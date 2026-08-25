@@ -1,0 +1,817 @@
+# Afterburner
+
+A jet flight simulator built for **Godot 4.8**. Four flyable airframes, a
+rigid-body flight model with fly-by-wire, working internal weapons bays, and a
+3 km runway you can actually take off from and land on.
+
+Everything — aircraft, terrain, runway, effects — is generated procedurally in
+GDScript. There are no imported art assets.
+
+```
+godot --path .          # or open the folder in the Godot editor and press F5
+```
+
+---
+
+## The hangar
+
+Twenty-one airframes across six nations plus civil traffic, filterable by
+faction in the hangar. The hangar also has a **GROUND** tab (seven vehicles) and
+a **NAVAL** tab (four crewable warships), so the whole fleet is selectable from
+one place.
+
+| NATO | | OPFOR | |
+|---|---|---|---|
+| **F-22A Raptor** (US) | ventral + cheek bays, thrust vectoring | **Su-57 Felon** (RU) | bays, vectored, big wing |
+| **F-35B Lightning II** (US) | two bays, lift fan and a swivelling nozzle | **Su-35S Flanker-E** (RU) | vectored, enormous slow-speed turn |
+| **F-16C Viper** (US) | pylons, fastest roll rate | **MiG-29 Fulcrum** (IR) | light, short legged, quick to point |
+| **F-15E Strike Eagle** (US) | pylons, climbs like a rocket | **J-20 Mighty Dragon** (CN) | canards, bays, long reach |
+| **Eurofighter Typhoon** (UK) | canard delta, huge instantaneous turn | | |
+| **Dassault Rafale C** (FR) | close-coupled canards, sharp when slow | | |
+| **AC-130J Ghostrider** (US) | 105 mm / 40 mm / 25 mm side battery, walkable hold | | |
+| **C-130J Super Hercules** (US) | cargo ramp and a hold you can walk into | | |
+| **AH-64E Apache** (US) · **Tiger HAD** (FR) | attack helicopters | **Mi-28N Havoc** (RU) · **Z-10** (CN) | attack helicopters |
+
+Plus four civilian aircraft to fill the sky: the **A320-series airliner**, the
+**Northwind 8Q** commuter turboprop, the **Skylane 172** light single and the
+**Ranger 206** JetRanger.
+
+The stealth jets carry everything inside and only expose it when the doors open.
+External jets are always ready to fire but pay for it in drag and radar cross
+section, which is what the AI uses to pick who to chase first.
+
+The **AC-130** is flown as an orbit-and-shoot gunship. The 105 mm, 40 mm and
+25 mm barrels run out through the port side of the belly — no pylons — and each
+one fires from its own muzzle. Put the targeting pod on something, pick a gun
+with `1`/`2`/`3` and the battery lobs shells at the designated point. The **C-130** is the same airframe without the guns — drop the
+ramp and people can walk into the hold.
+
+## Modes
+
+*Quiet:* **Runway start** (cold on 36), **Free flight**, **Approach** (12 km
+final), **Ramp walk** (start on foot beside the flight line), **Carrier trap**
+(three miles behind the boat with the hook down).
+
+*Fighting:* **Patrol**, **Conquest** (five sectors, ticket bleed),
+**Rush** (sectors open one at a time), **Warlords** (sequential sectors paying
+command points), **Team Deathmatch**, **Free For All**.
+
+Opposition in the battle modes is a mixed package: three fighters from the
+opposing bloc, a pair of attack helicopters working low over the sectors, and
+SAM sites. Sector armour is crewed — the tanks traverse, lead their targets and
+shoot, and the self propelled guns arc onto anything that comes into reach.
+
+Battle modes lay out capture zones with garrisons — flip one by holding the ring
+or by flattening everything inside it. Tickets, sector ownership and capture
+progress are drawn across the top of the HUD.
+
+## Multiplayer
+
+LAN host/join over ENet from the hangar screen (enter an address, HOST or JOIN).
+The host runs whatever match is selected and tells joiners which one to load, so
+both ends have the same sectors; sector ownership, capture progress and ticket
+counts are then **authoritative on the host** and pushed to clients twice a
+second rather than being simulated twice and drifting apart.
+Aircraft state is broadcast at 20 Hz. Remote jets and vehicles are **kinematic
+ghosts** — frozen rigid bodies moved on the physics tick, dead-reckoned along
+their last reported velocity and eased onto the last reported pose, so Godot's
+own physics interpolation smooths them for the renderer instead of them
+stuttering between packets. Missile launches and hits replicate as events. Players on foot sync too,
+including passengers riding in someone else's cargo hold — the hold owner is
+sent with the packet so occupants stay attached to the right aircraft rather
+than drifting in world space.
+
+## Helicopters
+
+Four gunships on a rotary flight model: the main rotor makes thrust along the
+disc axis, so you fly them the way you fly a real helicopter — tilt the aircraft
+and the thrust vector goes with it. Collective is on the throttle keys, the tail
+rotor holds the nose, translational lift makes the disc happier once you are
+moving, and there is a ground cushion in the hover. The stability system trims
+out main-rotor torque automatically; switch the assist off with `H` and you hold
+the pedal yourself. Below translational speed the sideslip angle is meaningless,
+so the pedal loop falls back to holding yaw rate.
+
+## Sensors
+
+`ALT` + right click raises the targeting sensor as a full screen page and arms
+it as a weapon station: `1`-`4` pick a store, `SPACE` releases at whatever the
+pod is holding, `CTRL`+`T` point-tracks a vehicle or ground-stabilises a spot,
+and `L` paints it with the laser so bombs and missiles guide onto the mark. The
+same page is the helicopter's sight.
+
+The corner panels work like Arma's: `[` and `]` cycle the left and right slots
+through off, sensor, radar and a north-up minimap, so you decide what sits in
+your peripheral vision. Radar range steps through 10, 20, 40 and 80 km with
+`-` and `=`, and both the RWR and the minimap scale to it.
+
+**Gunships** have a proper gunner's station. Press `G` (or pick it from the TAB
+menu) and the aircraft rolls into a left hand pylon turn on the autopilot while
+you move back to the sight — measured holding a 24 degree bank at a steady
+altitude and speed — with `1`/`2`/`3` selecting the 105 mm, the 40 mm or the
+25 mm.
+
+## Ground vehicles
+
+Seven drivable vehicles, listed in the hangar alongside the aircraft (or on
+their own under the GROUND tab). The ramp start parks the whole garage on the
+apron and every capture zone garrisons two. Walk up and press `U` to get in.
+
+| Main battle tanks | Self propelled guns | Rocket artillery |
+|---|---|---|
+| M1A2 Abrams · T-90M Proryv · ZTZ-99A | M109A7 Paladin · 2S19 Msta-S | M270 MLRS · BM-30 Smerch |
+
+The howitzers and launchers fire **indirect**, laid by **bearing and range**
+rather than by a crosshair: the mouse swings the bearing and walks the fall of
+shot in and out, or you open the map with `M` and **right click** to call a fire
+mission. Placing a crosshair on distant ground does not work for a gun that
+depresses a few degrees — a tenth of a degree is a kilometre of range — so the
+sight is a range dial and the barrel sits at the live firing solution. It does not use
+the lofted root of the ballistic equation — that gives near vertical mortar arcs
+— it holds about 40 degrees of quadrant elevation and solves for the propelling
+charge, only flattening out at full charge beyond that. The HUD shows range,
+quadrant elevation, charge percentage and time of flight; the M109 reaches about
+32 km with a 20-70 second flight, and the MLRS ripples twelve rockets.
+
+Each of the fourteen road wheels is an independent spring/damper contact
+against the terrain with its own longitudinal and lateral friction, so the hull
+pitches over crests, rolls in turns and squats under braking. Drive is
+power-limited rather than a flat force — strong off the mark, tailing off with
+road speed — and steering is differential across the two tracks, so it will
+neutral-steer on the spot with the throttle closed. Measured: 0–31 km/h in two
+seconds, cruising about 42 km/h, scrubbing to 29 km/h through a hard turn.
+
+`W`/`S` drive, `A`/`D` steer, `X` brake, mouse lays the turret (rate-limited
+slew), `SPACE` main gun, `V` coax, `C` gunner sight, `U` to get out.
+
+## Ships
+
+Ten vessels work the eastern ocean: a carrier group with its screen, a hostile
+surface action group, a submarine and civil traffic. They steam on their own
+courses, take damage, and sink.
+
+Four of them are yours to command from the **NAVAL** tab, or by walking up to one
+and pressing `U`:
+
+| | |
+|---|---|
+| **Arleigh Burke** destroyer | 155 m, 30 kts, main mount and 32 vertical launch cells |
+| **Type 23** frigate | 133 m, 29 kts, 16 cells |
+| **Steregushchiy** corvette | 105 m, 26 kts, 8 cells |
+| **Patrol boat** | 38 m, 35 kts, gun only |
+
+`A`/`D` is the wheel and `W`/`S` the engine order. A ship answers slowly: the
+wheel sets a rate of turn and the engines take time to build or shed way. The
+mouse lays the battery -- up to 70 degrees, with the camera boom rising and
+shortening as it elevates so a high angle shot is not taken through your own
+superstructure. Left click fires; `\` swaps between the gun and the tubes.
+
+The **fleet carrier** is sailable too. Its flight deck is registered by
+reference, so it goes on working as a landing platform while it is under way --
+you can put it on a heading, get out, take an aeroplane up and trap on a deck
+that has moved since you left it.
+
+The submarine carries two strategic rounds. `K` calls a strike onto whatever is
+designated: measured from 27 km, the round arrived **10 m from the aim point**
+and flattened 504 structures.
+
+## Air traffic
+
+`F3` opens a page for watching the aeroplane fly itself. Pick a type, call one
+in on a twelve kilometre final or send one off the runway, and optionally follow
+it with the camera. It is the same scripted pilot the test harness uses, driven
+from inside the game: a flight of three called in line astern all landed.
+
+## Walking around
+
+The ramp start puts you on foot with a carbine. WASD walks, `SHIFT` runs,
+`CTRL` crouches, `SPACE` jumps, `V` fires (real ballistics — travel time and
+drop), `C` swaps first and third person, and `U` climbs into any jet you are
+standing next to. First and third person share one skeleton and one animation
+set; first person simply puts the eye in the head joint. Long falls hurt, and a
+killed pilot is handed to a jointed rigid-body ragdoll.
+
+**Aircraft interiors** are solved in the aircraft's own frame. Step into a hold
+and you become a child of that hold, so you inherit the aircraft's motion
+exactly — walk around while it manoeuvres and nothing slides. Walk off the open
+ramp and you are handed back to the world with the aircraft's velocity.
+
+## Controls
+
+| | |
+|---|---|
+| `W` / `S` | pitch down / up |
+| `A` / `D` | roll |
+| `Q` / `E` | rudder |
+| `SHIFT` / `CTRL` | throttle (afterburner above 78 %) |
+| `G` | landing gear |
+| `F` | flaps |
+| `X` | wheel brakes on the ground, airbrake in the air |
+| `B` | open / close the weapon bay |
+| `1` … `8` | select a weapon directly |
+| `\` | cycle weapon |
+| `T` | cycle target |
+| left click or `SPACE` | fire the selected weapon |
+| `V` | gun burst |
+| `N` | flare salvo |
+| `C` | cockpit / chase / orbit camera |
+| `ALT` (hold) | free look |
+| right click, or `O` | raise / stow the sensor page |
+| `CTRL`+`T` | pod designates: point track a vehicle, or ground stabilise a spot |
+| `L` | laser designator (bombs guide onto the spot) |
+| `N` (pod up) | sensor channel: TV, night, white hot, black hot |
+| `[` / `]` | cycle the left / right corner panel: off, sensor, radar, minimap |
+| `-` / `=` | radar range: 10, 20, 40 or 80 km |
+| `Y` | weapon camera — ride the round you just released |
+| `G` (in a hold) | take the gun station from inside a gunship |
+| `M` | tactical map — baked relief, roads, towns, objectives, contacts |
+| `TAB` | action menu — aircraft, vehicle or ship, whichever you are in |
+| `F3` | air traffic: call aircraft in to land and watch them do it |
+| `Z` | look back |
+| `;` | mouse stick on / off |
+| `H` | fly-by-wire on / off (STOVL conversion on the F-35B) |
+| `ESC` menu · `F2` hide the control legend |
+
+### Flying with the mouse
+
+Press `;` to take the mouse stick. The pointer is captured and behaves like a
+spring-centred stick: **push forward for nose down, pull back for nose up**, left
+and right to roll. How far the pointer sits from the centre of the screen is how
+much deflection you are asking for, so small movements are small inputs. Let go
+of nothing -- there is no button to hold -- and press `;` again to hand control
+back to the keyboard. Holding `ALT` while the stick is on looks around instead of
+flying, and releasing it returns the view to boresight.
+
+With the fly-by-wire in (the default) the stick asks for a *rate* rather than a
+surface deflection, so the aeroplane holds what you ask for and the law keeps it
+inside its angle of attack and g limits. `H` switches the law out, at which point
+the stick moves the surfaces directly and the aeroplane will depart if you ask it
+to.
+
+### Right click is not a trigger
+
+The trigger is the left button. Right click raises the sensor page, and nothing
+about it fires: a modifier chord for the pod turned out to be unreliable on a
+Mac, and having the same button do both meant reaching for the sensors put a
+missile off the rail. While the map or an action menu is up, weapons are
+inhibited altogether -- the mouse belongs to the page.
+
+## Weapons and bays
+
+Internal stores are hidden until the doors run. Pressing `SPACE` with a shut bay
+starts the doors and tells you so; the shot goes when they are open. Open doors
+cost drag and multiply your radar cross section, so you do not fly around with
+them hanging out.
+
+* **AIM-9X** – short range IR, fire and forget, defeated by flares.
+* **AIM-120C** – radar, needs a lock, 40 km.
+* **GBU-32 JDAM** – unpowered, lofts onto a ground target (`T` cycles ground
+  targets when the bomb is selected).
+* **Gun** – hitscan tracers, every fourth round drawn.
+
+Missiles fly proportional navigation, bleed energy after motor burnout and can
+only pull their rated g while fast — a late, hard break with flares is a real
+defence rather than a formality. Warheads use a swept proximity fuse with
+damage falloff, so a near miss hurts instead of deleting you.
+
+## The world
+
+A 140 × 140 km map generated from one analytic height field. The airfield sits
+in a north–south valley so both runway approaches and the departure end stay
+clear of rising ground, with open ocean off the eastern coast.
+
+* **Modular chunked terrain** — concentric rings of square chunks, each ring
+  coarser than the one inside it (30 m cells over the field, 110 m, 380 m, then
+  1.9 km at the rim). Each ring doubles the cell size and reaches four chunks
+  out, so the hole in the middle of a ring is *exactly* two of that ring's
+  chunks and the finer ring inside fills it precisely — get that alignment wrong
+  and coarse chunks lie over fine ones, which tears visible holes in mountains.
+  Every chunk samples the same height and biome fields, so neighbours line up
+  and biome bands run continuously; vertical skirts hide the LOD seams. 366
+  chunks, 187k triangles, frustum-culled, shadows only on the inner ring.
+* **Biomes** — a temperature/moisture field blends snow, rock, forest, grass,
+  steppe, sand and marsh. It drives terrain colour *and* the scatter, so forest
+  belts, dry steppe and the snow line all read differently on the ground.
+* **Water** at −35 m fills the basins as lakes, with sand blending along the
+  shoreline. Ditching in a lake counts as a crash.
+* **Settlements** — four towns and a small city, plus outlying farms. Placement
+  is water-, slope- and road-aware, so nothing is built on a cliff or in a lake.
+* **Roads** are both surfaced (hugging carriageway and kerb meshes) and painted
+  wide into the terrain's vertex colours, so the network reads from altitude
+  where the carriageway itself is sub-pixel. Town street grids are planned
+  *before* the ground is generated, otherwise the terrain paints only the trunk
+  roads and towns come out with invisible streets. Distance-to-road is baked
+  into a 256² field — asking 124 segments per vertex cost more than the rest of
+  world generation put together.
+* **Military scenery** — a dispersal base with hardened hangars and revetments,
+  parked jets on the home apron, vehicles, blast walls, radar and SAM sites.
+* **Scatter** — ~33k trees, pines, bushes and rocks chosen by biome and placed
+  by slope, batched into 1,700 MultiMesh cells with per-cell visibility ranges
+  so distant ground cover stops drawing entirely.
+
+## Weather
+
+Four presets, selectable in the hangar: **clear**, **scattered**, **overcast**
+and **dusk**. Each one drives the cloud deck density and altitude, fog distance,
+ambient level, sun angle and colour, and the sky gradient. Clouds are billboard
+puff clusters you can fly through.
+
+## Crew
+
+Picking the runway start plays the walk-out: the pilot crosses the apron, climbs
+the boarding ladder, drops into the seat, and the canopy comes down before
+control is handed over. Any key skips it. The figure is posed procedurally —
+walk, climb and seated cycles — and when an aircraft is destroyed the crew is
+handed to a jointed rigid-body **ragdoll** that tumbles clear of the wreck.
+
+## Runway operations
+
+Runway 18/36 is 3000 × 46 m with threshold bars, touchdown zone markers, edge
+and approach lighting, and a **PAPI** on the left abeam the aiming point — two
+white two red is on slope. The HUD adds an ILS-style cross whenever the gear is
+down within 18 km, plus runway-remaining on rollout.
+
+Touchdowns are graded on descent rate and centreline offset:
+`GREASED` under 1.2 m/s, `GOOD`, `FIRM`, then `HARD` past 5 m/s. Above 7 m/s you
+start breaking the aircraft.
+
+## How it is put together
+
+```
+scripts/core/       sim.gd           autoload: terrain field, input map, scoring
+                    meshkit.gd       procedural mesh helpers (lofts, prisms, boxes)
+                    chase_camera.gd  cockpit / chase / orbit
+scripts/aircraft/   jet_spec.gd      the airframe database (all tuning lives here)
+                    jet_factory.gd   builds an airframe + its moving parts
+                    aircraft.gd      flight model, gear, bays, stores, damage
+                    player_jet.gd    human pilot + the scripted test pilot
+scripts/weapons/    weapon_spec.gd   store database and store meshes
+                    missile.gd       separation, boost, PN guidance, fuse
+                    effects.gd       tracers, explosions, smoke, embers
+scripts/world/      world.gd         main scene: env, missions, scoring, CLI
+                    terrain.gd       one warped-grid mesh for the whole 40 km map
+                    airbase.gd       runway, markings, lighting, PAPI
+                    scenery.gd       towns, military sites, scatter, home base
+                    weather.gd       cloud deck and environment presets
+                    pilot.gd         posable aircrew figure
+                    ragdoll.gd       jointed rigid-body crew
+scripts/ai/         ai_plane.gd      patrol / engage / extend / defend
+                    ground_target.gd hangars, radars, fuel, shooting SAM sites
+scripts/ui/         hud.gd           world-referenced HUD
+                    menu.gd          hangar screen
+```
+
+**Flight model.** Aerodynamics run in `_integrate_forces`: lift from a
+CL/α curve with a stall break and ground effect, induced plus parasitic drag
+with configuration penalties, sideslip side force, and separate damping and
+static-stability moments. Control power is deliberately large — what keeps it
+flyable is the fly-by-wire law, which converts stick position into a *rate*
+command and closes the loop on measured body rates with AoA and g protection.
+Turn it off with `H` and you get the bare relaxed-stability airframe.
+
+**Ground handling.** Three suspension legs with spring/damper struts, tyre
+friction split into rolling and lateral, nose-wheel steering, and surface grip
+that drops off the paved area. Terrain height comes from one analytic noise
+field (`Sim.height_at`) shared by the visual mesh, the gear and the crash test,
+so there is no collision mesh for the world at all.
+
+## Test harness
+
+The game can fly itself, which is how the flight model was tuned. Arguments go
+after `--`:
+
+```
+godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --dump=100
+```
+
+| flag | meaning |
+|---|---|
+| `--preset=takeoff\|free\|landing\|combat` | start that mission immediately |
+| `--jet=f22\|f35\|f16\|f15` | pick the airframe |
+| `--auto=takeoff\|land\|fight\|cruise` | run the scripted pilot |
+| `--dump=N` | print telemetry every N/120 s (speed, AoA, β, g, rates…) |
+| `--shot=PATH` | render a frame to a PNG and quit |
+| `--view=cockpit\|chase\|orbit`, `--dist=`, `--orbit=x,y` | camera for screenshots |
+| `--weather=clear\|scattered\|overcast\|dusk` | weather preset |
+| `--frames=N` | render the screenshot after N frames |
+| `--openbay`, `--fx`, `--nocockpit`, `--noboard` | debug helpers |
+| `--host`, `--join=ADDR`, `--mission=ID` | start a session; `--mission` picks what the host runs |
+| `--netlog` | print roster, ghosts, replicated AI and packet counts every 2 s |
+| `--fpslog` | print averaged fps and render monitors every 2 s |
+| `--runfor=SECONDS` | quit after that many **wall clock** seconds |
+| `--turntest=SPEED` | sustained level turn at that entry speed, prints g, rate and radius |
+| `--noassist` | fly-by-wire off from the start |
+| `--tvctest=SPEED` | full aft stick at that speed; reports pitch rate, AoA and nozzle angle |
+| `--boardtest` | stand at every boardable in turn and check the walk-up offers that one |
+| `--jolttest` | tumble through every attitude and report the worst single-frame camera roll |
+| `--overlaptest` | audit every vehicle, aircraft and structure on the ramp for overlapping spawns |
+| `--artytest=KIND` | mount that piece, designate 100 deg off the hull, and report the fall of shot |
+| `--admintest` | call a flight of three in and check they all land |
+| `--restarttest` | restart three times and count what is left in the world |
+| `--shiptest=1` | take a ship, run the helm and the battery, report the conn |
+| `--navaltest` | bomb a warship and check the hull takes it |
+| `--subtest` | strategic launch from the submarine onto a built up area |
+| `--fleettest` | count the shipping and check it floats at its draught |
+| `--seamtest` | measure the T junction gaps between terrain rings |
+| `--seatest` | map where the water is deep enough to float in |
+| `--locktest` | can a warship be locked, and does the box know about terrain |
+| `--triggertest` | which mouse button fires, and does the map inhibit it |
+| `--firetest` | unlocked launch, and cancelling a shot queued behind the doors |
+| `--aimtest` | hand to grip error and elbow position across the aim range |
+| `--seattest` | where the pilot sits relative to the cockpit sill |
+| `--boardtest` | stand at every boardable in turn and check the offer |
+| `--flaptest` | both flaps down together |
+| `--viewtest` | cockpit furniture against the eye line, and the glazing profile |
+| `--hudtest=VIEW` | does the flight page draw from that camera |
+| `--lasertest` | laser stows on exit, point track survives |
+| `--podch=N` | force a sensor channel and render it |
+| `--keytest=1` | driver seat keys: map, panels, and what the trigger does |
+| `--helitest` | hands off altitude drift, then the collective both ways |
+| `--hovertest` | STOVL conversion and a hover |
+| `--ctltest=SPEED` | roll and pitch authority, assisted and raw |
+| `--wrecktest` | destroy every vehicle and watch where the hulks end up |
+| `--gtest=STRAIN` | pin the grey-out veil at that strain, for looking at it |
+| `--debugweapons` | trace every round: guidance, why a seeker dropped its target, and the closest it ever got |
+
+`--runfor` deliberately reads the wall clock rather than sim time: `--fixed-fps`
+decouples the two, and a two-process network test only means anything if both
+ends are alive at the same real moment.
+
+`--auto=takeoff` rolls, rotates, climbs and levels off; `--auto=land` flies the
+3° slope, flares and rolls to a stop on the centreline.
+
+## What has been measured
+
+*The entries below are in rough order of when they were established; the newest
+work is at the end of this section.*
+
+The sim can fly and drive itself, and the numbers below came out of the headless
+harness rather than off the screen:
+
+* **Top speed** — the F-22 holds about 900 KIAS at full burner across the
+  envelope: Mach 1.5 down at 1500 m where dynamic pressure limits it, Mach 2.05
+  at 7000 m and Mach 2.5 at 11000 m. Drag is modelled as a wave-drag hump
+  centred just past Mach 1 that falls away again, plus a steep rise past Mach
+  1.5 for skin friction and heating; a flat supersonic penalty pinned every jet
+  at Mach 1.2 no matter how much thrust it had. Past the never-exceed speed the
+  airframe takes damage, and the fly-by-wire pulls the throttle back before it
+  gets there — switch the assist off and you can tear the wings off.
+* **Turn performance** — sustained level turn at 80 deg of bank with the entry
+  speed held, which is the only way to measure this: leave the burner in and the
+  jet simply accelerates out of the turn and reports nothing useful. At 250 m/s
+  and 6000 m the fleet now reads:
+
+  | | g | rate | radius | AoA |
+  |---|---|---|---|---|
+  | Typhoon | 7.63 | 20.8 deg/s | 677 m | 20.6 |
+  | Rafale | 7.32 | 20.9 | 670 m | 23.5 |
+  | Su-57 | 6.96 | 20.8 | 675 m | 26.0 |
+  | F-22 | 6.98 | 20.6 | 685 m | 25.6 |
+  | MiG-29 | 6.81 | 19.6 | 723 m | 26.7 |
+  | Su-35 | 6.18 | 19.0 | 743 m | 30.5 |
+  | J-20 | 6.43 | 19.3 | 732 m | 26.2 |
+  | F-15E | 6.73 | 18.0 | 803 m | 23.4 |
+  | F-16 | 6.15 | 16.9 | 845 m | 24.7 |
+  | F-35 | 4.80 | 13.3 | 1082 m | 25.9 |
+
+  The light canard deltas turn best and the F-35 turns worst, which is the right
+  order. Every one is angle-of-attack limited rather than short of thrust.
+  Four separate faults were sitting under those numbers:
+  - The fly-by-wire rate loop was proportional only, so it settled with a
+    standing error: at 250 m/s it commanded 0.36 rad/s of pitch rate, held 0.28,
+    and left the stabilator at a quarter deflection while the stick was on the
+    back stop. An integral term with anti-windup closes the loop, worth about
+    23% more turn rate on its own, and the same term went on the roll axis.
+  - The F-35's thrust was **124 billion newtons** in military power and 211
+    trillion in burner, a botched multiply from an earlier speed pass. The
+    airframe diverged numerically within five seconds of every mission: it was
+    completely unflyable and nothing had caught it.
+  - The rest of the fleet was inconsistent in the same way, quietly. The F-22
+    and Su-35 had been boosted during that pass and everything else was left at
+    real-world figures, so the F-16 was flying with **one nineteenth** of the
+    F-22's afterburner. Thrust is now referenced off the F-22, whose top speed
+    was measured and accepted, with every other jet keeping its real ratio to
+    it.
+  - Most of the fleet was flying at maximum takeoff weight. `mass` is the dry
+    airframe with fuel added on top, and it had been set near *combat* weight
+    for several types, so a full bag put them over gross. Empty weights and
+    internal fuel loads are now the published figures. This alone was worth
+    +80% turn rate on the F-15E and +37% on the F-16.
+* **Banked flight** — with the stick centred in pitch the load factor tracks the
+  bank exactly: 0.9 g wings level, 0.5 g at 60 deg, and **0.0 g at 90 deg**,
+  where the jet falls away at a clean 1 g and the heading stops changing. The
+  lift vector really is doing what it should.
+* **Takeoff** — F-22 rotates at ~150 kt and unsticks around 160, climbing away
+  at 14 deg with the gear coming up through 40 m.
+* **Autoland** — flies the 3 deg slope from twelve miles, flares and rolls to a
+  full stop on the centreline.
+* **Tank** — 0-31 km/h in two seconds, ~42 km/h cruise, scrubbing to 29 km/h
+  through a hard turn, hull level throughout.
+* **Helicopter** — lifts off and holds a straight climb with the heading locked
+  and zero sideslip drift.
+* **Chase camera** — constant 17.2 m boom and 0.00 deg off-axis through a full
+  free-look sweep.
+* **Sector capture** — flattening a hostile garrison drives the sector from
+  fully theirs, through neutral, to ours in 5.4 seconds.
+* **Multiplayer** — two headless instances on the loopback: the joiner is told
+  which match to load, both ends reach `roster=2`, and state flows both ways
+  (client tx=275/rx=546, host tx=309/rx=290) with each holding the other's
+  ghost at the correct position. Getting there found a real bug: restarting into
+  the host's mission swept the network ghosts into the general cleanup, and the
+  dangling entries aborted the sync loop on a typed read every frame.
+* **Shared opposition** — the AI is host-authoritative. Clients no longer spawn
+  bandits of their own; the host announces the set and pushes pose and velocity
+  ten times a second, and says once, reliably, when one is gone. Measured over a
+  40 second session: the host simulating five bandits, the client holding five
+  ghosts that track them and dropping to four as the first was shot down, while
+  the host held the client's own aircraft at the right place the whole time.
+  Two bugs came out of it. The roster was announced only to whoever was already
+  connected, so a late joiner saw an empty sky — it is re-sent on every join
+  now. And a ghost whose owner stopped reporting dead reckoned along its last
+  velocity for ever: a disconnected peer ended up 3.6 x 10^18 m from the field.
+  Ghosts now coast to a halt after a second without an update.
+* **Cross-client kills** — the whole damage chain, end to end on the loopback:
+  a client's AMRAAM detonates 8.3 m from its ghost of a bandit the host is
+  simulating, the client reports 47, 37 and 66 points of damage, the host walks
+  the real aircraft down 100 -> 53.3 -> 16.5 -> 0.0, announces it gone, and the
+  client removes the ghost. Ghosts no longer take damage locally at all: a ghost
+  is a picture of an aircraft somebody else is simulating and has no standing to
+  decide whether it just died, so every hit is reported to the owner and comes
+  back as replicated state. Four bugs came out of building this:
+  - Damage was never wired up. `net_hit` and `net_fire` existed and nothing
+    called either of them, so in a session nobody could hurt anybody.
+  - A joiner's ghost was created over the airfield and was a valid target before
+    its first position arrived, so in a contested match it was shot to pieces on
+    arrival — and once damage was authoritative that killed the real aircraft
+    too, in 0.7 seconds. Ghosts are now invisible and untargetable until their
+    first fix, which also stops them flying in from the spawn point.
+  - A frozen kinematic body has its `linear_velocity` recomputed by the physics
+    server from however far it was teleported last tick, so the replicated value
+    did not survive being assigned. The dead reckoning read that derived value
+    back and extrapolated along it, which is a feedback loop: ghosts wound up at
+    20 km climbing at Mach 2.5, and missiles led them into empty sky. The
+    reported velocity now lives where physics cannot touch it, and guidance
+    leads that.
+  - The scripted pilot chose its weapon by range but fired regardless of which
+    one was selected, so it emptied both Sidewinder rails at seven miles where
+    they cannot reach and then spent the rest of the fight pulling the trigger
+    on empty rails.
+* **Shared ground war** — garrison assets follow the same rule as aircraft. Both
+  ends build a sector's garrison in the same order, so the sector label plus the
+  slot number is a key neither side has to be told, and a client that shoots a
+  hangar reports the hit rather than deciding it fell over. Measured on a
+  conquest session: a client flattens all six assets in sector A, its own copies
+  stay standing because it has no authority to kill them, all six reports reach
+  the host, the host destroys the real ones, and the next objectives packet
+  brings the client's copies down and hands it a sector that went from fully
+  hostile to captured in 4.2 seconds. The objectives packet now carries a
+  per-sector bitmask of what is still standing, so nobody is left shooting at a
+  structure that fell over minutes ago.
+* **Thrust vectoring** — it used to be a fudge: a floor under the control
+  authority so vectoring aircraft kept some response at low speed. It is now
+  the actual mechanism. The nozzles take the same commands as the tails, swivel
+  at 80 deg/s, and the moment falls out of where they sit relative to the
+  centre of mass rather than being a number invented for the purpose. Fitted to
+  the aircraft that have it and nobody else: F-22 20 deg in pitch (its nozzles
+  are two dimensional, so no yaw), Su-57 16 deg in both axes, Su-35 15 in both,
+  J-20 10 in pitch. The F-35A had a token value and now has none, because it
+  has none.
+  Full aft stick at 90 m/s with the assist off, which is where vectoring earns
+  its keep: **F-22 330 deg/s of pitch rate, Su-35 313, Su-57 297, J-20 215,
+  against 146 for an F-16 and 96 for an F-15E**. The ordering follows nozzle
+  deflection, and sustained turn rate at 250 m/s is unchanged, which is right --
+  at fighting speed the wing does the work.
+  One trap worth recording: the moment has to be worked out from a *real*
+  thrust figure. Engine thrust here is about fifteen times life so the jets feel
+  right against a 140 km map, with drag scaled to match, but a moment arm has no
+  such compensation. Feeding the inflated number through eight metres of tail
+  gave the Raptor **four thousand degrees a second**, about twelve rolls a
+  second, before that was caught.
+  The cans move too: vectoring aircraft get each nozzle on its own pivot, with
+  the burner glow riding it, and everything else keeps them baked into the one
+  mesh. Verified the pivots track the commanded deflection exactly, and that
+  non-vectoring types build no pivots at all.
+* **Walking up to things on the ramp** — reach was measured from the walker to
+  the machine's *origin* with a flat eleven metre limit, which only works if
+  everything is the same size. It is not: standing against the flank of an
+  AC-130 you are twenty-two metres from the point it is measured from, so the
+  aeroplane offered nothing at all, while a transport parked near a tank could
+  win the prompt over the tank you were touching. Reach is now measured to the
+  hull -- each machine caches its own model bounds and answers how far a point
+  is from the box, not from the centre. Tested by standing two metres off the
+  flank of every boardable on the ramp in turn: **11 of 11 correct**, against
+  10 of 11 with a large aircraft present before. The pilot also used to be put
+  down at a fixed fourteen metres to one side, which is outside an F-22 and
+  *inside* an AC-130's wing; they now start clear of the nose whatever the
+  aeroplane is, and the ramp audits clean for every airframe.
+* **Camera roll through the vertical** — the chase rig blended the airframe up
+  vector toward world up with a straight lerp to level the horizon. Near
+  inverted flight the two are nearly opposite, so the blend collapsed to a
+  tenth of a unit and whatever sideways component survived decided the camera
+  roll. Measured with a scripted tumble that rolls continuously while the nose
+  traces a loop, so the rig meets every attitude there is: **161 degrees of
+  camera roll in a single frame**, on every jet, every time it went over the
+  top. Three changes, each verified against that number. The blend is done by
+  angle in the plane across the view rather than by lerping two nearly opposite
+  vectors. The levelling fades out as the aircraft rolls past knife edge, since
+  "55% of the way to world up" has no continuous answer once the airframe up is
+  pointing down -- inverted, the rig simply rides the airframe, which is always
+  well defined. And the roll reference is rate limited to 200 deg/s, so the
+  remaining switches between references read as a short sweep instead of a
+  snap. 161 deg per frame down to 4-5, and what is left is the deliberate rate
+  limit rather than a discontinuity. The free-look sweep is unchanged: constant
+  17.2 m boom, 0.00 deg off axis.
+* **Artillery actually goes where you send it** — designating on the map and
+  firing put the rounds kilometres from the target, and four separate faults
+  were responsible. The ground aim point is cached for a few frames because
+  marching the height field is expensive, but the cache was keyed on time
+  alone: designate a target and pull the trigger in the same breath and the
+  tubes laid on the new bearing while the rounds flew to the old one. The cache
+  now knows what it was computed from. The piece also fired the instant you
+  asked, though the traverse takes 0.9 rad/s, so the rounds left on the correct
+  bearing while the launcher was still swinging round -- it now holds the shot
+  and sends it the moment it is laid, and the HUD says LAYING with the angle to
+  go and whether a round is queued. Worst of the four: a fuse arms at the
+  muzzle, so a howitzer parked in a line of vehicles detonated its own round
+  nine metres out, on the tank standing beside it, every single time. Rounds
+  now arm after ninety metres of flight. Measured at 6 km with the target
+  designated a hundred degrees off the hull: **M109 11 m, Msta 10 m**, and the
+  launchers spread as area weapons should at **110-131 m**.
+* **One rocket at a time** — a launcher used to commit its whole pod to a single
+  trigger press. Each press now sends one round and holding the trigger walks
+  the rest out at the ripple rate, so a fire mission is yours to place.
+* **The menu turntable was a real vehicle** — picking a ground vehicle and any
+  mission put the player 256 m in the air. The preview model on the menu card
+  sits in a rig high above the world and it had been taken out of the
+  "boardable" and "hittable" groups but left in "vehicles", so the code that
+  went looking for "the M109" found the turntable first and mounted the player
+  in it. It is out of that group now, and the handover picks from the vehicles
+  just parked on the ramp rather than searching a group at all. This is also
+  the answer to an older report that spawning as an MLRS "breaks the game",
+  which could never be reproduced at the time.
+* **Nothing falls out of the world** — two separate versions of the same fault.
+  A knocked out tank skipped its whole physics step because the crew was dead,
+  and since there is no world collision mesh -- the ground only exists because
+  the road wheels look up the height field -- the hulk sank through the terrain
+  for ever. Wrecks now keep their suspension and roll to a stop: measured at a
+  steady 0.49 m ride height for as long as you care to watch. Separately, the
+  rotary flight model was missing the fixed wing's catch-all crash test, and its
+  only other one needed the aircraft to be banked past 47 degrees, so an upright
+  helicopter that got below the terrain kept going. Bandit gunships were ending
+  up **190 km underground while still reporting themselves alive**, which is why
+  a client in a co-op dogfight would watch its opponents sink out of the sky.
+  The rotary AI was also stowing its undercarriage on spawn, copied from the
+  fixed wing bandit -- skids do not retract, and with no gear there was no
+  ground contact to stand on in the first place.
+* **Target selection** — the radar ranked contacts purely on angle off
+  boresight, so anything dead ahead won however far away it was: a fighter would
+  lock something 95 km away and opening in preference to a bandit two
+  kilometres off the nose, and sit there with a full load of missiles. Ranking
+  now weighs range alongside angle and ignores anything outside the selected
+  radar range.
+* **Fuel** — thrust is scaled well above real figures so the jets feel right
+  against a 140 km map, but the consumption divisor was never scaled with it.
+  Burning fuel against the inflated thrust emptied an F-22 in eighty seconds of
+  afterburner, and the high altitude dash test had been quietly measuring a
+  glider. Full burner is now about seven minutes.
+* **Approach speed** — the autoland flew a fixed 160 kt, which was right for one
+  weight and wrong for every other; at the corrected weights a light fighter has
+  so much surplus lift that it climbs away from the slope at idle. Threshold
+  speed is now 1.3 times the stall speed at the current weight, and the flap
+  lift increment is per airframe -- a fighter's plain flap is not an airliner's
+  slats and triple slotted flaps, and giving the transports a fighter's
+  increment is what made them need a fighter's runway.
+* **Approach stability** — the scripted pilot's roll loop was tuned on fighters
+  and had no notion of how fast a given aeroplane can actually roll. Commanding
+  43 degrees of bank on a transport that rolls at 0.95 rad/s means the
+  correction is still going in long after it was needed: a Hercules on approach
+  wallowed through plus and minus sixty degrees at about 1.5 Hz, at nearly full
+  aileron, all the way to the ground. Bank authority, the bank loop gain, the
+  roll rate damping and the fly-by-wire integrator wind-in rate are all now
+  scaled by the airframe's own roll and pitch authority, normalised to the F-22
+  so the fighters are unchanged by construction. The approach entry speed comes
+  from the airframe too -- a fixed 148 m/s is a fighter's approach and roughly
+  twice what a Hercules flies, and no controller tunes its way out of starting a
+  hundred knots fast with the throttle already closed. Every fighter and the
+  Cessna now roll to a full stop on the centreline; the wallow is gone from the
+  heavy transports, which fly a stable wings-level slope but still arrive high
+  and go around. That last part is the scripted pilot, not the flight model:
+  they take off and hand-fly correctly, so it is recorded here rather than
+  papered over.
+* **Ground handling** — an aircraft on its wheels is held straight by the tyres,
+  not the fin, and the damping did not rise with speed. The F-35 lands at 170 kt
+  and would swing 20 degrees off the centreline and cartwheel. Yaw and roll
+  damping now scale with speed and the dihedral effect is suppressed while the
+  undercarriage is loaded; every fighter in the hangar now rolls to a full stop
+  on the centreline.
+* **Grey-out** — sustained g costs you your sight. Tolerance is 5.5 g and the
+  rate of onset goes with the *square* of the overage, because a linear rate
+  that greys you out at nine also greys you out at six, which is wrong: a suited
+  pilot holding a good strain sits at six g more or less indefinitely. Measured
+  in the turn test, eight seconds at 6.13 g costs 10% of your vision and eight
+  seconds at 8.31 g blacks you out completely. The veil was checked by rendering
+  the same frame at three strain settings and measuring it rather than looking
+  at it: at rest the frame is unchanged, at 0.55 the mean drops from 109 to 55
+  and the edge-to-centre brightness ratio falls from 0.688 to 0.345 -- the
+  periphery going twice as fast as the middle, which is what tunnel vision is --
+  and at 0.95 the whole frame is down to 7. Negative g fills the view with blood
+  instead, and it arrives much faster because there is far less headroom.
+  Finding this also turned up why nothing appeared at first: a Control parented
+  straight to a CanvasLayer has nothing for its anchors to resolve against, so
+  it is zero-sized and draws nothing.
+* **Replicated garrisons** — sector armour drives itself, so unlike a structure
+  its pose has to be sent or a client ends up shooting at where its own copy
+  wandered off to. Six garrison tanks across a conquest map track the host's
+  positions to within 0.01-0.03 m.
+* **Frame rate** — 1600x900 on an M3: 85-87 fps rolling down the runway, 90-93
+  airborne over the valley, 84-87 low over the city in overcast with a conquest
+  match running, 88-90 on foot at the ramp with every vehicle spawned. Around
+  1100 draw calls and 1.85M primitives, 115 MB peak.
+* **Gun** — a bandit shot down from 500 m astern in 1.6 seconds.
+* **JDAM** — released from 1.5 km slant, tracks the designated target and
+  detonates 1.2 m from it. Getting there needed three fixes: the guidance was
+  leading a ballistic drop and aiming hundreds of metres short, the energy model
+  scaled a bomb's turn rate against a missile's reference speed so it could not
+  hold its own weight, and the fuse and lethal radius were tuned for a missile
+  rather than a thousand pounder.
+* **Artillery** — 40 degree quadrant elevation with the charge scaling from 25 %
+  at 2 km to 97 % at 30 km, times of flight from 18 to 72 seconds. Measured fall
+  of shot at 4 km: the M109 lands 7-29 m from the aim point, the M270 spreads
+  its salvo over 54-122 m as an area weapon should.
+* **Heavy takeoffs** — the airliner and the AC-130 both rotate around 150-170 kt
+  and climb away at 13 degrees. Both needed their main gear moved close to the
+  centre of mass first: with the mains a metre and a half aft, the weight moment
+  is larger than anything the tailplane can produce at rotation speed.
+
+* **Nothing spawns inside anything else** — a self check runs at mission start,
+  takes the world space footprint of every vehicle, aircraft and structure, and
+  names any two that overlap. It immediately found two: the airbase parked four
+  hangars along x=150, which is exactly the line the ramp start parks its
+  aircraft on, so a jet spawned inside a hangar; and `_clear_mission`
+  deliberately skipped the aircraft you were flying, so swapping type and
+  restarting left the old one standing on the apron for the next mission to park
+  a fresh one through. Both fixed; three restarts in a row now leave four
+  aircraft in the world and zero conflicts. The check stays in, so the next one
+  announces itself rather than waiting to be noticed.
+* **Weapons that outlive their shooter** — passing a freed object to a typed
+  `Node` parameter does not quietly pass null, it raises, and the raise aborted
+  the rest of the damage loop. A bomb whose shooter had died therefore detonated
+  1.1 m from its target and did **nothing at all**. It affected every weapon:
+  bombs, missiles, cannon rounds, blast. Four call sites now resolve a dead
+  shooter to null. The F-16 JDAM test went from "no kill, target at 80 hp" to a
+  kill at t=8.1, and a busy conquest run went from eight runtime errors to zero.
+* **Terrain seams, measured rather than looked at** — at every ring boundary the
+  coarser ring has a vertex only at every second one of the finer ring's, so its
+  edge runs straight past the odd ones: **mean 10.33 m, worst 257.67 m** of gap
+  across 3072 samples. The skirts were hiding a quarter kilometre crack rather
+  than fixing it. Chunk edges facing a coarser ring now drop their odd vertices
+  onto the chord between their neighbours, so the two edges are the same line and
+  the residual is **0.00006 m**, which is float rounding.
+* **Weapons and water** — the terminal check tested only the height field, so a
+  round aimed at a ship swam down to the seabed a couple of hundred metres below
+  and went off there. They now detonate at the surface: a JDAM on a corvette took
+  its hull from **1100 to 258**.
+* **The trigger** — left click fires, everywhere. Right click is deliberately not
+  a weapon: it raises the sensor page. Weapons are polled straight from the input
+  actions rather than through the GUI, so a click on the map used to fire as
+  well; a modal flag now inhibits them while a full screen page is up. Verified:
+  with the map up, `fired=false`.
+* **Ships under command** — helm, telegraph, battery and tubes: an Arleigh Burke
+  made 119 m in eight seconds (29.9 kts), answered the wheel, laid its mount on
+  068 when ordered to 068, and fired.
+
+## Code health
+
+`project.godot` promotes the analyser's style warnings to **errors** — shadowed
+identifiers, unused variables and parameters, integer division, incompatible
+ternaries, confusable declarations, uncast enums. Nothing is silenced; the
+project builds clean under that setting, and any new slip fails the parse rather
+than scrolling past in the output panel.
+
+To check every file from the command line:
+
+```
+godot --headless --path . --editor --quit          # build the class cache first
+for f in scripts/**/*.gd; do godot --headless --path . --check-only --script $f; done
+```
+
+The cache step matters: without it every file reports its `class_name`
+dependencies as missing and the real warnings are buried.
+
+## Sound
+
+Everything is synthesised at startup, nothing is loaded from disk. Fixed wing
+aircraft get a turbine core plus a broadband afterburner layer; helicopters get
+a blade slap thump train at the blade passing frequency over a turbine whine and
+rotor wash, so a Havoc does not sound like a Flanker. On top of that: airflow
+that rises with dynamic pressure and gets louder with the gear or bay out, tyre
+roll, gun buzz, a short rifle crack, missile launches, positional explosions,
+gear and bay servos, a touchdown thump, stall buffet and a missile warning tone.
+
+## Simplifications
+
+Nothing is textured from an image: surfaces get procedural panel lines and
+mottling, and the afterburner is a shaded plume rather than a bitmap. No
+compressor/engine modelling beyond spool and altitude lapse, no wind or
+weather, no fuel burn effects on CG, IR/radar detection is a single
+cross-section number, and the AI does not fly formation or use terrain masking.

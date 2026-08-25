@@ -1,0 +1,60 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Afterburner"
+config/description="Multi-airframe jet sim with internal weapons bays and runway ops."
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.8", "Forward Plus")
+config/icon="res://icon.svg"
+
+[autoload]
+
+Sim="*res://scripts/core/sim.gd"
+
+[debug]
+
+gdscript/warnings/unused_variable=2
+gdscript/warnings/unused_local_constant=2
+gdscript/warnings/unused_private_class_variable=2
+gdscript/warnings/unused_parameter=2
+gdscript/warnings/shadowed_variable=2
+gdscript/warnings/shadowed_variable_base_class=2
+gdscript/warnings/shadowed_global_identifier=2
+gdscript/warnings/standalone_expression=2
+gdscript/warnings/incompatible_ternary=2
+gdscript/warnings/redundant_await=2
+gdscript/warnings/integer_division=2
+gdscript/warnings/narrowing_conversion=2
+gdscript/warnings/int_as_enum_without_cast=2
+gdscript/warnings/confusable_local_declaration=2
+gdscript/warnings/confusable_local_usage=2
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+window/stretch/mode="canvas_items"
+
+[physics]
+
+common/physics_ticks_per_second=120
+common/max_physics_steps_per_frame=12
+3d/default_gravity=9.81
+common/physics_interpolation=true
+
+[rendering]
+
+lights_and_shadows/directional_shadow/size=8192
+lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
+anti_aliasing/quality/msaa_3d=2
+environment/defaults/default_clear_color=Color(0.35, 0.55, 0.78, 1)
+anti_aliasing/quality/screen_space_aa=1
