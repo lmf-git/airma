@@ -182,9 +182,10 @@ func build_roads(points: Array, links: Array) -> void:
 ## surveyor does — the result follows the contours without any pathfinding.
 func route(a: Vector2, b: Vector2) -> Array:
 	var span := a.distance_to(b)
-	var n: int = clampi(int(span / 900.0), 1, 14)
-	if n < 2:
-		return [[a, b]]
+	# Always at least two legs, so every road gets relaxed. A short link left
+	# as one straight segment has no waypoints to move and takes whatever
+	# gradient lies between its ends: that is where the 53% pitches came from.
+	var n: int = clampi(int(span / 700.0), 2, 16)
 	var dir := (b - a).normalized()
 	var nrm := Vector2(-dir.y, dir.x)
 	var pts: Array = [a]
@@ -200,6 +201,8 @@ func route(a: Vector2, b: Vector2) -> Array:
 			for k in [-1.0, -0.6, -0.3, 0.3, 0.6, 1.0]:
 				var q: Vector2 = p + nrm * (reach * k)
 				if height_at(q.x, q.y) < WATER_LEVEL + 6.0:
+					continue
+				if not clear_of_airfield(q.x, q.y):
 					continue
 				var cost := _road_cost(pts[i - 1], q, pts[i + 1])
 				if cost < best_cost:
@@ -235,6 +238,14 @@ func _road_cost(prev: Vector2, p: Vector2, next: Vector2) -> float:
 			# few percent costs nothing and half a gradient costs everything.
 			var grade := rise / maxf(run, 1.0)
 			cost += grade * grade * run * 90.0
+			# and a trunk road does not run across an active airfield. Without
+			# this the network cut straight through the approach and the apron
+			# on its way between the field and the towns: 362 sample points in
+			# a keep-out it had no reason to enter.
+			if not clear_of_airfield(q.x, q.y):
+				cost += run * 400.0
+			if on_runway(q.x, q.y):
+				cost += run * 4000.0
 			last = h
 		cost += d * 0.085                     # and so is every metre of tarmac
 	return cost
@@ -380,13 +391,21 @@ func _seg_dist(p: Vector2, a: Vector2, b: Vector2) -> float:
 	return p.distance_to(a + ab * t)
 
 ## Can something be built here? Rejects water, steep ground, roads and the field.
-func buildable(x: float, z: float, flat := 0.86, clearance := 4.0) -> bool:
+## `road_clear` is the half-width of the thing being placed. Each road is then
+## checked against its own width rather than against one number for everything:
+## the old flat sixteen metres was the carriageway and its kerbs and nothing
+## else, so a twenty-four metre building placed at exactly sixteen had four
+## metres of itself in the road — 62 of 3641 town buildings. Making that one
+## number big enough for a motorway then deleted more than half the town,
+## because a ten metre street was demanding a motorway's clearance.
+func buildable(x: float, z: float, flat := 0.86, clearance := 4.0,
+		road_clear := 4.0) -> bool:
 	var y := height_at(x, z)
 	if y < WATER_LEVEL + clearance:
 		return false
 	if normal_at(x, z).y < flat:
 		return false
-	if road_distance(x, z) < 16.0:
+	if not clear_of_roads(x, z, road_clear):
 		return false
 	if absf(x) < 340.0 and absf(z) < 2100.0:
 		return false
@@ -394,6 +413,21 @@ func buildable(x: float, z: float, flat := 0.86, clearance := 4.0) -> bool:
 
 ## A wider keep-out for anything tall: pylons, masts and turbines must not stand
 ## in the approach path or on the airfield itself.
+## True when nothing of the given half-width would be standing in a road here.
+func clear_of_roads(x: float, z: float, half: float) -> bool:
+	if _road_field.is_empty():
+		return true
+	if _sample_road_field(x, z) > 170.0 + half:
+		return true
+	var p := Vector2(x, z)
+	for r in ROADS:
+		if _seg_dist(p, r[0], r[1]) < 13.0 + half:   # carriageway plus kerbs
+			return false
+	for r in _segments:
+		if _seg_dist(p, r[0], r[1]) < 8.0 + half:
+			return false
+	return true
+
 func clear_of_airfield(x: float, z: float) -> bool:
 	if absf(x) < 620.0 and absf(z) < 2600.0:
 		return false
@@ -594,6 +628,7 @@ func _setup_input() -> void:
 	_add(&"pause_menu",   [_key(KEY_ESCAPE)])
 	_add(&"assist",       [_key(KEY_H)])
 	_add(&"flare",        [_key(KEY_N)])
+	_add(&"chaff",        [_key(KEY_B)])
 	_add(&"mouse_fly",    [_key(KEY_SEMICOLON)])
 	_add(&"map",          [_key(KEY_M), _key(KEY_F1)])
 	_add(&"time_slow",    [_key(KEY_BACKSLASH)])

@@ -25,8 +25,8 @@ static func _db() -> Dictionary:
 		"arm_time": 0.6, "fuse": 13.0, "damage": 130.0,
 		"colour": Color(0.80, 0.80, 0.78), "band": Color(0.75, 0.72, 0.30),
 		"eject": 6.0, "trail": Color(0.85, 0.85, 0.9),
-		"flare_bait": 0.0,
-		"desc": "Radar guided BVR. Needs lock until it goes active.",
+		"flare_bait": 0.0, "chaff_bait": 0.45,
+		"desc": "Radar guided BVR. Needs lock until it goes active; chaff will break it.",
 	},
 	"sm2": {
 		# A ship's magazine is not an aeroplane's. A naval round is launched
@@ -42,8 +42,8 @@ static func _db() -> Dictionary:
 		"arm_time": 0.8, "fuse": 22.0, "damage": 290.0,
 		"colour": Color(0.86, 0.86, 0.84), "band": Color(0.30, 0.45, 0.70),
 		"eject": 0.0, "trail": Color(0.88, 0.88, 0.92),
-		"flare_bait": 0.0,
-		"desc": "Fleet area defence. Long reach, heavy warhead, no flare seduction.",
+		"flare_bait": 0.0, "chaff_bait": 0.30,
+		"desc": "Fleet area defence. Long reach, heavy warhead; harder to chaff than an AMRAAM.",
 	},
 	"slbm": {
 		"name": "Trident submarine-launched missile", "short": "SLB", "kind": "radar",

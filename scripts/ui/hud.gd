@@ -624,7 +624,10 @@ func _draw_status(vp: Vector2) -> void:
 		if st["gone"]:
 			_box(Rect2(px, strip_y + 24, 9, 18), col2, 1.0)
 		px += 13.0
-	_txt(Vector2(rx, strip_y + 58), "N  FLARES %d" % jet.flares, 14, GREEN)
+	_txt(Vector2(rx, strip_y + 58), "N  FLARE %d" % jet.flares, 14,
+		GREEN if jet.flares > 24 else AMBER)
+	_txt(Vector2(rx, strip_y + 76), "B  CHAFF %d" % jet.chaff, 14,
+		GREEN if jet.chaff > 24 else AMBER)
 
 func _draw_bay_icon(at: Vector2, col: Color) -> void:
 	var open := 0.0
@@ -907,6 +910,7 @@ func _draw_help() -> void:
 			["LMB / SPACE", "fire selected weapon"],
 			["V", "gun burst"],
 			["N", "flares"],
+			["B", "chaff"],
 		]],
 		["SENSORS", [
 			["RMB or O", "raise / stow the sensor page"],

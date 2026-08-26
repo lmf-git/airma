@@ -80,6 +80,11 @@ var _naval_hp := 0.0
 var _naval_ship: Node3D = null
 var _naval_shot := false
 var _naval_weapon := "gbu32"
+var _naval_said := -1
+var _cm_test := ""
+var _cm_t := 0.0
+var _cm_step := 0
+var _cm_sam: Node3D = null
 var _bat_test := false
 var _bat_t := 0.0
 var _bat_a: Node3D = null
@@ -103,6 +108,7 @@ var _form_n := 0
 var _form_worst := 0.0
 var _mask_test := false
 var _mask_t := 0.0
+var mask_seeker_ok := false
 var _shipnet := false
 var _shipnet_t := 0.0
 var _shipnet_said := 0
@@ -913,17 +919,20 @@ func _process(delta: float) -> void:
 			print("[naval] attacking %s with %s, hull %.0f; laser spot %s (sea level %.0f)" % [
 				_naval_ship.call("display_name"), _naval_weapon, _naval_hp,
 				str(player.designated.round()), Sim.WATER_LEVEL])
+		elif _naval_t > 2.0 and _naval_t < 5.0 and is_instance_valid(_naval_ship):
+			if int(_naval_t * 4.0) != _naval_said:
+				_naval_said = int(_naval_t * 4.0)
+				var rel: Vector3 = _naval_ship.global_position - player.global_position
+				print("[naval] t=%.2f  target=%s  %.1f deg below the nose, %.0f m  locked=%s lock_t=%.2f" % [
+					_naval_t, str(is_instance_valid(player.target)),
+					rad_to_deg((-player.global_transform.basis.z).angle_to(rel)),
+					rel.length(), str(player.locked), player.lock_time])
 		elif _naval_t > 5.0 and not _naval_shot:
 			_naval_shot = true
 			print("[naval] at release: pod active=%s lasing=%s mode=%d tracked=%s designated=%s node=%s" % [
 				str(pod.active), str(pod.lasing), pod.mode,
 				str(is_instance_valid(pod.tracked)), str(player.designated.round()),
 				str(player.designated_node.name) if is_instance_valid(player.designated_node) else "none"])
-			# hold the lock right up to release: the pod's own processing can
-			# break it between designation and the shot
-			if is_instance_valid(_naval_ship):
-				player.target = _naval_ship
-				player.locked = true
 			print("[naval] release: %s" % ("away" if player.fire() == "" else "refused"))
 		elif _naval_t > 40.0:
 			_naval_test = false
@@ -977,6 +986,55 @@ func _process(delta: float) -> void:
 						i, v.call("display_name"), _bat_hp[i], v.get("health"),
 						"SUNK" if not bool(v.get("alive")) else "afloat"])
 				get_tree().quit()
+	# Does a countermeasure actually break a shot? A SAM site fires at the
+	# player from close range; the aeroplane either dispenses or does not.
+	if _cm_test != "" and is_instance_valid(player):
+		_cm_t += delta
+		if _cm_t > 1.5 and _cm_step == 0:
+			_cm_step = 1
+			var at := Vector3(2000.0, 0.0, -3000.0)
+			_cm_sam = GroundTarget.new()
+			_cm_sam.team = 1
+			_cm_sam.setup("sam")
+			add_child(_cm_sam)
+			_cm_sam.global_position = Vector3(at.x, Sim.height_at(at.x, at.z), at.z)
+			player.team = 0
+			player.global_transform = Transform3D(Basis(),
+				at + Vector3(0.0, Sim.height_at(at.x, at.z) + 2000.0, 6000.0))
+			player.linear_velocity = Vector3(0, 0, -230.0)
+			player.gear_down = false
+			player.gear_anim = 0.0
+			player.flares = 240
+			player.chaff = 240
+			_reset_interp(player)
+			print("[cm] SAM at %s, aeroplane 6.0 km out at 2000 m agl, mode=%s" % [
+				str(_cm_sam.global_position.round()), _cm_test])
+		elif _cm_step == 1 and _cm_t > 2.5:
+			# let it shoot, then run the defence for the whole flight time
+			var live := 0
+			var tracking := 0
+			for m in get_tree().get_nodes_in_group("missiles"):
+				if not is_instance_valid(m):
+					continue
+				live += 1
+				if m.target == player:
+					tracking += 1
+			if live > 0:
+				match _cm_test:
+					"chaff":
+						player.drop_chaff()
+					"flare":
+						player.drop_flare()
+					"both":
+						player.dispense_all()
+					_:
+						pass
+			if _cm_t > 26.0:
+				_cm_step = 2
+				print("[cm] RESULT: %s — %d rounds up, %d still tracking; player alive=%s (flares %d, chaff %d left)" % [
+					_cm_test, live, tracking, str(player.is_alive()),
+					player.flares, player.chaff])
+				get_tree().quit()
 	# Where the towns ended up, how level they are, and whether the streets are
 	# on the surface or buried in it.
 	if _town_test:
@@ -1008,6 +1066,144 @@ func _process(delta: float) -> void:
 			print("[town] %-14s at %s (moved %4.0f m)  gradient %.4f  worst footprint step %5.2f m" % [
 				String(t["name"]), str(c.round()), moved,
 				mean / maxf(float(n), 1.0), worst])
+		# How clearly a street reads. Walk perpendicular across one and compare
+		# the stain on the centreline with the stain halfway to the next street.
+		var on_road := 0.0
+		var between := 0.0
+		var xs := 0
+		for r in scenery._streets:
+			var ra: Vector2 = r[0]
+			var rb: Vector2 = r[1]
+			if ra.distance_to(rb) < 200.0:
+				continue
+			var dirv := (rb - ra).normalized()
+			var nrm := Vector2(-dirv.y, dirv.x)
+			for k in 5:
+				var q: Vector2 = ra.lerp(rb, 0.2 + float(k) * 0.15)
+				on_road += terrain.mask_at(q.x, q.y).x
+				between += terrain.mask_at(q.x + nrm.x * 64.0, q.y + nrm.y * 64.0).x
+				xs += 1
+		print("[town] street contrast: stain %.2f on the centreline, %.2f halfway to the next street" % [
+			on_road / maxf(float(xs), 1.0), between / maxf(float(xs), 1.0)])
+		# and how much of the built-up area actually looks built up
+		var paved := 0.0
+		var edge_paved := 0.0
+		var edge_n := 0
+		var all_n := 0
+		for t in scenery.sites:
+			var tc: Vector2 = t["c"]
+			var rad: float = float(t["r"])
+			for i in 21:
+				for j in 21:
+					var q := tc + Vector2(float(i - 10), float(j - 10)) * (rad / 10.0)
+					var dd := q.distance_to(tc)
+					if dd > rad:
+						continue
+					var tf: float = terrain.mask_at(q.x, q.y).y
+					paved += tf
+					all_n += 1
+					if dd > rad * 0.85:
+						edge_paved += tf
+						edge_n += 1
+		var stained := 0
+		var stain_n := 0
+		for t in scenery.sites:
+			var tc2: Vector2 = t["c"]
+			var rad2: float = float(t["r"])
+			for i in 61:
+				for j in 61:
+					var q := tc2 + Vector2(float(i - 30), float(j - 30)) * (rad2 / 30.0)
+					if q.distance_to(tc2) > rad2:
+						continue
+					stain_n += 1
+					if terrain.mask_at(q.x, q.y).x > 0.5:
+						stained += 1
+		var table: Array = Terrain.ring_table()
+		for t in scenery.sites:
+			var tc3: Vector2 = t["c"]
+			var cheb: float = maxf(absf(tc3.x), absf(tc3.y))
+			var cell := -1.0
+			for ring in table:
+				if cheb <= float(ring["coverage"]):
+					cell = float(ring["cell"])
+					break
+			print("[town] %-14s %.1f km from the field: terrain cells are %.0f m there (street grid is 128 m)" % [
+				String(t["name"]), cheb * 0.001, cell])
+		# Roads over the airfield, and buildings standing in the road.
+		var on_field := 0
+		var on_apron := 0
+		var on_runway := 0
+		var pts_f := 0
+		for r in Sim.ROADS:
+			var ra: Vector2 = r[0]
+			var rb: Vector2 = r[1]
+			var steps: int = maxi(int(ra.distance_to(rb) / 12.0), 2)
+			for k in steps + 1:
+				var q: Vector2 = ra.lerp(rb, float(k) / float(steps))
+				pts_f += 1
+				if not Sim.clear_of_airfield(q.x, q.y):
+					on_field += 1
+					if absf(q.x) < 620.0 and absf(q.y) < 2600.0:
+						on_apron += 1
+				if Sim.on_runway(q.x, q.y):
+					on_runway += 1
+		print("[town] trunk network over the airfield: %d of %d points inside the keep-out (%d of those on the field itself, %d on the runway)" % [
+			on_field, pts_f, on_apron, on_runway])
+		var clash := 0
+		var nearest_clash := 1e9
+		var built := 0
+		var on_tarmac := 0
+		for x in scenery.town_xforms:
+			var xf: Transform3D = x
+			built += 1
+			# half the footprint, from the instance scale
+			var halfw: float = maxf(xf.basis.x.length(), xf.basis.z.length()) * 0.5
+			var d := Sim.road_distance(xf.origin.x, xf.origin.z)
+			if d < halfw + 4.0:
+				clash += 1
+				nearest_clash = minf(nearest_clash, d)
+			if terrain.mask_at(xf.origin.x, xf.origin.z).x > 0.35:
+				on_tarmac += 1
+		print("[town] buildings in a road: %d of %d overlap the carriageway (closest centre %.1f m), %d stand on painted tarmac" % [
+			clash, built, nearest_clash if clash > 0 else -1.0, on_tarmac])
+		print("[town] tarmac covers %.1f%% of the built-up area" % [
+			100.0 * float(stained) / maxf(float(stain_n), 1.0)])
+		print("[town] made ground: %.2f across the footprint, %.2f in the outer ring where the buildings meet the country" % [
+			paved / maxf(float(all_n), 1.0), edge_paved / maxf(float(edge_n), 1.0)])
+		# The ribbon against the terrain *mesh*, which is what is actually
+		# drawn. The chunk mesh samples the height field on a 30 m grid and
+		# interpolates between, so over a dip the drawn ground sits above the
+		# true height field — and the carriageway, laid 0.16 m over the field,
+		# ends up underneath it.
+		var sunk := 0
+		var pts := 0
+		var worst_sink := 0.0
+		var sum_sink := 0.0
+		for r in (Sim.ROADS + scenery._streets):
+			var ra: Vector2 = r[0]
+			var rb: Vector2 = r[1]
+			var steps: int = maxi(int(ra.distance_to(rb) / 11.0), 2)
+			for k in steps + 1:
+				var q: Vector2 = ra.lerp(rb, float(k) / float(steps))
+				var road_y := Sim.height_at(q.x, q.y) + 0.16
+				# the drawn ground: bilinear over the innermost ring's cells
+				var cs := 30.0
+				var gx := floorf(q.x / cs) * cs
+				var gz := floorf(q.y / cs) * cs
+				var tx := (q.x - gx) / cs
+				var tz := (q.y - gz) / cs
+				var h00 := Sim.height_at(gx, gz)
+				var h10 := Sim.height_at(gx + cs, gz)
+				var h01 := Sim.height_at(gx, gz + cs)
+				var h11 := Sim.height_at(gx + cs, gz + cs)
+				var mesh_y := lerpf(lerpf(h00, h10, tx), lerpf(h01, h11, tx), tz)
+				pts += 1
+				if mesh_y > road_y:
+					sunk += 1
+					sum_sink += mesh_y - road_y
+					worst_sink = maxf(worst_sink, mesh_y - road_y)
+		print("[town] carriageway vs the drawn ground: %d of %d points under it, mean %.2f m, worst %.2f m" % [
+			sunk, pts, sum_sink / maxf(float(sunk), 1.0), worst_sink])
 		# and the streets: are they on the ground or under it
 		var buried := 0
 		var total := 0
@@ -1307,8 +1503,112 @@ func _process(delta: float) -> void:
 			var paint_clear := _radar_paints(ghost)
 			print("[mask] radar scope: paints it behind the ridge=%s (expect false), over it=%s (expect true)" % [
 				str(paint_masked), str(paint_clear)])
+			# and what shoots at you. The battery stands on the ridge's far
+			# side; the ship is at sea, with the player put behind the highest
+			# ground on the line running inland from her.
+			var sam := GroundTarget.new()
+			sam.team = 1
+			sam.setup("sam")
+			add_child(sam)
+			sam.global_position = Vector3(b.x, Sim.height_at(b.x, b.z), b.z)
+			var fired_masked := 0
+			var fired_clear := 0
+			for phase in 2:
+				var y: float = (bh + 2500.0) if phase == 1 else (Sim.height_at(a.x, a.z) + 40.0)
+				player.global_position = Vector3(a.x, y, a.z)
+				player.team = 0
+				_reset_interp(player)
+				sam._cool = 0.0
+				var before := get_tree().get_nodes_in_group("missiles").size()
+				for _i in 240:                     # two seconds of engagement
+					sam._physics_process(1.0 / 120.0)
+				var shots: int = get_tree().get_nodes_in_group("missiles").size() - before
+				if phase == 0:
+					fired_masked = shots
+				else:
+					fired_clear = shots
+			print("[mask] battery launches: behind the ridge=%d (expect 0), over it=%d (expect 1)" % [
+				fired_masked, fired_clear])
+			# the ship's own acquisition, from her masthead over open water
+			var sh := Ship.new()
+			sh.setup("destroyer", 1)
+			add_child(sh)
+			var sea := _deep_water(Vector3(26000.0, 0.0, 2000.0))
+			sh.global_position = Vector3(sea.x, Sim.WATER_LEVEL, sea.z)
+			sh.ai = false
+			# walk inland and find the highest ground on that bearing
+			var peak := Vector3.ZERO
+			var peak_h := -1e9
+			var peak_t := 0.0
+			for k in 220:
+				var t := float(k) * 90.0
+				var q := Vector3(sea.x - t, 0.0, sea.z)
+				var hh := Sim.height_at(q.x, q.z)
+				if hh > peak_h:
+					peak_h = hh
+					peak = q
+					peak_t = t
+			var behind := Vector3(peak.x - 3000.0, 0.0, peak.z)
+			var ship_masked := 0
+			var ship_clear := 0
+			for phase2 in 2:
+				var py: float = (peak_h + 3000.0) if phase2 == 1 \
+					else (Sim.height_at(behind.x, behind.z) + 60.0)
+				player.global_position = Vector3(behind.x, py, behind.z)
+				_reset_interp(player)
+				sh.vls_cd = 0.0
+				var before2 := get_tree().get_nodes_in_group("missiles").size()
+				if sh._pick_air() == player:
+					sh.fire_vls(player)
+				var shots2: int = get_tree().get_nodes_in_group("missiles").size() - before2
+				if phase2 == 0:
+					ship_masked = shots2
+				else:
+					ship_clear = shots2
+			print("[mask] ship at %s, ridge %.0f m at %.1f km inland, player %.1f km beyond it" % [
+				str(Vector2(sea.x, sea.z).round()), peak_h, peak_t * 0.001, 3.0])
+			print("[mask] ship launches: player behind the ridge=%d (expect 0), above it=%d (expect 1)" % [
+				ship_masked, ship_clear])
+			# And a round already in the air: duck behind the ridge and it should
+			# lose the track rather than fly through the hill. Built on its own
+			# rather than borrowed from the engagement above — the rounds fired
+			# there go off almost immediately at these ranges, and a detonated
+			# missile answers every question with whatever it last held.
+			var probe := Missile.new()
+			# Low, and close in on the seaward side: a round at five thousand
+			# metres looks down over a ridge and is not masked by it at all,
+			# which is correct and makes for a useless test.
+			var launch_at := Vector3(peak.x + 2400.0, peak_h - 450.0, peak.z)
+			player.global_position = Vector3(behind.x, peak_h + 3000.0, behind.z)
+			_reset_interp(player)
+			var pdir := (player.global_position - launch_at).normalized()
+			probe.launch("sm2", Transform3D(Basis.looking_at(pdir, Vector3.UP), launch_at),
+				pdir * 300.0, null, player)
+			add_child(probe)
+			for _i in 48:                      # kept short: it is under boost
+				probe._physics_process(1.0 / 120.0)
+			var probe_before: bool = probe.target == player
+			# now down behind the ridge
+			player.global_position = Vector3(behind.x,
+				Sim.height_at(behind.x, behind.z) + 60.0, behind.z)
+			_reset_interp(player)
+			for _i in 300:
+				if probe.dead:
+					break
+				probe._physics_process(1.0 / 120.0)
+			var probe_after: bool = probe.target == player
+			mask_seeker_ok = probe_before and not probe_after and not probe.dead
+			print("[mask] seeker: holding with a clear line=%s, still holding once masked=%s (round %.0f m up, its line to you clear=%s, detonated=%s)" % [
+				str(probe_before), str(probe_after), probe.global_position.y,
+				str(Sim.line_of_sight(probe.global_position, player.global_position)),
+				str(probe.dead)])
+			if is_instance_valid(probe):
+				probe.queue_free()
 			print("[mask] RESULT: %s" % ("ok" if not got_masked and got_clear \
-				and not paint_masked and paint_clear else "FAILED"))
+				and not paint_masked and paint_clear \
+				and fired_masked == 0 and fired_clear > 0 \
+				and ship_masked == 0 and ship_clear > 0 \
+				and mask_seeker_ok else "FAILED"))
 			get_tree().quit()
 	# Do the wingmen actually sit in the slot, and does the AI use the terrain.
 	if _form_test:
@@ -2253,7 +2553,8 @@ func _process(delta: float) -> void:
 		if _fx_t > 0.35:
 			_fx_t = 0.0
 			player.flares = 30
-			player.drop_flare()
+			player.chaff = 30
+			player.dispense_all()
 			if player.fire_cd <= 0.0 and player.count_remaining("aim120") > 0:
 				player.selected = maxi(player.weapon_types.find("aim120"), 0)
 				player.locked = true
@@ -4042,6 +4343,8 @@ func _parse_cmdline() -> void:
 			_vls_test = true
 		elif a == "--townstest":
 			_town_test = true
+		elif a.begins_with("--cmtest="):
+			_cm_test = a.substr(9)
 		elif a == "--dctest":
 			_dc_test = true
 		elif a == "--triggertest":

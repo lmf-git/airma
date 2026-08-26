@@ -7,9 +7,14 @@ extends Node3D
 ## borders. Vertical skirts hide the T-junctions where two rings meet.
 
 const CELLS := 16                     # cells per chunk edge, every ring
-const BASE_CELL := 30.0               # innermost cell size
+## Innermost cell size. This is the finest detail the ground can hold, and it is
+## also the finest anything *painted into* the ground can hold — a road stain
+## narrower than a cell has no vertices to land on and flickers with the grid.
+## Halved from 30 m, with a level added so the outermost ring still reaches the
+## same distance: 15 x 2^7 is the same 1920 m cell the old outer ring used.
+const BASE_CELL := 15.0
 const OUT := 4                        # chunks from the middle to the edge of a ring
-const LEVELS := 7                     # each level doubles the cell size
+const LEVELS := 8                     # each level doubles the cell size
 
 ## Every ring doubles the cell size and reaches OUT chunks out, so the hole in
 ## the middle of a ring is exactly two of that ring's chunks and the finer ring
@@ -29,6 +34,7 @@ static func ring_table() -> Array:
 	return out
 
 var _mat: ShaderMaterial
+var mask_img: Image = null
 var stats := {"chunks": 0, "tris": 0, "seam": 0.0}
 
 const GROUND_SHADER := """
@@ -38,6 +44,21 @@ render_mode diffuse_burley, specular_schlick_ggx;
 // How far out the fine grain is worth drawing. Beyond this the ground goes back
 // to flat biome colour, which is all you can resolve anyway and costs nothing.
 uniform float detail_fade = 1100.0;
+
+// Roads and made ground, baked once into a mask and sampled per fragment.
+//
+// These used to be painted into the vertex colours, which meant the sharpest a
+// road could ever be was one terrain cell. The rings are centred on the
+// airfield, so a town four kilometres out is drawn with 120 m cells and one ten
+// kilometres out with 240 m — against a street grid of 128 m. Northgate had
+// roughly one vertex every two blocks to say "street" with. No cell size fixes
+// that: 15 m cells out at ten kilometres is three and a half million triangles
+// for a single ring. In the mask it is one texture fetch and the geometry stops
+// mattering.
+uniform sampler2D ground_mask : filter_linear_mipmap, source_color;
+uniform float mask_half = 18000.0;
+uniform vec3 tarmac : source_color = vec3(0.135, 0.133, 0.140);
+uniform vec3 made_ground : source_color = vec3(0.335, 0.325, 0.305);
 
 varying vec3 wpos;
 varying vec3 wnrm;
@@ -76,6 +97,19 @@ void fragment() {
 	float rock_amt = smoothstep(0.38, 0.72, slope) * (1.0 - smoothstep(0.88, 0.99, slope));
 	vec3 rock = vec3(0.20, 0.19, 0.18) * (0.75 + 0.5 * grain);
 	base = mix(base, rock, rock_amt * 0.7);
+	// Built-up ground first, then the roads over it, so a street reads as a
+	// dark line on pavement rather than as a dark line on grass.
+	vec2 muv = wpos.xz / (mask_half * 2.0) + vec2(0.5);
+	float road_amt = 0.0;
+	float town_amt = 0.0;
+	if (muv.x > 0.0 && muv.x < 1.0 && muv.y > 0.0 && muv.y < 1.0) {
+		vec2 mk = texture(ground_mask, muv).rg;
+		road_amt = mk.r;
+		town_amt = mk.g;
+	}
+	float grit = (grain - 0.5) * 0.09;
+	base = mix(base, pow(made_ground, vec3(2.2)) * (1.0 + grit), town_amt * 0.85);
+	base = mix(base, pow(tarmac, vec3(2.2)) * (1.0 + grit * 0.5), road_amt * 0.88);
 	ALBEDO = base;
 	ROUGHNESS = 0.95 - 0.12 * grain;
 	METALLIC = 0.0;
@@ -90,7 +124,105 @@ func _ground_material() -> ShaderMaterial:
 	sh.code = GROUND_SHADER
 	var m := ShaderMaterial.new()
 	m.shader = sh
+	m.set_shader_parameter("mask_half", MASK_HALF)
+	m.set_shader_parameter("ground_mask", _bake_ground_mask())
 	return m
+
+const MASK_N := 4096                  # texels across the inhabited box
+const MASK_HALF := 18000.0            # and how far that box reaches
+
+## Rasterise the road network and the town footprints into one mask: red is
+## tarmac, green is made ground.
+##
+## Stamped segment by segment rather than sampled point by point. Asking the
+## distance field for every one of sixteen million texels would take minutes;
+## drawing 164 capsules into a byte array takes a moment, and it is the same
+## picture. The resolution works out at 8.8 m to a texel, which is what a ten
+## metre street needs to read as a line rather than as a suggestion.
+func _bake_ground_mask() -> ImageTexture:
+	var n := MASK_N
+	var t0 := Time.get_ticks_msec()
+	var buf := PackedByteArray()
+	buf.resize(n * n * 2)
+	var tpm: float = float(n) / (MASK_HALF * 2.0)     # texels per metre
+	# made ground under the settlements
+	for pad in Sim._town_pads:
+		var pc: Vector2 = pad["c"]
+		var pr: float = pad["r"]
+		_stamp_disc(buf, n, tpm, pc, pr * 1.02, pr * 1.32, 1)
+	# then the network: trunk roads wide, streets narrow
+	for r in Sim.ROADS:
+		_stamp_capsule(buf, n, tpm, r[0], r[1], 9.0, 30.0, 0)
+	for r in Sim._segments:
+		_stamp_capsule(buf, n, tpm, r[0], r[1], 5.0, 13.0, 0)
+	var road_px := 0
+	var town_px := 0
+	for k in range(0, buf.size(), 2):
+		if buf[k] > 96:
+			road_px += 1
+		if buf[k + 1] > 96:
+			town_px += 1
+	stats["mask_ms"] = Time.get_ticks_msec() - t0
+	stats["mask_road_px"] = road_px
+	stats["mask_town_px"] = town_px
+	stats["mask_m_per_texel"] = snappedf(1.0 / tpm, 0.01)
+	var img := Image.create_from_data(n, n, false, Image.FORMAT_RG8, buf)
+	# A second 33 MB copy is only worth carrying when something is going to
+	# measure it; in a normal session the GPU has the only copy it needs.
+	if OS.has_feature("headless") or OS.is_debug_build():
+		mask_img = img.duplicate()      # un-mipmapped, for the harness
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
+## What the ground actually shows at a world point: red tarmac, green made
+## ground, straight out of the baked mask.
+func mask_at(x: float, z: float) -> Vector2:
+	if mask_img == null:
+		return Vector2.ZERO
+	var tpm: float = float(MASK_N) / (MASK_HALF * 2.0)
+	var i := clampi(int((x + MASK_HALF) * tpm), 0, MASK_N - 1)
+	var j := clampi(int((z + MASK_HALF) * tpm), 0, MASK_N - 1)
+	var c := mask_img.get_pixel(i, j)
+	return Vector2(c.r, c.g)
+
+## World metres to texel, clamped to the image.
+func _to_texel(tpm: float, n: int, v: float) -> int:
+	return clampi(int((v + MASK_HALF) * tpm), 0, n - 1)
+
+func _stamp_disc(buf: PackedByteArray, n: int, tpm: float, c: Vector2,
+		solid: float, fade: float, channel: int) -> void:
+	var lo_x := _to_texel(tpm, n, c.x - fade)
+	var hi_x := _to_texel(tpm, n, c.x + fade)
+	var lo_z := _to_texel(tpm, n, c.y - fade)
+	var hi_z := _to_texel(tpm, n, c.y + fade)
+	for j in range(lo_z, hi_z + 1):
+		var wz := float(j) / tpm - MASK_HALF
+		for i in range(lo_x, hi_x + 1):
+			var wx := float(i) / tpm - MASK_HALF
+			var d := Vector2(wx - c.x, wz - c.y).length()
+			var v := 1.0 - smoothstep(solid, fade, d)
+			if v <= 0.0:
+				continue
+			var idx := (j * n + i) * 2 + channel
+			buf[idx] = maxi(buf[idx], int(clampf(v, 0.0, 1.0) * 255.0))
+
+func _stamp_capsule(buf: PackedByteArray, n: int, tpm: float, a: Vector2,
+		b: Vector2, solid: float, fade: float, channel: int) -> void:
+	var lo_x := _to_texel(tpm, n, minf(a.x, b.x) - fade)
+	var hi_x := _to_texel(tpm, n, maxf(a.x, b.x) + fade)
+	var lo_z := _to_texel(tpm, n, minf(a.y, b.y) - fade)
+	var hi_z := _to_texel(tpm, n, maxf(a.y, b.y) + fade)
+	for j in range(lo_z, hi_z + 1):
+		var wz := float(j) / tpm - MASK_HALF
+		for i in range(lo_x, hi_x + 1):
+			var wx := float(i) / tpm - MASK_HALF
+			var q := Vector2(wx, wz)
+			var d := Geometry2D.get_closest_point_to_segment(q, a, b).distance_to(q)
+			var v := 1.0 - smoothstep(solid, fade, d)
+			if v <= 0.0:
+				continue
+			var idx := (j * n + i) * 2 + channel
+			buf[idx] = maxi(buf[idx], int(clampf(v, 0.0, 1.0) * 255.0))
 
 func build() -> void:
 	_mat = _ground_material()
@@ -208,15 +340,9 @@ func _face(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
 		st.add_vertex(v)
 
 func _tint(v: Vector3, slope: float) -> Color:
+	# Biome only. Roads and made ground are in the ground mask, sampled per
+	# fragment, because a vertex can only be as sharp as its cell.
 	var c := Sim.biome_colour(v.x, v.z, v.y, slope)
-	# roads are painted into the terrain itself, so they never z-fight or float
-	if v.y > Sim.WATER_LEVEL:
-		# a wide, strong stain under every road and street: at altitude the
-		# carriageway mesh is sub-pixel, so this is what actually draws the
-		# network from the air
-		var rd := Sim.road_distance(v.x, v.z)
-		if rd < 46.0:
-			c = c.lerp(Color(0.19, 0.185, 0.175), (1.0 - smoothstep(7.0, 46.0, rd)) * 0.78)
 	var nz := Sim.noise_det.get_noise_2d(v.y * 7.3, slope * 1000.0) * 0.03
 	return Color(clampf(c.r + nz, 0, 1), clampf(c.g + nz, 0, 1), clampf(c.b + nz, 0, 1))
 

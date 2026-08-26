@@ -16,7 +16,8 @@ func _ready() -> void:
 	add_to_group("hittable")
 	add_to_group("bandits")
 	assist = true
-	flares = 40
+	flares = 150
+	chaff = 150
 	throttle = 0.55
 	# A helicopter's skids and wheels do not retract, and this was copied from
 	# the fixed wing bandit. With the gear stowed there is no ground contact at
@@ -57,7 +58,7 @@ func _pilot(delta: float) -> void:
 				want_speed = 0.0 if d < 1600.0 else 48.0
 				_shoot(foe, delta)
 		BREAK:
-			drop_flare()
+			dispense_all()
 			if foe:
 				var away := (global_position - foe.global_position).normalized()
 				goal = global_position + away * 1800.0

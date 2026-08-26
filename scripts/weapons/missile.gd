@@ -20,6 +20,8 @@ var _eject := 0.0
 var _trail: GPUParticles3D
 var _flame: MeshInstance3D
 var _seek_lost := 0.0
+var _mask_check := 0.0
+var _masked := false
 var _min_d := 1e9        # closest the round ever got to the aircraft it was aimed at
 var _min_age := 0.0
 
@@ -30,7 +32,8 @@ func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: 
 	vel = carrier_vel
 	shooter = from
 	target = tgt
-	team = from.team if "team" in from else 0
+	# `in` on a null shooter raises, and the raise aborts the rest of launch()
+	team = (from.team if "team" in from else 0) if is_instance_valid(from) else 0
 	_eject = ws["eject"]
 
 func _ready() -> void:
@@ -190,12 +193,38 @@ func _guide(delta: float) -> void:
 		if randf() < ws["flare_bait"] * delta * 2.0:
 			target = null
 			return
+	# and radar seekers by chaff, which until now nothing carried: a radar round
+	# had no counter at all, so a SAM site that got a shot off was unbeatable
+	# except by outrunning it.
+	var cb: float = float(ws.get("chaff_bait", 0.0))
+	if cb > 0.0 and target.has_method("chaff_active") and target.chaff_active():
+		if randf() < cb * delta * 2.0:
+			if Sim.debug_weapons:
+				print("[msl] %s decoyed by chaff at age %.1f" % [wid, age])
+			target = null
+			return
 	var los := tpos - global_position
 	var dist := los.length()
 	if dist < _min_d:
 		_min_d = dist
 		_min_age = age
 	if dist < 0.5:
+		return
+	# And the seeker has to be able to see it. Ducking behind a ridge with a
+	# round already in the air is a real defence and it did nothing: the missile
+	# tracked straight through the hill. Checked a few times a second rather
+	# than every frame — it is a ray march, and there can be a lot of rounds up.
+	_mask_check -= delta
+	if _mask_check <= 0.0:
+		_mask_check = 0.25
+		_masked = not Sim.line_of_sight(global_position, tpos)
+	if _masked:
+		_seek_lost += delta
+		if _seek_lost > 0.6:
+			if Sim.debug_weapons:
+				print("[msl] %s dropped %s at age %.1f: terrain masked at %.0f m" % [
+					wid, str(target.name), age, dist])
+			target = null
 		return
 	var seeker_ang := rad_to_deg((-global_transform.basis.z).angle_to(los))
 	if seeker_ang > ws["seeker_fov"]:

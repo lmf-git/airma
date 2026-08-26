@@ -108,6 +108,8 @@ func _pilot(delta: float) -> void:
 	if Sim.tapped(&"cycle_target") \
 			and not (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
 		cycle_target()
+	if Sim.tapped(&"chaff"):
+		drop_chaff()
 	if Sim.tapped(&"flare"):
 		if flares > 0:
 			drop_flare()

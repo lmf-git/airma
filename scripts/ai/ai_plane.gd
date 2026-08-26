@@ -40,7 +40,8 @@ func _ready() -> void:
 	add_to_group("hittable")
 	add_to_group("bandits")
 	assist = true
-	flares = 48
+	flares = 180
+	chaff = 180
 	throttle = 0.85
 	gear_down = false
 	gear_anim = 0.0
@@ -101,7 +102,9 @@ func _pilot(delta: float) -> void:
 			if _state_t > 7.0:
 				state = ENGAGE
 		DEFEND:
-			drop_flare()
+			# both dispensers: the aeroplane being shot at does not know what
+			# is guiding the round any more than the pilot does
+			dispense_all()
 			if player:
 				var away := (global_position - player.global_position).normalized()
 				goal = global_position + (away + Vector3.UP * 0.35).normalized() * 3000.0
@@ -210,7 +213,7 @@ func _cas(delta: float) -> void:
 				state = PATROL
 				_state_t = 0.0
 		DEFEND:
-			drop_flare()
+			dispense_all()
 			goal = global_position - global_transform.basis.z * 2000.0 + Vector3.UP * 900.0
 			throttle = 1.0
 			if _state_t > 4.0:
@@ -292,7 +295,7 @@ func _transport(delta: float) -> void:
 		state = DEFEND
 		_state_t = 0.0
 	if state == DEFEND:
-		drop_flare()
+		dispense_all()
 		cruise = 900.0
 		throttle = 1.0
 		if is_instance_valid(target):

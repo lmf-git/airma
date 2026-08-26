@@ -279,11 +279,35 @@ and then refusing to lock it is worse than not painting it, because you can see
 it and cannot understand what the radar is doing. A masked contact leaves a
 faded trace where it was last seen and nothing more.
 
+**Nothing shoots at what it cannot see.** A SAM battery will not engage through
+the hill it is standing behind, and a ship's air search is taken from her
+masthead — so an aeroplane down in the valley is not a contact, and flying the
+low route to stay behind the ridge line is worth doing. A round already in the
+air loses the track too: duck behind terrain with a missile chasing you and the
+seeker gives up after half a second of no line, and does not get it back.
+That check runs a few times a second rather than every frame, because it is a
+ray march and there can be a lot of rounds up.
+
 The AI uses the same fact the other way. An aeroplane being shot at, or running
 in on something that can shoot back, checks how much lower it would have to be
 for the ridge line to cover it -- and if there is something to get behind, goes
 down behind it and comes up late. If the ground between is open it stays high,
 because giving away the energy buys nothing.
+
+## Countermeasures
+
+Two dispensers, 240 cartridges each, and they do different jobs. **Flares**
+(`N`) seduce an infra-red seeker. **Chaff** (`B`) blooms a cloud of dipoles that
+a radar seeker locks onto instead. Before chaff existed there was nothing at all
+that worked against a radar round, so a SAM site that got a shot away was
+unbeatable except by outrunning it — and pumping flares at it, which is what you
+would instinctively do, did precisely nothing.
+
+Measured against five SAM rounds in the air: dispensing **nothing** leaves all
+five still tracking; **flares alone** also leave all five, which is correct and
+is the point; **chaff** breaks four of the five. The AI works both dispensers
+together when it is defending, because an aeroplane being shot at does not know
+what is guiding the round any more than the pilot does.
 
 ## Wrecks
 
@@ -365,6 +389,7 @@ ramp and you are handed back to the world with the aircraft's velocity.
 | `CTRL`+`T` | pod designates: point track a vehicle, or ground stabilise a spot |
 | `L` | laser designator (bombs guide onto the spot) |
 | `/` | chat line (Enter sends, Escape cancels) |
+| `N` / `B` | flares / chaff |
 | `N` (pod up) | sensor channel: TV, night, white hot, black hot |
 | `[` / `]` | cycle the left / right corner panel: off, sensor, radar, minimap |
 | `-` / `=` | radar range: 10, 20, 40 or 80 km |
@@ -578,6 +603,7 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--masktest` | does terrain block a line, and does the radar respect it |
 | `--chattest` | `/`, a line of text, and whether the stick moved while typing |
 | `--shipnet` | what each end of a session thinks the fleet is doing |
+| `--cmtest=WHAT` | flares, chaff, both or none against a SAM shot |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
 | `--townstest` | where the towns ended up, how level, and whether the streets are buried |
@@ -950,6 +976,19 @@ harness rather than off the screen:
 * **Ships under command** — helm, telegraph, battery and tubes: an Arleigh Burke
   made 119 m in eight seconds (29.9 kts), answered the wheel, laid its mount on
   068 when ordered to 068, and fired.
+* **The lock that let go just before you shot** — an AMRAAM fired at a ship was
+  arriving unguided. The fuse fix below was real but it was not the whole story:
+  the lock itself was being dropped half a second before the trigger. The gate
+  was the *missile's* seeker field of view, which is a different instrument from
+  the aircraft's radar, and on any look-down attack the target slides below the
+  nose as you close. Measured on a run-in from 1500 m: lock acquired at 29.8
+  degrees down, held to 32.4, and **dropped at 33.2 — the AIM-120's gate —
+  with the shot due at 33.5**. The round then left the rail with nothing to
+  follow and flew where it was pointed. The gate is the aircraft's own radar
+  gimbal now, and a targeting pod holding a point track keeps the lock whatever
+  the nose is doing, which is the entire purpose of putting a sensor on a
+  gimbal. Worth noting the harness had been quietly papering over this: it
+  re-asserted the lock at release, so the test passed while the game did not.
 * **A fuse that measured to the wrong place** — a Sidewinder arriving at a
   destroyer's bow was seventy metres from the ship's origin amidships, which is
   the point the proximity fuse was measuring against. It flew through the ship
@@ -999,6 +1038,72 @@ harness rather than off the screen:
   the segments are walked properly anywhere the answer is close enough to
   matter: **0.0 m mean error, 0.0 m worst, 0 of 1476 points unpainted**, for
   about 1.4 s more at world generation.
+* **Roads through the airfield, and buildings standing in them** — two faults
+  that both came down to one number being asked to cover every case.
+  The trunk network ran across the airfield: **362 of 4784** sample points
+  inside the keep-out, and once the router was told to avoid it, four points
+  ended up on the runway itself — worse in the most visible way. Penalising
+  the middle of a leg cannot help when the *ends* are the problem: a road that
+  starts beside an airfield and heads south-west is inside the keep-out within
+  a few hundred metres whatever the relaxation does, because the relaxation
+  moves waypoints and not endpoints. The network hangs off a bypass down the
+  east side of the field instead, and the towns join whichever end of it is
+  nearer: **0 points on the field, 0 on the runway**, with the 95 that remain
+  all out in the extended-centreline strip, kilometres from the threshold,
+  where a road crossing an approach is what real airfields look like.
+  Buildings stood in the road because the clearance was a flat 16 m measured
+  from the centreline — the carriageway and its kerbs and nothing else — so a
+  24 m building placed at exactly 16 m had four metres of itself in the road:
+  **62 of 3641**. Making that one number wide enough for a motorway then
+  deleted **more than half the town**, because a ten metre street was demanding
+  a motorway's clearance. Each road is checked against its own width now, and
+  the building is sized before it is sited: **0 of 2936 overlap a carriageway**,
+  and one solitary building still stands on painted tarmac. It costs about 19%
+  of the buildings, which is the price of not building in the road.
+  The denser network is a fringe benefit: 47 legs and 57 km became 103 legs and
+  93 km, with the towns joined to each other in a ring rather than only to the
+  field, and the climb per kilometre came *down* — 41.0 to 31.8 m/km — once
+  every leg was subdivided. Legs short enough to be left as a single straight
+  segment had no waypoints to relax and took whatever gradient lay between
+  their ends, which is where a 53% pitch had appeared.
+* **Roads drawn per fragment instead of per vertex** — the sharpest a road
+  could ever be was one terrain cell, and the cell size is set by distance from
+  the *airfield*, not from the camera, because the rings are built once around
+  the origin. Measured: Vane gets 60 m cells, Kestrel and Rampart City 120 m,
+  **Northgate 240 m** — against a street grid of 128 m. Northgate had roughly
+  one vertex every two blocks to say "street" with. Smaller cells cannot rescue
+  this: 15 m cells out at ten kilometres is about three and a half million
+  triangles for a single ring, against 215 thousand for the whole world now.
+  The network and the built-up ground are baked once into a 4096² two-channel
+  mask — **8.79 m to a texel** — and sampled per fragment, so the geometry stops
+  mattering. It is stamped capsule by capsule rather than sampled point by
+  point: asking a distance field for sixteen million texels would take minutes,
+  drawing 164 capsules into a byte array takes **509 ms**. Tarmac now covers
+  **28.9%** of a town's area rather than 66.8%, and world generation came out
+  *faster* — 8.57 s to 7.22 s — because the per-vertex segment walk it replaces
+  was costing more than the bake does.
+  The innermost cell was halved to 15 m anyway (a level added so the outer ring
+  still reaches as far): 366 chunks to 421, 187k triangles to 215k, seam
+  residual unchanged at 0.00006 m.
+* **Towns that looked like fields with buildings in them** — two separate
+  faults, and the first guess about each was wrong. Buildings at the edge stood
+  on grass because nothing ever changed the *ground* under a settlement: it was
+  whatever biome the terrain painter decided on, houses or no houses. Towns now
+  stand on made ground that fades into the country beyond the last building —
+  measured at **1.00 across the footprint and 1.00 in the outer ring** where
+  the buildings meet open land, where before it was pasture throughout.
+  Separately, the road stain used one 46 m band for everything. That is right
+  for a trunk road, whose carriageway mesh is sub-pixel from any height, and far
+  too wide for a town street: they run every 128 m, so **66.8% of the built-up
+  area was painted tarmac**. Each kind has its own band now and it is **41.2%**,
+  with the contrast between a street and mid-block going from 1.00/0.57 to
+  1.00/0.40 — and then to 28.9% once the painting moved off the vertices
+  entirely, which is the entry above. The first attempt was bounded by the
+  terrain resolution; the second removed the bound.
+  Checking the carriageway mesh itself first was worth it — the suspicion that
+  it was buried turned out to be wrong. Against the *drawn* ground rather than
+  the height field, only **253 of 21,938** points sit under it, by a mean of
+  0.11 m.
 * **Roads that go round things** — the trunk network was straight legs between
   fixed points, which on this terrain climbs a ridge, drops into a valley and
   climbs the next one. It is laid between the towns as they actually ended up —
@@ -1058,7 +1163,21 @@ harness rather than off the screen:
   between three hundred metres and three kilometres. Turning the position gains
   up from the stable set made it worse, not better — 1626 m — which is what an
   under-damped loop does.
-* **Terrain masking** — the highest ground within a 14 km box is 1644 m. Two
+* **Terrain masking, end to end** — the highest ground within a 14 km box is
+  1644 m. Every consumer of the line was checked against it: the radar refuses
+  the lock behind the ridge and takes it over the top; the scope paints nothing
+  behind and paints it over; a SAM battery fires 0 rounds at a masked aeroplane
+  and 1 at an exposed one; a destroyer 19.7 km out to sea fires 0 at a target
+  three kilometres behind the coastal ridge and 1 at the same target above it;
+  and a round in flight holds the track with a clear line and drops it once
+  masked. Two things came out of building the test rather than the feature. A
+  missile at five thousand metres looks *down* over a ridge and is not masked by
+  it — correct, and it makes for a useless test, so the probe has to be flown
+  low. And a round that has already detonated answers every question with
+  whatever it last held, which is how the first version of this passed while
+  measuring nothing.
+* **Terrain masking, the primitive** — the highest ground within a 14 km box is
+  1644 m. Two
   points 40 m above the deck either side of it: line blocked, and the ray passes
   938 m *inside* the hill. The same two points 2500 m up: clear. A bandit parked
   behind that ridge cannot be locked; lift both aircraft over it and the lock

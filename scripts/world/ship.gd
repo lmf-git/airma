@@ -441,9 +441,13 @@ func _pick_contact() -> Node3D:
 		if not o.alive:
 			continue
 		var d: float = global_position.distance_to(o.global_position)
-		if d < bd:
-			bd = d
-			best = o
+		if d >= bd:
+			continue
+		if not Sim.line_of_sight(global_position + Vector3(0, mast_height(), 0),
+				o.global_position + Vector3(0, 6.0, 0)):
+			continue
+		bd = d
+		best = o
 	if best != null:
 		return best
 	# nothing afloat: shore bombardment, if anything hostile is within reach
@@ -474,9 +478,17 @@ func _pick_air() -> Node3D:
 		if n.is_in_group("remote"):
 			continue
 		var d: float = global_position.distance_to((n as Node3D).global_position)
-		if d < bd:
-			bd = d
-			best = n as Node3D
+		if d >= bd:
+			continue
+		# Terrain masking. A ship's radar horizon is a mast head and a lot of
+		# open water, but the moment the contact is over land with a ridge in
+		# between there is nothing to shoot at — and an aeroplane down in the
+		# valley was being engaged through the hillside.
+		if not Sim.line_of_sight(global_position + Vector3(0, mast_height(), 0),
+				(n as Node3D).global_position):
+			continue
+		bd = d
+		best = n as Node3D
 	return best
 
 ## Lay the mount for a ballistic shot with lead. Returns true once the solution

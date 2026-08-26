@@ -19,6 +19,10 @@ var _stats := {}
 static var current: Scenery = null
 # Batches that can be flattened: {mmi, xforms, dead, centre, radius}
 var _breakable: Array = []
+## Every town building, so the harness can check them against the roads. The
+## batches get generated node names once several towns collide on "Town0", so
+## walking the children only ever found the first town's worth.
+var town_xforms: Array = []
 
 ## Lay out the road network first. The terrain paints roads into its own vertex
 ## colours, so the street grid has to exist before the ground is generated or
@@ -71,22 +75,43 @@ func _site_towns() -> void:
 			"was": want, "rough": best_rough})
 		pads.append({"c": best, "r": r})
 	Sim.register_town_pads(pads)
-	# and now lay the trunk network to where the towns actually are. Index 0 is
-	# the field; the rest are the towns in order.
-	var nodes: Array = [Vector2(0.0, 1700.0)]
+	# The trunk network, laid to where the towns actually ended up.
+	#
+	# It hangs off a bypass running down the east side of the field rather than
+	# off a single gate. A leg that starts beside an airfield and heads
+	# south-west is inside the keep-out within a few hundred metres whatever the
+	# router does about the middle of it, because the relaxation can only move
+	# the waypoints, not the ends — measured, 362 of 4784 sample points inside
+	# the keep-out and four of them on the runway itself. Starting from a road
+	# that is already clear of the field removes the problem rather than
+	# penalising it.
+	var nodes: Array = [
+		Vector2(980.0, 3100.0),        # 0: north gate
+		Vector2(980.0, -3100.0),       # 1: south gate
+	]
+	var links: Array = [[0, 1]]        # the bypass itself
 	for t in sites:
 		nodes.append(t["c"] as Vector2)
-	var links: Array = [[0, 1], [0, 2], [1, 4], [2, 3], [3, 1]]
-	# the depot road, and a couple of legs running off the map edge
-	nodes.append(Vector2(-1500.0, -6600.0))       # 5: the depot
-	nodes.append(Vector2(4200.0, 11000.0))        # 6, 7: out of the valley
+	nodes.append(Vector2(-1500.0, -6600.0))       # the depot
+	nodes.append(Vector2(4200.0, 11000.0))        # and two legs out of the valley
 	nodes.append(Vector2(-5200.0, -13000.0))
-	links.append([1, 5])
-	links.append([2, 6])
-	links.append([4, 7])
+	var first_town := 2
+	var n_towns: int = sites.size()
+	for i in n_towns:
+		# each town joins whichever end of the bypass is nearer
+		var tc: Vector2 = nodes[first_town + i]
+		var gate: int = 0 if tc.distance_to(nodes[0]) < tc.distance_to(nodes[1]) else 1
+		links.append([gate, first_town + i])
+	# and the towns to each other, in a ring, so it reads as a network
+	for i in n_towns:
+		links.append([first_town + i, first_town + (i + 1) % n_towns])
+	var depot := first_town + n_towns
+	links.append([depot, first_town])
+	links.append([depot + 1, first_town + mini(1, n_towns - 1)])
+	links.append([depot + 2, first_town])
 	var wanted: Array = []
 	for pair in links:
-		if pair[0] < nodes.size() and pair[1] < nodes.size():
+		if pair[0] < nodes.size() and pair[1] < nodes.size() and pair[0] != pair[1]:
 			wanted.append(pair)
 	Sim.build_roads(nodes, wanted)
 
@@ -227,17 +252,21 @@ func _town(centre: Vector2, radius: float, density: float, tallest: float) -> vo
 			var fz := absf(fmod(absf(pz - centre.y) + block * 0.5, block) - block * 0.5)
 			if fx < 15.0 or fz < 15.0:
 				continue
-			if not Sim.buildable(px, pz, 0.90, 6.0):
-				continue
 			var core: float = clampf(1.0 - d * 1.35, 0.0, 1.0)
 			var h: float = lerpf(7.0, tallest, pow(core, 1.7) * _rng.randf_range(0.35, 1.0))
 			var w: float = _rng.randf_range(17.0, 24.0) * (1.0 + core * 0.3)
 			var dep: float = _rng.randf_range(17.0, 24.0) * (1.0 + core * 0.3)
+			# Sized first, then sited: the clearance a building needs from a
+			# road depends on how big the building is, and half of a wide one
+			# is most of the carriageway.
+			if not Sim.buildable(px, pz, 0.90, 6.0, maxf(w, dep) * 0.5):
+				continue
 			var xf := Transform3D(Basis(Vector3.UP, _rng.randf_range(-0.015, 0.015)).scaled(
 				Vector3(w, h, dep)), Vector3(px, Sim.height_at(px, pz) - 0.5, pz))
 			buckets[_rng.randi() % 3].append(xf)
 	for i in 3:
 		_scatter(kinds[i], buckets[i], "Town%d" % i, true)
+		town_xforms.append_array(buckets[i])
 		_stats["buildings"] = int(_stats.get("buildings", 0)) + buckets[i].size()
 
 ## True when a point falls inside a town footprint, so nothing tall gets planted

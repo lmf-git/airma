@@ -116,9 +116,19 @@ var _trap_t := 0.0
 var _prev_hook_z := 0.0
 var _burn := 0.0
 var _rcs := 1.0
-var flares := 60
+## Countermeasures. A fighter's dispensers hold rather more than this used to
+## allow: a full load is a couple of hundred cartridges a side, and you are
+## meant to be able to pump them through a whole engagement rather than
+## rationing six salvos. Flares seduce an infra-red seeker; chaff blooms a cloud
+## of dipoles that a radar seeker can lock onto instead — before this there was
+## nothing at all that worked against a radar round, so a SAM site was simply
+## unbeatable once it had fired.
+var flares := 240
+var chaff := 240
 var _flare_t := 0.0
 var _flare_cd := 0.0
+var _chaff_t := 0.0
+var _chaff_cd := 0.0
 var debug_forces := false
 var _dbg_lift := 0.0
 var _dbg_drag := 0.0
@@ -328,6 +338,8 @@ func _physics_process(delta: float) -> void:
 				fire()
 	_flare_t = maxf(_flare_t - delta, 0.0)
 	_flare_cd = maxf(_flare_cd - delta, 0.0)
+	_chaff_t = maxf(_chaff_t - delta, 0.0)
+	_chaff_cd = maxf(_chaff_cd - delta, 0.0)
 	gun_cd = maxf(gun_cd - delta, 0.0)
 	fire_cd = maxf(fire_cd - delta, 0.0)
 	missile_warn = maxf(missile_warn - delta, 0.0)
@@ -1144,6 +1156,9 @@ func fire_gun(world: Node) -> bool:
 	return true
 
 # --------------------------------------------------------------------------
+## How far off boresight the aircraft's own radar can hold a contact.
+const RADAR_GIMBAL := 60.0
+
 func _update_lock(delta: float) -> void:
 	if target == null or not is_instance_valid(target) \
 			or (target.has_method("is_alive") and not target.is_alive()):
@@ -1156,9 +1171,22 @@ func _update_lock(delta: float) -> void:
 	var ang := rad_to_deg((-global_transform.basis.z).angle_to(to))
 	var w := current_weapon()
 	var ws := WeaponSpec.get_spec(w if w != "gun" else "aim9")
-	var fov: float = 60.0 if w == "gun" else ws["seeker_fov"] * 0.6
+	# The gate is the *aircraft's* radar, not the missile's seeker head. Those
+	# are different instruments and conflating them made every look-down attack
+	# fail in the same way: run in on a ship from fifteen hundred metres and the
+	# target slides below the nose as you close, so the lock is acquired at 30
+	# degrees down and dropped again at 33 — which is the AIM-120's seeker gate
+	# — about half a second before you press the trigger. The round then leaves
+	# the rail with nothing to follow, flies where it was pointed, and the ship
+	# steams on. A fighter radar scans a good deal wider than that.
+	var fov: float = 60.0 if w == "gun" else maxf(float(ws["seeker_fov"]) * 0.6,
+		RADAR_GIMBAL)
 	var rng: float = 20000.0 if w == "gun" else ws["range"] * 1.15
-	if ang < fov and dist < rng:
+	# And a targeting pod holding a point track keeps the lock whatever the nose
+	# is doing. Holding a target off boresight is the entire purpose of putting
+	# the sensor on a gimbal.
+	var pod_holds: bool = is_instance_valid(designated_node) and designated_node == target
+	if (ang < fov and dist < rng) or pod_holds:
 		lock_time += delta
 		locked = lock_time > (0.6 if w == "gun" else ws["lock_time"])
 	else:
@@ -1189,6 +1217,35 @@ func drop_flare() -> void:
 		get_tree().current_scene.add_child(f)
 		f.global_position = global_position + b.z * (2.2 + spread) \
 			+ b.y * -0.6 + b.x * side * randf_range(0.5, 1.4)
+
+func chaff_active() -> bool:
+	return _chaff_t > 0.0
+
+## Chaff is a cloud, not a light. It hangs where it was dropped and slows to the
+## airspeed of the air around it almost at once, so it works by putting a bigger
+## radar return behind you than you are.
+func drop_chaff() -> void:
+	if chaff <= 0 or _chaff_cd > 0.0:
+		return
+	_chaff_cd = 0.45
+	_chaff_t = 4.2                      # a cloud lingers longer than a flare burns
+	var n: int = mini(8, chaff)
+	chaff -= n
+	var b := global_transform.basis
+	for i in n:
+		var c := Chaff.new()
+		var side: float = -1.0 if i % 2 == 0 else 1.0
+		c.vel = linear_velocity * 0.35 + b.x * side * randf_range(3.0, 9.0) \
+			+ b.y * -randf_range(2.0, 6.0)
+		get_tree().current_scene.add_child(c)
+		c.global_position = global_position + b.z * (2.0 + float(i) * 0.3) \
+			+ b.y * -0.5 + b.x * side * randf_range(0.4, 1.2)
+
+## Both dispensers at once, which is what you actually do when something is
+## coming at you and you do not yet know what is guiding it.
+func dispense_all() -> void:
+	drop_flare()
+	drop_chaff()
 
 func warn_missile() -> void:
 	missile_warn = 2.0
@@ -1403,6 +1460,36 @@ func explode() -> void:
 
 ## Decoy flare: a hot billboard that flickers and tumbles away trailing embers
 ## and smoke, rather than the plain white ball it used to be.
+## A bundle of dipoles that blooms into a cloud. It is not bright — the whole
+## point is that it is invisible and enormous on a radar scope — so it is drawn
+## as a dull expanding puff rather than the firework a flare is.
+class Chaff extends Node3D:
+	var vel := Vector3.ZERO
+	var life := 7.0
+	var _age := 0.0
+	var _puff: GPUParticles3D
+
+	func _ready() -> void:
+		top_level = true
+		add_to_group("chaff")
+		_puff = Effects.trail_particles(Color(0.72, 0.74, 0.78), 2.2, 26)
+		_puff.lifetime = 3.0
+		_puff.emitting = true
+		add_child(_puff)
+		reset_physics_interpolation()
+
+	func _physics_process(delta: float) -> void:
+		_age += delta
+		life -= delta
+		if life <= 0.0:
+			queue_free()
+			return
+		# it sheds its launch speed almost immediately and then just hangs
+		vel = vel.lerp(Vector3.DOWN * 3.0, clampf(delta * 2.2, 0.0, 1.0))
+		global_position += vel * delta
+		if _age > 3.4 and is_instance_valid(_puff):
+			_puff.emitting = false
+
 class Flare extends Node3D:
 	var vel := Vector3.ZERO
 	var life := 5.0

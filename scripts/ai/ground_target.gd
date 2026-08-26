@@ -62,10 +62,19 @@ func _physics_process(delta: float) -> void:
 	if _cool > 0.0:
 		return
 	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n):
+			continue
 		if not (n is Aircraft) or n.team == team or not n.is_alive():
 			continue
 		var d: float = global_position.distance_to(n.global_position)
 		if d < 9000.0 and n.agl > 90.0:
+			# A battery cannot shoot at what its radar cannot see. Flying the
+			# valley floor to stay behind the ridge line is the whole point of
+			# going in low, and without this the site engaged straight through
+			# the hill it was standing behind.
+			if not Sim.line_of_sight(global_position + Vector3(0, 6.0, 0),
+					(n as Node3D).global_position):
+				continue
 			_cool = 14.0
 			var xf := Transform3D(Basis.looking_at((n.global_position - global_position).normalized(), Vector3.UP),
 				global_position + Vector3(0, 5.5, 0))
