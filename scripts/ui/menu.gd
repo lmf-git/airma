@@ -4,6 +4,7 @@ extends Control
 
 signal jet_changed(id: String)
 signal start_requested(id: String, mission: String)
+signal mission_changed(mission: String)
 signal weather_changed(id: String)
 signal host_requested(id: String, address: String)
 signal join_requested(id: String, address: String)
@@ -214,9 +215,14 @@ func _ready() -> void:
 	jb.custom_minimum_size = Vector2(110, 34)
 	jb.pressed.connect(func(): join_requested.emit(jet_id, _addr.text))
 	net_row.add_child(jb)
+	# The session line carries the address people have to type, so it is not a
+	# 12pt afterthought at the end of a row — and it is selectable, because the
+	# first thing anyone does with an address is copy it.
 	_net_status = Label.new()
-	_net_status.add_theme_font_size_override("font_size", 12)
-	_net_status.add_theme_color_override("font_color", Color(0.55, 0.9, 0.7))
+	_net_status.add_theme_font_size_override("font_size", 16)
+	_net_status.add_theme_color_override("font_color", Color(0.62, 0.95, 0.75))
+	_net_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_net_status.custom_minimum_size = Vector2(520, 0)
 	net_row.add_child(_net_status)
 
 	var quit := Button.new()
@@ -424,8 +430,36 @@ func _select_weather(id: String) -> void:
 		_weather_btns[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
 	weather_changed.emit(id)
 
+## In a session the host picks the match and everybody flies it. A joiner who
+## could choose for itself would either be quietly corrected a moment later or,
+## worse, fly a different mission on the same connection.
+var net_role := ""            # "", "host" or "client"
+
+func set_net_role(role: String, host_mission: String) -> void:
+	if role == net_role and (role != "client" or host_mission == mission_id):
+		return
+	net_role = role
+	var locked := role == "client"
+	for k in _mission_btns:
+		_mission_btns[k].disabled = locked
+		_mission_btns[k].tooltip_text = "the host chooses the match" if locked \
+			else _mission_tip(k)
+	if _launch != null:
+		_launch.disabled = locked
+		_launch.text = "HOST STARTS" if locked else "LAUNCH"
+	if locked and host_mission != "" and host_mission != mission_id:
+		_select_mission(host_mission)
+
+func _mission_tip(id: String) -> String:
+	for m in MISSIONS:
+		if m[0] == id:
+			return String(m[2])
+	return ""
+
 func _select_mission(id: String) -> void:
 	mission_id = id
+	if net_role == "host":
+		mission_changed.emit(id)
 	for k in _mission_btns:
 		_mission_btns[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
 	for m in MISSIONS:

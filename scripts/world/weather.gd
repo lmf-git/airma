@@ -122,7 +122,7 @@ void fog() {
 ## beyond it was never sampled and the sky rearranged itself as you flew. This
 ## mirrors the shader's stepping exactly so the harness can say when a preset no
 ## longer covers the distance it claims to.
-const MARCH_STEP := 55.0
+const MARCH_STEP := 38.0
 const MARCH_GROWTH := 1.105
 const MARCH_STEP_CAP := 300.0
 const MARCH_FAR := 13000.0
@@ -192,10 +192,11 @@ static func ids() -> PackedStringArray:
 ## without a single byte crossing the wire about it.
 const SKY_SHADER := """
 shader_type sky;
-// Clouds are raymarched in the quarter resolution pass. That pass is Godot's
-// own answer to expensive sky work: it runs at a sixteenth of the pixels and is
-// filtered back up, which for something as soft as cloud is free detail.
-render_mode use_quarter_res_pass;
+// Clouds are raymarched in the half resolution pass. A quarter of the pixels is
+// cheaper and fine for the body of a cloud, but an edge drawn at a quarter
+// resolution and filtered back up is a staircase, and the edge is the part you
+// look at.
+render_mode use_half_res_pass;
 
 group_uniforms sky_colour;
 uniform vec3 top_colour : source_color = vec3(0.13, 0.28, 0.62);
@@ -298,7 +299,7 @@ void sky() {
 	// The cubemap pass is generating radiance, not a picture. It sweeps the
 	// whole sphere from a position that is not the camera's, so marching cloud
 	// in it is both wrong and expensive; the gradient alone lights the world.
-	if (AT_QUARTER_RES_PASS && !AT_CUBEMAP_PASS) {
+	if (AT_HALF_RES_PASS && !AT_CUBEMAP_PASS) {
 		// --- the cloud layer -------------------------------------------
 		vec4 acc = vec4(0.0);
 		// Where the ray crosses the slab. Looking level or down from below it
@@ -334,7 +335,7 @@ void sky() {
 			// where a step has to be small against a cloud, and coarse sampling
 			// far out, where it does not — the same reasoning as any level of
 			// detail, applied along the ray.
-			float dt = 55.0;
+			float dt = 38.0;
 			int n = steps;
 			// An ordered dither. A random one sparkles, because it re-rolls
 			// every frame the camera moves; no dither at all leaves the march's
@@ -369,13 +370,35 @@ void sky() {
 				// count them on the horizon.
 				dt = min(dt * 1.105, 300.0);
 				if (d <= 0.001) { continue; }
-				// light march: how much of the sun reaches this point
+				// How much sun reaches this point. Marched with a growing
+				// step so a few samples cover a useful depth of cloud rather
+				// than five hundred metres of it.
 				float shade = 1.0;
+				float ls = 90.0;
 				for (int j = 1; j <= light_steps; j++) {
-					vec3 lp = p - sun * float(j) * 130.0;
-					shade *= exp(-cloud_density(lp, lod) * 130.0 * 0.55);
+					vec3 lp = p - sun * ls * float(j);
+					shade *= exp(-cloud_density(lp, lod) * ls * 0.85);
+					ls *= 1.7;
 				}
-				vec3 col = mix(cloud_dark, cloud_lit, clamp(shade, 0.0, 1.0));
+				shade = clamp(shade, 0.0, 1.0);
+				// Forward scattering. Cloud is bright toward the sun and dark
+				// away from it, and without this every cloud is the same flat
+				// tone from every angle -- a grey blob with an outline.
+				float mu = dot(dir, -sun);
+				float g = 0.55;
+				float hg = (1.0 - g * g)
+					/ (12.566 * pow(1.0 + g * g - 2.0 * g * mu, 1.5));
+				hg = 0.35 + 5.5 * hg;
+				// Beer-powder: thin edges lit through, thick cores dark, which
+				// is what gives a cumulus its shape rather than its silhouette.
+				float powder = 1.0 - exp(-d * 5.0);
+				// Ambient is not one colour either: the top of a cloud sees the
+				// sky and the bottom sees the ground.
+				float hgt = clamp((p.y - base_alt) / max(top_alt - base_alt, 1.0),
+					0.0, 1.0);
+				vec3 amb = mix(cloud_dark, mix(cloud_dark, cloud_lit, 0.55), hgt);
+				vec3 col = amb * (0.55 + 0.45 * hgt)
+					+ cloud_lit * LIGHT0_COLOR * shade * hg * powder * 1.35;
 				float alpha = 1.0 - exp(-d * dt * 0.9);
 				// ease the last few kilometres away so the march's own limit
 				// is not a visible edge across the sky
@@ -422,7 +445,7 @@ void sky() {
 			sky_col += vec3(0.85, 0.88, 1.0) * star * night
 				* smoothstep(-0.05, 0.15, up);
 		}
-		vec4 cl = QUARTER_RES_COLOR;
+		vec4 cl = HALF_RES_COLOR;
 		COLOR = mix(sky_col, cl.rgb, clamp(cl.a, 0.0, 1.0));
 	}
 }
@@ -563,7 +586,7 @@ func _apply_sun(_force: bool) -> void:
 		# set explicitly rather than left on the shader's own default: an unset
 		# uniform reads back as null, which is a trap for anything inspecting it
 		_psm.set_shader_parameter("march_far", 13000.0)
-		_psm.set_shader_parameter("light_steps", 4)
+		_psm.set_shader_parameter("light_steps", 5)
 		_psm.set_shader_parameter("wind", Vector3(1.0, 0.0, 0.35))
 		_psm.set_shader_parameter("cirrus_alt", 9400.0)
 	if _fog_mat != null:

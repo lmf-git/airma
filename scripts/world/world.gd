@@ -126,6 +126,10 @@ var _vls_best := 1e9
 var _town_test := false
 var _sky_test := false
 var _sky_short := 0
+var _nettest := false
+var _slot_home := Vector3.INF
+var _slot_said := -1
+var _mission_started := 0
 var _splash_aim := Vector3.INF
 var _splash_hit := Vector3.INF
 var _splash_r := 0.0
@@ -336,6 +340,9 @@ func _ready() -> void:
 	menu.weather_changed.connect(set_weather)
 	menu.start_requested.connect(_start)
 	menu.host_requested.connect(_host_game)
+	# the slot depends on the roster, which arrives after the mission starts
+	net.roster_changed.connect(_offset_for_peer)
+	menu.mission_changed.connect(func(m): net.announce_lobby(m) if net != null else null)
 	menu.join_requested.connect(_join_game)
 	menu.resume_requested.connect(_resume)
 	ui.add_child(menu)
@@ -492,6 +499,36 @@ func _process(delta: float) -> void:
 		or (is_instance_valid(actions) and actions.visible) \
 		or (is_instance_valid(chat) and chat.typing) \
 		or get_tree().paused
+	if _nettest and net != null:
+		_nettest = false
+		print("[net] before hosting: %s" % net.status_line())
+		print("[net] local address: %s" % net.local_ip())
+		var ok := net.host("f16")
+		print("[net] host() -> %s, listening on %d" % [str(ok), net.port])
+		print("[net] hangar shows: %s" % net.status_line())
+		print("[net] join address: %s" % net.join_address())
+		# and again, without leaving, which used to be fatal
+		var ok2 := net.host("f16")
+		print("[net] host() a second time without leaving -> %s, port %d" % [
+			str(ok2), net.port])
+		net.shutdown()
+		print("[net] after shutdown(): active=%s" % str(net.active))
+		net.leave()
+		print("[net] after leave: %s" % net.status_line())
+		var ok3 := net.host("f16")
+		print("[net] host() after leave -> %s, port %d" % [str(ok3), net.port])
+		net.leave()
+		get_tree().quit()
+	# Keep the hangar's session line current. It carries the address a joiner
+	# has to type, including the port, which is not something to leave to a
+	# mission-log message that scrolls away.
+	if is_instance_valid(menu) and menu.visible and net != null:
+		menu.set_net_status(net.status_line())
+		# and who is allowed to choose the match
+		var role := ""
+		if net.active:
+			role = "host" if net.is_host else "client"
+		menu.set_net_role(role, String(net.lobby_mission))
 	# The cloud volume rides with whatever camera is actually current — the
 	# cockpit, the chase, the sensor pod, a ship's bridge — not with the
 	# aircraft chase camera specifically. Handing the sky the wrong eye position
@@ -2733,6 +2770,9 @@ func _start(id: String, mission: String) -> void:
 	hud.visible = true
 	running = true
 	_audit_spawns.call_deferred()
+	_slot_home = Vector3.INF
+	_slot_said = -1
+	_mission_started = Time.get_ticks_msec()
 	_offset_for_peer.call_deferred()
 
 	var craft: Aircraft
@@ -3196,21 +3236,44 @@ func _build_fleet() -> void:
 ## Move this peer's aeroplane off the shared start point. Everybody loads the
 ## same mission, so without this two players who chose the same type begin
 ## inside one another.
+## Move this peer off the shared start point.
+##
+## This cannot be done at mission start. A joiner launches its mission before
+## the connection has finished — its own id is still the default 1 and the
+## roster is empty, so it works out slot 0 and stays exactly where the host is.
+## Measured with four peers: all four on the same coordinates. It is worked out
+## when the roster arrives instead, which is a second or so later and long
+## before anyone has flown anywhere.
 func _offset_for_peer() -> void:
 	if net == null or not net.active or not is_instance_valid(player):
 		return
+	if net.my_id == 1 and not net.is_host:
+		return                          # the connection has not landed yet
+	# Recomputed on every roster change, not latched on the first. A slot is a
+	# rank among the peers present, and the first roster a joiner sees contains
+	# only itself — so all three clients decided they were number one and piled
+	# onto the same offset. It is always applied to the *original* start point
+	# rather than to wherever the aeroplane is now, so refining the answer moves
+	# it to the right place instead of shifting it again.
+	if _slot_home == Vector3.INF:
+		_slot_home = player.global_position
+	if Time.get_ticks_msec() - _mission_started > 15000:
+		return                          # the roster has settled; leave it alone
+	var slot: int = net.spawn_slot()
 	var off: Vector3 = net.spawn_offset()
 	if off == Vector3.ZERO:
 		return
 	if player.on_ground or Sim.mission == "ramp" or Sim.mission == "takeoff":
 		# on the ground, step along the apron and keep the wheels on it
-		var p := player.global_position + Vector3(off.x, 0.0, off.z)
+		var p := _slot_home + Vector3(off.x, 0.0, off.z)
 		p.y = Sim.height_at(p.x, p.z) + _stance(player.spec) + 0.02
 		player.global_position = p
 	else:
-		player.global_position += off
+		player.global_position = _slot_home + off
 	_reset_interp(player)
-	Sim.report("spawn slot %d" % net.spawn_slot(), Sim.Ev.INFO)
+	if slot != _slot_said:
+		_slot_said = slot
+		Sim.report("spawn slot %d" % slot, Sim.Ev.INFO)
 
 func _audit_spawns() -> void:
 	var items: Array = []
@@ -4444,6 +4507,8 @@ func _parse_cmdline() -> void:
 			_town_test = true
 		elif a == "--skytest":
 			_sky_test = true
+		elif a == "--nettest":
+			_nettest = true
 		elif a.begins_with("--cmtest="):
 			_cm_test = a.substr(9)
 		elif a == "--dctest":

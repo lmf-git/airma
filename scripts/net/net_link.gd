@@ -38,24 +38,115 @@ var rx := 0
 var status := "offline"
 
 # --------------------------------------------------------------------------
+## Where the game is listening. Always PORT; kept as a variable only so the
+## UPnP mapping and the join address read from one place.
+var port := PORT
+
 func host(jet_id: String) -> bool:
+	_shut = false
+	# Anything still holding the socket has to go first. Hosting twice without
+	# leaving in between, or a previous attempt that failed after creating the
+	# peer, leaves the old one bound and the next `create_server` fails with an
+	# engine error and no explanation.
+	_drop_peer()
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_server(PORT, 8)
+	# One port, the published one, so the address you read out is always the
+	# same and a joiner never has to be told a different number. If it is busy
+	# the answer is to find out why, not to move quietly to 27016 and leave
+	# everyone guessing — and the reason is almost always this game itself,
+	# still running from a session that was not shut down.
+	port = PORT
+	var err := peer.create_server(port, 8)
 	if err != OK:
 		status = "host failed (%d)" % err
+		Sim.report("Port %d is already in use — another copy of the game is "
+			% port + "probably still running. Close it and host again.", Sim.Ev.BAD)
 		return false
 	multiplayer.multiplayer_peer = peer
-	multiplayer.peer_connected.connect(_on_peer_joined)
-	multiplayer.peer_disconnected.connect(_on_peer_left)
+	# `connect` on an already-connected signal raises, and leaving a session
+	# never disconnected these, so the second host of a sitting was fatal.
+	if not multiplayer.peer_connected.is_connected(_on_peer_joined):
+		multiplayer.peer_connected.connect(_on_peer_joined)
+	if not multiplayer.peer_disconnected.is_connected(_on_peer_left):
+		multiplayer.peer_disconnected.connect(_on_peer_left)
 	active = true
 	is_host = true
 	my_id = 1
 	roster[1] = {"jet": jet_id, "name": "Host", "team": 0}
-	status = "hosting on port %d" % PORT
-	Sim.report("Hosting on port %d — others can join by IP." % PORT, Sim.Ev.GOOD)
+	status = "hosting on port %d" % port
+	Sim.report("Hosting. Others join at %s" % join_address(), Sim.Ev.GOOD)
 	_open_port()
 	roster_changed.emit()
 	return true
+
+## The address to read out to whoever is joining, with the port always on it.
+##
+## The port is not decoration: if the usual one was busy the game is listening
+## somewhere else, and a joiner typing the bare IP will not find it. It is also
+## no use in a mission-log line that scrolls away thirty seconds later, which is
+## where it used to be and only there.
+func join_address() -> String:
+	if not is_host:
+		return ""
+	if upnp_ready and upnp_external != "":
+		return "%s:%d" % [upnp_external, port]
+	var lan := local_ip()
+	return "%s:%d" % [lan, port] if lan != "" else "port %d" % port
+
+## This machine's address on its own network. Loopback and IPv6 are no use to
+## somebody typing an address on another computer.
+func local_ip() -> String:
+	for a in IP.get_local_addresses():
+		var ip := String(a)
+		if ip.begins_with("127.") or ip.contains(":"):
+			continue
+		if ip.begins_with("169.254."):
+			continue
+		return ip
+	return ""
+
+## What the hangar shows while a session is up.
+func status_line() -> String:
+	if not active:
+		return status
+	if is_host:
+		var where := join_address()
+		var via := "port forwarded" if upnp_ready else "local network only"
+		return "HOSTING — others join at  %s   (%s, %d connected)" % [
+			where, via, maxi(roster.size() - 1, 0)]
+	return "%s — %d in the session" % [status, roster.size()]
+
+## Shutting the window is the common way out of this game, and until now it took
+## the socket and the router mapping with it — the port stayed bound for as long
+## as the process lingered, and the next session could not host. Godot only
+## sends the close notification when the quit is not automatic, so the tree
+## teardown is covered too.
+func _ready() -> void:
+	get_tree().set_auto_accept_quit(false)
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		shutdown()
+		get_tree().quit()
+	elif what == NOTIFICATION_PREDELETE or what == NOTIFICATION_EXIT_TREE:
+		shutdown()
+
+## Hand back the port and the router mapping. Safe to call more than once.
+func shutdown() -> void:
+	if _shut:
+		return
+	_shut = true
+	_close_port()
+	_drop_peer()
+	active = false
+
+var _shut := false
+
+## Let go of the socket, whatever state it is in.
+func _drop_peer() -> void:
+	if multiplayer.multiplayer_peer != null:
+		multiplayer.multiplayer_peer.close()
+		multiplayer.multiplayer_peer = null
 
 ## Ask the router to forward the port so somebody outside the house can actually
 ## reach the game. Discovery talks to the network and takes seconds, so it runs
@@ -77,8 +168,8 @@ func _upnp_worker() -> void:
 		_upnp_done.call_deferred(false, "", "router does not do UPnP")
 		return
 	# ENet is UDP; map TCP too so a future lobby or query port works
-	var r1 := up.add_port_mapping(PORT, PORT, "flight sim", "UDP", 0)
-	up.add_port_mapping(PORT, PORT, "flight sim", "TCP", 0)
+	var r1 := up.add_port_mapping(port, port, "flight sim", "UDP", 0)
+	up.add_port_mapping(port, port, "flight sim", "TCP", 0)
 	if r1 != UPNP.UPNP_RESULT_SUCCESS:
 		_upnp_done.call_deferred(false, "", "router refused the mapping (%d)" % r1)
 		return
@@ -89,8 +180,8 @@ func _upnp_done(ok: bool, ip: String, why: String) -> void:
 	upnp_ready = ok
 	upnp_external = ip
 	if ok:
-		status = "hosting on %s:%d" % [ip, PORT]
-		Sim.report("Port forwarded — others can join at %s" % ip, Sim.Ev.GOOD)
+		status = "hosting on %s:%d" % [ip, port]
+		Sim.report("Port forwarded — others can join at %s:%d" % [ip, port], Sim.Ev.GOOD)
 	else:
 		Sim.report("No port forwarding: %s. Players on your own network can " % why
 			+ "still join by local IP.", Sim.Ev.INFO)
@@ -101,33 +192,54 @@ func _upnp_done(ok: bool, ip: String, why: String) -> void:
 ## Hand the port back when the match ends, so it is not left open.
 func _close_port() -> void:
 	if _upnp != null:
-		_upnp.delete_port_mapping(PORT, "UDP")
-		_upnp.delete_port_mapping(PORT, "TCP")
+		_upnp.delete_port_mapping(port, "UDP")
+		_upnp.delete_port_mapping(port, "TCP")
 		_upnp = null
 	upnp_ready = false
 	upnp_external = ""
 
+## `address` may carry a port — "10.0.0.4:27016" — because a host whose usual
+## port was busy will be listening on another one and has to be reachable there.
 func join(address: String, jet_id: String) -> bool:
+	_shut = false
+	_drop_peer()
+	var host_ip := address.strip_edges()
+	var want := PORT
+	var colon := host_ip.rfind(":")
+	if colon > 0 and host_ip.substr(colon + 1).is_valid_int():
+		want = int(host_ip.substr(colon + 1))
+		host_ip = host_ip.substr(0, colon)
+	if host_ip == "":
+		host_ip = "127.0.0.1"
 	var peer := ENetMultiplayerPeer.new()
-	var err := peer.create_client(address, PORT)
+	var err := peer.create_client(host_ip, want)
 	if err != OK:
 		status = "join failed (%d)" % err
+		Sim.report("Could not reach %s on port %d." % [host_ip, want], Sim.Ev.BAD)
 		return false
+	port = want
 	multiplayer.multiplayer_peer = peer
-	multiplayer.connected_to_server.connect(_on_connected.bind(jet_id))
-	multiplayer.connection_failed.connect(_on_failed)
-	multiplayer.server_disconnected.connect(_on_dropped)
+	# same reason as the host side: these are never disconnected on leave, so
+	# joining twice in one sitting connected them twice
+	if not multiplayer.connected_to_server.is_connected(_on_connected):
+		multiplayer.connected_to_server.connect(_on_connected.bind(jet_id))
+	if not multiplayer.connection_failed.is_connected(_on_failed):
+		multiplayer.connection_failed.connect(_on_failed)
+	if not multiplayer.server_disconnected.is_connected(_on_dropped):
+		multiplayer.server_disconnected.connect(_on_dropped)
 	active = true
 	is_host = false
-	status = "connecting to %s" % address
-	Sim.report("Connecting to %s..." % address, Sim.Ev.INFO)
+	status = "connecting to %s:%d" % [host_ip, want]
+	Sim.report("Connecting to %s on port %d..." % [host_ip, want], Sim.Ev.INFO)
 	return true
 
 func leave() -> void:
 	_close_port()
-	if multiplayer.multiplayer_peer:
-		multiplayer.multiplayer_peer.close()
-	multiplayer.multiplayer_peer = null
+	_drop_peer()
+	if multiplayer.peer_connected.is_connected(_on_peer_joined):
+		multiplayer.peer_connected.disconnect(_on_peer_joined)
+	if multiplayer.peer_disconnected.is_connected(_on_peer_left):
+		multiplayer.peer_disconnected.disconnect(_on_peer_left)
 	for id in ghosts:
 		if is_instance_valid(ghosts[id]):
 			ghosts[id].queue_free()
@@ -145,7 +257,6 @@ func leave() -> void:
 	ship_conn = -1
 	ai_kinds.clear()
 	_ai_seen.clear()
-	_publish_weather.call_deferred()
 	veh_ghosts.clear()
 	foot_ghosts.clear()
 	ghosts.clear()
@@ -159,7 +270,16 @@ func leave() -> void:
 func _on_peer_joined(id: int) -> void:
 	Sim.report("player %d joined" % id, Sim.Ev.GOOD)
 	# tell the newcomer what we are playing, then hand over the roster
+	# Two different things, and sending only the first was a regression: the
+	# lobby message tells a joiner what the host has *selected*, so its hangar
+	# shows the right match and cannot pick another. `net_mission` is what makes
+	# it actually load the match that is already running. Without it every
+	# joiner stayed in whatever it had launched locally — three clients sitting
+	# on identical default start points, in a mission the host was not flying.
+	rpc_id(id, "net_lobby_mission", lobby_mission if lobby_mission != ""
+		else String(Sim.mission))
 	rpc_id(id, "net_mission", String(Sim.mission))
+	_publish_weather.call_deferred()      # and the sky they are joining
 	for pid in roster:
 		rpc_id(id, "net_announce", pid, roster[pid]["jet"], roster[pid]["team"])
 	# the AI roster was announced to whoever was connected at the time, so
@@ -205,6 +325,30 @@ func net_mission(mission: String) -> void:
 		return
 	Sim.report("host is running %s" % mission, Sim.Ev.INFO)
 	world.call_deferred("_start", String(Sim.selected_jet), mission)
+
+## The match everyone is going to fly. Sent when a peer joins, when the host
+## changes its mind in the hangar, and when the host launches — so a joiner's
+## hangar always shows what it is actually going to get, and cannot be sitting
+## on a different choice at the moment the match starts.
+func announce_mission(m: String) -> void:
+	if active and is_host:
+		rpc("net_mission", m)
+
+@rpc("authority", "call_remote", "reliable")
+func net_lobby_mission(m: String) -> void:
+	if is_host or world == null:
+		return
+	lobby_mission = m
+	roster_changed.emit()
+
+## What the host has selected but not yet launched. Clients show this and are
+## not allowed to choose anything else.
+var lobby_mission := ""
+
+func announce_lobby(m: String) -> void:
+	if active and is_host:
+		lobby_mission = m
+		rpc("net_lobby_mission", m)
 
 ## Objective state is authoritative on the host: sector ownership, capture
 ## progress and the ticket counts are pushed rather than simulated twice.
@@ -1051,18 +1195,40 @@ func _kind_of(n: Node) -> String:
 ## are not put in the same piece of sky. Derived from the peer id rather than
 ## from roster order: everyone works it out identically without having to agree
 ## on who joined first.
+## A slot per peer, and no two the same.
+##
+## Hashing the peer id was fine for two players and hopeless for more: with four
+## in the session, two of them landed on the same slot 65% of the time, and the
+## whole point of the slot is that nobody starts inside anybody else. Ranking
+## the roster gives a unique slot each, and because every peer holds the same
+## roster and sorts it the same way, they all work out the same answer without
+## being told.
 func spawn_slot() -> int:
 	if not active:
 		return 0
-	var h: int = absi(my_id)
-	return (h % 7) if my_id != 1 else 0
+	if is_host or my_id == 1:
+		return 0
+	var ids: Array = roster.keys()
+	ids.sort()
+	var rank := 0
+	for id in ids:
+		if int(id) == 1:
+			continue                    # the host always has slot 0
+		rank += 1
+		if int(id) == my_id:
+			return rank
+	return 1
 
+## Where that slot puts you. Laid out to both sides of the leader rather than
+## all to starboard, so a full session is a formation rather than a queue
+## stretching half a kilometre off one wing.
 func spawn_offset() -> Vector3:
 	var k := spawn_slot()
 	if k == 0:
 		return Vector3.ZERO
-	# a line abreast to starboard, stepped down so nobody is directly above
-	return Vector3(float(k) * 70.0, float(k) * -22.0, float(k) * 55.0)
+	var side: float = 1.0 if k % 2 == 1 else -1.0
+	var rankf := float(int((k + 1) / 2.0))
+	return Vector3(side * rankf * 90.0, -rankf * 24.0, rankf * 70.0)
 
 ## Called by the local player when it looses a store.
 func report_fire(weapon: String, xf: Transform3D, vel: Vector3) -> void:

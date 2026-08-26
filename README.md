@@ -68,6 +68,22 @@ progress are drawn across the top of the HUD.
 ## Multiplayer
 
 Host/join over ENet from the hangar screen (enter an address, HOST or JOIN).
+The hangar shows the **address to read out**, port included, for as long as the
+session is up — `192.168.0.45:27015`, or the external address once the router
+has forwarded it. It used to be a mission-log line that scrolled away thirty
+seconds into the flight, and the label meant to carry it in the hangar was
+never once written to.
+
+Hosting failed outright if the port was already bound, with an engine error and
+no explanation. Three things were wrong. The peer was never dropped before a new
+one was made, so hosting twice in a sitting was fatal; the multiplayer signals
+were connected on every host and disconnected on none, so they stacked up; and
+nothing released the socket or the router mapping when the window was shut, so a
+lingering process kept the port for the next session to trip over. The game
+hands both back on the way out now, and if the port really is in use it says
+which port and what is most likely holding it rather than failing silently. It
+does not quietly move to another port — an address you read out to somebody has
+to be the address they can type.
 The host asks the router for a port mapping over **UPnP** when it starts, so a
 game is reachable from outside the LAN without anyone editing a firewall — the
 hangar prints the external address to pass to your friends, and falls back to
@@ -124,13 +140,41 @@ hands the wheel over rather than forking the simulation: the orders go to the
 host and the hull comes back, which at five degrees a second of turn rate is
 not something you can feel.
 
+**The host owns the match.** A joiner's mission buttons are disabled and its
+LAUNCH reads HOST STARTS; the host's selection is pushed to every hangar as it
+changes, so a joiner is always looking at what it is actually going to get and
+cannot start something else on the same connection. Two separate messages do
+this and sending only one of them was a regression worth recording: the lobby
+message tells a joiner what the host has *selected*, and it takes a second
+message to make it load the match already running. With only the first, three
+clients sat in whatever they had launched locally, on identical default start
+points, in a mission the host was not flying.
+
+**Up to eight in a session**, not two. Verified with four peers: every one of
+them reaches `roster=4` holding three ghosts.
+
 Everyone gets their own **spawn slot**. Two players who pick the same aircraft
 used to be handed the same start point and would begin the match inside each
-other; each peer now derives a slot from its network id and is placed line
-abreast to starboard, stepped down so nobody is directly above anybody else.
-Ground starts keep their wheels on the apron — the offset is applied across the
-ramp and then re-seated to local ground height — while air starts take it
-whole.
+other. Each peer takes a slot from its rank in the roster and is placed to
+alternating sides of the leader, stepped down so nobody is directly above
+anybody else. Ground starts keep their wheels on the apron — the offset is
+applied across the ramp and then re-seated to local ground height — while air
+starts take it whole.
+
+Hashing the peer id, which was the first answer, is fine for two players and
+hopeless for more: with four in the session two of them collided on the same
+slot **65% of the time**. Ranking the roster gives a unique slot each, and
+because every peer holds the same roster and sorts it the same way they all
+reach the same answer without being told.
+
+It also cannot be worked out at mission start. A joiner launches before its
+connection has finished — its own id is still the default and its roster is
+empty — so it decides it is number one and stays exactly where the host is.
+Measured with four peers: all four on identical coordinates. The slot is
+recomputed on every roster change instead, and always applied to the *original*
+start point rather than to wherever the aeroplane has got to, so refining the
+answer moves it to the right place instead of shifting it again. Four peers now
+take slots 0, 1, 2 and 3.
 
 ## Helicopters
 
@@ -536,13 +580,24 @@ see the same sky.
 
 It is a density field now, marched in two places that share it:
 
-* The **sky shader**, in Godot's quarter-resolution pass — a sixteenth of the
-  pixels, filtered back up, which for something as soft as cloud is free
-  detail. It intersects a slab between the cloud base and tops, so it has real
-  parallax as you climb rather than sitting at infinity, and it lights each
-  sample by marching a short way toward the sun. Forty to fifty-six steps
-  depending on the weather; most of the screen most of the time misses the slab
-  entirely and costs nothing.
+* The **sky shader**, in Godot's half-resolution pass. A quarter of the pixels
+  is cheaper and fine for the body of a cloud, but an edge drawn at a quarter
+  resolution and filtered back up is a staircase, and the edge is the part you
+  look at. It intersects a slab between the cloud base and tops, so it has real
+  parallax as you climb rather than sitting at infinity. Fifty-eight to
+  sixty-eight steps depending on the weather; most of the screen most of the
+  time misses the slab entirely and costs nothing.
+
+  The lighting is what stops a cloud reading as a grey blob with an outline.
+  Sun visibility is marched with a growing step, so five samples reach 1.7 km
+  into the deck rather than the 650 m a fixed step managed. A Henyey-Greenstein
+  phase function makes cloud bright toward the sun and dark away from it —
+  measured across the viewing angles that is a multiplier from **0.43 to 3.70**,
+  which is the silver lining. Beer-powder darkens thin edges against lit cores,
+  and the ambient term is a gradient rather than one colour, because the top of
+  a cloud sees the sky and the bottom sees the ground. Together they take the
+  range from flat to about **7:1**: 0.30 at a shaded base facing away from the
+  sun, 0.69 side-on, 2.11 on a sunlit top facing into it.
 * A **FogVolume** carrying the same field through Godot's froxel grid, centred
   on the camera and six kilometres deep. This is the half that matters when you
   fly into it: a sky is only drawn where there is no geometry, so from above the
@@ -732,6 +787,7 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--chattest` | `/`, a line of text, and whether the stick moved while typing |
 | `--shipnet` | what each end of a session thinks the fleet is doing |
 | `--cmtest=WHAT` | flares, chaff, both or none against a SAM shot |
+| `--nettest` | host, host again without leaving, leave, host again; and the address shown |
 | `--skytest` | cloud settings, how far the march reaches, and the sun across a day |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
