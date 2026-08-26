@@ -19,7 +19,7 @@ var weather: Weather
 var _env: Environment
 var _sun: DirectionalLight3D
 var _fill: DirectionalLight3D
-var _psm: ProceduralSkyMaterial
+var _psm: ShaderMaterial
 var menu: Menu
 var hud: HUD
 var cam: ChaseCamera
@@ -125,6 +125,7 @@ var _vls_ship: Node3D = null
 var _vls_best := 1e9
 var _town_test := false
 var _sky_test := false
+var _sky_short := 0
 var _splash_aim := Vector3.INF
 var _splash_hit := Vector3.INF
 var _splash_r := 0.0
@@ -350,14 +351,17 @@ func _environment() -> void:
 	var we := WorldEnvironment.new()
 	var env := Environment.new()
 	var sky := Sky.new()
-	var psm := ProceduralSkyMaterial.new()
-	psm.sky_top_color = Color(0.13, 0.28, 0.62)
-	psm.sky_horizon_color = Color(0.66, 0.75, 0.87)
-	psm.ground_bottom_color = Color(0.30, 0.32, 0.30)
-	psm.ground_horizon_color = Color(0.66, 0.74, 0.83)
-	psm.sun_angle_max = 6.0
-	psm.sun_curve = 0.12
+	var psm := ShaderMaterial.new()
+	var sh := Shader.new()
+	sh.code = Weather.SKY_SHADER
+	psm.shader = sh
 	sky.sky_material = psm
+	# The clouds are marched every frame and they move, so the sky cannot be
+	# baked once. Real time keeps the radiance following the sun.
+	sky.process_mode = Sky.PROCESS_MODE_REALTIME
+	# A realtime sky only accepts 256; anything else is overridden internally
+	# and warns about it every launch.
+	sky.radiance_size = Sky.RADIANCE_SIZE_256
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
@@ -488,6 +492,14 @@ func _process(delta: float) -> void:
 		or (is_instance_valid(actions) and actions.visible) \
 		or (is_instance_valid(chat) and chat.typing) \
 		or get_tree().paused
+	# The cloud volume rides with whatever camera is actually current — the
+	# cockpit, the chase, the sensor pod, a ship's bridge — not with the
+	# aircraft chase camera specifically. Handing the sky the wrong eye position
+	# is what made it look welded to the view.
+	if is_instance_valid(weather):
+		var eye := get_viewport().get_camera_3d()
+		if eye != null:
+			weather.follow(eye.global_position)
 	if is_instance_valid(hud) and is_instance_valid(cam) and running:
 		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT)
 	if boarding:
@@ -991,26 +1003,53 @@ func _process(delta: float) -> void:
 	# goes over a day.
 	if _sky_test:
 		_sky_test = false
+		# The shader itself: headless never rasterises, so ask the compiler
+		# directly rather than assuming a clean parse means a clean sky.
+		var probe_sh := Shader.new()
+		probe_sh.code = Weather.SKY_SHADER
+		var unis := probe_sh.get_shader_uniform_list()
+		var names := PackedStringArray()
+		for u in unis:
+			names.append(String(u["name"]))
+		# A shader that fails to compile reports no uniforms at all and then
+		# quietly draws nothing. That is not something to print and move past:
+		# an array literal in the march cost a whole sky exactly this way.
+		if unis.size() < 15:
+			_sky_short += 1
+		print("[sky] shader compiled with %d uniforms: %s" % [unis.size(),
+			", ".join(names)])
+		var fog_sh := Shader.new()
+		fog_sh.code = Weather.FOG_SHADER
+		if fog_sh.get_shader_uniform_list().size() < 6:
+			_sky_short += 1
+		print("[sky] fog shader compiled with %d uniforms; volume %s, box %s, froxel reach %.0f m" % [
+			fog_sh.get_shader_uniform_list().size(),
+			"present" if weather.has_volume() else "MISSING",
+			str(weather.volume_size()), _env.volumetric_fog_length])
+		var eye0 := get_viewport().get_camera_3d()
+		if eye0 != null:
+			weather.follow(eye0.global_position)
+		print("[sky] eye handed to the sky: %s (current camera %s), march limit %.0f m" % [
+			str(_psm.get_shader_parameter("cam_pos")),
+			String(eye0.name) if eye0 != null else "none",
+			float(_psm.get_shader_parameter("march_far"))])
 		for id in Weather.ids():
 			set_weather(id)
-			var near_b := 0
-			var far_b := 0
-			var near_p := 0
-			var far_p := 0
+			var decks := 0
 			for d in weather.get_children():
-				if not (d is MultiMeshInstance3D):
-					continue
-				var mmi := d as MultiMeshInstance3D
-				var cnt: int = mmi.multimesh.instance_count
-				if String(mmi.name).begins_with("far_"):
-					far_b += 1
-					far_p += cnt
-				else:
-					near_b += 1
-					near_p += cnt
-			print("[sky] %-10s %6d puffs: %d near in %d batches, %d far in %d; %d decks; cloud %.0f to %.0f m" % [
-				id, near_p + far_p, near_p, near_b, far_p, far_b,
-				weather.deck_count(), weather.cloud_band().x, weather.cloud_band().y])
+				if d is MultiMeshInstance3D:
+					decks += 1
+			var band: Vector2 = weather.cloud_band()
+			var reach: float = weather.march_reach(id)
+			if reach < Weather.MARCH_FAR:
+				_sky_short += 1
+			print("[sky] %-10s coverage %.2f, density %.2f, %d steps reaching %6.0f m of %.0f; cloud %.0f to %.0f m; %d draw calls, %d billboards" % [
+				id, float(_psm.get_shader_parameter("coverage")),
+				float(_psm.get_shader_parameter("density_mul")),
+				int(_psm.get_shader_parameter("steps")), reach, Weather.MARCH_FAR,
+				band.x, band.y, decks, weather.puff_count()])
+		print("[sky] RESULT: %s" % ("ok" if _sky_short == 0 else
+			"FAILED — %d fault(s): a shader that did not compile, or a preset that cannot march as far as it claims" % _sky_short))
 		set_weather("scattered")
 		print("[sky] a day, by the solar model:")
 		for h in [0, 4, 6, 8, 12, 16, 18, 20, 22]:
@@ -1488,9 +1527,11 @@ func _process(delta: float) -> void:
 					broken += 1
 				if v2.is_sinking():
 					going += 1
-			print("[shipnet] %-8s sky: %s at %05.2f h, sun %+.1f deg, %d puffs | fleet: %d afloat, %d sunk, %d broken in two, %d going down" % [
+			print("[shipnet] %-8s sky: %s at %05.2f h, sun %+.1f deg, wind_time %.1f, coverage %.2f | fleet: %d afloat, %d sunk, %d broken in two, %d going down" % [
 				side0, weather.current, weather.time_of_day,
-				rad_to_deg(weather.sun_elevation()), weather.puff_count(),
+				rad_to_deg(weather.sun_elevation()),
+				float(_psm.get_shader_parameter("wind_time")),
+				float(_psm.get_shader_parameter("coverage")),
 				afloat, sunk, broken, going])
 			var side := "single"
 			if net != null and net.active:
@@ -3122,12 +3163,12 @@ func _build_fleet() -> void:
 	var grp := Vector3(24000.0, 0.0, 1200.0)
 	var plan := [
 		["destroyer", Vector3(2600, 0, -1800), -18.0, 0],
-		["destroyer", Vector3(-2200, 0, 2400), -18.0, 0],
+		["type45",    Vector3(-2200, 0, 2400), -18.0, 0],
 		["frigate",   Vector3(3800, 0, 3100), -18.0, 0],
 		["sub",       Vector3(-4200, 0, -3400), -22.0, 0],
 		["patrol",    Vector3(900, 0, 4200), -10.0, 0],
 		["corvette",  Vector3(12000, 0, -9000), 140.0, 1],
-		["destroyer", Vector3(15500, 0, -12500), 140.0, 1],
+		["type45",    Vector3(15500, 0, -12500), 140.0, 1],
 		["patrol",    Vector3(9500, 0, -14000), 155.0, 1],
 		["cargo",     Vector3(-6000, 0, 16000), 95.0, 2],
 		["cargo",     Vector3(20000, 0, 12000), 265.0, 2],

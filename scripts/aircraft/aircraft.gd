@@ -358,16 +358,20 @@ func _animate(delta: float) -> void:
 		if is_instance_valid(pv):
 			pv.rotation = Vector3(-nozzle_pitch, nozzle_yaw, 0.0)
 	ramp_anim = move_toward(ramp_anim, 1.0 if ramp_open else 0.0, delta / 3.0)
-	if _model.has("ramp"):
-		(_model["ramp"] as Node3D).rotation.x = deg_to_rad(22.0) * ramp_anim
+	var ramp_n := _part("ramp")
+	if ramp_n != null:
+		ramp_n.rotation.x = deg_to_rad(22.0) * ramp_anim
 	hook_anim = move_toward(hook_anim, 1.0 if hook_down else 0.0, delta / 1.4)
-	if _model.has("hook"):
-		(_model["hook"] as Node3D).rotation.x = deg_to_rad(-52.0) * hook_anim
+	var hook_n := _part("hook")
+	if hook_n != null:
+		hook_n.rotation.x = deg_to_rad(-52.0) * hook_anim
 	canopy_anim = move_toward(canopy_anim, 1.0 if canopy_open else 0.0, delta / 2.6)
-	if _model.has("canopy"):
-		(_model["canopy"] as Node3D).rotation.x = deg_to_rad(34.0) * canopy_anim
-	if _model.has("ladder"):
-		(_model["ladder"] as Node3D).visible = canopy_anim > 0.02
+	var canopy_n := _part("canopy")
+	if canopy_n != null:
+		canopy_n.rotation.x = deg_to_rad(34.0) * canopy_anim
+	var ladder_n := _part("ladder")
+	if ladder_n != null:
+		ladder_n.visible = canopy_anim > 0.02
 	var target_gear := 1.0 if gear_down else 0.0
 	gear_anim = move_toward(gear_anim, target_gear, delta / 2.4)
 	flap_anim = move_toward(flap_anim, flaps, delta / 1.6)
@@ -1310,6 +1314,17 @@ func _pick_part() -> String:
 	return avail[avail.size() - 1]
 
 ## Detach a part: it becomes tumbling debris and the airframe pays for it.
+## A named piece of the model, or null if it has been shot off. `_model` keeps
+## its entry after `break_part` reparents the node away and the debris is later
+## freed, so a plain cast raises — and the raise takes the rest of the animation
+## with it, every frame, for as long as the aeroplane exists. Measured on an
+## aircraft that had lost its canopy.
+func _part(id: String) -> Node3D:
+	if not _model.has(id):
+		return null
+	var n = _model[id]
+	return n as Node3D if is_instance_valid(n) else null
+
 func break_part(id: String) -> void:
 	if id == "" or lost.has(id):
 		return

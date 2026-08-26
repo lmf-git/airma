@@ -4,38 +4,32 @@ extends Node3D
 
 const PRESETS := {
 	"clear": {
-		"name": "CLEAR", "cover": 0.34, "hour": 13.2, "clouds": 26, "base": 3400.0, "spread": 18000.0,
+		"cover_frac": 0.30, "density": 0.85, "base_alt": 2400.0, "top_alt": 3500.0, "cirrus": 0.22, "steps": 58, "name": "CLEAR", "hour": 13.2, "spread": 18000.0,
 		"fog": 7500.0, "fog_end": 42000.0, "sun": 1.18, "amb": 0.70,
 		"top": Color(0.13, 0.28, 0.62), "horizon": Color(0.66, 0.75, 0.87),
-		"sun_rot": Vector3(-40, 136, 0), "fog_col": Color(0.68, 0.76, 0.86),
-		"cloud_tint": Color(1.0, 1.0, 1.0, 0.85), "sun_col": Color(1.0, 0.96, 0.90),
+		"sun_rot": Vector3(-40, 136, 0), "fog_col": Color(0.68, 0.76, 0.86), "sun_col": Color(1.0, 0.96, 0.90),
 	},
 	"scattered": {
-		"name": "SCATTERED", "cover": 0.80, "hour": 10.4, "clouds": 70, "base": 2300.0, "spread": 22000.0,
+		"cover_frac": 0.50, "density": 1.0, "base_alt": 2100.0, "top_alt": 3900.0, "cirrus": 0.35, "steps": 62, "name": "SCATTERED", "hour": 10.4, "spread": 22000.0,
 		"fog": 5200.0, "fog_end": 33000.0, "sun": 1.05, "amb": 0.78,
 		"top": Color(0.16, 0.30, 0.60), "horizon": Color(0.70, 0.77, 0.86),
-		"sun_rot": Vector3(-36, 150, 0), "fog_col": Color(0.72, 0.78, 0.86),
-		"cloud_tint": Color(1.0, 1.0, 1.0, 0.88), "sun_col": Color(1.0, 0.95, 0.88),
+		"sun_rot": Vector3(-36, 150, 0), "fog_col": Color(0.72, 0.78, 0.86), "sun_col": Color(1.0, 0.95, 0.88),
 	},
 	"overcast": {
-		"name": "OVERCAST", "cover": 1.45, "hour": 15.1, "clouds": 130, "base": 1500.0, "spread": 26000.0,
+		"cover_frac": 0.80, "density": 1.35, "base_alt": 1400.0, "top_alt": 3200.0, "cirrus": 0.15, "steps": 68, "name": "OVERCAST", "hour": 15.1, "spread": 26000.0,
 		"fog": 2600.0, "fog_end": 19000.0, "sun": 0.55, "amb": 0.95,
 		"top": Color(0.36, 0.40, 0.46), "horizon": Color(0.62, 0.65, 0.69),
-		"sun_rot": Vector3(-52, 120, 0), "fog_col": Color(0.63, 0.66, 0.70),
-		"cloud_tint": Color(0.72, 0.74, 0.78, 0.94), "sun_col": Color(0.85, 0.87, 0.92),
+		"sun_rot": Vector3(-52, 120, 0), "fog_col": Color(0.63, 0.66, 0.70), "sun_col": Color(0.85, 0.87, 0.92),
 	},
 	"dusk": {
-		"name": "DUSK", "cover": 0.72, "hour": 19.7, "clouds": 52, "base": 2800.0, "spread": 20000.0,
+		"cover_frac": 0.44, "density": 0.95, "base_alt": 2300.0, "top_alt": 3800.0, "cirrus": 0.45, "steps": 58, "name": "DUSK", "hour": 19.7, "spread": 20000.0,
 		"fog": 4200.0, "fog_end": 28000.0, "sun": 0.85, "amb": 0.55,
 		"top": Color(0.09, 0.13, 0.34), "horizon": Color(0.86, 0.48, 0.28),
-		"sun_rot": Vector3(-9, 104, 0), "fog_col": Color(0.62, 0.44, 0.38),
-		"cloud_tint": Color(1.0, 0.78, 0.62, 0.88), "sun_col": Color(1.0, 0.72, 0.46),
+		"sun_rot": Vector3(-9, 104, 0), "fog_col": Color(0.62, 0.44, 0.38), "sun_col": Color(1.0, 0.72, 0.46),
 	},
 }
 
 var current := "scattered"
-var _decks: Array[MultiMeshInstance3D] = []
-var _rng := RandomNumberGenerator.new()
 
 # ------------------------------------------------------------------ the sun
 ## Local time in hours. The sun's position is worked out from it properly
@@ -51,6 +45,113 @@ const DECLINATION := deg_to_rad(14.0)  # a summer-ish sun
 
 ## Elevation and azimuth of the sun for the current time, by the standard solar
 ## position formulae. Azimuth is measured clockwise from north.
+## Where the cloud actually is: the marched slab, and the cirrus sheet above it
+## when the preset carries one.
+const FOG_SHADER := """
+shader_type fog;
+
+// The near cloud, as real volumetric fog.
+//
+// The sky shader draws the cloudscape, but a sky is only drawn where there is
+// no geometry: fly above the deck, look down, and the cloud vanishes because
+// the terrain is in front of it. This is the same density field evaluated in
+// Godot's froxel grid, which sits between the camera and whatever it is looking
+// at, so the cloud you are actually in behaves like cloud -- it hides the
+// ground, it thickens as you enter it, and it goes past the canopy.
+uniform float coverage = 0.48;
+uniform float base_alt = 2200.0;
+uniform float top_alt = 3600.0;
+uniform float density_mul = 1.0;
+uniform vec3 wind = vec3(1.0, 0.0, 0.35);
+uniform float wind_time = 0.0;
+uniform vec3 cloud_albedo : source_color = vec3(0.92, 0.94, 0.97);
+uniform float emit = 0.06;
+
+float hash13(vec3 p) {
+	p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+	p *= 17.0;
+	return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float vnoise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), f.x),
+				   mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), f.x), f.y),
+			   mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), f.x),
+				   mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+float fbm(vec3 p) {
+	float v = 0.0;
+	float a = 0.5;
+	for (int i = 0; i < 4; i++) {
+		v += a * vnoise(p);
+		p *= 2.03;
+		a *= 0.5;
+	}
+	return v;
+}
+
+void fog() {
+	vec3 p = WORLD_POSITION;
+	if (p.y < base_alt || p.y > top_alt) {
+		DENSITY = 0.0;
+	} else {
+		// identical field to the sky pass, so the deck you fly into is the
+		// deck you were looking at
+		vec3 q = p * 0.00026;
+		q += wind * wind_time * 0.00026;
+		float h = clamp((p.y - base_alt) / max(top_alt - base_alt, 1.0), 0.0, 1.0);
+		float shape = fbm(q) + 0.10 * fbm(q * 2.6);
+		float profile = smoothstep(0.0, 0.18, h) * (1.0 - smoothstep(0.55, 1.0, h));
+		float d = max(shape * profile - (1.0 - coverage), 0.0);
+		DENSITY = d * density_mul * 0.55;
+		ALBEDO = cloud_albedo;
+		EMISSION = cloud_albedo * emit;
+	}
+}
+"""
+
+## How far a ray actually gets before it runs out of steps.
+##
+## The march grows its step geometrically, so the reach is a sum, not a
+## multiplication — and getting that wrong is silent. A fixed 55 m step with a
+## bounded count reached three kilometres out of twenty-six, so everything
+## beyond it was never sampled and the sky rearranged itself as you flew. This
+## mirrors the shader's stepping exactly so the harness can say when a preset no
+## longer covers the distance it claims to.
+const MARCH_STEP := 55.0
+const MARCH_GROWTH := 1.105
+const MARCH_STEP_CAP := 300.0
+const MARCH_FAR := 13000.0
+
+func march_reach(id: String) -> float:
+	var p: Dictionary = PRESETS[id if PRESETS.has(id) else "scattered"]
+	var t := 0.0
+	var dt := MARCH_STEP
+	for i in int(p["steps"]):
+		t += dt
+		dt = minf(dt * MARCH_GROWTH, MARCH_STEP_CAP)
+	return t
+
+func cloud_band() -> Vector2:
+	var p: Dictionary = PRESETS[current]
+	var hi := float(p["top_alt"])
+	if float(p["cirrus"]) > 0.01:
+		hi = 9400.0
+	return Vector2(float(p["base_alt"]), hi)
+
+## What the sky costs now. Both are zero, and they are kept so the harness can
+## assert that rather than the old numbers quietly disappearing: sixteen
+## thousand billboards in a hundred and sixty-six batches became none of either.
+func puff_count() -> int:
+	return 0
+
+func deck_count() -> int:
+	return 0
+
 func solar_angles(hours: float) -> Vector2:
 	var ha := deg_to_rad((hours - 12.0) * 15.0)
 	var sin_e: float = sin(DECLINATION) * sin(LATITUDE) \
@@ -79,38 +180,258 @@ func twilight() -> float:
 static func ids() -> PackedStringArray:
 	return PackedStringArray(["clear", "scattered", "overcast", "dusk"])
 
-## Cloud layers, in the order they are built. Bases are where weather actually
-## sits: fair-weather cumulus around six or seven thousand feet with real
-## vertical development above it, altocumulus in the middle teens, and cirrus up
-## where a jet cruises. The old single deck put everything between 1500 m and
-## 3400 m, which is below the tops of the hills in places and means you climb
-## through the entire sky in the first thirty seconds.
-const LAYERS := [
-	{"name": "cumulus", "base": 2200.0, "depth": 1400.0, "puff": 520.0,
-	 "flat": 0.62, "density": 1.0, "cell": 12000.0},
-	{"name": "altocumulus", "base": 5200.0, "depth": 700.0, "puff": 780.0,
-	 "flat": 0.38, "density": 0.7, "cell": 16000.0},
-	{"name": "cirrus", "base": 9400.0, "depth": 500.0, "puff": 1600.0,
-	 "flat": 0.16, "density": 0.5, "cell": 22000.0},
-]
+## Raymarched cloud, in the sky itself.
+##
+## The billboard deck this replaces could not be made to look like weather. It
+## was sixteen thousand quads that you saw through rather than into, it needed a
+## hand-built LOD scheme and 166 draw calls to be affordable, and every peer had
+## to be handed the same random seed to see the same sky. A slab marched in the
+## sky shader has none of those problems: it is one pass at a quarter
+## resolution, it has no instances at all, and it is a pure function of position
+## and a wind offset — so two machines given the same clock draw the same cloud
+## without a single byte crossing the wire about it.
+const SKY_SHADER := """
+shader_type sky;
+// Clouds are raymarched in the quarter resolution pass. That pass is Godot's
+// own answer to expensive sky work: it runs at a sixteenth of the pixels and is
+// filtered back up, which for something as soft as cloud is free detail.
+render_mode use_quarter_res_pass;
 
-## How far the field reaches, and how the detail is banded. A cell close enough
-## to matter is drawn from its detailed batch; past that a coarse batch of
-## fewer, larger puffs stands in for it, and past the last range nothing is
-## drawn at all. Godot's visibility range works per node against that node's own
-## bounds, so the field has to be cut into cells for any of this to do
-## anything — one node covering the whole sky is always in range of everything.
-const FIELD := 46000.0
-const NEAR_RANGE := 14000.0
-const FAR_RANGE := 52000.0
+group_uniforms sky_colour;
+uniform vec3 top_colour : source_color = vec3(0.13, 0.28, 0.62);
+uniform vec3 horizon_colour : source_color = vec3(0.66, 0.75, 0.87);
+uniform vec3 ground_colour : source_color = vec3(0.30, 0.32, 0.30);
+uniform float night = 0.0;
+uniform float dusk = 0.0;
+
+group_uniforms cloud;
+uniform float coverage = 0.48;      // 0 clear, 1 solid
+uniform float base_alt = 2200.0;
+uniform float top_alt = 3600.0;
+uniform float density_mul = 1.0;
+uniform vec3 wind = vec3(1.0, 0.0, 0.35);
+uniform float wind_time = 0.0;      // metres of drift, not seconds: see Weather
+uniform vec3 cloud_lit : source_color = vec3(1.0, 0.98, 0.95);
+uniform vec3 cloud_dark : source_color = vec3(0.42, 0.46, 0.55);
+uniform int steps = 28;
+uniform int light_steps = 4;
+// The camera, handed in rather than taken from the sky shader's own POSITION.
+// Relying on that built-in left the cloud locked to the view: swing the head
+// round with free-look and the whole sky came with it. A uniform set from the
+// camera every frame is unambiguous.
+uniform vec3 cam_pos = vec3(0.0);
+uniform float march_far = 13000.0;
+
+group_uniforms high_cloud;
+uniform float cirrus = 0.35;
+uniform float cirrus_alt = 9400.0;
+
+float hash13(vec3 p) {
+	p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+	p *= 17.0;
+	return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float vnoise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float n000 = hash13(i);
+	float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+	float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+	float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+	float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+	float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+	float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+	float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+	return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+			   mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+// `lod` fades the fine octaves out. A sample taken with a three hundred metre
+// step is standing in for three hundred metres of cloud, so resolving detail
+// finer than that is not extra quality — it is the thing that makes distant
+// cloud crawl and band, because which side of a small feature a big step lands
+// on changes with every metre the camera moves.
+float fbm(vec3 p, float lod) {
+	float v = 0.0;
+	float a = 0.5;
+	float norm = 0.0;
+	for (int i = 0; i < 4; i++) {
+		// Octave i has features 1/2^i across, so the fine ones go first as the
+		// step widens and the coarsest always stays. Written the other way
+		// round it drops the *base* octave first, which removes the cloud and
+		// leaves the grain — precisely backwards.
+		float w = clamp((1.0 - lod) * 3.0 + 1.0 - float(i), 0.0, 1.0);
+		if (w > 0.001) {
+			v += a * w * vnoise(p);
+			norm += a * w;
+		}
+		p *= 2.03;
+		a *= 0.5;
+	}
+	if (norm < 0.0001) {
+		return 0.0;
+	}
+	return v / norm * 0.9375;
+}
+
+// Density inside the slab. The vertical profile is what stops it looking like
+// fog in a box: thin at the base, full through the middle, eroded at the top,
+// which is the shape a cumulus actually has.
+float cloud_density(vec3 p, float lod) {
+	vec3 q = p * 0.00026;                   // wider features: less like static
+	q += wind * wind_time * 0.00026;
+	float h = clamp((p.y - base_alt) / max(top_alt - base_alt, 1.0), 0.0, 1.0);
+	float shape = fbm(q, lod);
+	// A little detail, at a frequency that reads as billow rather than grain,
+	// and only where the sampling is fine enough to carry it.
+	shape += 0.10 * (1.0 - clamp(lod * 2.0, 0.0, 1.0)) * fbm(q * 2.6, lod);
+	float profile = smoothstep(0.0, 0.18, h) * (1.0 - smoothstep(0.55, 1.0, h));
+	float d = shape * profile - (1.0 - coverage);
+	return max(d, 0.0) * density_mul * 2.6;
+}
+
+void sky() {
+	vec3 dir = EYEDIR;
+	vec3 cam = cam_pos;
+	// The cubemap pass is generating radiance, not a picture. It sweeps the
+	// whole sphere from a position that is not the camera's, so marching cloud
+	// in it is both wrong and expensive; the gradient alone lights the world.
+	if (AT_QUARTER_RES_PASS && !AT_CUBEMAP_PASS) {
+		// --- the cloud layer -------------------------------------------
+		vec4 acc = vec4(0.0);
+		// Where the ray crosses the slab. Looking level or down from below it
+		// there is nothing to march, which is most of the screen most of the
+		// time and is why this is cheap.
+		float lo = base_alt;
+		float hi = top_alt;
+		float t0 = 0.0;
+		float t1 = 0.0;
+		bool inside = cam.y > lo && cam.y < hi;
+		if (abs(dir.y) < 0.0015) {
+			t0 = 0.0;
+			t1 = inside ? 42000.0 : -1.0;
+		} else {
+			float ta = (lo - cam.y) / dir.y;
+			float tb = (hi - cam.y) / dir.y;
+			t0 = min(ta, tb);
+			t1 = max(ta, tb);
+			t0 = max(t0, 0.0);
+		}
+		if (t1 > t0 && t0 < march_far) {
+			t1 = min(t1, march_far);
+			float span = t1 - t0;
+			// Steps that grow with distance. Two wrong answers came before
+			// this one. Dividing the span by a step count made the samples
+			// kilometres apart when looking along the slab, and they slid about
+			// with every small movement of the camera, which was the distant
+			// shimmer. Replacing that with a fixed 55 m step fixed the shimmer
+			// and broke something worse: a bounded number of 55 m steps only
+			// reaches three kilometres, so everything beyond that was never
+			// sampled at all and the whole sky changed as you flew through it.
+			// Growing the step geometrically gives fine sampling close in,
+			// where a step has to be small against a cloud, and coarse sampling
+			// far out, where it does not — the same reasoning as any level of
+			// detail, applied along the ray.
+			float dt = 55.0;
+			int n = steps;
+			// An ordered dither. A random one sparkles, because it re-rolls
+			// every frame the camera moves; no dither at all leaves the march's
+			// own steps visible as horizontal layers in the distance, which is
+			// worse. A 4x4 Bayer pattern is fixed to the screen, so a still
+			// camera gives a still image, and it breaks the banding up into a
+			// texture too fine to read as steps.
+			// Built arithmetically rather than from a table: a shader-stage
+			// array literal is not something this language will take, and a
+			// sky shader that fails to compile reports no uniforms and draws
+			// nothing rather than saying so.
+			int bx = int(SCREEN_UV.x * 1920.0) & 3;
+			int by = int(SCREEN_UV.y * 1080.0) & 3;
+			int ba = bx ^ by;
+			int bidx = ((ba & 1) << 3) | ((by & 1) << 2)
+				| (((ba >> 1) & 1) << 1) | ((by >> 1) & 1);
+			float jitter = float(bidx) / 16.0;
+			vec3 sun = LIGHT0_DIRECTION;
+			float t = t0;
+			for (int i = 0; i < n; i++) {
+				if (acc.a > 0.985 || t > t1) { break; }
+				vec3 p = cam + dir * (t + jitter * dt);
+				// the step this sample stands for, as a fraction of the
+				// coarsest step the march ever takes
+				float lod = clamp(dt / 300.0, 0.0, 1.0);
+				float d = cloud_density(p, lod);
+				t += dt;
+				// capped, so the far steps stay short enough that what they
+				// land on does not change as the camera drifts
+				// Capped well under the slab's own thickness. At 1200 m a step
+				// cut a fifteen-hundred-metre deck into three, and you could
+				// count them on the horizon.
+				dt = min(dt * 1.105, 300.0);
+				if (d <= 0.001) { continue; }
+				// light march: how much of the sun reaches this point
+				float shade = 1.0;
+				for (int j = 1; j <= light_steps; j++) {
+					vec3 lp = p - sun * float(j) * 130.0;
+					shade *= exp(-cloud_density(lp, lod) * 130.0 * 0.55);
+				}
+				vec3 col = mix(cloud_dark, cloud_lit, clamp(shade, 0.0, 1.0));
+				float alpha = 1.0 - exp(-d * dt * 0.9);
+				// ease the last few kilometres away so the march's own limit
+				// is not a visible edge across the sky
+				alpha *= 1.0 - smoothstep(march_far * 0.55, march_far, t);
+				acc.rgb += col * alpha * (1.0 - acc.a);
+				acc.a += alpha * (1.0 - acc.a);
+			}
+		}
+		// a thin cirrus sheet, flat and far above everything
+		if (dir.y > 0.02) {
+			float tc = (cirrus_alt - cam.y) / dir.y;
+			if (tc > 0.0 && tc < 200000.0) {
+				vec3 cp = cam + dir * tc;
+				vec2 cq = cp.xz * 0.000045 + wind.xz * wind_time * 0.00002;
+				float s = fbm(vec3(cq * 2.0, 0.0), 0.0);
+				s = smoothstep(0.52 - cirrus * 0.3, 0.78, s) * cirrus;
+				s *= smoothstep(0.02, 0.25, dir.y);
+				vec3 ccol = mix(cloud_dark, cloud_lit, 0.85);
+				acc.rgb += ccol * s * (1.0 - acc.a);
+				acc.a += s * (1.0 - acc.a);
+			}
+		}
+		COLOR = acc.rgb;
+		ALPHA = acc.a;
+	} else {
+		// --- the sky behind them ---------------------------------------
+		float up = clamp(dir.y, -1.0, 1.0);
+		vec3 sky_col = mix(horizon_colour, top_colour, pow(clamp(up, 0.0, 1.0), 0.55));
+		if (up < 0.0) {
+			sky_col = mix(horizon_colour, ground_colour, pow(-up, 0.35));
+		}
+		// the sun's own disc and the glow around it
+		float sd = max(dot(dir, -LIGHT0_DIRECTION), 0.0);
+		sky_col += LIGHT0_COLOR * pow(sd, 320.0) * 6.0 * (1.0 - night);
+		sky_col += LIGHT0_COLOR * pow(sd, 8.0) * 0.16 * (1.0 - night);
+		// a warm band low down when the sun is on the horizon
+		sky_col = mix(sky_col, sky_col * vec3(1.25, 0.86, 0.66),
+			dusk * (1.0 - smoothstep(0.0, 0.35, abs(up))));
+		// stars, once it is dark enough to see them
+		if (night > 0.02 && up > -0.05) {
+			vec3 sp = floor(dir * 780.0);
+			float star = hash13(sp);
+			star = pow(max(star - 0.9965, 0.0) * 285.0, 2.2);
+			sky_col += vec3(0.85, 0.88, 1.0) * star * night
+				* smoothstep(-0.05, 0.15, up);
+		}
+		vec4 cl = QUARTER_RES_COLOR;
+		COLOR = mix(sky_col, cl.rgb, clamp(cl.a, 0.0, 1.0));
+	}
+}
+"""
 
 func apply(id: String, env: Environment, sun: DirectionalLight3D,
-		fill: DirectionalLight3D, psm: ProceduralSkyMaterial) -> void:
+		fill: DirectionalLight3D, psm: ShaderMaterial) -> void:
 	current = id if PRESETS.has(id) else "scattered"
 	var p: Dictionary = PRESETS[current]
-	psm.sky_top_color = p["top"]
-	psm.sky_horizon_color = p["horizon"]
-	psm.ground_horizon_color = p["horizon"].darkened(0.05)
 	env.fog_light_color = p["fog_col"]
 	env.fog_depth_begin = p["fog"]
 	env.fog_depth_end = p["fog_end"]
@@ -125,14 +446,59 @@ func apply(id: String, env: Environment, sun: DirectionalLight3D,
 	_sun_node = sun
 	_fill_node = fill
 	_psm = psm
-	_build_decks(p)
+	_ensure_fog(env)
 	_apply_sun(true)
 	set_process(true)
 
 var _env: Environment
 var _sun_node: DirectionalLight3D
 var _fill_node: DirectionalLight3D
-var _psm: ProceduralSkyMaterial
+var _psm: ShaderMaterial
+
+var _fog: FogVolume
+var _fog_mat: ShaderMaterial
+
+## The volumetric slab, made once and then carried along with the camera. It is
+## a box rather than the whole sky because Godot's froxel grid only reaches as
+## far as `volumetric_fog_length`; past that the sky shader takes over, and the
+## two use the same density field so the join does not show.
+func _ensure_fog(env: Environment) -> void:
+	env.volumetric_fog_enabled = true
+	env.volumetric_fog_density = 0.0          # the volume supplies all of it
+	env.volumetric_fog_length = 6000.0
+	env.volumetric_fog_detail_spread = 2.4
+	env.volumetric_fog_gi_inject = 0.0
+	env.volumetric_fog_temporal_reprojection_enabled = true
+	env.volumetric_fog_temporal_reprojection_amount = 0.92
+	if is_instance_valid(_fog):
+		return
+	_fog_mat = ShaderMaterial.new()
+	var fsh := Shader.new()
+	fsh.code = FOG_SHADER
+	_fog_mat.shader = fsh
+	_fog = FogVolume.new()
+	_fog.name = "CloudVolume"
+	_fog.shape = RenderingServer.FOG_VOLUME_SHAPE_BOX
+	_fog.size = Vector3(12000.0, 6000.0, 12000.0)
+	_fog.material = _fog_mat
+	add_child(_fog)
+
+## Keep the slab centred on whoever is looking, in the horizontal only: moving
+## it vertically would slide the cloud up and down with the aeroplane.
+func has_volume() -> bool:
+	return is_instance_valid(_fog)
+
+func volume_size() -> Vector3:
+	return _fog.size if is_instance_valid(_fog) else Vector3.ZERO
+
+func follow(eye: Vector3) -> void:
+	if _psm != null:
+		# the sky needs to know where it is being looked at from
+		_psm.set_shader_parameter("cam_pos", eye)
+	if is_instance_valid(_fog):
+		var p: Dictionary = PRESETS[current]
+		var mid: float = (float(p["base_alt"]) + float(p["top_alt"])) * 0.5
+		_fog.global_position = Vector3(eye.x, mid, eye.z)
 
 func _process(delta: float) -> void:
 	if _sun_node == null or not is_instance_valid(_sun_node):
@@ -168,170 +534,49 @@ func _apply_sun(_force: bool) -> void:
 		var night_top := Color(0.012, 0.017, 0.045)
 		var night_horizon := Color(0.045, 0.055, 0.10)
 		var dusk_horizon := Color(0.86, 0.42, 0.24)
-		_psm.sky_top_color = top.lerp(night_top, night)
-		_psm.sky_horizon_color = horizon.lerp(dusk_horizon, dusk * 0.8) \
-			.lerp(night_horizon, night * 0.9)
-		_psm.ground_horizon_color = _psm.sky_horizon_color.darkened(0.15)
-		_psm.sun_angle_max = 6.0
+		_psm.set_shader_parameter("top_colour", top.lerp(night_top, night))
+		_psm.set_shader_parameter("horizon_colour",
+			horizon.lerp(dusk_horizon, dusk * 0.8).lerp(night_horizon, night * 0.9))
+		_psm.set_shader_parameter("ground_colour",
+			Color(0.30, 0.32, 0.30).lerp(Color(0.03, 0.04, 0.06), night))
+		_psm.set_shader_parameter("night", night)
+		_psm.set_shader_parameter("dusk", dusk)
+		# The cloud drifts on a distance derived from the clock, not from the
+		# frame timer: every peer given the same time of day marches the same
+		# sky, so the weather needs no replication of its own beyond the clock
+		# that is already synchronised.
+		# Slow. The clock runs a day in four hours, so anything scaled off it
+		# directly moves six times faster than it looks like it should.
+		_psm.set_shader_parameter("wind_time", time_of_day * 3600.0 * 0.22)
+		_psm.set_shader_parameter("coverage", float(p["cover_frac"]))
+		_psm.set_shader_parameter("density_mul", float(p["density"]))
+		_psm.set_shader_parameter("base_alt", float(p["base_alt"]))
+		_psm.set_shader_parameter("top_alt", float(p["top_alt"]))
+		_psm.set_shader_parameter("cirrus", float(p["cirrus"]))
+		_psm.set_shader_parameter("cloud_lit",
+			Color(1.0, 0.98, 0.95).lerp(Color(1.0, 0.62, 0.36), dusk * 0.85)
+				.lerp(Color(0.20, 0.24, 0.36), night * 0.9))
+		_psm.set_shader_parameter("cloud_dark",
+			Color(0.42, 0.46, 0.55).lerp(Color(0.40, 0.24, 0.24), dusk * 0.7)
+				.lerp(Color(0.05, 0.06, 0.11), night * 0.9))
+		_psm.set_shader_parameter("steps", int(p["steps"]))
+		# set explicitly rather than left on the shader's own default: an unset
+		# uniform reads back as null, which is a trap for anything inspecting it
+		_psm.set_shader_parameter("march_far", 13000.0)
+		_psm.set_shader_parameter("light_steps", 4)
+		_psm.set_shader_parameter("wind", Vector3(1.0, 0.0, 0.35))
+		_psm.set_shader_parameter("cirrus_alt", 9400.0)
+	if _fog_mat != null:
+		for k in ["coverage", "base_alt", "top_alt", "density_mul", "wind_time"]:
+			_fog_mat.set_shader_parameter(k, _psm.get_shader_parameter(k))
+		_fog_mat.set_shader_parameter("cloud_albedo",
+			Color(0.92, 0.94, 0.97).lerp(Color(1.0, 0.70, 0.44), dusk * 0.8)
+				.lerp(Color(0.18, 0.21, 0.32), night * 0.9))
+		_fog_mat.set_shader_parameter("emit", lerpf(0.06, 0.01, night))
 	if _env != null:
 		_env.ambient_light_energy = lerpf(float(p["amb"]), 0.16, night)
 		_env.fog_light_color = Color(p["fog_col"]) \
 			.lerp(Color(0.55, 0.30, 0.22), dusk * 0.7) \
 			.lerp(Color(0.05, 0.06, 0.11), night * 0.9)
-	# and the clouds are lit by whatever is lighting everything else
-	var tint := Color(p["cloud_tint"])
-	var lit := tint.lerp(Color(1.0, 0.66, 0.42, tint.a), dusk * 0.8) \
-		.lerp(Color(0.16, 0.19, 0.30, tint.a), night * 0.88)
-	for d in _decks:
-		if is_instance_valid(d) and d.material_override is StandardMaterial3D:
-			(d.material_override as StandardMaterial3D).albedo_color = lit
 
 
-func _cloud_material(p: Dictionary) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	m.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
-	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	m.billboard_keep_scale = true
-	m.albedo_texture = Effects.puff_texture()
-	m.albedo_color = p["cloud_tint"]
-	m.disable_receive_shadows = true
-	# Clouds sort behind everything else that is transparent, for the same
-	# reason the sea does: they are enormous and their origins are nowhere near
-	# what you are looking at.
-	m.render_priority = -6
-	return m
-
-## Build the sky, layer by layer, cell by cell.
-##
-## Each cell gets two batches: a detailed one of many small puffs that is drawn
-## while you are near it, and a coarse one of a few large puffs that stands in
-## once you are not. The swap is Godot's own visibility range, so it costs
-## nothing per frame — but it only works because the field is cut into cells.
-func _build_decks(p: Dictionary) -> void:
-	for d in _decks:
-		if is_instance_valid(d):
-			# out of the tree now, not at the end of the frame: anything that
-			# counts the sky between a rebuild and the next frame otherwise
-			# sees the old deck and the new one at once
-			remove_child(d)
-			d.queue_free()
-	_decks.clear()
-	_rng.seed = 4242
-	_band = Vector2(1e9, -1e9)
-	var qm := QuadMesh.new()
-	qm.size = Vector2(1.0, 1.0)
-	var mat := _cloud_material(p)
-	var cover: float = float(p["cover"]) if p.has("cover") else 1.0
-	var puffs_total := 0
-	for layer in LAYERS:
-		var cell: float = float(layer["cell"])
-		var n: int = int(FIELD / cell)
-		for gx in range(-n, n + 1):
-			for gz in range(-n, n + 1):
-				var origin := Vector2(float(gx) * cell, float(gz) * cell)
-				if origin.length() > FIELD:
-					continue
-				puffs_total += _build_cell(qm, mat, layer, origin, cell, cover)
-	_stat_puffs = puffs_total
-	if _band.x > 1e8:
-		_band = Vector2.ZERO
-
-var _stat_puffs := 0
-var _band := Vector2.ZERO
-
-func puff_count() -> int:
-	return _stat_puffs
-
-## Lowest and highest puff in the sky, for the harness.
-## Lowest and highest puff in the sky. Recorded as the field is built, not read
-## back off the MultiMesh: `get_instance_transform` goes through the rendering
-## server, which is a stub in headless, so every instance reads as identity
-## there and any measurement taken that way is measuring nothing.
-func cloud_band() -> Vector2:
-	return _band
-
-func deck_count() -> int:
-	return _decks.size()
-
-## One cell of one layer, as a detailed batch and a coarse stand-in.
-func _build_cell(qm: QuadMesh, mat: StandardMaterial3D, layer: Dictionary,
-		origin: Vector2, cell: float, cover: float) -> int:
-	var density: float = float(layer["density"]) * cover
-	# Cells are large — a dozen kilometres or more — because each one is two
-	# draw calls and the field covers ninety kilometres across. Cutting it into
-	# five kilometre cells produced four thousand batches, which is a worse
-	# problem than the one the cells were there to solve.
-	var clumps: int = int(round(_rng.randf_range(5.0, 11.0) * density))
-	if clumps <= 0:
-		return 0
-	var near_xf: Array[Transform3D] = []
-	var far_xf: Array[Transform3D] = []
-	for c in clumps:
-		var cx: float = origin.x + _rng.randf_range(-0.5, 0.5) * cell
-		var cz: float = origin.y + _rng.randf_range(-0.5, 0.5) * cell
-		var cy: float = float(layer["base"]) \
-			+ _rng.randf_range(0.0, float(layer["depth"]))
-		var w: float = _rng.randf_range(0.30, 0.75) * cell
-		var flat: float = float(layer["flat"])
-		var base_puff: float = float(layer["puff"])
-		# the detailed version: a heap of small puffs with real vertical build
-		var count: int = _rng.randi_range(11, 20)
-		for i in count:
-			var o := Vector3(_rng.randf_range(-w, w),
-				_rng.randf_range(-0.12, 1.0) * float(layer["depth"]) * 0.55,
-				_rng.randf_range(-w * 0.75, w * 0.75))
-			# puffs get smaller and sparser toward the top, which is what gives
-			# a cumulus its cauliflower rather than a flat slab
-			var lift: float = clampf(o.y / maxf(float(layer["depth"]) * 0.55, 1.0), 0.0, 1.0)
-			var sz: float = base_puff * _rng.randf_range(0.65, 1.5) * (1.0 - 0.45 * lift)
-			near_xf.append(Transform3D(
-				Basis(Vector3.UP, _rng.randf_range(0.0, TAU))
-					.scaled(Vector3(sz, sz * flat * (1.0 + lift * 0.5), sz)),
-				Vector3(cx, cy, cz) + o))
-		# and the stand-in: a handful of big ones covering the same volume
-		for i in 4:
-			var o2 := Vector3(_rng.randf_range(-w, w),
-				_rng.randf_range(0.0, float(layer["depth"]) * 0.4),
-				_rng.randf_range(-w * 0.75, w * 0.75))
-			var sz2: float = base_puff * _rng.randf_range(2.4, 3.6)
-			far_xf.append(Transform3D(
-				Basis().scaled(Vector3(sz2, sz2 * flat, sz2)),
-				Vector3(cx, cy, cz) + o2))
-	# The cell is in the name: Godot renames colliding siblings, and anything
-	# classifying batches by a trailing "_near"/"_far" then sees one of each and
-	# several hundred it cannot place.
-	var tag := "%s_%d_%d" % [layer["name"], int(origin.x / cell), int(origin.y / cell)]
-	_add_batch(qm, mat, near_xf, "near_" + tag, 0.0, NEAR_RANGE)
-	_add_batch(qm, mat, far_xf, "far_" + tag, NEAR_RANGE, FAR_RANGE)
-	return near_xf.size() + far_xf.size()
-
-func _add_batch(qm: QuadMesh, mat: StandardMaterial3D, xf: Array[Transform3D],
-		nm: String, from: float, to: float) -> void:
-	if xf.is_empty():
-		return
-	for t in xf:
-		_band.x = minf(_band.x, t.origin.y)
-		_band.y = maxf(_band.y, t.origin.y)
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = nm
-	var mm := MultiMesh.new()
-	# Order matters: the transform format sizes the buffer, the count allocates
-	# it, and the mesh goes on last. Assigning the mesh in the middle threw the
-	# transforms away and left every puff sitting at the world origin.
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = qm
-	mm.instance_count = xf.size()
-	for i in xf.size():
-		mm.set_instance_transform(i, xf[i])
-	mmi.multimesh = mm
-	mmi.material_override = mat
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mmi.visibility_range_begin = from
-	mmi.visibility_range_end = to
-	mmi.visibility_range_begin_margin = 900.0 if from > 0.0 else 0.0
-	mmi.visibility_range_end_margin = 1400.0
-	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(mmi)
-	_decks.append(mmi)

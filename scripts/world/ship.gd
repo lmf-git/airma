@@ -12,6 +12,15 @@ const KINDS := {
 		"super": [[-0.10, 0.30, 26.0, 13.0], [0.12, 0.20, 16.0, 9.0]],
 		"mast": 22.0, "guns": 2, "vls": 32, "class": "warship",
 	},
+	"type45": {
+		"name": "Type 45 destroyer", "len": 152.4, "beam": 21.2, "draught": 7.4,
+		"free": 10.5, "hp": 2050.0, "speed": 16.0, "sub": false,
+		"paint": Color(0.34, 0.37, 0.41), "deck": Color(0.28, 0.30, 0.33),
+		# A long enclosed superstructure and the tall octagonal mast that
+		# carries SAMPSON: one high block forward, a lower one aft.
+		"super": [[-0.12, 0.34, 30.0, 14.5], [0.14, 0.22, 18.0, 10.0]],
+		"mast": 27.0, "guns": 1, "vls": 48, "class": "warship",
+	},
 	"frigate": {
 		"name": "Type 23 frigate", "len": 133.0, "beam": 16.1, "draught": 7.3,
 		"free": 8.0, "hp": 1500.0, "speed": 14.9, "sub": false,

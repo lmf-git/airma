@@ -221,6 +221,7 @@ and pressing `U`:
 | | |
 |---|---|
 | **Arleigh Burke** destroyer | 155 m, 30 kts, main mount and 32 vertical launch cells |
+| **Type 45** destroyer | 152 m, 31 kts, main mount and 48 cells; the tallest mast in the fleet |
 | **Type 23** frigate | 133 m, 29 kts, 16 cells |
 | **Steregushchiy** corvette | 105 m, 26 kts, 8 cells |
 | **Patrol boat** | 38 m, 35 kts, gun only |
@@ -527,26 +528,87 @@ Measured across a day at 45 degrees latitude:
 | 18:00 | +9.8° | 280 | 0.79 |
 | 20:00 | −9.9° | 302 | 0.00 |
 
-**Clouds** are three layers rather than one deck: cumulus with real vertical
-development from 2200 m, altocumulus around 5200 m, and cirrus at 9400 m where
-a jet cruises. The old single deck sat between 1180 and 4020 m — below the tops
-of the hills in places, and you climbed through the entire sky in the first
-thirty seconds. It now runs from **2121 m to 10158 m**, and there are three to
-sixteen thousand puffs in it depending on the weather rather than two hundred
-to eighteen hundred.
+**Clouds are raymarched, not billboarded.** The deck of sixteen thousand quads
+that used to stand in for weather could not be made to look like it: you saw
+through it rather than into it, it needed a hand-built LOD scheme and 166 draw
+calls to be affordable, and every peer had to be handed the same random seed to
+see the same sky.
 
-That many billboards need **LOD**, and LOD needs the field cut into cells:
-Godot's visibility range works per node against that node's own bounds, so one
-node covering the whole sky is always in range of everything. Each cell of each
-layer gets a detailed batch of many small puffs drawn while you are near it and
-a coarse batch of a few large ones that stands in once you are not. The cells
-are twelve to twenty-two kilometres across, because each one is two draw calls
-and the field is ninety kilometres wide — cutting it into five kilometre cells
-produced four thousand batches, which is a worse problem than the one the cells
-were there to solve. It settles at 166 batches, most of them out of range at
-any moment.
+It is a density field now, marched in two places that share it:
 
-## Weather
+* The **sky shader**, in Godot's quarter-resolution pass — a sixteenth of the
+  pixels, filtered back up, which for something as soft as cloud is free
+  detail. It intersects a slab between the cloud base and tops, so it has real
+  parallax as you climb rather than sitting at infinity, and it lights each
+  sample by marching a short way toward the sun. Forty to fifty-six steps
+  depending on the weather; most of the screen most of the time misses the slab
+  entirely and costs nothing.
+* A **FogVolume** carrying the same field through Godot's froxel grid, centred
+  on the camera and six kilometres deep. This is the half that matters when you
+  fly into it: a sky is only drawn where there is no geometry, so from above the
+  deck looking down at terrain the sky-shader cloud simply is not there. The fog
+  volume sits between the camera and whatever it is looking at, so the cloud
+  hides the ground, thickens as you enter it, and goes past the canopy.
+
+**Zero draw calls and zero instances**, against 166 batches and up to sixteen
+thousand billboards. And because the field is a pure function of world position
+and a wind offset derived from the clock — which is already host-authoritative —
+**two machines draw the same sky without a byte crossing the wire about it.**
+Verified with a client started on `clear` joining a host on `overcast`: same
+preset, same coverage, and the wind offset tracking to within one publish
+interval.
+
+Three things had to be undone after seeing it move. The march was dithered with a
+per-pixel hash to break up banding, which at a quarter resolution is a quarter
+resolution of *sparkle* — and it re-rolls as the camera turns, so the whole sky
+boils. It uses a fixed offset and more steps instead; banding you cannot see
+beats grain you can. And the drift was scaled straight off the clock, which runs
+a day in four hours, so the cloud crossed the sky six times faster than it
+looked like it should. And the sky shader was taking the camera from its own
+`POSITION` built-in, which left the cloud welded to the view — swing the head
+round with free-look and the whole sky came with it. The eye is a uniform now,
+set every frame from whichever camera is actually current, so the cockpit, the
+chase, the sensor pod and a ship's bridge all give the sky the right position.
+The stepping took three goes and the middle one was the worst. It began as
+`span / steps`, and looking nearly along the slab that span is tens of
+kilometres, so samples ended up a kilometre apart and slid about with every
+small movement — the distant shimmer. Replacing it with a fixed 55 m step cured
+that and broke something far more visible: **a bounded number of 55 m steps only
+reaches three kilometres**, so everything past that was never sampled at all and
+the whole sky rearranged itself as you flew through it. The step grows
+geometrically now, 55 m near and capped at 1200 m far — fine sampling where a
+step has to be small against a cloud, coarse where it does not, which is the
+same reasoning as any level of detail applied along a ray.
+
+That mistake was invisible to every test here, because the reach of a geometric
+series is a sum and nothing was computing it. The harness now mirrors the
+shader's stepping and fails a preset that cannot march as far as it claims:
+58 steps reach 14.6 km, 68 reach 17.6 km, against a 13 km limit.
+
+Two more things came out of watching it rather than testing it. The far step was
+capped at 1200 m, which cuts a fifteen-hundred-metre deck into three slices —
+you could count the layers on the horizon. It is capped at 300 m now, and the
+march reaches thirteen kilometres rather than twenty-six, because a deck fading
+into haze at that range is what cloud does anyway and the steps are better spent
+close in. And removing the dither to cure the sparkle left the remaining
+banding bare: it is an ordered 4x4 Bayer pattern now, fixed to the screen, so a
+still camera gives a still image and the steps break up into a texture too fine
+to read as steps. The last of the banding was not a stepping problem at all but a sampling one.
+A sample taken with a three hundred metre step stands in for three hundred
+metres of cloud, and resolving detail finer than that is not extra quality: it
+is what makes distant cloud crawl, because which side of a small feature a big
+step lands on changes with every metre the camera moves. The noise now carries
+fewer octaves as the step widens — four close in, three at nine hundred metres,
+one past two kilometres — which is mip-mapping, applied along a ray.
+
+That pattern has to be built arithmetically — a shader-stage
+array literal is not something this language will take, and a sky shader that
+fails to compile reports no uniforms and then quietly draws nothing rather than
+saying so. The harness fails on that too now; it caught this one. The radiance cubemap pass skips the cloud march entirely: it
+sweeps the whole sphere from somewhere that is not the camera, so marching in it
+was both wrong and expensive.
+
+## Weather## Weather
 
 Four presets, selectable in the hangar: **clear**, **scattered**, **overcast**
 and **dusk**. Each one drives the cloud deck density and altitude, fog distance,
@@ -670,7 +732,7 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--chattest` | `/`, a line of text, and whether the stick moved while typing |
 | `--shipnet` | what each end of a session thinks the fleet is doing |
 | `--cmtest=WHAT` | flares, chaff, both or none against a SAM shot |
-| `--skytest` | cloud counts, batching and altitude band, and the sun across a day |
+| `--skytest` | cloud settings, how far the march reaches, and the sun across a day |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
 | `--townstest` | where the towns ended up, how level, and whether the streets are buried |
