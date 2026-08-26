@@ -30,6 +30,14 @@ var net: Node = null              # the live NetLink, or null offline
 ## than through the GUI, so without this a click on the map also pulled the
 ## trigger.
 var ui_modal := false
+## True while the chat line is open. Held keys keep reporting through
+## `Input.is_action_pressed` no matter what consumes the event, so typing "d"
+## in the chat rolled the aeroplane right. Every control surface reads through
+## the three helpers below instead, and they go quiet while a line is open.
+var typing := false
+## Where the last explosion was drawn, for the harness.
+var last_burst := Vector3.INF
+var last_burst_r := 0.0
 ## Sensor suite state, shared by the HUD, the pod and the map.
 const RADAR_RANGES := [10000.0, 20000.0, 40000.0, 80000.0]
 var radar_range_idx := 2
@@ -104,6 +112,17 @@ func height_at(x: float, z: float) -> float:
 	var f := flat_factor(x, z)
 	if f > 0.0:
 		h = lerpf(h, RUNWAY_ELEV, f)
+	# Settlements stand on ground that has been levelled for them. Towns are
+	# built where the land is workable, not draped over whatever gradient
+	# happens to run through the middle of them — a street grid laid across a
+	# hillside is a staircase, and the buildings climb it.
+	for pad in _town_pads:
+		var pc: Vector2 = pad["c"]
+		var pr: float = pad["r"]
+		var d := Vector2(x - pc.x, z - pc.y).length()
+		if d < pr * 1.60:
+			h = lerpf(h, float(pad["y"]),
+				1.0 - smoothstep(pr * 1.06, pr * 1.60, d))
 	if not decks.is_empty():
 		h = maxf(h, deck_height(x, z))
 	return h
@@ -131,8 +150,10 @@ func surface_grip(x: float, z: float) -> float:
 		return 1.0
 	return 0.45
 
-## Road network, shared by the terrain painter and the placement rules.
-const ROADS := [
+## Road network, shared by the terrain painter and the placement rules. It is
+## rebuilt once the towns have been sited, because the towns move: a trunk road
+## drawn to where a town was originally wanted ends somewhere in a field.
+var ROADS: Array = [
 	[Vector2(0, 1700), Vector2(-2300, -5200)],
 	[Vector2(0, -1700), Vector2(2600, 4200)],
 	[Vector2(-2300, -5200), Vector2(2100, -9200)],
@@ -141,6 +162,82 @@ const ROADS := [
 	[Vector2(2600, 4200), Vector2(4200, 11000)],
 	[Vector2(-2300, -5200), Vector2(-5200, -13000)],
 ]
+
+## Lay the trunk network between the airfield and wherever the towns ended up,
+## each leg routed round the worst of the ground rather than driven straight
+## over it. `link` is a list of index pairs into `points`.
+func build_roads(points: Array, links: Array) -> void:
+	ROADS = []
+	for pair in links:
+		var a: Vector2 = points[pair[0]]
+		var b: Vector2 = points[pair[1]]
+		for seg in route(a, b):
+			ROADS.append(seg)
+
+## A road between two places that goes round the hills instead of over them.
+## Straight legs are cheap and look it: a trunk road driven at a constant
+## bearing across this terrain climbs a ridge, drops into a valley and climbs
+## the next one. This lays intermediate waypoints and then relaxes each one
+## sideways toward whatever nearby ground is lower, which is what a road
+## surveyor does — the result follows the contours without any pathfinding.
+func route(a: Vector2, b: Vector2) -> Array:
+	var span := a.distance_to(b)
+	var n: int = clampi(int(span / 900.0), 1, 14)
+	if n < 2:
+		return [[a, b]]
+	var dir := (b - a).normalized()
+	var nrm := Vector2(-dir.y, dir.x)
+	var pts: Array = [a]
+	for i in range(1, n):
+		pts.append(a.lerp(b, float(i) / float(n)))
+	pts.append(b)
+	var reach: float = minf(span * 0.22, 2600.0)
+	for _pass in 3:
+		for i in range(1, pts.size() - 1):
+			var p: Vector2 = pts[i]
+			var best: Vector2 = p
+			var best_cost := _road_cost(pts[i - 1], p, pts[i + 1])
+			for k in [-1.0, -0.6, -0.3, 0.3, 0.6, 1.0]:
+				var q: Vector2 = p + nrm * (reach * k)
+				if height_at(q.x, q.y) < WATER_LEVEL + 6.0:
+					continue
+				var cost := _road_cost(pts[i - 1], q, pts[i + 1])
+				if cost < best_cost:
+					best_cost = cost
+					best = q
+			pts[i] = best
+		reach *= 0.45
+	var out: Array = []
+	for i in range(pts.size() - 1):
+		out.append([pts[i], pts[i + 1]])
+	return out
+
+## What a waypoint costs: the climb either side of it, plus a mild penalty for
+## the detour, so a road will go a long way round a mountain and not one metre
+## round a molehill.
+func _road_cost(prev: Vector2, p: Vector2, next: Vector2) -> float:
+	var cost := 0.0
+	for pair in [[prev, p], [p, next]]:
+		var f: Vector2 = pair[0]
+		var t: Vector2 = pair[1]
+		var d := f.distance_to(t)
+		var steps: int = clampi(int(d / 120.0), 2, 24)
+		var last := height_at(f.x, f.y)
+		var run: float = d / float(steps)
+		for i in range(1, steps + 1):
+			var q: Vector2 = f.lerp(t, float(i) / float(steps))
+			var h := height_at(q.x, q.y)
+			var rise := absf(h - last)
+			cost += rise * 1.6                # every metre of climb is work
+			# and a steep pinch is worse than the same climb spread out: without
+			# this the router happily trades a long gentle grade for a short
+			# wall, because the total height gained is the same. Squared, so a
+			# few percent costs nothing and half a gradient costs everything.
+			var grade := rise / maxf(run, 1.0)
+			cost += grade * grade * run * 90.0
+			last = h
+		cost += d * 0.085                     # and so is every metre of tarmac
+	return cost
 
 var _segments: Array = []          # every road and street, filled by Scenery
 var decks: Array = []              # landable platforms: {origin, basis, half, y}
@@ -171,6 +268,43 @@ const RF_HALF := 18000.0     # road field covers the inhabited part of the map
 const RF_N := 256
 
 var _road_field := PackedFloat32Array()
+
+## Level ground for the settlements. Each pad is worked out from the land as it
+## is before any of them exist, so the platform sits at the natural height of
+## the site and the shoulders blend out over the last fifth of the radius.
+var _town_pads: Array = []
+
+func register_town_pads(sites: Array) -> void:
+	_town_pads.clear()
+	for site in sites:
+		var c: Vector2 = site["c"]
+		var r: float = site["r"]
+		# the mean of the land under the footprint, not the height at the middle
+		var total := 0.0
+		var n := 0
+		for i in 9:
+			for j in 9:
+				var q := c + Vector2(float(i - 4), float(j - 4)) * (r * 0.22)
+				if q.distance_to(c) > r:
+					continue
+				total += height_at(q.x, q.y)
+				n += 1
+		var y: float = (total / maxf(float(n), 1.0)) if n > 0 else height_at(c.x, c.y)
+		_town_pads.append({"c": c, "r": r, "y": maxf(y, WATER_LEVEL + 8.0)})
+
+## Mean gradient over a footprint, as a fraction. Used to choose where a town
+## goes: the flattest workable ground within reach of where it was wanted.
+func site_roughness(c: Vector2, r: float) -> float:
+	var total := 0.0
+	var n := 0
+	for i in 7:
+		for j in 7:
+			var q := c + Vector2(float(i - 3), float(j - 3)) * (r * 0.30)
+			if q.distance_to(c) > r:
+				continue
+			total += 1.0 - normal_at(q.x, q.y).y
+			n += 1
+	return total / maxf(float(n), 1.0)
 
 func register_segments(segs: Array) -> void:
 	_segments = segs
@@ -338,6 +472,46 @@ func report(text: String, kind: int = Ev.INFO) -> void:
 	mission_event.emit(text, kind)
 	if OS.has_feature("headless") or OS.is_debug_build():
 		print("[mission %6.1f] %s" % [Time.get_ticks_msec() * 0.001, text])
+
+## Terrain masking. True when nothing between the two points is inside the
+## height field — the test a radar, a seeker head and a pair of eyes all need,
+## and previously duplicated inside the HUD where nothing else could reach it.
+## The step is fine enough to catch a ridge line and coarse enough that a whole
+## radar sweep's worth of calls costs nothing.
+func line_of_sight(from: Vector3, to: Vector3) -> bool:
+	var span := from.distance_to(to)
+	if span < 1.0:
+		return true
+	var steps := clampi(int(span / 180.0), 6, 48)
+	for i in range(1, steps):
+		var q: Vector3 = from.lerp(to, float(i) / float(steps))
+		if q.y < height_at(q.x, q.z) - 2.0:
+			return false
+	return true
+
+## How far down a contact would have to go to break the line. Negative when it
+## is already masked. Used by the AI to decide whether the terrain is worth
+## hiding behind or whether it would just be flying into a valley for nothing.
+func masking_depth(from: Vector3, to: Vector3) -> float:
+	var span := from.distance_to(to)
+	if span < 1.0:
+		return 0.0
+	var worst := 1e9
+	var steps := clampi(int(span / 180.0), 6, 48)
+	for i in range(1, steps):
+		var t := float(i) / float(steps)
+		var q: Vector3 = from.lerp(to, t)
+		worst = minf(worst, q.y - height_at(q.x, q.z))
+	return worst if worst < 1e8 else 0.0
+
+func strength(action: StringName) -> float:
+	return 0.0 if typing else Input.get_action_strength(action)
+
+func held(action: StringName) -> bool:
+	return not typing and Input.is_action_pressed(action)
+
+func tapped(action: StringName) -> bool:
+	return not typing and Input.is_action_just_pressed(action)
 
 # --------------------------------------------------------------------------
 func _add(action: StringName, events: Array) -> void:

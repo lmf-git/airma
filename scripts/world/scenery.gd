@@ -26,15 +26,71 @@ var _breakable: Array = []
 func _ready() -> void:
 	current = self
 
+## Where each town actually ended up, after being moved onto workable ground.
+var sites: Array = []
+
 func plan() -> void:
 	_streets.clear()
-	for t in TOWNS:
-		_plan_town_streets(t[0], t[1])
+	_site_towns()
+	for t in sites:
+		_plan_town_streets(t["c"], t["r"])
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
 	Sim.register_segments(_streets)
 	_stats["streets"] = _streets.size()
 
-func _plan_town_streets(centre: Vector3, radius: float) -> void:
+## Put each town on the flattest ground within reach of where it was wanted,
+## then level a platform under it. People build towns on the valley floor; they
+## do not lay a grid of streets up the side of a mountain and live on the
+## staircase. Both halves matter — moving alone still leaves a gradient, and
+## levelling alone puts a cliff round a town that should never have been there.
+func _site_towns() -> void:
+	sites.clear()
+	var pads: Array = []
+	for t in TOWNS:
+		var want := Vector2(float(t[0].x), float(t[0].z))
+		var r: float = float(t[1])
+		var best := want
+		var best_rough: float = Sim.site_roughness(want, r)
+		var step: float = r * 0.45
+		for i in range(-3, 4):
+			for j in range(-3, 4):
+				if i == 0 and j == 0:
+					continue
+				var q := want + Vector2(float(i), float(j)) * step
+				# still near the airfield's valley, still on dry land
+				if Sim.height_at(q.x, q.y) < Sim.WATER_LEVEL + 25.0:
+					continue
+				if not Sim.clear_of_airfield(q.x, q.y):
+					continue
+				var rough := Sim.site_roughness(q, r)
+				if rough < best_rough:
+					best_rough = rough
+					best = q
+		sites.append({"c": best, "r": r, "density": float(t[2]),
+			"tallest": float(t[3]), "name": String(t[4]),
+			"was": want, "rough": best_rough})
+		pads.append({"c": best, "r": r})
+	Sim.register_town_pads(pads)
+	# and now lay the trunk network to where the towns actually are. Index 0 is
+	# the field; the rest are the towns in order.
+	var nodes: Array = [Vector2(0.0, 1700.0)]
+	for t in sites:
+		nodes.append(t["c"] as Vector2)
+	var links: Array = [[0, 1], [0, 2], [1, 4], [2, 3], [3, 1]]
+	# the depot road, and a couple of legs running off the map edge
+	nodes.append(Vector2(-1500.0, -6600.0))       # 5: the depot
+	nodes.append(Vector2(4200.0, 11000.0))        # 6, 7: out of the valley
+	nodes.append(Vector2(-5200.0, -13000.0))
+	links.append([1, 5])
+	links.append([2, 6])
+	links.append([4, 7])
+	var wanted: Array = []
+	for pair in links:
+		if pair[0] < nodes.size() and pair[1] < nodes.size():
+			wanted.append(pair)
+	Sim.build_roads(nodes, wanted)
+
+func _plan_town_streets(centre: Vector2, radius: float) -> void:
 	var block := 128.0
 	var lines := int(radius / block)
 	for i in range(-lines, lines + 1):
@@ -42,18 +98,18 @@ func _plan_town_streets(centre: Vector3, radius: float) -> void:
 		var half := sqrt(maxf(radius * radius - off * off, 0.0))
 		if half < 40.0:
 			continue
-		_streets.append([Vector2(centre.x + off, centre.z - half),
-			Vector2(centre.x + off, centre.z + half)])
-		_streets.append([Vector2(centre.x - half, centre.z + off),
-			Vector2(centre.x + half, centre.z + off)])
-	_streets.append([Vector2(centre.x, centre.z), _nearest_trunk(Vector2(centre.x, centre.z))])
+		_streets.append([Vector2(centre.x + off, centre.y - half),
+			Vector2(centre.x + off, centre.y + half)])
+		_streets.append([Vector2(centre.x - half, centre.y + off),
+			Vector2(centre.x + half, centre.y + off)])
+	_streets.append([centre, _nearest_trunk(centre)])
 
 func build() -> void:
 	_rng.seed = 20260821
 	if _streets.is_empty():
 		plan()
-	for t in TOWNS:
-		_town(t[0], t[1], t[2], t[3])
+	for t in sites:
+		_town(t["c"], float(t["r"]), float(t["density"]), float(t["tallest"]))
 	_military(Vector3(-1500, 0, -6600))
 	_farms()
 	_build_roads()
@@ -148,7 +204,7 @@ func damage_area(pos: Vector3, radius: float) -> int:
 		b["dead"] = dead
 	return hits
 
-func _town(centre: Vector3, radius: float, density: float, tallest: float) -> void:
+func _town(centre: Vector2, radius: float, density: float, tallest: float) -> void:
 	var kinds := [
 		_block_mesh(1.0, 1.0, 1.0, Color(0.26, 0.25, 0.23), Color(0.70, 0.67, 0.61)),
 		_block_mesh(1.0, 1.0, 1.0, Color(0.22, 0.23, 0.25), Color(0.58, 0.59, 0.60)),
@@ -162,13 +218,13 @@ func _town(centre: Vector3, radius: float, density: float, tallest: float) -> vo
 	for gx in range(-n, n + 1):
 		for gz in range(-n, n + 1):
 			var px := centre.x + gx * step + _rng.randf_range(-1.5, 1.5)
-			var pz := centre.z + gz * step + _rng.randf_range(-1.5, 1.5)
-			var d := Vector2(px - centre.x, pz - centre.z).length() / radius
+			var pz := centre.y + gz * step + _rng.randf_range(-1.5, 1.5)
+			var d := Vector2(px - centre.x, pz - centre.y).length() / radius
 			if d > 1.0 or _rng.randf() > density * (1.3 - d * 0.8):
 				continue
 			# keep clear of the kerb
 			var fx := absf(fmod(absf(px - centre.x) + block * 0.5, block) - block * 0.5)
-			var fz := absf(fmod(absf(pz - centre.z) + block * 0.5, block) - block * 0.5)
+			var fz := absf(fmod(absf(pz - centre.y) + block * 0.5, block) - block * 0.5)
 			if fx < 15.0 or fz < 15.0:
 				continue
 			if not Sim.buildable(px, pz, 0.90, 6.0):
@@ -187,9 +243,8 @@ func _town(centre: Vector3, radius: float, density: float, tallest: float) -> vo
 ## True when a point falls inside a town footprint, so nothing tall gets planted
 ## on top of the buildings.
 func _inside_town(p: Vector2) -> bool:
-	for t in TOWNS:
-		var c: Vector3 = t[0]
-		if p.distance_to(Vector2(c.x, c.z)) < float(t[1]) * 1.15:
+	for t in sites:
+		if p.distance_to(t["c"] as Vector2) < float(t["r"]) * 1.15:
 			return true
 	return false
 
@@ -647,11 +702,11 @@ func _utility_props() -> void:
 	var tower_mesh := MeshKit.finish(tower, MeshKit.mat(Color(0.62, 0.63, 0.60), 0.85, 0.2))
 	var tx := []
 	var wx := []
-	for t in TOWNS:
-		var c: Vector3 = t[0]
-		var r: float = t[1]
+	for t in sites:
+		var c: Vector2 = t["c"]
+		var r: float = float(t["r"])
 		for i in 3:
-			var q := Vector2(c.x, c.z) + Vector2(cos(float(i) * 2.1), sin(float(i) * 2.1)) * (r * 1.15)
+			var q := c + Vector2(cos(float(i) * 2.1), sin(float(i) * 2.1)) * (r * 1.15)
 			if not Sim.buildable(q.x, q.y, 0.92, 6.0):
 				continue
 			var y := Sim.height_at(q.x, q.y)

@@ -444,16 +444,7 @@ func _draw_targets() -> void:
 ## rather than raycast: the terrain has no collision mesh at all, it is an
 ## analytic field, so this is the only thing there is to ask.
 func _los_clear(from: Vector3, to: Vector3) -> bool:
-	var span := from.distance_to(to)
-	if span < 1.0:
-		return true
-	var steps := clampi(int(span / 220.0), 6, 40)
-	for i in range(1, steps):
-		var t := float(i) / float(steps)
-		var q: Vector3 = from.lerp(to, t)
-		if q.y < Sim.height_at(q.x, q.z) - 2.0:
-			return false
-	return true
+	return Sim.line_of_sight(from, to)
 
 ## A rectangle drawn as a dashed outline.
 func _box_dashed(r: Rect2, col: Color, w := 1.0) -> void:
@@ -704,7 +695,14 @@ func _draw_sensor_stub(c: Vector2, r: float) -> void:
 	_box(Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0), DIM, 1.2)
 	_txt(c - Vector2(r - 8, -4), "SENSOR   ALT+RMB", 13, DIM)
 
+## When each contact was last actually seen, so a masked one leaves a fading
+## trace rather than vanishing the instant it goes behind something.
+var _held := {}
+
 func _draw_radar_at(c: Vector2, r: float) -> void:
+	for k in _held.keys():
+		if not is_instance_valid(k) or _t - float(_held[k]) > 10.0:
+			_held.erase(k)
 	draw_arc(c, r, 0, TAU, 40, DIM, 1.2)
 	draw_arc(c, r * 0.5, 0, TAU, 30, Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
 	draw_line(c - Vector2(0, r), c + Vector2(0, r), Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
@@ -727,6 +725,21 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 		var p := c + Vector2(sin(bearing), -cos(bearing)) * rr
 		var hostile: bool = ("team" in n) and n.team != jet.team
 		var col := RED if hostile else Color(0.4, 0.8, 1.0)
+		# Terrain masking, on the scope as well as on the lock. A contact behind
+		# a ridge is not a return; painting it solid and then refusing to lock
+		# it is worse than not painting it, because the pilot can see it and
+		# cannot understand why the radar will not take it.
+		var masked := d > 2000.0 and not Sim.line_of_sight(
+			jet.global_position + Vector3(0, 4, 0),
+			(n as Node3D).global_position + Vector3(0, 4, 0))
+		if masked:
+			# a faded memory trace where it was last seen, and nothing more
+			if _held.has(n) and _t - float(_held[n]) < 8.0:
+				var fade: float = clampf(1.0 - (_t - float(_held[n])) / 8.0, 0.0, 1.0)
+				draw_arc(p, 3.0, 0, TAU, 8,
+					Color(col.r, col.g, col.b, 0.30 * fade), 1.0)
+			continue
+		_held[n] = _t
 		if n is GroundTarget:
 			draw_rect(Rect2(p - Vector2(3, 3), Vector2(6, 6)), col, false, 1.4)
 		else:

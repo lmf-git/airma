@@ -6,6 +6,11 @@ const NATO_JETS := ["f16", "f15", "typhoon", "rafale"]
 const OPFOR_JETS := ["su35", "mig29", "su57", "j20"]
 const NATO_HELIS := ["ah64", "tiger"]
 const OPFOR_HELIS := ["mi28", "z10"]
+## Aircraft the AI flies for something other than air-to-air: a mud mover that
+## works the ground and the shipping, and a transport going about its business.
+const NATO_CAS := ["a10", "f16"]
+const OPFOR_CAS := ["su35", "mig29"]
+const AI_TRANSPORTS := ["c130", "ac130"]
 
 var terrain: Terrain
 var base: Airbase
@@ -60,6 +65,7 @@ var _pod_t := 0.0
 var _pod_want := -1
 var _admin_test := false
 var _admin_t := 0.0
+var _admin_from := ""
 var _restart_test := false
 var _restart_t := 0.0
 var _restart_n := 0
@@ -73,6 +79,52 @@ var _naval_t := 0.0
 var _naval_hp := 0.0
 var _naval_ship: Node3D = null
 var _naval_shot := false
+var _naval_weapon := "gbu32"
+var _bat_test := false
+var _bat_t := 0.0
+var _bat_a: Node3D = null
+var _bat_b: Node3D = null
+var _bat_hp := [0.0, 0.0]
+var _bat_said := 0
+var _cas_test := false
+var _cas_t := 0.0
+var _cas_said := 0
+var _cas_hp := {}
+var _chat_test := false
+var _chat_t := 0.0
+var _chat_step := 0
+var _flight_lead: AIPlane = null
+var _cas_lead: AIPlane = null
+var _form_test := false
+var _form_t := 0.0
+var _form_said := 0
+var _form_sum := 0.0
+var _form_n := 0
+var _form_worst := 0.0
+var _mask_test := false
+var _mask_t := 0.0
+var _shipnet := false
+var _shipnet_t := 0.0
+var _shipnet_said := 0
+var _splash_test := false
+var _splash_t := 0.0
+var _splash_step := 0
+var _auto_diag := false
+var _auto_diag_t := 0.0
+var _auto_diag_n := 0
+var _vls_test := false
+var _vls_t := 0.0
+var _vls_step := 0
+var _vls_ship: Node3D = null
+var _vls_best := 1e9
+var _town_test := false
+var _splash_aim := Vector3.INF
+var _splash_hit := Vector3.INF
+var _splash_r := 0.0
+var _dc_test := false
+var _dc_t := 0.0
+var _dc_ship: Node3D = null
+var _dc_said := 0
 var _trig_test := false
 var _trig_t := 0.0
 var _seam_test := false
@@ -169,6 +221,7 @@ var map: MapView
 var carrier: Carrier
 var fleet_count := 0
 var weapon_cam_on := false
+var chat: ChatBox = null
 var ship: Ship = null
 var _ship_kind := ""
 var admin: AdminMenu
@@ -257,6 +310,8 @@ func _ready() -> void:
 	ui.add_child(pod)
 	_place_pod()
 	get_viewport().size_changed.connect(_place_pod)
+	chat = ChatBox.new()
+	ui.add_child(chat)
 	map = MapView.new()
 	map.world = self
 	ui.add_child(map)
@@ -424,6 +479,7 @@ func _process(delta: float) -> void:
 	# hanging it off the audio rig meant it never ran if there was no sound.
 	Sim.ui_modal = (is_instance_valid(map) and map.visible) \
 		or (is_instance_valid(actions) and actions.visible) \
+		or (is_instance_valid(chat) and chat.typing) \
 		or get_tree().paused
 	if is_instance_valid(hud) and is_instance_valid(cam) and running:
 		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT)
@@ -676,12 +732,52 @@ func _process(delta: float) -> void:
 				rad_to_deg(asin(clampf(-b.z.y, -1.0, 1.0))),
 				rad_to_deg(atan2(-b.x.y, b.y.y)), str(player.alive)])
 			get_tree().quit()
+	# hold the view on something real while following
+	if is_instance_valid(admin) and admin.following and is_instance_valid(cam):
+		if not is_instance_valid(cam.subject) or not _traffic.has(cam.subject):
+			_follow_traffic(true)
 	if _admin_test:
 		_admin_t += delta
 		if _admin_t > 3.0 and _traffic.is_empty():
+			# optionally get out of the aeroplane first: the report is that
+			# traffic only flies its approach while the player is in one
+			if _admin_from != "":
+				if _admin_from == "ship":
+					for sh in get_tree().get_nodes_in_group("ships"):
+						var v := sh as Ship
+						if v != null and v.has_gun() and v.team == 0:
+							_enter_ship(v)
+							break
+				elif _admin_from == "tank":
+					for v in get_tree().get_nodes_in_group("vehicles"):
+						if v is Tank and (v as Tank).alive:
+							_enter_tank(v as Tank)
+							break
+				elif _admin_from == "foot":
+					_try_dismount()
+				print("[admin] player is now in: %s (aeroplane valid=%s active=%s)" % [
+					_admin_from, str(is_instance_valid(player)),
+					str(player.active) if is_instance_valid(player) else "-"])
 			admin.jet_id = "f16"
 			_do_admin("flight")
+			if _admin_from != "":
+				_do_admin("follow")     # and watch them, from wherever we are
 			print("[admin] called a flight of %d" % _traffic.size())
+		elif _admin_t > 8.0 and fmod(_admin_t, 25.0) < delta:
+			for t in _traffic:
+				if not is_instance_valid(t):
+					continue
+				var view := "none"
+				if is_instance_valid(cam) and cam.current:
+					view = "chase->%s" % (String(cam.subject.name) \
+						if is_instance_valid(cam.subject) else "-")
+				elif is_instance_valid(ship) and is_instance_valid(ship.cam) \
+						and ship.cam.current:
+					view = "ship"
+				print("[admin] %-12s auto=%-8s active=%s  z=%8.1f y=%6.1f thr=%.2f gnd=%s  view=%s" % [
+					t.name, t.auto, str(t.active), t.global_position.z,
+					t.global_position.y, t.throttle, str(t.on_ground), view])
+				break
 		elif _admin_t > 210.0:
 			_admin_test = false
 			var down := 0
@@ -758,14 +854,25 @@ func _process(delta: float) -> void:
 			player.fire_cd = 0.0
 			player.set_weapon(maxi(player.weapon_types.find("aim120"), 0))
 			player.fire()
-		elif _wcam_t > 4.0:
+			cam.diag = true
+			cam.wcam_jitter = 0.0
+			cam.wcam_jsum = 0.0
+			cam.wcam_jn = 0
+		elif _wcam_t > 12.0:
 			_wcam_test = false
 			var riding: bool = cam.weapon_cam != null and is_instance_valid(cam.weapon_cam)
 			var d := -1.0
 			if riding:
 				d = cam.global_position.distance_to((cam.weapon_cam as Node3D).global_position)
+			# How steady the ride is: the frame-to-frame change in the boom
+			# vector from the round to the camera. A rigid follow holds it near
+			# zero; a camera stepping at the physics rate while the round is
+			# drawn interpolated moves a whole tick of travel every frame.
 			print("[wcam] armed=%s riding a round=%s, camera %.1f m from it" % [
 				str(weapon_cam_on), str(riding), d])
+			print("[wcam] boom wobble over %d frames: mean %.3f m, worst %.3f m" % [
+				cam.wcam_jn, cam.wcam_jsum / maxf(float(cam.wcam_jn), 1.0),
+				cam.wcam_jitter])
 			get_tree().quit()
 	if _naval_test and is_instance_valid(player):
 		_naval_t += delta
@@ -799,11 +906,12 @@ func _process(delta: float) -> void:
 				pod.toggle_laser()
 			pod._process(0.016)
 			player.locked = true
-			player.set_weapon(maxi(player.weapon_types.find("gbu32"), 0))
+			player.set_weapon(maxi(player.weapon_types.find(_naval_weapon), 0))
 			player.fire_cd = 0.0
 			_reset_interp.call_deferred(player)
-			print("[naval] attacking %s, hull %.0f; laser spot %s (sea level %.0f)" % [
-				_naval_ship.call("display_name"), _naval_hp,
+			player.target = _naval_ship
+			print("[naval] attacking %s with %s, hull %.0f; laser spot %s (sea level %.0f)" % [
+				_naval_ship.call("display_name"), _naval_weapon, _naval_hp,
 				str(player.designated.round()), Sim.WATER_LEVEL])
 		elif _naval_t > 5.0 and not _naval_shot:
 			_naval_shot = true
@@ -818,6 +926,569 @@ func _process(delta: float) -> void:
 			print("[naval] RESULT: hull %.0f -> %.0f (%s)" % [_naval_hp, now,
 				"HIT" if now < _naval_hp else "no damage"])
 			get_tree().quit()
+	# Two hostile warships put within gun range of each other, left to it.
+	if _bat_test:
+		_bat_t += delta
+		if _bat_t > 1.5 and not is_instance_valid(_bat_a):
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v == null or not v.has_gun():
+					continue
+				if v.team == 0 and _bat_a == null:
+					_bat_a = v
+				elif v.team == 1 and _bat_b == null:
+					_bat_b = v
+			if _bat_a == null or _bat_b == null:
+				print("[fleet] need one warship a side")
+				_bat_test = false
+				return
+			var mid: Vector3 = (_bat_a.global_position + _bat_b.global_position) * 0.5
+			_bat_a.global_position = Vector3(mid.x - 4000.0, Sim.WATER_LEVEL, mid.z)
+			_bat_b.global_position = Vector3(mid.x + 4000.0, Sim.WATER_LEVEL, mid.z)
+			_bat_hp = [_bat_a.get("health"), _bat_b.get("health")]
+			print("[fleet] %s (t0, hull %.0f) vs %s (t1, hull %.0f), 8.0 km apart" % [
+				_bat_a.call("display_name"), _bat_hp[0],
+				_bat_b.call("display_name"), _bat_hp[1]])
+		else:
+			var tick := int((_bat_t - 3.0) / 30.0) + 1
+			if tick > _bat_said:
+				_bat_said = tick
+				var rng := -1.0
+				if is_instance_valid(_bat_a) and is_instance_valid(_bat_b):
+					rng = _bat_a.global_position.distance_to(_bat_b.global_position)
+				for v in [_bat_a, _bat_b]:
+					if is_instance_valid(v):
+						print("[fleet] %6.1fs  %-26s %-46s spd %4.1f  fired %2d  rng %5.0f m" % [
+							_bat_t, v.call("display_name"), v.call("damage_report"),
+							v.get("speed"), int(v.get("rounds")), rng])
+			if _bat_t > 150.0:
+				_bat_test = false
+				for i in 2:
+					var v: Node3D = _bat_a if i == 0 else _bat_b
+					if not is_instance_valid(v):
+						print("[fleet] RESULT: side %d gone from the board" % i)
+						continue
+					print("[fleet] RESULT: side %d %-26s hull %.0f -> %.0f  %s" % [
+						i, v.call("display_name"), _bat_hp[i], v.get("health"),
+						"SUNK" if not bool(v.get("alive")) else "afloat"])
+				get_tree().quit()
+	# Where the towns ended up, how level they are, and whether the streets are
+	# on the surface or buried in it.
+	if _town_test:
+		_town_test = false
+		for t in scenery.sites:
+			var c: Vector2 = t["c"]
+			var r: float = float(t["r"])
+			var moved: float = c.distance_to(t["was"] as Vector2)
+			# worst height spread across a 24 m building footprint, sampled
+			# across the town, and the mean gradient over the whole site
+			var worst := 0.0
+			var mean := 0.0
+			var n := 0
+			for i in 15:
+				for j in 15:
+					var q := c + Vector2(float(i - 7), float(j - 7)) * (r / 8.0)
+					if q.distance_to(c) > r:
+						continue
+					var lo := 1e9
+					var hi := -1e9
+					for dx in [-12.0, 12.0]:
+						for dz in [-12.0, 12.0]:
+							var y := Sim.height_at(q.x + dx, q.y + dz)
+							lo = minf(lo, y)
+							hi = maxf(hi, y)
+					worst = maxf(worst, hi - lo)
+					mean += 1.0 - Sim.normal_at(q.x, q.y).y
+					n += 1
+			print("[town] %-14s at %s (moved %4.0f m)  gradient %.4f  worst footprint step %5.2f m" % [
+				String(t["name"]), str(c.round()), moved,
+				mean / maxf(float(n), 1.0), worst])
+		# and the streets: are they on the ground or under it
+		var buried := 0
+		var total := 0
+		var deepest := 0.0
+		for seg in scenery._streets:
+			var a: Vector2 = seg[0]
+			var b: Vector2 = seg[1]
+			for k in 12:
+				var q: Vector2 = a.lerp(b, float(k) / 11.0)
+				total += 1
+				# the ribbon lays its surface 0.16 m above the sampled height,
+				# so anything more than that below a neighbour is buried
+				var here := Sim.height_at(q.x, q.y) + 0.16
+				var around := -1e9
+				for dx in [-6.0, 6.0]:
+					for dz in [-6.0, 6.0]:
+						around = maxf(around, Sim.height_at(q.x + dx, q.y + dz))
+				if around > here:
+					buried += 1
+					deepest = maxf(deepest, around - here)
+		print("[town] streets: %d segments, %d of %d sample points buried, deepest %.2f m" % [
+			scenery._streets.size(), buried, total, deepest])
+		# and the trunk network: how much climbing it does, and how steep it gets
+		var climb := 0.0
+		var length := 0.0
+		var steepest := 0.0
+		for r in Sim.ROADS:
+			var a: Vector2 = r[0]
+			var b: Vector2 = r[1]
+			var d := a.distance_to(b)
+			length += d
+			var steps: int = maxi(int(d / 50.0), 2)
+			var last := Sim.height_at(a.x, a.y)
+			for k in range(1, steps + 1):
+				var q: Vector2 = a.lerp(b, float(k) / float(steps))
+				var y := Sim.height_at(q.x, q.y)
+				climb += absf(y - last)
+				steepest = maxf(steepest, absf(y - last) / (d / float(steps)))
+				last = y
+		for t in scenery.sites:
+			var tc: Vector2 = t["c"]
+			var near := 1e9
+			for r in Sim.ROADS:
+				near = minf(near, Geometry2D.get_closest_point_to_segment(
+					tc, r[0], r[1]).distance_to(tc))
+			print("[town] %-14s nearest trunk road %.0f m from the middle of it" % [
+				String(t["name"]), near])
+		print("[town] trunk roads: %d legs, %.1f km of tarmac, %.0f m of climb (%.1f m per km), steepest %.1f%%" % [
+			Sim.ROADS.size(), length * 0.001, climb, climb / maxf(length * 0.001, 1.0),
+			steepest * 100.0])
+		get_tree().quit()
+	# Do the tubes actually reach an aeroplane, or does the round climb away.
+	if _vls_test and is_instance_valid(player):
+		_vls_t += delta
+		if _vls_t > 2.0 and _vls_step == 0:
+			_vls_step = 1
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v != null and v.has_vls() and v.team != 0:
+					_vls_ship = v
+					break
+			if _vls_ship == null:
+				print("[vls] no hostile ship with tubes")
+				_vls_test = false
+				return
+			# put the aeroplane where a strike aircraft would be: twelve
+			# kilometres out and eight thousand feet up, running in
+			var sp: Vector3 = _vls_ship.global_position
+			player.team = 0
+			player.global_transform = Transform3D(Basis(),
+				sp + Vector3(0.0, 2400.0, 12000.0))
+			player.linear_velocity = Vector3(0, 0, -240.0)
+			player.gear_down = false
+			player.gear_anim = 0.0
+			_reset_interp(player)
+			print("[vls] %s at %s, aeroplane 12.0 km out at 2400 m" % [
+				_vls_ship.call("display_name"), str(sp.round())])
+		elif _vls_step == 1 and _vls_t > 3.0:
+			_vls_step = 2
+			print("[vls] launch: %s" % str(_vls_ship.call("fire_vls", player)))
+		elif _vls_step == 2:
+			var live := 0
+			for m in get_tree().get_nodes_in_group("missiles"):
+				if not is_instance_valid(m):
+					continue
+				live += 1
+				_vls_best = minf(_vls_best,
+					(m as Node3D).global_position.distance_to(player.global_position))
+			if int(_vls_t) % 6 == 0 and int(_vls_t * 60.0) % 360 == 0:
+				for m in get_tree().get_nodes_in_group("missiles"):
+					if is_instance_valid(m):
+						var mp: Vector3 = (m as Node3D).global_position
+						print("[vls] t=%5.1f  round at %s  alt %6.0f  %.0f m from the aeroplane" % [
+							_vls_t, str(mp.round()), mp.y,
+							mp.distance_to(player.global_position)])
+						break
+			if _vls_t > 28.0:
+				_vls_test = false
+				print("[vls] RESULT: closest approach %.0f m, %d rounds still up, player alive=%s" % [
+					_vls_best, live, str(player.is_alive())])
+				get_tree().quit()
+	# What the autoland is actually commanding on the way down.
+	if _auto_diag and is_instance_valid(player):
+		_auto_diag_t += delta
+		var step := int(_auto_diag_t / 2.0)
+		if step > _auto_diag_n:
+			_auto_diag_n = step
+			var pp := player.global_position
+			print("[auto] t=%5.1f  x=%+7.1f z=%+8.1f y=%6.1f agl=%5.1f  ias=%5.1f kt  thr=%.2f  vs=%+5.2f  gnd=%s" % [
+				_auto_diag_t, pp.x, pp.z, pp.y, player.agl, player.ias * 1.94384,
+				player.throttle, player.linear_velocity.y, str(player.on_ground)])
+	# A bomb into open water: is the fireball anywhere a player could see it.
+	if _splash_test and is_instance_valid(player):
+		_splash_t += delta
+		if _splash_t > 2.0 and _splash_step == 0:
+			_splash_step = 1
+			var sea := _deep_water(Vector3(26000.0, 0.0, 3000.0))
+			player.global_transform = Transform3D(Basis(),
+				Vector3(sea.x, Sim.WATER_LEVEL + 1400.0, sea.z + 2600.0))
+			player.linear_velocity = Vector3(0, 0, -230.0)
+			player.gear_down = false
+			player.gear_anim = 0.0
+			player.set_bays(true)
+			for k in player.bays:
+				player.bays[k]["anim"] = 1.0
+				player.bays[k]["open"] = true
+			# the shipping stands down, so the only thing going off out here is
+			# the bomb rather than somebody's five inch practice
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v != null:
+					v.ai = false
+			# lase the water, the way a pilot would: without the pod running,
+			# `designated` is cleared every frame and the bomb leaves unguided
+			# Deliberately NOT lased. A bomb that reaches the water with nothing
+			# to detonate on is the case that was broken: it falls through the
+			# proximity fuse to the terminal water check, and that is where the
+			# fireball used to be drawn under the sea.
+			if pod.active:
+				pod.toggle()
+			_splash_aim = Vector3(sea.x, Sim.WATER_LEVEL, sea.z)
+			player.locked = true
+			player.set_weapon(maxi(player.weapon_types.find("gbu32"), 0))
+			player.fire_cd = 0.0
+			Sim.last_burst = Vector3.INF
+			_reset_interp.call_deferred(player)
+			print("[splash] aiming at open water %s, sea level %.0f" % [
+				str(player.designated.round()), Sim.WATER_LEVEL])
+		elif _splash_t > 4.5 and _splash_step == 1:
+			_splash_step = 2
+			print("[splash] release: %s" % ("away" if player.fire() == "" else "refused"))
+		elif _splash_step == 2:
+			# latch the burst that belongs to this bomb, not whatever else in the
+			# world happened to go off last
+			if Sim.last_burst != Vector3.INF \
+					and Sim.last_burst.distance_to(_splash_aim) < 2500.0:
+				_splash_hit = Sim.last_burst
+				_splash_r = Sim.last_burst_r
+			if _splash_t < 40.0:
+				return
+			_splash_test = false
+			Sim.last_burst = _splash_hit
+			Sim.last_burst_r = _splash_r
+			if Sim.last_burst == Vector3.INF:
+				print("[splash] RESULT: FAILED — nothing ever went off")
+			else:
+				var above: float = Sim.last_burst.y - Sim.WATER_LEVEL
+				print("[splash] last fireball at %s, radius %.0f — %.1f m %s the surface" % [
+					str(Sim.last_burst.round()), Sim.last_burst_r, absf(above),
+					"above" if above >= 0.0 else "BELOW"])
+				# and the reason it was invisible in the first place: the sea is
+				# a transparent mesh sixty kilometres across, so it has to be
+				# told to sort behind everything drawn at the surface
+				var sea_pri := -99
+				var boom_pri := -99
+				for n in terrain.get_children():
+					if n.name == "Water" and n is MeshInstance3D:
+						var wm := (n as MeshInstance3D).material_override as StandardMaterial3D
+						if wm != null:
+							sea_pri = wm.render_priority
+				var probe := Effects.Boom.new()
+				add_child(probe)
+				boom_pri = probe._mat.render_priority
+				probe.queue_free()
+				print("[splash] render order: sea %d, explosion %d (sea must be lower)" % [
+					sea_pri, boom_pri])
+				print("[splash] RESULT: %s" % ("ok" if above >= -0.5 \
+					and sea_pri < boom_pri else "FAILED"))
+			get_tree().quit()
+	# What each end of a session thinks the fleet is doing.
+	if _shipnet:
+		_shipnet_t += delta
+		var mark := int(_shipnet_t / 10.0)
+		if mark > _shipnet_said:
+			_shipnet_said = mark
+			var side := "single"
+			if net != null and net.active:
+				side = "host" if net.is_host else "client %d" % net.my_id
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v == null or v.fleet_idx > 2:
+					continue
+				print("[shipnet] %-12s t=%3.0f  hull %d  %-26s pos %s  hdg %6.1f  hull %6.0f  ghost=%s" % [
+					side, _shipnet_t, v.fleet_idx, v.display_name(),
+					str(v.global_position.round()), rad_to_deg(v.heading),
+					v.health, str(v.ghost)])
+	# Does the terrain actually block a line, and does the radar respect it.
+	if _mask_test and is_instance_valid(player):
+		_mask_t += delta
+		if _mask_t > 2.0:
+			_mask_test = false
+			# a pair of points either side of the highest ground we can find
+			var best := Vector3.ZERO
+			var bh := -1e9
+			for i in 40:
+				for j in 40:
+					var q := Vector3(float(i - 20) * 700.0, 0.0, float(j - 20) * 700.0)
+					var h := Sim.height_at(q.x, q.z)
+					if h > bh:
+						bh = h
+						best = Vector3(q.x, h, q.z)
+			print("[mask] highest ground nearby: %s at %.0f m" % [
+				str(best.round()), bh])
+			var a := best + Vector3(-3500.0, 0, 0)
+			var b := best + Vector3(3500.0, 0, 0)
+			a.y = Sim.height_at(a.x, a.z) + 40.0
+			b.y = Sim.height_at(b.x, b.z) + 40.0
+			print("[mask] low either side of it: clear=%s (expect false), depth %.0f m" % [
+				str(Sim.line_of_sight(a, b)), Sim.masking_depth(a, b)])
+			var ha := Vector3(a.x, bh + 2500.0, a.z)
+			var hb := Vector3(b.x, bh + 2500.0, b.z)
+			print("[mask] both well above it: clear=%s (expect true),  depth %.0f m" % [
+				str(Sim.line_of_sight(ha, hb)), Sim.masking_depth(ha, hb)])
+			# and what the radar does about it
+			var ghost := AIPlane.new()
+			ghost.setup("su35")
+			ghost.team = 1
+			ghost.name = "Masked bandit"
+			add_child(ghost)
+			ghost.global_position = b
+			ghost.freeze = true
+			player.global_position = a
+			player.team = 0
+			_reset_interp(player)
+			player.target = null
+			player.cycle_target()
+			var got_masked: bool = is_instance_valid(player.target)
+			ghost.global_position = Vector3(b.x, bh + 2500.0, b.z)
+			player.global_position = Vector3(a.x, bh + 2500.0, a.z)
+			player.target = null
+			player.cycle_target()
+			var got_clear: bool = is_instance_valid(player.target)
+			print("[mask] radar lock: behind the ridge=%s (expect false), over it=%s (expect true)" % [
+				str(got_masked), str(got_clear)])
+			# and the scope, not just the lock: count what the radar page would
+			# actually paint from behind the ridge and from over it
+			ghost.global_position = b
+			player.global_position = a
+			var paint_masked := _radar_paints(ghost)
+			ghost.global_position = Vector3(b.x, bh + 2500.0, b.z)
+			player.global_position = Vector3(a.x, bh + 2500.0, a.z)
+			var paint_clear := _radar_paints(ghost)
+			print("[mask] radar scope: paints it behind the ridge=%s (expect false), over it=%s (expect true)" % [
+				str(paint_masked), str(paint_clear)])
+			print("[mask] RESULT: %s" % ("ok" if not got_masked and got_clear \
+				and not paint_masked and paint_clear else "FAILED"))
+			get_tree().quit()
+	# Do the wingmen actually sit in the slot, and does the AI use the terrain.
+	if _form_test:
+		_form_t += delta
+		if _form_t > 1.5 and _form_said == 0:
+			_form_said = -1
+			# Nothing to fight: the point of this test is the slot, not the
+			# engagement, and a flight that splits for a bandit is measuring
+			# how far apart two aeroplanes in a dogfight get.
+			if is_instance_valid(player):
+				player.global_position = Vector3(0.0, 9000.0, 62000.0)
+				player.team = 9
+				_reset_interp(player)
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v != null:
+					v.ai = false
+					v.cells_left = 0
+			for g in get_tree().get_nodes_in_group("ground_targets"):
+				if is_instance_valid(g):
+					g.queue_free()
+		if _form_t > 3.0:
+			var step := int((_form_t - 3.0) / 15.0) + 1
+			if step > maxi(_form_said, 0):
+				_form_said = step
+				for n in get_tree().get_nodes_in_group("bandits"):
+					var a := n as AIPlane
+					if a == null or not is_instance_valid(a.leader):
+						continue
+					var want: Vector3 = a.leader.global_transform * a.slot
+					var lcl: Vector3 = a.leader.global_transform.affine_inverse() \
+						* a.global_position - a.slot
+					print("[form] %6.1fs %-12s slot err %6.1f m form=%s st=%d  dx %+6.0f dy %+6.0f dz %+6.0f  thr %.2f rol %+.2f pit %+.2f  spd %3.0f/%3.0f" % [
+						_form_t, a.name, a.global_position.distance_to(want),
+						str(a.formating), a.state, lcl.x, lcl.y, lcl.z,
+						a.throttle, a.in_roll, a.in_pitch,
+						a.linear_velocity.length(), a.leader.linear_velocity.length()])
+			# sample the settled error continuously, not just at the marks
+			if _form_t > 40.0:      # after the rejoin: what it actually holds
+				for n in get_tree().get_nodes_in_group("bandits"):
+					var a := n as AIPlane
+					if a == null or not is_instance_valid(a.leader):
+						continue
+					# only while he is actually flying the slot: a wingman who
+					# has broken off to attack something is not station keeping
+					# badly, he is doing his job
+					if not a.formating:
+						continue
+					var e: float = a.global_position.distance_to(
+						a.leader.global_transform * a.slot)
+					_form_sum += e
+					_form_worst = maxf(_form_worst, e)
+					_form_n += 1
+			if _form_t > 75.0:
+				_form_test = false
+				var n_wings := 0
+				for n in get_tree().get_nodes_in_group("bandits"):
+					var a := n as AIPlane
+					if a != null and is_instance_valid(a.leader):
+						n_wings += 1
+				var busy := 0
+				for n in get_tree().get_nodes_in_group("bandits"):
+					var a := n as AIPlane
+					if a != null and is_instance_valid(a.leader) and not a.formating:
+						busy += 1
+				print("[form] RESULT: %d wingmen (%d off doing something else); while in the slot, over %d samples mean error %.1f m, worst %.1f m" % [
+					n_wings, busy, _form_n, _form_sum / maxf(float(_form_n), 1.0),
+					_form_worst])
+				get_tree().quit()
+	# Does the chat line take a message without the aeroplane flying itself.
+	if _chat_test and is_instance_valid(player):
+		_chat_t += delta
+		if _chat_t > 1.5 and _chat_step == 0:
+			_chat_step = 1
+			_press(KEY_SLASH)
+			print("[chat] after '/': typing=%s modal=%s" % [str(chat.typing),
+				str(Sim.typing)])
+		elif _chat_t > 2.0 and _chat_step == 1:
+			_chat_step = 2
+			# "wasd" is throttle, pitch and roll; here it has to be four letters
+			var roll_before := player.in_roll
+			var pitch_before := player.in_pitch
+			for c in "wasd on the deck".to_utf8_buffer():
+				_press(KEY_A, c)
+			print("[chat] typed %d chars, draft=%s" % [chat.draft.length(), chat.draft])
+			print("[chat] stick while typing: roll %+.2f -> %+.2f, pitch %+.2f -> %+.2f" % [
+				roll_before, player.in_roll, pitch_before, player.in_pitch])
+		elif _chat_t > 2.5 and _chat_step == 2:
+			_chat_step = 3
+			_press(KEY_ENTER)
+			print("[chat] after enter: typing=%s, backlog=%d, last=%s" % [
+				str(chat.typing), chat.log_lines.size(),
+				String(chat.log_lines[-1]["text"]) if not chat.log_lines.is_empty() else "-"])
+			print("[chat] RESULT: %s" % ("ok" if not chat.typing \
+				and not chat.log_lines.is_empty() \
+				and String(chat.log_lines[-1]["text"]) == "wasd on the deck" \
+				else "FAILED"))
+			get_tree().quit()
+	# What the aeroplanes that are not fighters actually do: does the mud mover
+	# find something on the ground, roll in on it and hurt it, and does the
+	# transport get anywhere.
+	if _cas_test:
+		_cas_t += delta
+		if _cas_t > 2.0 and _cas_hp.is_empty():
+			# Its own scenario: the shipping is stood down so the movers are not
+			# spending the whole run defending against naval SAMs, and the mud
+			# is put where an aeroplane can get at it.
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v != null:
+					v.ai = false
+					v.cells_left = 0
+			var seed_at := Vector3(2000.0, 0.0, -6000.0)
+			for i in 4:
+				var g := GroundTarget.new()
+				g.team = 0
+				g.setup(["sam", "radar", "fuel", "hangar"][i])
+				add_child(g)
+				var gp := seed_at + Vector3(float(i) * 260.0 - 400.0, 0, float(i) * 190.0)
+				g.global_position = Vector3(gp.x, Sim.height_at(gp.x, gp.z), gp.z)
+				g.name = "CAS target %d" % (i + 1)
+			for n in get_tree().get_nodes_in_group("bandits"):
+				var a := n as AIPlane
+				if a == null or a.role != "cas":
+					continue
+				# put them fifteen kilometres out, pointed at the target area
+				var start := seed_at + Vector3(-13000.0, 0, -7000.0 + float(a._runs) * 900.0)
+				a.global_transform = Transform3D(Basis(),
+					Vector3(start.x, Sim.height_at(start.x, start.z) + 3200.0, start.z))
+				a.look_at_from_position(a.global_position, seed_at, Vector3.UP)
+				a.linear_velocity = -a.global_transform.basis.z * 180.0
+				_reset_interp(a)
+			for n in get_tree().get_nodes_in_group("hittable"):
+				if is_instance_valid(n) and not (n is Aircraft) and ("team" in n):
+					_cas_hp[n.get_instance_id()] = [n, float(n.get("health"))]
+			print("[cas] watching %d ground and surface targets" % _cas_hp.size())
+		elif _cas_t > 2.0:
+			var step := int(_cas_t / 12.0)
+			if step > _cas_said:
+				_cas_said = step
+				for n in get_tree().get_nodes_in_group("bandits"):
+					var a := n as AIPlane
+					if a == null or a.role == "fighter":
+						continue
+					var hr := -1.0
+					if is_instance_valid(a.target):
+						hr = Vector2(a.target.global_position.x - a.global_position.x,
+							a.target.global_position.z - a.global_position.z).length()
+					print("[cas] %6.1fs %-14s %-9s st=%d runs=%d alt %5.0f rng %6.0f spd %3.0f pit %+.2f rol %+.2f aoa %+4.1f stall=%s gun %d near %.0f ang %.1f tgt=%s" % [
+						_cas_t, a.name, a.role, a.state, a._runs,
+						a.global_position.y, hr, a.linear_velocity.length(),
+						a.in_pitch, a.in_roll, rad_to_deg(a.aoa), str(a.stalling), a.ammo,
+						a.min_slant, a.min_ang,
+						String(a.target.name) if is_instance_valid(a.target) else "none"])
+			if _cas_t > 150.0:
+				_cas_test = false
+				var hurt := 0
+				var killed := 0
+				for k in _cas_hp:
+					var e: Array = _cas_hp[k]
+					if not is_instance_valid(e[0]):
+						killed += 1
+					elif float(e[0].get("health")) < float(e[1]) - 0.5:
+						hurt += 1
+				var movers := 0
+				var hauls := 0
+				for n in get_tree().get_nodes_in_group("bandits"):
+					var a := n as AIPlane
+					if a == null:
+						continue
+					if a.role == "cas":
+						movers += 1
+						print("[cas] RESULT: %s made %d attack runs, %d rounds left; closest %.0f m, best nose-on %.1f deg" % [
+							a.name, a._runs, a.ammo, a.min_slant, a.min_ang])
+					elif a.role == "transport":
+						hauls += 1
+						print("[cas] RESULT: %s on leg %d at %.0f m, %.0f m agl" % [
+							a.name, a._leg, a.global_position.y, a.agl])
+				print("[cas] RESULT: %d movers and %d transports still up; %d targets damaged, %d destroyed" % [
+					movers, hauls, hurt, killed])
+				get_tree().quit()
+	# One ship hurt on purpose, then left alone to see if the party save her.
+	if _dc_test:
+		_dc_t += delta
+		if _dc_t > 1.5 and not is_instance_valid(_dc_ship):
+			# nobody fights: this is about the party, not the enemy
+			for sh in get_tree().get_nodes_in_group("ships"):
+				var v := sh as Ship
+				if v == null:
+					continue
+				if v.kind == "destroyer" and _dc_ship == null:
+					_dc_ship = v          # she keeps her captain
+				else:
+					v.ai = false          # nobody else fights, or moves
+					v.telegraph = 0.0
+					v.speed = 0.0
+			if _dc_ship == null:
+				print("[dc] no destroyer")
+				_dc_test = false
+				return
+			_dc_ship.set("telegraph", 1.0)
+			print("[dc] %s hull %.0f, full ahead" % [_dc_ship.call("display_name"),
+				_dc_ship.get("health")])
+		elif is_instance_valid(_dc_ship) and _dc_t > 3.0 and _dc_said == 0:
+			_dc_said = 1
+			_dc_ship.call("take_hit", 620.0, null)
+			_dc_ship.call("take_hit", 380.0, null)
+			print("[dc] two hits for 1000 of 2200: %s" % _dc_ship.call("damage_report"))
+		elif is_instance_valid(_dc_ship) and _dc_t > 3.0:
+			var step := int((_dc_t - 3.0) / 12.0) + 1
+			if step > _dc_said and step <= 10:
+				_dc_said = step
+				print("[dc] %6.1fs  %s  spd %4.1f  list %4.1f deg" % [
+					_dc_t, _dc_ship.call("damage_report"), _dc_ship.get("speed"),
+					rad_to_deg(float(_dc_ship.get("list_ang")))])
+			if _dc_t > 132.0:
+				_dc_test = false
+				print("[dc] RESULT: hull %.0f, %s" % [_dc_ship.get("health"),
+					"afloat" if bool(_dc_ship.get("alive")) else "sunk"])
+				get_tree().quit()
 	if _trig_test and is_instance_valid(player):
 		_trig_t += delta
 		if _trig_t > 2.5:
@@ -1484,7 +2155,32 @@ func _process(delta: float) -> void:
 					n += 1
 					lo = minf(lo, v.global_position.y - Sim.height_at(
 						v.global_position.x, v.global_position.z))
-			print("[wreck] t=%4.1f  vehicles=%d  lowest above ground=%.2f m" % [_wreck_t2, n, lo])
+			var junk := get_tree().get_nodes_in_group("wreckage")
+			var loose := 0
+			var settled := 0
+			var turrets := 0
+			for w in junk:
+				if not is_instance_valid(w) or not (w is Effects.Debris):
+					continue
+				loose += 1
+				if String(w.name).ends_with("turret"):
+					turrets += 1
+				if (w as Effects.Debris).at_rest():
+					settled += 1
+			var burning := 0
+			for v in get_tree().get_nodes_in_group("vehicles"):
+				if is_instance_valid(v) and bool(v.get("_wrecked")):
+					burning += 1
+			var sample := ""
+			for w in junk:
+				if is_instance_valid(w) and w is Effects.Debris:
+					var rb := w as Effects.Debris
+					sample = " first: agl %.2f v %.2f" % [
+						rb.global_position.y - Sim.height_at(rb.global_position.x,
+							rb.global_position.z), rb.vel.length()]
+					break
+			print("[wreck] t=%4.1f  vehicles=%d  lowest above ground=%.2f m  burning=%d  debris=%d (%d turrets, %d at rest)%s" % [
+				_wreck_t2, n, lo, burning, loose, turrets, settled, sample])
 	if _tank_test:
 		if tank == null and not parked.is_empty():
 			for v in get_tree().get_nodes_in_group("vehicles"):
@@ -2037,9 +2733,14 @@ func _build_fleet() -> void:
 		["cargo",     Vector3(-6000, 0, 16000), 95.0, 2],
 		["cargo",     Vector3(20000, 0, 12000), 265.0, 2],
 	]
-	for e in plan:
+	for i in plan.size():
+		var e: Array = plan[i]
 		var sh := Ship.new()
 		sh.setup(String(e[0]), int(e[3]))
+		sh.fleet_idx = i
+		# every peer lays the same fleet down in the same order, so the index is
+		# the whole address the network needs
+		sh.ghost = net != null and net.active and not net.is_host
 		add_child(sh)
 		var at: Vector3 = grp + (e[1] as Vector3)
 		# The coast is ragged and the shelf runs out to about 24 km, so a berth
@@ -2216,8 +2917,7 @@ func _do_admin(id: String) -> void:
 			_call_traffic(admin.jet_id, "takeoff", 0)
 		"follow":
 			admin.following = not admin.following
-			if not admin.following and is_instance_valid(cam):
-				cam.subject = player
+			_follow_traffic(admin.following)
 		"clear":
 			for t in _traffic:
 				if is_instance_valid(t):
@@ -2263,9 +2963,43 @@ func _call_traffic(id: String, what: String, slot: int) -> void:
 	craft.add_to_group("hittable")
 	_reset_interp.call_deferred(craft)
 	_traffic.append(craft)
-	if admin.following and is_instance_valid(cam):
-		cam.subject = craft
+	if admin.following:
+		_follow_traffic(true)
 	Sim.report("%s called in: %s" % [String(craft.spec["name"]), what], Sim.Ev.INFO)
+
+## Watch the traffic, from whatever the player happens to be crewing.
+##
+## Setting the chase camera's subject is not enough on its own. A player on a
+## ship or in a tank is looking through *that* vehicle's camera, so the aircraft
+## camera can be pointed at a landing aeroplane all it likes and the view never
+## moves — which reads as the traffic not flying at all, rather than as the
+## camera being somewhere else.
+func _follow_traffic(on: bool) -> void:
+	if not is_instance_valid(cam):
+		return
+	if on:
+		var subject: Node3D = null
+		for t in _traffic:
+			if is_instance_valid(t):
+				subject = t
+				break
+		if subject == null:
+			admin.following = false
+			Sim.report("nothing in the circuit to follow", Sim.Ev.BAD)
+			return
+		cam.subject = subject as Aircraft
+		cam.mode = ChaseCamera.Mode.CHASE
+		cam.current = true          # take the view off the ship or the tank
+		Sim.report("following %s" % subject.name, Sim.Ev.INFO)
+		return
+	cam.subject = player if is_instance_valid(player) else null
+	# and give it back to whatever the player is actually riding
+	if is_instance_valid(ship) and ship.occupied:
+		ship.cam.current = true
+	elif is_instance_valid(tank) and is_instance_valid(tank.cam):
+		tank.cam.current = true
+	else:
+		cam.current = true
 
 func _do_action(id: String) -> void:
 	# vehicle and ship actions first: they are the ones on screen when crewing
@@ -2362,6 +3096,8 @@ func _enter_ship(sh: Ship) -> void:
 	hud.walker = null
 	ship = sh
 	sh.mount(true)
+	if net != null and net.active:
+		net.take_ship_conn(sh.fleet_idx, true)
 	pod.host = sh
 	hud.ship = sh
 	Sim.report("you have the conn — W/S engine order, A/D helm", Sim.Ev.INFO)
@@ -2371,6 +3107,8 @@ func _leave_ship() -> void:
 	if not is_instance_valid(ship):
 		return
 	ship.mount(false)
+	if net != null and net.active:
+		net.take_ship_conn(ship.fleet_idx, false)
 	pod.host = null
 	if pod.active:
 		pod.toggle()
@@ -2848,6 +3586,21 @@ func _spawn_threats(count := -1) -> void:
 		b.linear_velocity = -b.global_transform.basis.z * 240.0
 		_reset_interp.call_deferred(b)
 		b.died.connect(_on_bandit_down)
+		# Pairs: number one leads, number two flies his wing, and so on down the
+		# flight. They cruise in the slot and split when there is something to
+		# fight, which is what a patrol actually looks like.
+		if i % 2 == 1 and _flight_lead != null and is_instance_valid(_flight_lead):
+			b.leader = _flight_lead
+			b.slot = Vector3(90.0, -18.0, 120.0) if (i / 2.0) < 1.0 \
+				else Vector3(-90.0, -18.0, 120.0)
+			# in the slot from the start: a flight takes off together, and
+			# making the wingman rejoin from two kilometres every match just
+			# means he spends the first minute of it catching up
+			b.global_transform = Transform3D(_flight_lead.global_transform.basis,
+				_flight_lead.global_transform * b.slot)
+			b.linear_velocity = _flight_lead.linear_velocity
+		else:
+			_flight_lead = b
 	var picks := [["sam", Vector3(-900, 0, -8300)], ["sam", Vector3(1400, 0, -9400)],
 		["radar", Vector3(200, 0, -8900)], ["fuel", Vector3(700, 0, -8600)],
 		["hangar", Vector3(-300, 0, -9200)]]
@@ -2870,6 +3623,47 @@ func _spawn_threats(count := -1) -> void:
 			_reset_interp.call_deferred(h)
 	if mode != null and mode.mode in ["tdm", "ffa"]:
 		return
+	# A pair working the ground: the aeroplanes that are not trying to shoot
+	# you down are the ones that make the field feel busy.
+	var cas: Array = OPFOR_CAS if JetSpec.bloc_of(Sim.selected_jet) == "nato" \
+		else NATO_CAS
+	for i in 2:
+		var m := AIPlane.new()
+		m.setup(cas[i % cas.size()])
+		m.role = "cas"
+		m.team = 1
+		m.name = "Mud Mover %d" % (i + 1)
+		m.home = Vector3(-2000.0 + i * 3800.0, 0, -7000.0)
+		m.patrol_r = 3200.0
+		add_child(m)
+		var mx: float = m.home.x
+		var mz: float = m.home.z - 5000.0
+		m.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(180.0 + 10.0 * i)),
+			Vector3(mx, Sim.height_at(mx, mz) + 2400.0 + i * 300.0, mz))
+		m.linear_velocity = -m.global_transform.basis.z * 175.0
+		m.died.connect(_on_bandit_down)
+		if i == 1 and is_instance_valid(_cas_lead):
+			m.leader = _cas_lead
+			m.slot = Vector3(-110.0, -20.0, 150.0)
+			m.global_transform = Transform3D(_cas_lead.global_transform.basis,
+				_cas_lead.global_transform * m.slot)
+			m.linear_velocity = _cas_lead.linear_velocity
+		else:
+			_cas_lead = m
+		_reset_interp.call_deferred(m)
+	# and one transport on a milk run, which is a target rather than a threat
+	var hauler := AIPlane.new()
+	hauler.setup(AI_TRANSPORTS[randi() % AI_TRANSPORTS.size()])
+	hauler.role = "transport"
+	hauler.team = 1
+	hauler.name = "Heavy 1"
+	hauler.home = Vector3(0, 0, -12000.0)
+	add_child(hauler)
+	hauler.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(120.0)),
+		Vector3(6000.0, Sim.height_at(6000.0, -16000.0) + 5200.0, -16000.0))
+	hauler.linear_velocity = -hauler.global_transform.basis.z * 150.0
+	hauler.died.connect(_on_bandit_down)
+	_reset_interp.call_deferred(hauler)
 	for p in picks:
 		var g := GroundTarget.new()
 		g.team = 1
@@ -2897,6 +3691,12 @@ func _on_bandit_down(who: Node) -> void:
 
 # ---------------------------------------------------------------- landing
 func _on_touchdown(info: Dictionary) -> void:
+	if Sim.debug_weapons or _auto_diag:
+		print("[td] x=%+.1f z=%+.1f on_runway=%s vs=%.2f gs=%.0f pitch=%+.1f bank=%+.1f" % [
+			float(info["offset"]),
+			player.global_position.z if is_instance_valid(player) else 0.0,
+			str(info["on_runway"]), float(info["vs"]), float(info["gs"]),
+			float(info["pitch"]), float(info["bank"])])
 	if not info["on_runway"]:
 		Sim.report("touchdown off the paved surface", Sim.Ev.BAD)
 		return
@@ -2942,7 +3742,41 @@ func _resume() -> void:
 		if player.mouse_fly:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
+## What the radar page would draw for one contact: the same masking test the
+## scope itself applies.
+func _radar_paints(n: Node3D) -> bool:
+	if not is_instance_valid(player) or not is_instance_valid(n):
+		return false
+	var d := player.global_position.distance_to(n.global_position)
+	if d > Sim.radar_range():
+		return false
+	return d <= 2000.0 or Sim.line_of_sight(player.global_position + Vector3(0, 4, 0),
+		n.global_position + Vector3(0, 4, 0))
+
+## Synthesise a key for the harness, straight into the same handler the shell
+## uses, so the test exercises the real path rather than calling chat methods.
+func _press(code: Key, unicode := 0) -> void:
+	var e := InputEventKey.new()
+	e.keycode = code
+	e.physical_keycode = code
+	e.unicode = unicode
+	e.pressed = true
+	_shell_input(e)
+
 func _shell_input(e: InputEvent) -> void:
+	# The chat line comes first and eats everything while it is open, so that
+	# typing "w" is a letter rather than full throttle.
+	if is_instance_valid(chat) and e is InputEventKey:
+		var ke := e as InputEventKey
+		if chat.typing:
+			chat.handle_key(ke)
+			Sim.typing = chat.typing
+			return
+		if ke.pressed and not ke.echo and ke.keycode == KEY_SLASH and running \
+				and not Sim.ui_modal:
+			chat.open_line()
+			Sim.typing = true
+			return
 	# ALT + right click raises the targeting pod; the wheel zooms it.
 	if e is InputEventMouseButton and (e as InputEventMouseButton).pressed and running \
 			and not on_foot and not Sim.ui_modal:
@@ -3134,6 +3968,9 @@ func _parse_cmdline() -> void:
 			_pod_test = true
 		elif a == "--admintest":
 			_admin_test = true
+		elif a.begins_with("--adminfrom="):
+			_admin_test = true
+			_admin_from = a.substr(12)
 		elif a == "--restarttest":
 			_restart_test = true
 		elif a.begins_with("--shiptest="):
@@ -3142,6 +3979,31 @@ func _parse_cmdline() -> void:
 			_wcam_test = true
 		elif a == "--navaltest":
 			_naval_test = true
+		elif a.begins_with("--navaltest="):
+			_naval_test = true
+			_naval_weapon = a.substr(12)
+		elif a == "--battletest":
+			_bat_test = true
+		elif a == "--castest":
+			_cas_test = true
+		elif a == "--chattest":
+			_chat_test = true
+		elif a == "--formtest":
+			_form_test = true
+		elif a == "--masktest":
+			_mask_test = true
+		elif a == "--shipnet":
+			_shipnet = true
+		elif a == "--splashtest":
+			_splash_test = true
+		elif a == "--autodiag":
+			_auto_diag = true
+		elif a == "--vlstest":
+			_vls_test = true
+		elif a == "--townstest":
+			_town_test = true
+		elif a == "--dctest":
+			_dc_test = true
 		elif a == "--triggertest":
 			_trig_test = true
 		elif a == "--seamtest":

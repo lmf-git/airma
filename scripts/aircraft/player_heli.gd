@@ -44,12 +44,12 @@ func _pilot(delta: float) -> void:
 		in_yaw = 0.0
 		wheel_brake = true
 		return
-	if Input.is_action_just_pressed(&"mouse_fly"):
+	if Sim.tapped(&"mouse_fly"):
 		mouse_fly = not mouse_fly
 		_mouse = Vector2.ZERO
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if mouse_fly else Input.MOUSE_MODE_VISIBLE
-	var kp := Input.get_action_strength(&"pitch_up") - Input.get_action_strength(&"pitch_down")
-	var kr := Input.get_action_strength(&"roll_right") - Input.get_action_strength(&"roll_left")
+	var kp := Sim.strength(&"pitch_up") - Sim.strength(&"pitch_down")
+	var kr := Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
 	var target_stick := Vector2(kr, kp)
 	if mouse_fly:
 		target_stick = Vector2(clampf(_mouse.x + kr, -1, 1), clampf(-_mouse.y + kp, -1, 1))
@@ -57,12 +57,12 @@ func _pilot(delta: float) -> void:
 	stick = stick.lerp(target_stick, clampf(delta * 8.0, 0.0, 1.0))
 	in_roll = stick.x
 	in_pitch = stick.y
-	in_yaw = Input.get_action_strength(&"yaw_right") - Input.get_action_strength(&"yaw_left")
+	in_yaw = Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
 	# Collective. With the stability system in, the lever commands a rate of
 	# climb and centring it holds the height you have -- a helicopter that
 	# wanders up and down whenever you take your hand off it is not flyable.
 	# Switch the assist off and it goes back to being raw engine power.
-	var t := Input.get_action_strength(&"throttle_up") - Input.get_action_strength(&"throttle_down")
+	var t := Sim.strength(&"throttle_up") - Sim.strength(&"throttle_down")
 	if assist and not on_ground:
 		if absf(t) > 0.01:
 			hold_alt = global_position.y          # follow the lever, then hold there
@@ -73,23 +73,23 @@ func _pilot(delta: float) -> void:
 		hold_alt = global_position.y
 		_coll_trim = throttle
 		throttle = clampf(throttle + t * delta * 0.7, 0.0, 1.0)
-	wheel_brake = Input.is_action_pressed(&"brakes") and on_ground
+	wheel_brake = Sim.held(&"brakes") and on_ground
 
-	if Input.is_action_just_pressed(&"gear"):
+	if Sim.tapped(&"gear"):
 		toggle_gear()
-	if Input.is_action_just_pressed(&"cycle_weapon"):
+	if Sim.tapped(&"cycle_weapon"):
 		cycle_weapon()
 	for i in 8:
-		if Input.is_action_just_pressed(StringName("weapon_%d" % (i + 1))) and i < weapon_types.size():
+		if Sim.tapped(StringName("weapon_%d" % (i + 1))) and i < weapon_types.size():
 			set_weapon(i)
-	if Input.is_action_just_pressed(&"cycle_target") \
+	if Sim.tapped(&"cycle_target") \
 			and not (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
 		cycle_target()
-	if Input.is_action_just_pressed(&"flare"):
+	if Sim.tapped(&"flare"):
 		drop_flare()
-	if Input.is_action_pressed(&"gun") and current_weapon() == "gun" and not Sim.ui_modal:
+	if Sim.held(&"gun") and current_weapon() == "gun" and not Sim.ui_modal:
 		fire_gun(get_tree().current_scene)
-	if Input.is_action_just_pressed(&"fire") and not Sim.ui_modal:
+	if Sim.tapped(&"fire") and not Sim.ui_modal:
 		if current_weapon() == "gun":
 			fire_gun(get_tree().current_scene)
 		else:

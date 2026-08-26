@@ -230,6 +230,11 @@ func _water() -> void:
 	m.metallic = 0.45
 	m.rim_enabled = true
 	m.rim = 0.7
+	# The sea sorts before every other transparent thing. It is a single mesh
+	# the width of the world, so its sort origin is nowhere near the piece of
+	# water you are actually looking at, and without this it happily draws over
+	# splashes, explosions and anything else at the surface.
+	m.render_priority = -8
 	var mi := MeshKit.mi(pm, "Water")
 	mi.material_override = m
 	mi.position = Vector3(0, Sim.WATER_LEVEL, 0)

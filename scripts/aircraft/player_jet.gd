@@ -49,14 +49,14 @@ func _pilot(delta: float) -> void:
 	if auto != "":
 		_auto_pilot(delta)
 		return
-	if Input.is_action_just_pressed(&"mouse_fly"):
+	if Sim.tapped(&"mouse_fly"):
 		mouse_fly = not mouse_fly
 		_mouse = Vector2.ZERO
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if mouse_fly else Input.MOUSE_MODE_VISIBLE
 		say("mouse stick " + ("ON" if mouse_fly else "OFF"))
 
-	var kp := Input.get_action_strength(&"pitch_up") - Input.get_action_strength(&"pitch_down")
-	var kr := Input.get_action_strength(&"roll_right") - Input.get_action_strength(&"roll_left")
+	var kp := Sim.strength(&"pitch_up") - Sim.strength(&"pitch_down")
+	var kr := Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
 	var target_stick := Vector2(kr, kp)
 	if mouse_fly:
 		target_stick = Vector2(clampf(_mouse.x + kr, -1, 1), clampf(-_mouse.y + kp, -1, 1))
@@ -65,23 +65,23 @@ func _pilot(delta: float) -> void:
 	stick = stick.lerp(target_stick, clampf(delta * rate, 0.0, 1.0))
 	in_roll = stick.x
 	in_pitch = stick.y
-	in_yaw = Input.get_action_strength(&"yaw_right") - Input.get_action_strength(&"yaw_left")
+	in_yaw = Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
 
-	var t := Input.get_action_strength(&"throttle_up") - Input.get_action_strength(&"throttle_down")
+	var t := Sim.strength(&"throttle_up") - Sim.strength(&"throttle_down")
 	throttle = clampf(throttle + t * delta * 0.55, 0.0, 1.0)
-	airbrake = Input.is_action_pressed(&"brakes") and not on_ground
-	wheel_brake = Input.is_action_pressed(&"brakes") and on_ground
+	airbrake = Sim.held(&"brakes") and not on_ground
+	wheel_brake = Sim.held(&"brakes") and on_ground
 
-	if Input.is_action_just_pressed(&"gear"):
+	if Sim.tapped(&"gear"):
 		if on_ground and gear_down:
 			say("gear locked down — weight on wheels")
 		else:
 			toggle_gear()
 			say("gear " + ("down" if gear_down else "up"))
-	if Input.is_action_just_pressed(&"flaps"):
+	if Sim.tapped(&"flaps"):
 		flaps = 0.0 if flaps > 0.5 else 1.0
 		say("flaps " + ("down" if flaps > 0.5 else "up"))
-	if Input.is_action_just_pressed(&"bay"):
+	if Sim.tapped(&"bay"):
 		if bays.values().any(func(b): return b["kind"] == "internal"):
 			var opening := not any_bay_open()
 			set_bays(opening)
@@ -91,39 +91,39 @@ func _pilot(delta: float) -> void:
 			say("cargo ramp " + ("opening" if ramp_open else "closing"))
 		else:
 			say("no internal bays on this airframe")
-	if Input.is_action_just_pressed(&"assist"):
+	if Sim.tapped(&"assist"):
 		assist = not assist
 		Sim.assist = assist
 		say("fly-by-wire " + ("ON" if assist else "OFF — you are on your own"))
-	if Input.is_action_just_pressed(&"cycle_weapon"):
+	if Sim.tapped(&"cycle_weapon"):
 		cycle_weapon()
 		_announce_weapon()
 	for i in 8:
-		if Input.is_action_just_pressed(StringName("weapon_%d" % (i + 1))):
+		if Sim.tapped(StringName("weapon_%d" % (i + 1))):
 			if i < weapon_types.size():
 				set_weapon(i)
 				_announce_weapon()
 			else:
 				say("no station %d on this jet" % (i + 1))
-	if Input.is_action_just_pressed(&"cycle_target") \
+	if Sim.tapped(&"cycle_target") \
 			and not (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
 		cycle_target()
-	if Input.is_action_just_pressed(&"flare"):
+	if Sim.tapped(&"flare"):
 		if flares > 0:
 			drop_flare()
 		else:
 			say("out of flares")
 	if is_gunship_weapon(current_weapon()) and not Sim.ui_modal:
-		if Input.is_action_pressed(&"gun") or Input.is_action_pressed(&"fire"):
+		if Sim.held(&"gun") or Sim.held(&"fire"):
 			var aim := gunship_aim()
 			if aim != Vector3.INF:
 				fire_gunship(get_tree().current_scene, aim)
 			else:
 				say("no aim point — ALT+right click for the pod, CTRL+T to designate")
-	elif Input.is_action_pressed(&"gun") and current_weapon() == "gun" and not Sim.ui_modal:
+	elif Sim.held(&"gun") and current_weapon() == "gun" and not Sim.ui_modal:
 		if not fire_gun(get_tree().current_scene) and ammo <= 0:
 			say("gun dry")
-	if Input.is_action_just_pressed(&"fire") and not Sim.ui_modal:
+	if Sim.tapped(&"fire") and not Sim.ui_modal:
 		if current_weapon() == "gun":
 			fire_gun(get_tree().current_scene)
 		else:
@@ -206,6 +206,20 @@ func cycle_target() -> void:
 		return fwd.angle_to(rel) + rel.length() / reach * 1.2
 	cand = cand.filter(func(n): return \
 		global_position.distance_to(n.global_position) < reach)
+	# Terrain masking. A radar cannot see through a mountain: a contact in the
+	# next valley is not a lock, and something sitting behind a ridge is hidden
+	# until one of you comes up. Anything within a couple of kilometres stays
+	# available so a target does not blink out as it crosses a hedge.
+	var visible_now: Array = cand.filter(func(n): return \
+		global_position.distance_to(n.global_position) < 2000.0 \
+		or Sim.line_of_sight(global_position + Vector3(0, 4, 0),
+			(n as Node3D).global_position + Vector3(0, 4, 0)))
+	if not visible_now.is_empty():
+		cand = visible_now
+	else:
+		say("no radar contacts — terrain masked")
+		target = null
+		return
 	if cand.is_empty():
 		say("no targets")
 		target = null
@@ -420,7 +434,15 @@ func _fly_approach() -> void:
 		in_roll = 0.0
 		in_yaw = clampf(-p.x * 0.04 - linear_velocity.x * 0.15, -0.5, 0.5)
 		return
-	var want_y: float = maxf(d * tan(deg_to_rad(Airbase.GLIDE)), 0.0)
+	# The slope is referenced to the threshold, not to the aiming point. Flown
+	# straight at the aim point the aeroplane is only eighteen metres up three
+	# hundred metres out, so the flare begins before the runway and the wheels
+	# arrive on the threshold lip: measured, an F-22 touching at z=+1474 with
+	# the paved surface ending at 1500, hard, and reported as a landing off the
+	# paved surface because a few metres either way put it outside. A real three
+	# degree approach crosses the threshold at fifty feet and touches down in
+	# the zone beyond it, which is what the bias buys.
+	var want_y: float = maxf((d + Airbase.THRESH_BIAS) * tan(deg_to_rad(Airbase.GLIDE)), 0.0)
 	var err := want_y - p.y
 	var want_vs := clampf(err * 0.28, -8.0, 6.0)
 	# Flare on HEIGHT, not on a fixed sink rate. The old law commanded a steady
@@ -430,9 +452,14 @@ func _fly_approach() -> void:
 	# autothrottle simply flew the length of the runway and went around. Sink
 	# proportional to height arrives at the ground promptly and still touches
 	# down at half a metre a second.
-	var flaring := p.y < 18.0
+	var flaring := p.y < 26.0
 	if flaring:
-		want_vs = -maxf(0.5, p.y * 0.45)
+		# Begun higher and shallower than it was. At 18 m the old law commanded
+		# the eight metres a second the aeroplane was already doing, so there
+		# was nothing left to arrest and a fighter arrived at 7.9 m/s — a hard
+		# landing every time. Starting at 26 m with a gentler gradient gives the
+		# elevator, which is clamped at eleven degrees, time to do the work.
+		want_vs = -maxf(0.55, p.y * 0.28)
 	var want_pitch := clampf((want_vs - linear_velocity.y) * 1.1 + 3.0, -6.0, 11.0)
 	var hdg_err := clampf(-p.x * 0.10 - linear_velocity.x * 0.6, -14.0, 14.0)
 	_hold_pitch(want_pitch, hdg_err)
@@ -450,4 +477,9 @@ func _fly_approach() -> void:
 	throttle = clampf(0.30 + (want_kt / 1.94384 - ias) * 0.045
 		+ clampf(err, -80.0, 80.0) * 0.005, 0.0, 1.0)
 	if flaring:
-		throttle = minf(throttle, 0.05)   # close it in the flare, as you would
+		# Closed at the very end rather than the moment the flare begins. A
+		# fighter on approach is holding a lot of its weight on thrust; taking
+		# it all away twenty-five metres up simply drops the aeroplane onto the
+		# runway, and no amount of elevator inside an eleven degree clamp gets
+		# it back. Idle below four metres, as you would.
+		throttle = minf(throttle, 0.05 if p.y < 4.0 else 0.24)

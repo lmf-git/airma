@@ -171,6 +171,10 @@ static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -
 	e.smoke = smoke
 	world.add_child(e)
 	e.global_position = pos
+	# where the last fireball was actually drawn, so the harness can check that
+	# it was somewhere a player could see it
+	Sim.last_burst = pos
+	Sim.last_burst_r = radius
 
 static func dust(world: Node, pos: Vector3, scale := 3.0) -> void:
 	var e := Boom.new()
@@ -221,6 +225,7 @@ static func trail_particles(colour: Color, size := 0.6, amount := 48) -> GPUPart
 	m.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	m.billboard_keep_scale = true
+	m.render_priority = 6      # over the sea; see Boom._ready
 	m.albedo_texture = puff_texture()
 	m.albedo_color = Color(1, 1, 1, 1)
 	m.vertex_color_use_as_albedo = true
@@ -269,6 +274,7 @@ static func ember_particles(colour: Color, size := 0.5, amount := 24) -> GPUPart
 	m.albedo_texture = glow_texture()
 	m.albedo_color = colour
 	m.vertex_color_use_as_albedo = true
+	m.render_priority = 6      # over the sea; see Boom._ready
 	qm.material = m
 	p.draw_pass_1 = qm
 	p.amount = amount
@@ -414,6 +420,13 @@ class Boom extends Node3D:
 		_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		_mat.albedo_color = tint
 		_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		# Transparent surfaces do not write depth; they are sorted, and the sort
+		# key is the object's origin. The sea is one mesh sixty kilometres wide
+		# whose origin is the middle of the world, so from anywhere out over the
+		# water it sorted in front of a fireball at the surface and composited
+		# 86% opaque sea over the top of it. A bomb into the water looked like a
+		# dud. Explosions are drawn last, over everything transparent.
+		_mat.render_priority = 8
 		sm.material = _mat
 		_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_mi)
@@ -435,3 +448,53 @@ class Boom extends Node3D:
 		_mat.albedo_color.a = 1.0 - t
 		if _light:
 			_light.light_energy = 12.0 * (1.0 - t) * (1.0 - t)
+
+# ---------------------------------------------------------------------------
+## A piece of something that has come apart. There is no physics terrain in this
+## project — the ground is a height field and every vehicle does its own contact
+## against it — so a RigidBody3D thrown off a wreck has nothing to land on and
+## falls for ever. Measured: 640 m below the airfield and still accelerating.
+## This does the same job the honest way: ballistic, bounces once or twice, and
+## comes to rest on the surface it was thrown onto.
+class Debris extends Node3D:
+	var vel := Vector3.ZERO
+	var spin := Vector3.ZERO
+	var bounce := 0.28
+	var rest_offset := 0.3        # how far the centre sits above the ground
+	var life := 90.0
+	var floats := false           # settles on the sea instead of the seabed
+	var _still := 0.0
+
+	func _ready() -> void:
+		top_level = true
+		add_to_group("wreckage")
+		reset_physics_interpolation()
+
+	func at_rest() -> bool:
+		return _still > 0.4
+
+	func _physics_process(delta: float) -> void:
+		life -= delta
+		if life <= 0.0:
+			queue_free()
+			return
+		if at_rest():
+			return
+		vel += Vector3.DOWN * 9.81 * delta
+		global_position += vel * delta
+		rotation += spin * delta
+		var floor_y := Sim.height_at(global_position.x, global_position.z)
+		if floats:
+			floor_y = maxf(floor_y, Sim.WATER_LEVEL)
+		floor_y += rest_offset
+		if global_position.y <= floor_y:
+			global_position.y = floor_y
+			if vel.y < -1.2:
+				vel.y = -vel.y * bounce
+				vel.x *= 0.55
+				vel.z *= 0.55
+				spin *= 0.5
+			else:
+				vel = Vector3.ZERO
+				spin = Vector3.ZERO
+				_still = 1.0

@@ -97,11 +97,11 @@ func _unhandled_input(e: InputEvent) -> void:
 			deg_to_rad(-20.0), deg_to_rad(50.0))
 
 func _conn(delta: float) -> void:
-	var w := Input.get_action_strength(&"roll_right") - Input.get_action_strength(&"roll_left")
+	var w := Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
 	helm = move_toward(helm, w, delta * 1.1)
-	var t := Input.get_action_strength(&"pitch_down") - Input.get_action_strength(&"pitch_up")
+	var t := Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up")
 	telegraph = clampf(telegraph + t * delta * 0.28, -0.2, 1.0)
-	if Input.is_action_just_pressed(&"interact"):
+	if Sim.tapped(&"interact"):
 		dismount_requested.emit()
 	# from the island, looking down the deck
 	var eye: Vector3 = global_position + Vector3(0, DECK_Y + 22.0, 0)

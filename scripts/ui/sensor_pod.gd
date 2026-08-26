@@ -252,9 +252,16 @@ func _update_laser() -> void:
 	if not _beam.visible:
 		return
 	var origin := _head_origin()
+	var reach := origin.distance_to(p)
+	if reach < 1.0:
+		# the spot has collapsed onto the head — usually because whatever was
+		# being tracked has just been destroyed. Pointing a zero length beam
+		# raises, and the raise takes the rest of this function with it.
+		_beam.visible = false
+		return
 	_beam.global_position = origin
 	_beam.look_at(p, Vector3.UP)
-	_beam.scale = Vector3(1, 1, origin.distance_to(p))
+	_beam.scale = Vector3(1, 1, reach)
 	if _marker == null or not is_instance_valid(_marker):
 		_marker = Node3D.new()
 		_marker.name = "Laser spot"

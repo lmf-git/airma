@@ -57,6 +57,10 @@ var turret_pitch := 0.0
 
 var speed := 0.0
 var _turret: Node3D
+var _wrecked := false
+var _burn := 0.0
+var _fire: GPUParticles3D
+var _wreck_smoke: GPUParticles3D
 var _mantlet: Node3D
 var _muzzle: Node3D
 var _road_wheels: Array = []      # {node, side, index, rest_y, spin}
@@ -298,9 +302,9 @@ func _unhandled_input(e: InputEvent) -> void:
 				deg_to_rad(-9.0), deg_to_rad(20.0))
 
 func _drive_input(delta: float) -> void:
-	in_throttle = Input.get_action_strength(&"pitch_down") - Input.get_action_strength(&"pitch_up")
-	in_steer = Input.get_action_strength(&"roll_right") - Input.get_action_strength(&"roll_left")
-	in_brake = Input.is_action_pressed(&"brakes")
+	in_throttle = Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up")
+	in_steer = Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
+	in_brake = Sim.held(&"brakes")
 	turret_yaw = aim_yaw
 	if is_indirect():
 		# lay the barrel at the live firing solution so what you see is what the
@@ -318,20 +322,20 @@ func _drive_input(delta: float) -> void:
 			aim_yaw = turret_yaw
 	else:
 		turret_pitch = aim_pitch
-	if Input.is_action_just_pressed(&"camera"):
+	if Sim.tapped(&"camera"):
 		gunner = not gunner
 	# Weapon select works the way it does in the air: cycle, or pick directly.
 	# The trigger is then just a trigger, whichever weapon is up.
-	if Input.is_action_just_pressed(&"cycle_weapon"):
+	if Sim.tapped(&"cycle_weapon"):
 		cycle_weapon()
 	for wi in weapons().size():
-		if Input.is_action_just_pressed(StringName("weapon_%d" % (wi + 1))):
+		if Sim.tapped(StringName("weapon_%d" % (wi + 1))):
 			set_weapon(wi)
 	# ALT/META + right click is the sensor page chord. The trigger is also on
 	# right click, so without this the act of opening the sensors fired the gun.
-	var chord := Input.is_action_pressed(&"freelook") or Sim.ui_modal
-	var held := Input.is_action_pressed(&"fire") and not chord
-	var tapped := Input.is_action_just_pressed(&"fire") and not chord
+	var chord := Sim.held(&"freelook") or Sim.ui_modal
+	var held := Sim.held(&"fire") and not chord
+	var tapped := Sim.tapped(&"fire") and not chord
 	if current_weapon() == "coax":
 		if held:
 			fire_coax(get_tree().current_scene)
@@ -342,9 +346,9 @@ func _drive_input(delta: float) -> void:
 		if tapped or (is_ripple() and held):
 			fire_main(get_tree().current_scene)
 	# V still works as a dedicated coax key whatever is selected
-	if Input.is_action_pressed(&"gun") and current_weapon() != "coax":
+	if Sim.held(&"gun") and current_weapon() != "coax":
 		fire_coax(get_tree().current_scene)
-	if Input.is_action_just_pressed(&"interact"):
+	if Sim.tapped(&"interact"):
 		dismount_requested.emit()
 	# camera
 	if gunner:
@@ -372,6 +376,15 @@ var _ai_target: Node3D = null
 var _ai_scan := 0.0
 
 func _physics_process(delta: float) -> void:
+	if _wrecked:
+		# It burns hard for half a minute, then sits there smoking. Leaving the
+		# flames on for the rest of the match makes a battlefield look like a
+		# stage set; leaving the smoke on is what a burnt-out hull actually does.
+		_burn += delta
+		if is_instance_valid(_fire) and _burn > 34.0:
+			_fire.emitting = false
+		if is_instance_valid(_wreck_smoke) and _burn > 30.0:
+			_wreck_smoke.amount_ratio = clampf(1.0 - (_burn - 30.0) / 90.0, 0.25, 1.0)
 	if ai and alive and not occupied:
 		_ai_think(delta)
 	if occupied and alive and not scripted:
@@ -742,10 +755,84 @@ func apply_damage(amount: float) -> void:
 		alive = false
 		Effects.explosion(get_tree().current_scene, global_position + Vector3(0, 1.5, 0), 18.0)
 		remove_from_group("boardable")
-		var smoke := Effects.trail_particles(Color(0.25, 0.25, 0.25), 3.0, 32)
-		smoke.emitting = true
-		add_child(smoke)
+		_wreck()
 		died.emit(self)
+
+## What is left after the ammunition goes up. The turret comes off — that is
+## what a hull full of propellant actually does, and it is the one silhouette
+## everybody recognises — the paint burns off what is left, and the hull sits
+## there on fire for a while before settling down to smoke.
+func _wreck() -> void:
+	if _wrecked:
+		return
+	_wrecked = true
+	_burn = 0.0
+	var parent := get_parent()
+	if is_instance_valid(_turret) and parent != null:
+		# Off the hull and onto a piece of debris, so it flies, lands and stays
+		# where it fell rather than continuing to track the gun.
+		var thrown := Effects.Debris.new()
+		thrown.name = "%s turret" % name
+		thrown.rest_offset = 0.8
+		thrown.life = 1e9                # a blown turret is scenery from now on
+		var keep := _turret.global_transform
+		for c in _turret.get_children():
+			if c is MeshInstance3D or c == _mantlet:
+				_turret.remove_child(c)
+				thrown.add_child(c)
+		parent.add_child(thrown)
+		thrown.global_transform = keep
+		# up, over the side, and spinning
+		thrown.vel = Vector3(randf_range(-3.0, 3.0), randf_range(7.0, 12.0),
+			randf_range(-3.0, 3.0))
+		thrown.spin = Vector3(randf_range(-2.5, 2.5), randf_range(-3.5, 3.5),
+			randf_range(-2.5, 2.5))
+		_turret.visible = false
+	# scorch whatever is left standing
+	for n in _all_meshes(self):
+		var mi := n as MeshInstance3D
+		var mat := mi.get_active_material(0)
+		if mat is StandardMaterial3D:
+			var burnt := (mat as StandardMaterial3D).duplicate() as StandardMaterial3D
+			burnt.albedo_color = burnt.albedo_color.darkened(0.72)
+			burnt.metallic = 0.0
+			burnt.roughness = 0.95
+			mi.material_override = burnt
+	_fire = Effects.ember_particles(Color(1.0, 0.5, 0.12), 1.6, 26)
+	_fire.emitting = true
+	_fire.position = Vector3(0, 1.6, 0.4)
+	add_child(_fire)
+	var smoke := Effects.trail_particles(Color(0.14, 0.14, 0.15), 4.5, 40)
+	smoke.emitting = true
+	smoke.position = Vector3(0, 2.0, 0.2)
+	add_child(smoke)
+	_wreck_smoke = smoke
+	# a handful of pieces thrown clear
+	for i in 5:
+		if parent == null:
+			break
+		var d := Effects.Debris.new()
+		var sz := Vector3(randf_range(0.3, 0.9), randf_range(0.2, 0.5),
+			randf_range(0.3, 1.0))
+		d.rest_offset = sz.y * 0.5
+		var db := MeshKit.begin()
+		MeshKit.box(db, sz, Vector3.ZERO)
+		d.add_child(MeshKit.mi(MeshKit.finish(db,
+			MeshKit.mat(Color(0.13, 0.13, 0.14), 0.9, 0.15)), "Chunk"))
+		parent.add_child(d)
+		d.global_position = global_position + Vector3(0, 1.8, 0)
+		d.vel = Vector3(randf_range(-9.0, 9.0), randf_range(5.0, 14.0),
+			randf_range(-9.0, 9.0))
+		d.spin = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
+
+## Every MeshInstance3D under a node, so the whole vehicle can be scorched.
+func _all_meshes(n: Node) -> Array:
+	var out: Array = []
+	for c in n.get_children():
+		if c is MeshInstance3D:
+			out.append(c)
+		out.append_array(_all_meshes(c))
+	return out
 
 func crew_position() -> Vector3:
 	return global_transform * Vector3(-0.55, 2.35, 1.0)

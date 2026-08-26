@@ -67,7 +67,13 @@ progress are drawn across the top of the HUD.
 
 ## Multiplayer
 
-LAN host/join over ENet from the hangar screen (enter an address, HOST or JOIN).
+Host/join over ENet from the hangar screen (enter an address, HOST or JOIN).
+The host asks the router for a port mapping over **UPnP** when it starts, so a
+game is reachable from outside the LAN without anyone editing a firewall — the
+hangar prints the external address to pass to your friends, and falls back to
+LAN-only with a note if the router refuses or has UPnP switched off. Discovery
+runs on its own thread, so a router that never answers costs you nothing but a
+line of text. The mapping is dropped again on quit.
 The host runs whatever match is selected and tells joiners which one to load, so
 both ends have the same sectors; sector ownership, capture progress and ticket
 counts are then **authoritative on the host** and pushed to clients twice a
@@ -80,6 +86,24 @@ stuttering between packets. Missile launches and hits replicate as events. Playe
 including passengers riding in someone else's cargo hold — the hold owner is
 sent with the packet so occupants stay attached to the right aircraft rather
 than drifting in world space.
+
+**The fleet replicates too.** Ships need no spawn roster: every peer lays the
+same fleet down in the same order at load, so a hull is addressed by its index
+in that plan and the host only has to say where it is and what state it is in.
+Clients hold theirs as pictures -- posed, never simulated -- so the two ends
+cannot drift apart, and the damage state travels with the pose so the fires and
+the list look the same on every screen. Taking the conn of a ship in a session
+hands the wheel over rather than forking the simulation: the orders go to the
+host and the hull comes back, which at five degrees a second of turn rate is
+not something you can feel.
+
+Everyone gets their own **spawn slot**. Two players who pick the same aircraft
+used to be handed the same start point and would begin the match inside each
+other; each peer now derives a slot from its network id and is placed line
+abreast to starboard, stepped down so nobody is directly above anybody else.
+Ground starts keep their wheels on the apron — the offset is applied across the
+ramp and then re-seated to local ground height — while air starts take it
+whole.
 
 ## Helicopters
 
@@ -98,7 +122,12 @@ so the pedal loop falls back to holding yaw rate.
 it as a weapon station: `1`-`4` pick a store, `SPACE` releases at whatever the
 pod is holding, `CTRL`+`T` point-tracks a vehicle or ground-stabilises a spot,
 and `L` paints it with the laser so bombs and missiles guide onto the mark. The
-same page is the helicopter's sight.
+same page is the helicopter's sight. A laser-guided bomb keeps steering onto a
+point track as the ship under it moves, rather than at the patch of sea the
+track started on, and the sensor page draws the falling bomb's predicted impact
+mark so you can see whether the release is going to reach. Warheads that reach
+water detonate there — a hit alongside a hull still shakes it, and you get the
+column and the ring of spray instead of the round quietly vanishing.
 
 The corner panels work like Arma's: `[` and `]` cycle the left and right slots
 through off, sensor, radar and a north-up minimap, so you decide what sits in
@@ -150,6 +179,15 @@ Ten vessels work the eastern ocean: a carrier group with its screen, a hostile
 surface action group, a submarine and civil traffic. They steam on their own
 courses, take damage, and sink.
 
+Every hull nobody is standing on **fights for itself**. A warship looks for a
+contact, opens or closes to a range her battery can make, holds the enemy on
+the beam so the whole broadside bears, and lays the mount with a real ballistic
+and lead solution -- a shell at 820 m/s takes twelve seconds to reach ten
+kilometres, so a ship making fifteen knots has moved the better part of two
+hundred metres by the time it arrives. Aircraft get the tubes instead; a five
+inch mount cannot track an aeroplane. Merchant traffic is left alone, and a ship
+flooding badly breaks off rather than fighting the enemy and the sea at once.
+
 Four of them are yours to command from the **NAVAL** tab, or by walking up to one
 and pressing `U`:
 
@@ -160,11 +198,34 @@ and pressing `U`:
 | **Steregushchiy** corvette | 105 m, 26 kts, 8 cells |
 | **Patrol boat** | 38 m, 35 kts, gun only |
 
+The **launch tubes** are a flush deck of hatches forward of the mast, so a ship
+reads as armed from the air; a boat carries hers in the casing forward of the
+sail, and the round comes out of the cell it is drawn in.
+
 `A`/`D` is the wheel and `W`/`S` the engine order. A ship answers slowly: the
 wheel sets a rate of turn and the engines take time to build or shed way. The
 mouse lays the battery -- up to 70 degrees, with the camera boom rising and
 shortening as it elevates so a high angle shot is not taken through your own
 superstructure. Left click fires; `\` swaps between the gun and the tubes.
+
+### Damage control
+
+A warship does not stop existing when the hull bar empties. A hit either opens
+her up or starts a fire, depending on where it lands and how big it was, and
+both of those are then a problem you live with. Fires burn the hull down at
+about nine points a second at full intensity and slowly make water. Flooding
+takes away her speed and lays her over -- the list comes straight off the free
+surface, so a ship down twenty-eight percent is heeled seven degrees and two
+knots slow. The damage control party fight both, at an effectiveness that scales
+with what is left of the crew, and the crew scales with what is left of the
+hull: a ship hit hard enough cannot save herself. They need a few seconds
+without being hit again to make any headway at all.
+
+Whatever the telegraph says, the water she has taken on decides what she
+actually makes, and that applies to a hull under nobody's orders too. If the
+flooding wins she founders whatever the hull bar reads, and then she goes down
+over the better part of a minute: way comes off, the list opens out to sixty
+degrees, and the deck goes under.
 
 The **fleet carrier** is sailable too. Its flight deck is registered by
 reference, so it goes on working as a landing platform while it is under way --
@@ -174,6 +235,63 @@ that has moved since you left it.
 The submarine carries two strategic rounds. `K` calls a strike onto whatever is
 designated: measured from 27 km, the round arrived **10 m from the aim point**
 and flattened 504 structures.
+
+## The opposition
+
+Not everything in the air is trying to shoot you down.
+
+**Fighters** patrol an orbit, run a lag-pursuit intercept, shoot, and defend
+against incoming. **Mud movers** -- an A-10 or whatever the other bloc sends --
+work the ground and the shipping instead: run in at height, push over inside
+five kilometres, bombs at stand-off and then the gun, pull off, come round and
+do it again. They fly a real re-attack rather than orbiting the target.
+**Transports** are going somewhere, at height, on a route; if something shoots
+at them they do the only thing a transport can, which is flares and down into
+the weeds. All three can be shot down and all three count.
+
+### Formation
+
+Aeroplanes fly in **pairs**. Number one leads, number two flies his wing in a
+slot ninety metres out and a little low, and the flight starts in formation
+rather than spending the first minute of the match rejoining. A wingman leaves
+the slot for a missile, for a leader who has broken off, or for anything close
+enough to be his own business, and rejoins when it is over.
+
+The slot is held by a controller working in the **leader's own frame**: the
+along-track error goes to the throttle, the lateral error to the bank and the
+vertical to the pitch, on top of simply matching his attitude. Steering at a
+point cannot do this -- it is a bank-to-turn controller being asked to solve a
+translation problem, and measured, it settled six hundred metres off the slot
+and stayed there. The other half is damping on the closure rate: without it the
+wingman drives at the slot, arrives with all that speed still on, sails through
+and comes round again, swinging between three hundred metres and three
+kilometres for ever.
+
+### Terrain masking
+
+A radar cannot see through a mountain. A contact in the next valley is not a
+lock, and something sitting behind a ridge is hidden until one of you comes up;
+anything within a couple of kilometres stays available so a target does not
+blink out as it crosses a hedge.
+
+The AI uses the same fact the other way. An aeroplane being shot at, or running
+in on something that can shoot back, checks how much lower it would have to be
+for the ridge line to cover it -- and if there is something to get behind, goes
+down behind it and comes up late. If the ground between is open it stays high,
+because giving away the energy buys nothing.
+
+## Chat
+
+`/` opens a line at the bottom of the screen. Type, Enter sends it to everyone
+in the session, Escape throws it away. The backlog holds for nine seconds and
+then fades, so it is readable in a fight without permanently covering the left
+of the canopy.
+
+While the line is open every control goes quiet. Held keys keep reporting
+through the input singleton no matter what consumes the event, so consuming the
+key was not enough on its own -- typing "d" rolled the aeroplane right. Every
+control surface in the game reads its actions through a gate that closes while
+a line is open.
 
 ## Air traffic
 
@@ -219,6 +337,7 @@ ramp and you are handed back to the world with the aircraft's velocity.
 | right click, or `O` | raise / stow the sensor page |
 | `CTRL`+`T` | pod designates: point track a vehicle, or ground stabilise a spot |
 | `L` | laser designator (bombs guide onto the spot) |
+| `/` | chat line (Enter sends, Escape cancels) |
 | `N` (pod up) | sensor channel: TV, night, white hot, black hot |
 | `[` / `]` | cycle the left / right corner panel: off, sensor, radar, minimap |
 | `-` / `=` | radar range: 10, 20, 40 or 80 km |
@@ -424,6 +543,14 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--viewtest` | cockpit furniture against the eye line, and the glazing profile |
 | `--hudtest=VIEW` | does the flight page draw from that camera |
 | `--lasertest` | laser stows on exit, point track survives |
+| `--navaltest` | laser-guided bomb against a moving ship, hull before and after |
+| `--battletest` | two hostile warships put in gun range and left to it |
+| `--dctest` | a hull hurt on purpose, then the party against the fire and the water |
+| `--castest` | do the mud movers find, attack and hurt something; does the transport get anywhere |
+| `--formtest` | how far off the slot a wingman actually sits |
+| `--masktest` | does terrain block a line, and does the radar respect it |
+| `--chattest` | `/`, a line of text, and whether the stick moved while typing |
+| `--shipnet` | what each end of a session thinks the fleet is doing |
 | `--podch=N` | force a sensor channel and render it |
 | `--keytest=1` | driver seat keys: map, panels, and what the trigger does |
 | `--helitest` | hands off altitude drift, then the collective both ways |
@@ -530,6 +657,17 @@ harness rather than off the screen:
   now. And a ghost whose owner stopped reporting dead reckoned along its last
   velocity for ever: a disconnected peer ended up 3.6 x 10^18 m from the field.
   Ghosts now coast to a halt after a second without an update.
+* **Reachable games and separate spawns** — hosting on a real network asked the
+  router for a port mapping and got one back, printing the external address to
+  hand out; discovery is threaded, so the wait never stalls the hangar. With
+  that up, two peers who both picked the F-22 were checked into the same free
+  match: the host started at (-17369, 2512, 4947) and the joiner at
+  (-17406, 2510, 3903), a kilometre of clear air apart instead of the shared
+  start point that used to put one inside the other. The test also caught
+  something dumber than either feature — a host left running from a previous
+  run still held the port, the new host's `create_server` failed, and the
+  joiner happily connected to the *old* game. Worth knowing the failure looks
+  like success from the client end.
 * **Cross-client kills** — the whole damage chain, end to end on the loopback:
   a client's AMRAAM detonates 8.3 m from its ghost of a bandit the host is
   simulating, the client reports 47, 37 and 66 points of damage, the host walks
@@ -779,6 +917,64 @@ harness rather than off the screen:
 * **Ships under command** — helm, telegraph, battery and tubes: an Arleigh Burke
   made 119 m in eight seconds (29.9 kts), answered the wheel, laid its mount on
   068 when ordered to 068, and fired.
+* **Ships that fight** — an Arleigh Burke and a Steregushchiy put eight
+  kilometres apart and left alone. Both opened fire, the corvette went down at
+  9.2 s and a patrol boat with her, and the destroyer came out at sixty percent
+  with forty-one percent flooding. Then the interesting part: over the next
+  thirty seconds the party pumped her out, the list came off and she worked back
+  up from 11.7 to 15.4 knots. Finding this needed the merchants excluding from
+  the target list — the first run had one side shelling neutral container ships
+  while the other side shelled them, and the scoreline looked like a rout.
+* **Damage control** — a destroyer given a thousand points of a 2200 point hull:
+  fire at 73%, hull down to 55%. The fire then burned for a minute, cost another
+  two hundred points of hull and 1.4 knots while it did, and the party had it out
+  by fifty seconds. Both channels are tuned to a match rather than to life: about
+  half a minute to fight a fire and a minute and a half to pump out flooding,
+  with a full party.
+* **Close air support** — a mud mover pair against four targets. The run-in
+  measured 12.6 km to 900 m in one continuous descent, bombs away, off target,
+  out to eight kilometres and back in again; three targets damaged. Three
+  separate things had to be fixed to get there. The nose-on abort fired on the
+  first frame of every attack, because straight off an egress turn the aeroplane
+  is pointed the wrong way — no run ever got past one second. Re-attacking on a
+  timer alone put it back in with the target three kilometres *below* it, which
+  is not a run but a vertical scissors: measured pulling up through ten thousand
+  metres and stalling there. And the goal was held sixty metres above the target
+  for terrain clearance, which left the nose that much high — the best gun angle
+  measured 11.4°, just outside the trigger gate, so it never fired a round.
+* **Formation** — a wingman holds **120 to 140 m mean and about 200 m worst**
+  off a 151 m slot, over 4200 samples per run, while the flight is patrolling. Before the controller was
+  rewritten to work in the leader's frame it settled at 1.3 km and oscillated
+  between three hundred metres and three kilometres. Turning the position gains
+  up from the stable set made it worse, not better — 1626 m — which is what an
+  under-damped loop does.
+* **Terrain masking** — the highest ground within a 14 km box is 1644 m. Two
+  points 40 m above the deck either side of it: line blocked, and the ray passes
+  938 m *inside* the hill. The same two points 2500 m up: clear. A bandit parked
+  behind that ridge cannot be locked; lift both aircraft over it and the lock
+  takes.
+* **Ships in a session** — the fleet reaches a client with the hull states exact:
+  499, 2200 and 1304 on both ends, two of those having been damaged in a fight
+  the host simulated. The client's ghost is on the identical track — the
+  host-to-client position delta normalises to (0.877, −0.479), which is heading
+  61° to the decimal.
+* **The chat line** — `/` opens it, sixteen characters go in, "wasd on the deck"
+  comes out the far end, and the stick reads +0.00 roll and +0.00 pitch the whole
+  time it is being typed.
+* **The weapon camera** — riding a round, the boom vector wobbled a **mean of
+  4.81 m and a worst of 6.16 m every frame**: the camera was placed from the
+  round's stepped physics position while the round itself was drawn interpolated
+  to the render frame, so the thing being followed jittered by exactly one tick
+  of travel. Reading the interpolated pose instead, and smoothing the boom
+  offset rather than the world position, takes it to **0.001 m mean, 0.005 m
+  worst** over 2280 frames.
+* **A bomb onto a moving ship** — designate a corvette from the pod, release a
+  GBU, and the hull goes 1100 -> 255. Three separate things were wrong before it
+  worked. The bomb steered at the coordinates the point track was *created* at,
+  so the ship sailed out from under it. The ship's origin sat below the
+  waterline, so a hit at the hull detonated in the air above the deck. And the
+  laser, having only a height field to intersect, painted the seabed 35 m under
+  the target instead of the ship on it.
 
 ## Code health
 

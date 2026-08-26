@@ -28,6 +28,23 @@ static func _db() -> Dictionary:
 		"flare_bait": 0.0,
 		"desc": "Radar guided BVR. Needs lock until it goes active.",
 	},
+	"sm2": {
+		# A ship's magazine is not an aeroplane's. A naval round is launched
+		# from a standing start with the whole ocean's worth of mass behind it,
+		# so it can afford a booster an air-launched missile cannot: it goes
+		# faster, it burns longer, it reaches further and it carries a great
+		# deal more warhead. Firing AMRAAMs out of a destroyer gave the fleet an
+		# air defence that arrived late and did not hurt.
+		"name": "SM-2 surface-to-air", "short": "SM2", "kind": "radar",
+		"mass": 708.0, "length": 4.72, "dia": 0.343, "fin": 0.55,
+		"boost": 620.0, "burn": 16.0, "max_g": 44.0, "drag": 0.00026, "ref_speed": 780.0,
+		"life": 110.0, "range": 74000.0, "seeker_fov": 70.0, "lock_time": 0.6,
+		"arm_time": 0.8, "fuse": 22.0, "damage": 290.0,
+		"colour": Color(0.86, 0.86, 0.84), "band": Color(0.30, 0.45, 0.70),
+		"eject": 0.0, "trail": Color(0.88, 0.88, 0.92),
+		"flare_bait": 0.0,
+		"desc": "Fleet area defence. Long reach, heavy warhead, no flare seduction.",
+	},
 	"slbm": {
 		"name": "Trident submarine-launched missile", "short": "SLB", "kind": "radar",
 		"mass": 5900.0, "length": 13.4, "dia": 2.11, "fin": 0.90,

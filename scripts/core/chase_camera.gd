@@ -21,6 +21,12 @@ var clamped_frames := 0
 var weapon_cam: Node3D = null    # ride a round in flight
 var _wcam_prev: Node3D = null
 var _wcam_hold := 0.0
+var _wcam_off := Vector3.ZERO
+var _wcam_look := Vector3.FORWARD
+var _wcam_diag := Vector3.ZERO
+var wcam_jitter := 0.0        # worst frame-to-frame boom wobble, metres
+var wcam_jsum := 0.0
+var wcam_jn := 0
 var _up_smooth := Vector3.ZERO
 var _roll_now := Vector3.UP
 var _roll_prev := Vector3.ZERO
@@ -77,26 +83,50 @@ func _process(delta: float) -> void:
 			weapon_cam = null
 			_wcam_hold = 1.6
 		else:
-			var wp: Vector3 = weapon_cam.global_position
+			# The interpolated pose, not the raw one. A round is moved once per
+			# physics tick; its mesh is then interpolated to the render frame,
+			# but `global_position` still reads the stepped value. Riding the
+			# stepped value while looking at the interpolated mesh is exactly
+			# one tick of relative motion every frame, which is the judder.
+			var wxf := weapon_cam.get_global_transform_interpolated()
+			var wp: Vector3 = wxf.origin
 			var wv := Vector3.FORWARD
 			if "vel" in weapon_cam:
 				wv = weapon_cam.get("vel")
 			elif "linear_velocity" in weapon_cam:
 				wv = weapon_cam.linear_velocity
 			if wv.length() < 1.0:
-				wv = -weapon_cam.global_transform.basis.z
+				wv = -wxf.basis.z
 			var wdir := wv.normalized()
 			var want := wp - wdir * 22.0 + Vector3(0, 5.0, 0)
 			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 3.0)
-			# Rigid, not eased. Lerping the world position toward a target doing
-			# six hundred metres a second leaves a steady state lag of v over
-			# the gain -- about seventy metres -- so the camera never catches
-			# the round it is supposed to be riding. The boom is smooth already
-			# because the round's own flight is.
+			# Rigid on the round, eased on the boom. Lerping the world position
+			# toward a target doing six hundred metres a second leaves a steady
+			# state lag of v over the gain — about seventy metres — so the
+			# camera never catches the round. Smoothing the offset instead keeps
+			# the tracking exact while taking the steps out of the arm: the
+			# direction of flight swings as the weapon guides, and the terrain
+			# floor snaps as the ground comes up under it.
+			var off := want - wp
+			if _wcam_prev != weapon_cam:
+				_wcam_off = off
+				_wcam_look = wdir
+			else:
+				var k: float = clampf(delta * 7.0, 0.0, 1.0)
+				_wcam_off = _wcam_off.lerp(off, k)
+				_wcam_look = _wcam_look.slerp(wdir, k).normalized()
 			_wcam_prev = weapon_cam
-			global_position = want
-			look_at(wp + wdir * 40.0, Vector3.UP)
+			global_position = wp + _wcam_off
+			var up_ref := Vector3.UP if absf(_wcam_look.y) < 0.985 else Vector3.FORWARD
+			look_at(wp + _wcam_look * 40.0, up_ref)
 			fov = lerpf(fov, 58.0, delta * 4.0)
+			if diag:
+				var d := global_position - wp
+				if _wcam_diag != Vector3.ZERO:
+					wcam_jitter = maxf(wcam_jitter, (d - _wcam_diag).length())
+					wcam_jsum += (d - _wcam_diag).length()
+					wcam_jn += 1
+				_wcam_diag = d
 			return
 	if _wcam_hold > 0.0:
 		_wcam_hold -= delta

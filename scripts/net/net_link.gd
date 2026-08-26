@@ -24,6 +24,8 @@ var _obj_acc := 0.0
 var _ai_acc := 0.0
 var _gnd_acc := 0.0
 var _ai_seen := {}
+var _ship_acc := 0.0
+var ship_conn := -1           # fleet index this peer has the conn of, -1 none
 var verbose := false
 var upnp_ready := false           # the router forwarded the port
 var upnp_external := ""           # the address other people should use
@@ -138,6 +140,8 @@ func leave() -> void:
 		if is_instance_valid(ai_ghosts[id]):
 			ai_ghosts[id].queue_free()
 	ai_ghosts.clear()
+	set_fleet_ghosts(false)
+	ship_conn = -1
 	ai_kinds.clear()
 	_ai_seen.clear()
 	veh_ghosts.clear()
@@ -176,6 +180,7 @@ func _on_connected(jet_id: String) -> void:
 		print("[net] announcing self %d to server" % my_id)
 	rpc("net_announce", my_id, jet_id, 0)
 	net_announce(my_id, jet_id, 0)
+	set_fleet_ghosts(true)
 
 func _on_failed() -> void:
 	status = "connection failed"
@@ -401,6 +406,195 @@ func net_ai_gone(idx: PackedInt32Array) -> void:
 			if g.visible:
 				Effects.explosion(world, g.global_position, 12.0)
 			g.queue_free()
+
+# ----------------------------------------------------------------- chat
+## Text chat. Anyone may send; it goes to everybody including the sender, so
+## one code path posts the line and the local echo cannot drift from what the
+## rest of the session sees.
+@rpc("any_peer", "call_local", "reliable")
+func net_chat(who: String, text: String, team: int) -> void:
+	if world == null:
+		return
+	var box = world.get("chat")
+	if box != null and is_instance_valid(box):
+		box.post(who, text.substr(0, 140), team)
+
+func say(text: String) -> void:
+	if not active:
+		return
+	var who := "P%d" % my_id
+	var team := 0
+	if roster.has(my_id):
+		who = String(roster[my_id].get("name", who))
+		team = int(roster[my_id].get("team", 0))
+	rpc("net_chat", who, text.substr(0, 140), team)
+
+# ---------------------------------------------------------------- ships
+## Ships do not need a spawn roster. Every peer builds the same fleet from the
+## same plan at load, so a hull is addressed by its index in that plan and the
+## host only has to say where it is and what state it is in. Clients hold theirs
+## as ghosts: posed, not simulated, so the two ends cannot diverge.
+## A client hands the whole fleet over to the host. They are built identically
+## on both ends at load, long before anyone connects, so this flips them rather
+## than trying to decide at construction time.
+func set_fleet_ghosts(on: bool) -> void:
+	if world == null:
+		return
+	for n in world.get_tree().get_nodes_in_group("ships"):
+		if is_instance_valid(n) and n is Ship:
+			(n as Ship).ghost = on
+
+func _ship_by_index(i: int) -> Ship:
+	if world == null:
+		return null
+	for n in world.get_tree().get_nodes_in_group("ships"):
+		if is_instance_valid(n) and n is Ship and (n as Ship).fleet_idx == i:
+			return n as Ship
+	return null
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_ships(idx: PackedInt32Array, pos: PackedVector3Array,
+		yaw: PackedFloat32Array, hp: PackedFloat32Array,
+		dmg: PackedFloat32Array, flags: PackedInt32Array) -> void:
+	if is_host or world == null:
+		return
+	rx += 1
+	for i in idx.size():
+		var sh := _ship_by_index(idx[i])
+		if sh == null:
+			continue
+		sh.net_apply(pos[i], yaw[i], hp[i], dmg[i * 3], dmg[i * 3 + 1],
+			dmg[i * 3 + 2], flags[i])
+
+## The conn changes hands. The host stops letting the AI captain steer that
+## hull and starts taking its wheel and telegraph from the peer instead.
+@rpc("any_peer", "call_local", "reliable")
+func net_ship_conn(i: int, taken: bool) -> void:
+	if not is_host:
+		return
+	var sh := _ship_by_index(i)
+	if sh == null or not sh.alive:
+		return
+	var who := multiplayer.get_remote_sender_id()
+	if taken:
+		if sh.remote_conn != 0 and sh.remote_conn != who:
+			return                      # somebody already has her
+		sh.remote_conn = who
+		sh.ai = false
+	elif sh.remote_conn == who:
+		sh.remote_conn = 0
+		sh.ai = true
+
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func net_ship_orders(i: int, helm: float, telegraph: float,
+		yaw: float, pitch: float) -> void:
+	if not is_host:
+		return
+	var sh := _ship_by_index(i)
+	if sh == null or sh.remote_conn != multiplayer.get_remote_sender_id():
+		return
+	sh.net_orders(helm, telegraph, yaw, pitch)
+
+## A request to shoot, and the round everyone else sees. `what` is 0 for the
+## main battery and 1 for the tubes.
+@rpc("any_peer", "call_remote", "reliable")
+func net_ship_fire(i: int, what: int, yaw: float, pitch: float) -> void:
+	if not is_host:
+		return
+	var sh := _ship_by_index(i)
+	if sh == null or not sh.alive:
+		return
+	if sh.remote_conn != multiplayer.get_remote_sender_id():
+		return
+	sh.aim_yaw = yaw
+	sh.aim_pitch = pitch
+	if what == 1:
+		sh.fire_vls()
+	else:
+		sh.fire_gun()
+
+## The host telling everyone a ship's battery went off, so the flash and the
+## tracer are on every screen and not only on the hull that fired.
+@rpc("authority", "call_remote", "reliable")
+func net_ship_shot(i: int, yaw: float, pitch: float) -> void:
+	if is_host or world == null:
+		return
+	var sh := _ship_by_index(i)
+	if sh == null:
+		return
+	sh.show_shot(yaw, pitch)
+
+func request_ship_fire(i: int, what: int, yaw: float, pitch: float) -> void:
+	if not active or i < 0:
+		return
+	rpc_id(1, "net_ship_fire", i, what, yaw, pitch)
+
+func take_ship_conn(i: int, taken: bool) -> void:
+	if not active:
+		return
+	ship_conn = i if taken else -1
+	if is_host:
+		var sh := _ship_by_index(i)
+		if sh != null:
+			sh.remote_conn = 0
+			sh.ai = not taken
+		return
+	rpc_id(1, "net_ship_conn", i, taken)
+
+@rpc("any_peer", "call_remote", "reliable")
+func net_ship_hit(i: int, amount: float) -> void:
+	if not is_host:
+		return
+	var sh := _ship_by_index(i)
+	if sh != null and sh.alive:
+		sh.take_hit(amount, null)
+
+## A client's weapon reached a hull the host owns. The client's copy is a
+## picture and has no standing to decide whether it just sank.
+func report_ship_damage(sh: Node, amount: float) -> void:
+	if not active or not (sh is Ship):
+		return
+	var i: int = (sh as Ship).fleet_idx
+	if i < 0:
+		return
+	if is_host:
+		(sh as Ship).take_hit(amount, null)
+	else:
+		rpc_id(1, "net_ship_hit", i, amount)
+
+## Host side: one packet for the whole fleet, five times a second. A ship is
+## slow and there are a dozen of them, so this is cheaper than treating each
+## hull as its own replicated actor.
+func _publish_ships() -> void:
+	var idx := PackedInt32Array()
+	var pos := PackedVector3Array()
+	var yaw := PackedFloat32Array()
+	var hp := PackedFloat32Array()
+	var dmg := PackedFloat32Array()
+	var flags := PackedInt32Array()
+	for n in world.get_tree().get_nodes_in_group("ships"):
+		if not is_instance_valid(n) or not (n is Ship):
+			continue
+		var sh := n as Ship
+		if sh.fleet_idx < 0:
+			continue
+		idx.append(sh.fleet_idx)
+		pos.append(sh.global_position)
+		yaw.append(sh.heading)
+		hp.append(sh.health)
+		dmg.append(sh.flood)
+		dmg.append(sh.fires)
+		dmg.append(sh.list_side)
+		var f := 0
+		if sh.alive:
+			f |= 1
+		if sh.is_sinking():
+			f |= 2
+			f |= int(clampf(sh.sink_fraction(), 0.0, 1.0) * 255.0) << 8
+		flags.append(f)
+	if idx.size() > 0:
+		tx += 1
+		rpc("net_ships", idx, pos, yaw, hp, dmg, flags)
 
 ## Ground vehicles replicate the same way as aircraft: a kinematic stand-in
 ## eased onto the last reported pose on the physics tick.
@@ -668,6 +862,10 @@ func _physics_process(delta: float) -> void:
 		if _gnd_acc >= 0.1:
 			_gnd_acc = 0.0
 			_publish_ground()
+		_ship_acc += RATE
+		if _ship_acc >= 0.2:
+			_ship_acc = 0.0
+			_publish_ships()
 		_obj_acc += RATE
 		if _obj_acc >= 0.5:
 			_obj_acc = 0.0
@@ -691,6 +889,14 @@ func _physics_process(delta: float) -> void:
 					masks.append(m)
 				rpc("net_objectives", labels, owners, prog, masks,
 					int(mode.tickets.get(0, 0)), int(mode.tickets.get(1, 0)))
+	# holding the conn of a ship: the orders go over, the hull comes back
+	if ship_conn >= 0 and not is_host:
+		var sh := _ship_by_index(ship_conn)
+		if sh != null and sh.occupied:
+			tx += 1
+			rpc_id(1, "net_ship_orders", ship_conn, sh.helm, sh.telegraph,
+				sh.aim_yaw, sh.aim_pitch)
+		return
 	# in a vehicle: send the hull and turret instead
 	var tk = world.get("tank")
 	if tk != null and is_instance_valid(tk):

@@ -131,25 +131,25 @@ func _physics_process(delta: float) -> void:
 		else:
 			_step_in_frame(delta)
 			return
-	if Input.is_action_just_pressed(&"camera"):
+	if Sim.tapped(&"camera"):
 		third = not third
-	crouching = Input.is_action_pressed(&"crouch")
+	crouching = Sim.held(&"crouch")
 
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
 	var right := Vector3(cos(yaw), 0, -sin(yaw))
 	var wish := Vector3.ZERO
-	wish += fwd * (Input.get_action_strength(&"pitch_down") - Input.get_action_strength(&"pitch_up"))
-	wish += right * (Input.get_action_strength(&"roll_right") - Input.get_action_strength(&"roll_left"))
+	wish += fwd * (Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up"))
+	wish += right * (Sim.strength(&"roll_right") - Sim.strength(&"roll_left"))
 	if wish.length() > 1.0:
 		wish = wish.normalized()
-	var running: bool = Input.is_action_pressed(&"throttle_up") and not crouching
+	var running: bool = Sim.held(&"throttle_up") and not crouching
 	var speed: float = CROUCH if crouching else (RUN if running else WALK)
 	var flat := Vector3(vel.x, 0, vel.z)
 	flat = flat.lerp(wish * speed, clampf(delta * (13.0 if on_floor else 2.2), 0.0, 1.0))
 	vel.x = flat.x
 	vel.z = flat.z
 	vel.y -= GRAV * delta
-	if on_floor and not crouching and Input.is_action_just_pressed(&"fire"):
+	if on_floor and not crouching and Sim.tapped(&"fire"):
 		vel.y = JUMP
 		on_floor = false
 	global_position += vel * delta
@@ -177,7 +177,7 @@ func _physics_process(delta: float) -> void:
 	var moving := flat.length() > 0.4
 	_anim += delta * clampf(flat.length() / WALK, 0.0, 2.2)
 	rotation.y = yaw
-	var aiming: bool = Input.is_action_pressed(&"gun") or Input.is_action_pressed(&"fire")
+	var aiming: bool = Sim.held(&"gun") or Sim.held(&"fire")
 	if not on_floor:
 		body.pose_air(vel.y > 0.0)
 	elif crouching:
@@ -217,7 +217,7 @@ func _physics_process(delta: float) -> void:
 		cam.global_transform.basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch + _recoil)
 
 	_scan()
-	if target_jet and Input.is_action_just_pressed(&"interact"):
+	if target_jet and Sim.tapped(&"interact"):
 		if target_jet.has_method("has_hold") and target_jet.has_hold() and target_jet.get("ramp_open"):
 			hold_requested.emit(target_jet)
 		else:
@@ -226,22 +226,22 @@ func _physics_process(delta: float) -> void:
 ## Movement solved entirely in the hold's local space: flat floor at y = 0,
 ## walls at the hull, and the open ramp as the way out.
 func _step_in_frame(delta: float) -> void:
-	if Input.is_action_just_pressed(&"camera"):
+	if Sim.tapped(&"camera"):
 		third = not third
-	crouching = Input.is_action_pressed(&"crouch")
+	crouching = Sim.held(&"crouch")
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
 	var right := Vector3(cos(yaw), 0, -sin(yaw))
 	var wish := Vector3.ZERO
-	wish += fwd * (Input.get_action_strength(&"pitch_down") - Input.get_action_strength(&"pitch_up"))
-	wish += right * (Input.get_action_strength(&"roll_right") - Input.get_action_strength(&"roll_left"))
+	wish += fwd * (Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up"))
+	wish += right * (Sim.strength(&"roll_right") - Sim.strength(&"roll_left"))
 	if wish.length() > 1.0:
 		wish = wish.normalized()
-	var speed: float = CROUCH if crouching else (RUN * 0.6 if Input.is_action_pressed(&"throttle_up") else WALK * 0.8)
+	var speed: float = CROUCH if crouching else (RUN * 0.6 if Sim.held(&"throttle_up") else WALK * 0.8)
 	var flat := Vector3(vel.x, 0, vel.z).lerp(wish * speed, clampf(delta * 14.0, 0.0, 1.0))
 	vel.x = flat.x
 	vel.z = flat.z
 	vel.y -= GRAV * delta
-	if on_floor and Input.is_action_just_pressed(&"fire"):
+	if on_floor and Sim.tapped(&"fire"):
 		vel.y = JUMP * 0.7
 		on_floor = false
 	position += vel * delta
@@ -275,7 +275,7 @@ func _step_in_frame(delta: float) -> void:
 		body.pose_walk(_anim * 1.5)
 	else:
 		body.pose_idle()
-	if Input.is_action_pressed(&"gun"):
+	if Sim.held(&"gun"):
 		body.pose_aim(pitch)
 	_eye = lerpf(_eye, EYE_CROUCH if crouching else EYE, clampf(delta * 9.0, 0, 1))
 	body.visible = true
@@ -289,10 +289,10 @@ func _step_in_frame(delta: float) -> void:
 		cam.global_transform.basis = frame.global_transform.basis \
 			* (Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch))
 	# G takes the gun station on a gunship; U steps back out of the hold
-	if Input.is_action_just_pressed(&"gunner_station") and is_instance_valid(frame_owner) \
+	if Sim.tapped(&"gunner_station") and is_instance_valid(frame_owner) \
 			and frame_owner.spec.get("gunship", false):
 		station_requested.emit(frame_owner)
-	elif Input.is_action_just_pressed(&"interact"):
+	elif Sim.tapped(&"interact"):
 		exit_frame(get_tree().current_scene)
 
 ## Carbine: real projectiles with travel time and drop, fired from the muzzle.
@@ -305,7 +305,7 @@ func _shoot(delta: float) -> void:
 		return
 	if _flash.visible and _shot_cd < 0.085:
 		_flash.visible = false
-	if not Input.is_action_pressed(&"gun"):
+	if not Sim.held(&"gun"):
 		return
 	if ammo <= 0:
 		reloading = 2.1

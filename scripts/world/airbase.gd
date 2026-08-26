@@ -6,6 +6,9 @@ const HALF := Sim.RUNWAY_LEN * 0.5
 const W := Sim.RUNWAY_HALF_W
 const AIM_Z := 1180.0        # touchdown aiming point for runway 36
 const GLIDE := 3.0
+## How far short of the aiming point the glide slope is anchored. The slope is
+## flown to the threshold; the wheels go down in the zone past it.
+const THRESH_BIAS := 150.0
 
 var papi: Array[MeshInstance3D] = []
 var _papi_mats: Array[StandardMaterial3D] = []

@@ -107,6 +107,13 @@ func _physics_process(delta: float) -> void:
 	var sea_bed := Sim.height_at(to.x, to.z)
 	if to.y < Sim.WATER_LEVEL and sea_bed < Sim.WATER_LEVEL:
 		var hit := Vector3(to.x, Sim.WATER_LEVEL, to.z)
+		# Up onto the surface before it goes off. `_die` draws the fireball at
+		# the round's own position, and by the time this test trips the round is
+		# already under the sea — so a bomb into the water made a splash with
+		# the explosion hidden beneath it, and read as a dud.
+		# clear of the surface, not level with it: what you see of a warhead
+		# going off in the water is the column standing above it
+		global_position = hit + Vector3(0, maxf(float(ws["fuse"]) * 0.4, 4.0), 0)
 		Effects.splash(get_tree().current_scene, hit, maxf(float(ws["fuse"]) * 0.9, 6.0))
 		_ground_burst(hit)
 		_die(true)
@@ -115,7 +122,9 @@ func _physics_process(delta: float) -> void:
 		# A missile that goes into the ground still has a warhead on it. It used
 		# to make a flash and do nothing, so a Sidewinder could be walked into a
 		# building without marking it.
-		_ground_burst(Vector3(to.x, Sim.height_at(to.x, to.z), to.z))
+		var gnd := Vector3(to.x, Sim.height_at(to.x, to.z), to.z)
+		global_position = gnd + Vector3(0, 1.2, 0)   # same reason as above
+		_ground_burst(gnd)
 		_die(true)
 		return
 	# a round that has stopped flying has arrived at something: go off rather
@@ -134,6 +143,7 @@ func _physics_process(delta: float) -> void:
 		# sweep the travelled segment: at 1 km/s closing speed a point test would
 		# step straight past a 9 m fuse radius
 		var best: Node = null
+		var best_gap := 1e9
 		var best_d := 1e9
 		for n in get_tree().get_nodes_in_group("hittable"):
 			if not is_instance_valid(n) or n == shooter:
@@ -144,10 +154,19 @@ func _physics_process(delta: float) -> void:
 				continue
 			var np: Vector3 = n.global_position
 			var d := Geometry3D.get_closest_point_to_segment(np, from, to).distance_to(np)
-			if d < best_d:
+			# Against the target's *surface*, not its origin. A destroyer is a
+			# hundred and fifty five metres long with its origin amidships, so a
+			# Sidewinder arriving at the bow was seventy metres from the point
+			# this used to measure — far outside any fuse radius. It flew
+			# through the ship and went off in the sea beyond, and the same
+			# arithmetic quietly under-fused every large target in the game.
+			var r: float = n.hit_radius() if n.has_method("hit_radius") else 0.0
+			var gap: float = d - r
+			if gap < best_gap:
+				best_gap = gap
 				best_d = d
 				best = n
-		if best and best_d < ws["fuse"]:
+		if best and best_gap < float(ws["fuse"]):
 			_hit(best, best_d)
 
 func _guide(delta: float) -> void:
