@@ -788,6 +788,8 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--shipnet` | what each end of a session thinks the fleet is doing |
 | `--cmtest=WHAT` | flares, chaff, both or none against a SAM shot |
 | `--nettest` | host, host again without leaving, leave, host again; and the address shown |
+| `--cluttertest=AGL` | what a SAM battery can do about a target at that height |
+| `--breaktest=RNG[,ALT[,WEAPON]]` | a shot, then a full-power break: closest approach |
 | `--skytest` | cloud settings, how far the march reaches, and the sun across a day |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
@@ -1399,7 +1401,53 @@ harness rather than off the screen:
   laser, having only a height field to intersect, painted the seabed 35 m under
   the target instead of the ship on it.
 
+## Defeating a missile
+
+Three things decide whether a break works, and the interesting part is which
+one turned out to matter.
+
+**Air density.** A fin makes its side force from dynamic pressure, so the same
+round is far less agile high up. An AMRAAM at its peak speed has 35 g on the
+deck, 17 g at six thousand metres and 7.7 g at fifteen thousand — and a shot
+that has to climb to reach you arrives slower as well as thinner.
+
+**Ground clutter.** A radar seeker looking down at a target near the ground is
+picking it out of the return from every field and roof behind it. A couple of
+seconds in the notch and the track is gone, and a SAM battery will not spend a
+round on something it cannot hold in the first place — measured, it fires none
+at all at an aircraft at 250 m and four at the same aircraft at 4000 m.
+
+**Induced drag**, which is the one that was missing. Instrumenting a whole
+engagement showed the round asking for **0.1 to 4.4 g while it had 17.4** — the
+g limit never once engaged, which is why raising and lowering it changed nothing
+whatsoever. What the missile could do was turn as hard as it liked for free, so
+a defensive break bled the aeroplane's energy and none of the missile's. A turn
+now costs speed, as the square of the side force and inversely with the air it
+has to work in: a gentle correction at 5 g costs 3 m/s per second, a hard
+endgame turn at 25 g down low costs over 170. That is the whole reason a late
+break works in reality.
+
+None of it stops a missile killing something that flies straight: three bandits
+still go down in the standard dogfight.
+
 ## Code health
+
+Godot will not report every warning from a headless run. A standalone ternary
+is raised by `GDScript::reload` only in a real windowed session, so the first
+anyone hears of it is a warning on somebody's screen — `--editor --quit` says
+nothing, a headless run says nothing, and `--check-only --script` cannot resolve
+the autoloads to get that far. `tools/lint_gd.py` catches that class statically.
+
+    python3 tools/lint_gd.py
+
+It took three attempts to be worth having. Matching a ternary by regex flagged
+every wrapped argument list in the project — 38 of them — until it tracked
+bracket depth across lines. Then it caught nothing at all, because the rule that
+skipped "lines which are a call" threw the real fault away with the false ones;
+the test that works is whether the `if` and `else` sit at bracket depth zero,
+since inside brackets they belong to somebody else's expression and
+`print("a" if b else "c")` is a perfectly good line. And two slice comparisons
+were off by one, so `line[i:i + 4] == "if "` could never be true.
 
 `project.godot` promotes the analyser's style warnings to **errors** — shadowed
 identifiers, unused variables and parameters, integer division, incompatible

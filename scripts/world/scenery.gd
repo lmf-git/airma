@@ -23,6 +23,9 @@ var _breakable: Array = []
 ## batches get generated node names once several towns collide on "Town0", so
 ## walking the children only ever found the first town's worth.
 var town_xforms: Array = []
+## Where the pylons ended up, for the same reason: a MultiMesh cannot be read
+## back in headless, so the harness needs the source.
+var pylon_spots: Array = []
 
 ## Lay out the road network first. The terrain paints roads into its own vertex
 ## colours, so the street grid has to exist before the ground is generated or
@@ -577,6 +580,22 @@ const PYLON_ROUTES := [
 	[Vector2(-1900, 3100), Vector2(2400, 4000)],
 ]
 
+## Step a pylon sideways until it is out of the road, or give up on it. Moving
+## along the run would just find the next place the line crosses; moving across
+## it clears the carriageway and leaves the route where it was.
+func _off_the_road(q: Vector2, a: Vector2, b: Vector2) -> Vector2:
+	var dir := (b - a).normalized()
+	var nrm := Vector2(-dir.y, dir.x)
+	for step in [22.0, -22.0, 40.0, -40.0, 62.0, -62.0, 90.0, -90.0]:
+		var t: Vector2 = q + nrm * float(step)
+		if Sim.height_at(t.x, t.y) < Sim.WATER_LEVEL + 3.0:
+			continue
+		if not Sim.clear_of_airfield(t.x, t.y) or _inside_town(t):
+			continue
+		if Sim.clear_of_roads(t.x, t.y, 12.0):
+			return t
+	return Vector2.INF
+
 func _pylon_mesh() -> ArrayMesh:
 	var st := MeshKit.begin()
 	var h := 34.0
@@ -609,12 +628,31 @@ func _powerlines() -> void:
 					continue
 				if not Sim.clear_of_airfield(q.x, q.y) or _inside_town(q):
 					continue
+				# A pylon has a base about eight metres across and stands
+				# thirty-four metres up; putting one in the carriageway is worse
+				# than putting a house there. Nudged aside rather than dropped,
+				# so the line still gets there.
+				if not Sim.clear_of_roads(q.x, q.y, 12.0):
+					var moved := _off_the_road(q, a, b)
+					if moved == Vector2.INF:
+						continue
+					q = moved
 				pts.append(q)
-		pts.append(route[route.size() - 1])
+		# The last pylon on a run goes through the same test as the rest of
+		# them. Appended unconditionally it was the one that ended up in the
+		# carriageway: 1 of 128.
+		var last: Vector2 = route[route.size() - 1]
+		if Sim.clear_of_roads(last.x, last.y, 12.0):
+			pts.append(last)
+		else:
+			var shifted := _off_the_road(last, route[route.size() - 2], last)
+			if shifted != Vector2.INF:
+				pts.append(shifted)
 		var prev := Vector3.INF
 		for q in pts:
 			var y: float = Sim.height_at(q.x, q.y)
 			xf.append(Transform3D(Basis(Vector3.UP, 0.0), Vector3(q.x, y - 1.0, q.y)))
+			pylon_spots.append(Vector3(q.x, y, q.y))
 			var top := Vector3(q.x, y + 23.8, q.y)
 			if prev != Vector3.INF:
 				_catenary(wire, prev, top)

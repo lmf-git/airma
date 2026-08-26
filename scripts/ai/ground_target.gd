@@ -67,7 +67,10 @@ func _physics_process(delta: float) -> void:
 		if not (n is Aircraft) or n.team == team or not n.is_alive():
 			continue
 		var d: float = global_position.distance_to(n.global_position)
-		if d < 9000.0 and n.agl > 90.0:
+		# A battery will not waste a round on something down in the clutter it
+		# cannot hold a lock on. Ninety metres was a floor to stop it shooting
+		# at parked aircraft; it takes real terrain-following to be safe now.
+		if d < 9000.0 and n.agl > 90.0 and _worth_shooting(n as Node3D, d):
 			# A battery cannot shoot at what its radar cannot see. Flying the
 			# valley floor to stay behind the ridge line is the whole point of
 			# going in low, and without this the site engaged straight through
@@ -84,6 +87,15 @@ func _physics_process(delta: float) -> void:
 			get_tree().current_scene.add_child(m)
 			Effects.dust(get_tree().current_scene, global_position + Vector3(0, 2, 0), 4.0)
 			return
+
+## How well this site can hold a low target. A radar looking down at something
+## in the weeds is competing with the ground return behind it, and the further
+## away it is the worse that gets.
+func _worth_shooting(n: Node3D, d: float) -> bool:
+	var agl: float = n.global_position.y - Sim.height_at(n.global_position.x,
+		n.global_position.z)
+	var need: float = 60.0 + 90.0 * (d / 9000.0) * 6.0
+	return agl > need
 
 func take_hit(amount: float, _from: Node = null) -> void:
 	if not alive:

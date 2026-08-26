@@ -85,6 +85,17 @@ var _cm_test := ""
 var _cm_t := 0.0
 var _cm_step := 0
 var _cm_sam: Node3D = null
+var _clutter_test := false
+var _clutter_agl := 200.0
+var _clutter_t2 := 0.0
+var _clutter_step := 0
+var _break_test := false
+var _break_rng := 8000.0
+var _break_t := 0.0
+var _break_step := 0
+var _break_min := 1e9
+var _break_alt := 6000.0
+var _break_w := "aim120"
 var _bat_test := false
 var _bat_t := 0.0
 var _bat_a: Node3D = null
@@ -342,7 +353,7 @@ func _ready() -> void:
 	menu.host_requested.connect(_host_game)
 	# the slot depends on the roster, which arrives after the mission starts
 	net.roster_changed.connect(_offset_for_peer)
-	menu.mission_changed.connect(func(m): net.announce_lobby(m) if net != null else null)
+	menu.mission_changed.connect(_on_lobby_mission)
 	menu.join_requested.connect(_join_game)
 	menu.resume_requested.connect(_resume)
 	ui.add_child(menu)
@@ -1097,6 +1108,110 @@ func _process(delta: float) -> void:
 				h, rad_to_deg(sa.x), rad_to_deg(sa.y), _sun.light_energy,
 				_env.ambient_light_energy, weather.daylight()])
 		get_tree().quit()
+	# A missile launched from a given range at an aeroplane that then breaks
+	# hard at full power: how close does it get?
+	if _break_test and is_instance_valid(player):
+		_break_t += delta
+		if _break_t > 1.5 and _break_step == 0:
+			_break_step = 1
+			var shooter := AIPlane.new()
+			shooter.setup("su35")
+			shooter.team = 1
+			shooter.name = "Shooter"
+			add_child(shooter)
+			var spot := Vector3(0.0, _break_alt, 0.0)
+			shooter.global_transform = Transform3D(Basis(),
+				spot + Vector3(0, 0, _break_rng))
+			shooter.look_at_from_position(shooter.global_position, spot, Vector3.UP)
+			shooter.linear_velocity = -shooter.global_transform.basis.z * 300.0
+			player.team = 0
+			player.global_transform = Transform3D(Basis(), spot)
+			player.rotation.y = deg_to_rad(180.0)
+			player.linear_velocity = -player.global_transform.basis.z * 380.0
+			player.gear_down = false
+			player.gear_anim = 0.0
+			player.flares = 0
+			player.chaff = 0
+			player.throttle = 1.0
+			player.power = 1.0
+			_reset_interp(player)
+			_reset_interp(shooter)
+			# Nothing else in the world gets a vote. With the fleet left running
+			# there were twenty-one rounds in the air and the closest approach
+			# was whichever of them happened to be nearest — the measurement
+			# came out identical whatever the missile physics were doing.
+			for sh2 in get_tree().get_nodes_in_group("ships"):
+				var v2 := sh2 as Ship
+				if v2 != null:
+					v2.ai = false
+					v2.cells_left = 0
+			for g2 in get_tree().get_nodes_in_group("ground_targets"):
+				if is_instance_valid(g2):
+					g2.queue_free()
+			for m2 in get_tree().get_nodes_in_group("missiles"):
+				if is_instance_valid(m2):
+					m2.queue_free()
+			shooter.target = player
+			shooter.locked = true
+			shooter.selected = maxi(shooter.weapon_types.find(_break_w), 0)
+			shooter.fire_cd = 0.0
+			print("[break] %s from %.1f km at %.0f m; the target then breaks at full power" % [
+				_break_w, _break_rng * 0.001, _break_alt])
+			shooter.fire()
+		elif _break_step == 1 and _break_t > 2.0:
+			# hard break, wings level nowhere near the missile
+			player.in_roll = 1.0
+			player.in_pitch = 1.0
+			player.throttle = 1.0
+			for m in get_tree().get_nodes_in_group("missiles"):
+				if is_instance_valid(m) and m.target == player \
+						and String(m.wid) == _break_w:
+					_break_min = minf(_break_min,
+						(m as Node3D).global_position.distance_to(player.global_position))
+			if _break_t > 34.0:
+				_break_step = 2
+				print("[break] RESULT: %s from %.1f km at %.0f m — closest %.0f m (fuse %.0f), player alive=%s" % [
+					_break_w, _break_rng * 0.001, _break_alt, _break_min,
+					float(WeaponSpec.get_spec(_break_w)["fuse"]),
+					str(player.is_alive())])
+				get_tree().quit()
+	# Fly the same profile at different heights and see what the battery can do
+	# about it.
+	if _clutter_test and is_instance_valid(player):
+		_clutter_t2 += delta
+		if _clutter_t2 > 1.5 and _clutter_step == 0:
+			_clutter_step = 1
+			var at := Vector3(2000.0, 0.0, -3000.0)
+			_cm_sam = GroundTarget.new()
+			_cm_sam.team = 1
+			_cm_sam.setup("sam")
+			add_child(_cm_sam)
+			_cm_sam.global_position = Vector3(at.x, Sim.height_at(at.x, at.z), at.z)
+			player.team = 0
+			var px := at.x
+			var pz := at.z + 6000.0
+			player.global_transform = Transform3D(Basis(),
+				Vector3(px, Sim.height_at(px, pz) + _clutter_agl, pz))
+			player.linear_velocity = Vector3(0, 0, -220.0)
+			player.gear_down = false
+			player.gear_anim = 0.0
+			player.flares = 0
+			player.chaff = 0             # no countermeasures: clutter alone
+			_reset_interp(player)
+			print("[clutter] running in at %.0f m agl, 6.0 km out, no countermeasures" % _clutter_agl)
+		elif _clutter_step == 1 and _clutter_t2 > 30.0:
+			_clutter_step = 2
+			var fired := 0
+			var tracking := 0
+			for m in get_tree().get_nodes_in_group("missiles"):
+				if not is_instance_valid(m):
+					continue
+				fired += 1
+				if m.target == player:
+					tracking += 1
+			print("[clutter] RESULT: %.0f m agl — %d rounds up, %d still tracking, player alive=%s, agl now %.0f" % [
+				_clutter_agl, fired, tracking, str(player.is_alive()), player.agl])
+			get_tree().quit()
 	# Does a countermeasure actually break a shot? A SAM site fires at the
 	# player from close range; the aeroplane either dispenses or does not.
 	if _cm_test != "" and is_instance_valid(player):
@@ -1275,6 +1390,19 @@ func _process(delta: float) -> void:
 				nearest_clash = minf(nearest_clash, d)
 			if terrain.mask_at(xf.origin.x, xf.origin.z).x > 0.35:
 				on_tarmac += 1
+		var pyl_bad := 0
+		var pyl_n := 0
+		for n in scenery.get_children():
+			if not (n is MultiMeshInstance3D) or String(n.name) != "Pylons":
+				continue
+			var pm := (n as MultiMeshInstance3D).multimesh
+			for i in pm.instance_count:
+				pyl_n += 1
+				var o: Vector3 = scenery.pylon_spots[i] if i < scenery.pylon_spots.size() \
+					else Vector3.ZERO
+				if not Sim.clear_of_roads(o.x, o.z, 12.0):
+					pyl_bad += 1
+		print("[town] pylons standing in a road: %d of %d" % [pyl_bad, pyl_n])
 		print("[town] buildings in a road: %d of %d overlap the carriageway (closest centre %.1f m), %d stand on painted tarmac" % [
 			clash, built, nearest_clash if clash > 0 else -1.0, on_tarmac])
 		print("[town] tarmac covers %.1f%% of the built-up area" % [
@@ -3244,6 +3372,11 @@ func _build_fleet() -> void:
 ## Measured with four peers: all four on the same coordinates. It is worked out
 ## when the roster arrives instead, which is a second or so later and long
 ## before anyone has flown anywhere.
+## The host changed its mind in the hangar; tell everyone waiting in it.
+func _on_lobby_mission(m: String) -> void:
+	if net != null:
+		net.announce_lobby(m)
+
 func _offset_for_peer() -> void:
 	if net == null or not net.active or not is_instance_valid(player):
 		return
@@ -4511,6 +4644,18 @@ func _parse_cmdline() -> void:
 			_nettest = true
 		elif a.begins_with("--cmtest="):
 			_cm_test = a.substr(9)
+		elif a.begins_with("--breaktest="):
+			# range[,altitude[,weapon]]
+			var bits := a.substr(12).split(",")
+			_break_rng = float(bits[0])
+			if bits.size() > 1:
+				_break_alt = float(bits[1])
+			if bits.size() > 2:
+				_break_w = String(bits[2])
+			_break_test = true
+		elif a.begins_with("--cluttertest="):
+			_clutter_agl = float(a.substr(14))
+			_clutter_test = true
 		elif a == "--dctest":
 			_dc_test = true
 		elif a == "--triggertest":

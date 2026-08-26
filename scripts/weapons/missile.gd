@@ -22,6 +22,7 @@ var _flame: MeshInstance3D
 var _seek_lost := 0.0
 var _mask_check := 0.0
 var _masked := false
+var _clutter_t := 0.0
 var _min_d := 1e9        # closest the round ever got to the aircraft it was aimed at
 var _min_age := 0.0
 
@@ -41,12 +42,20 @@ func _ready() -> void:
 	global_transform = _start_xf
 	var mi := MeshKit.mi(WeaponSpec.build_mesh(wid), "Body")
 	add_child(mi)
-	_trail = Effects.trail_particles(ws["trail"], 1.4, 64)
+	# The smoke follows the round's own girth rather than being one width for
+	# everything. A naval round is a foot and a half across and four and three
+	# quarter metres long — it should not leave the same thread behind it as a
+	# Sidewinder.
+	var bore: float = float(ws["dia"])
+	_trail = Effects.trail_particles(ws["trail"],
+		clampf(1.4 + bore * 9.0, 1.4, 5.5), int(clampf(64.0 + bore * 220.0, 64.0, 150.0)))
 	_trail.emitting = false
 	add_child(_trail)
 	if ws["burn"] > 0.0:
 		var st := MeshKit.begin()
-		MeshKit.cone(st, ws["dia"] * 0.45, 0.02, 0.0, 2.6, Vector3.ZERO, 8, false)
+		# a bigger motor makes a bigger flame
+		MeshKit.cone(st, bore * 0.45, 0.02, 0.0, 2.6 + bore * 3.0, Vector3.ZERO,
+			8, false)
 		var fm := StandardMaterial3D.new()
 		fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		fm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -196,6 +205,29 @@ func _guide(delta: float) -> void:
 	# and radar seekers by chaff, which until now nothing carried: a radar round
 	# had no counter at all, so a SAM site that got a shot off was unbeatable
 	# except by outrunning it.
+	# Ground clutter. A radar seeker looking down at a target close to the
+	# ground is trying to pick it out of the return from every field, hedge and
+	# roof behind it, and the slower the closing rate the harder that is. This
+	# is why anyone being shot at by a radar missile goes low, and until now it
+	# bought nothing at all: the seeker tracked a target at fifty feet exactly
+	# as well as one at forty thousand.
+	if String(ws["kind"]) == "radar":
+		var tgt_agl: float = tpos.y - Sim.height_at(tpos.x, tpos.z)
+		var look_down: float = clampf((global_position.y - tpos.y) / 900.0, 0.0, 1.0)
+		var low: float = 1.0 - smoothstep(120.0, 1400.0, tgt_agl)
+		var clutter: float = low * look_down
+		if clutter > 0.01:
+			_clutter_t += delta * clutter
+			# a couple of seconds in the notch and the track is gone
+			if _clutter_t > 2.4:
+				if Sim.debug_weapons:
+					print("[msl] %s lost %s in ground clutter at age %.1f: target %.0f m agl, %.0f m below the round" % [
+						wid, str(target.name), age, tgt_agl,
+						global_position.y - tpos.y])
+				target = null
+				return
+		else:
+			_clutter_t = maxf(_clutter_t - delta * 1.5, 0.0)
 	var cb: float = float(ws.get("chaff_bait", 0.0))
 	if cb > 0.0 and target.has_method("chaff_active") and target.chaff_active():
 		if randf() < cb * delta * 2.0:
@@ -257,11 +289,43 @@ func _guide(delta: float) -> void:
 	# late defensive break survivable. The reference speed is per weapon: a bomb
 	# never flies at missile speeds, and scaling it against one left the JDAM
 	# unable to hold its own weight, let alone steer.
+	#
+	# It has to be the speed the round pulls its rated g *at*, which is near its
+	# peak — not its launch speed. Set to the latter, an AMRAAM peaking at 1105
+	# m/s had this term pinned at 1.0 for the whole engagement and pulled the
+	# full thirty-five g right down to the merge, so breaking hard bought
+	# nothing at all.
 	var energy := clampf(vel.length() / float(ws.get("ref_speed", 420.0)), 0.15, 1.0)
-	var g_max: float = ws["max_g"] * 9.81 * energy * energy
+	# And the air it is turning against. A fin makes its lift from dynamic
+	# pressure, which is density times speed squared, so the same round is far
+	# less agile at forty thousand feet than it is down low — and a shot that
+	# has to climb to reach you arrives slower as well as thinner. Sea level is
+	# the reference, so nothing changes for a missile fired on the deck.
+	var rho_g: float = exp(-clampf(global_position.y, 0.0, 30000.0) / 8500.0)
+	var g_max: float = ws["max_g"] * 9.81 * energy * energy \
+		* clampf(rho_g, 0.22, 1.0)
+	if Sim.debug_weapons and String(ws["kind"]) == "radar" and fmod(age, 0.5) < delta:
+		print("[g] %s age=%.1f spd=%.0f alt=%.0f  wants %.1f g, has %.1f g%s" % [
+			wid, age, vel.length(), global_position.y, accel.length() / 9.81,
+			g_max / 9.81, "  <- LIMITED" if accel.length() > g_max else ""])
 	if accel.length() > g_max:
 		accel = accel.normalized() * g_max
 	vel += accel * delta
+	# Induced drag: a turn is not free.
+	#
+	# This is what was missing. Available g was never the limit — instrumented
+	# through a whole engagement the round wanted 0.1 to 4.4 g while holding
+	# 17.4, so the clamp never once engaged and changing it changed nothing.
+	# What it could do was turn as hard as it liked at no cost, so a defensive
+	# break bled the aeroplane's energy and none of the missile's. A fin that
+	# makes side force makes drag with it, as the square of the force and
+	# inversely with the air it has to work in, and that is precisely why a late
+	# hard break works: the round follows you and arrives with nothing left.
+	var lat := (accel - accel.project(vel.normalized())).length()
+	if lat > 1.0:
+		var q: float = maxf(rho_g * vel.length_squared(), 1.0)
+		var bleed: float = float(ws.get("induced", 0.9)) * lat * lat / q * 1000.0
+		vel -= vel.normalized() * minf(bleed, vel.length() * 0.5) * delta
 
 func _hit(what: Node, miss := 0.0) -> void:
 	# a detonation out at the edge of the fuse envelope only peppers the target

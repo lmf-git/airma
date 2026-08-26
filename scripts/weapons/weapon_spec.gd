@@ -9,7 +9,7 @@ static func _db() -> Dictionary:
 	"aim9": {
 		"name": "AIM-9X", "short": "9X", "kind": "ir",
 		"mass": 85.0, "length": 3.02, "dia": 0.127, "fin": 0.32,
-		"boost": 320.0, "burn": 5.0, "max_g": 50.0, "drag": 0.00035, "ref_speed": 420.0,
+		"boost": 320.0, "burn": 5.0, "max_g": 50.0, "drag": 0.00035, "ref_speed": 900.0,
 		"life": 32.0, "range": 12000.0, "seeker_fov": 80.0, "lock_time": 0.5,
 		"arm_time": 0.35, "fuse": 9.0, "damage": 105.0,
 		"colour": Color(0.86, 0.86, 0.83), "band": Color(0.85, 0.55, 0.15),
@@ -20,7 +20,7 @@ static func _db() -> Dictionary:
 	"aim120": {
 		"name": "AIM-120C", "short": "120", "kind": "radar",
 		"mass": 152.0, "length": 3.65, "dia": 0.178, "fin": 0.26,
-		"boost": 420.0, "burn": 8.0, "max_g": 35.0, "drag": 0.00028, "ref_speed": 520.0,
+		"boost": 420.0, "burn": 8.0, "max_g": 35.0, "drag": 0.00028, "ref_speed": 1100.0,
 		"life": 75.0, "range": 40000.0, "seeker_fov": 55.0, "lock_time": 1.4,
 		"arm_time": 0.6, "fuse": 13.0, "damage": 130.0,
 		"colour": Color(0.80, 0.80, 0.78), "band": Color(0.75, 0.72, 0.30),
@@ -36,8 +36,8 @@ static func _db() -> Dictionary:
 		# deal more warhead. Firing AMRAAMs out of a destroyer gave the fleet an
 		# air defence that arrived late and did not hurt.
 		"name": "SM-2 surface-to-air", "short": "SM2", "kind": "radar",
-		"mass": 708.0, "length": 4.72, "dia": 0.343, "fin": 0.55,
-		"boost": 620.0, "burn": 16.0, "max_g": 44.0, "drag": 0.00026, "ref_speed": 780.0,
+		"mass": 708.0, "length": 6.55, "dia": 0.343, "fin": 0.62,
+		"boost": 620.0, "burn": 16.0, "max_g": 44.0, "drag": 0.00026, "ref_speed": 1550.0,
 		"life": 110.0, "range": 74000.0, "seeker_fov": 70.0, "lock_time": 0.6,
 		"arm_time": 0.8, "fuse": 22.0, "damage": 290.0,
 		"colour": Color(0.86, 0.86, 0.84), "band": Color(0.30, 0.45, 0.70),
