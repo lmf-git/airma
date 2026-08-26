@@ -1055,6 +1055,41 @@ func _process(delta: float) -> void:
 					tc, r[0], r[1]).distance_to(tc))
 			print("[town] %-14s nearest trunk road %.0f m from the middle of it" % [
 				String(t["name"]), near])
+		# Does the baked field actually know where the roads are? The terrain
+		# paints its road stain from this, so if the field cannot resolve a
+		# carriageway the network is invisible from the air.
+		var worst_err := 0.0
+		var sum_err := 0.0
+		var missed := 0
+		var samples := 0
+		for r in (Sim.ROADS + scenery._streets):
+			var ra: Vector2 = r[0]
+			var rb: Vector2 = r[1]
+			for k in 9:
+				var q: Vector2 = ra.lerp(rb, float(k) / 8.0)
+				if absf(q.x) >= 18000.0 or absf(q.y) >= 18000.0:
+					continue
+				var field := Sim.road_distance(q.x, q.y)
+				var exact := Sim._road_distance_exact(q.x, q.y)
+				samples += 1
+				sum_err += absf(field - exact)
+				worst_err = maxf(worst_err, absf(field - exact))
+				if field >= 46.0:
+					missed += 1      # the terrain paints no road stain here
+		print("[town] road field on the centreline: mean error %.1f m, worst %.1f m; %d of %d points where the terrain paints nothing" % [
+			sum_err / maxf(float(samples), 1.0), worst_err, missed, samples])
+		for n in scenery.get_children():
+			if n is MeshInstance3D and String(n.name) in ["Roads", "Kerbs"]:
+				var mi := n as MeshInstance3D
+				var ab := mi.get_aabb()
+				var tris := 0
+				if mi.mesh != null:
+					for si in mi.mesh.get_surface_count():
+						tris += mi.mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX].size() / 3
+				print("[town] mesh %-6s visible=%s tris=%d  aabb pos=%s size=%s  layers=%d" % [
+					String(mi.name), str(mi.visible), tris,
+					str(ab.position.round()), str(ab.size.round()), mi.layers])
+		print("[town] scenery: %s" % str(scenery._stats))
 		print("[town] trunk roads: %d legs, %.1f km of tarmac, %.0f m of climb (%.1f m per km), steepest %.1f%%" % [
 			Sim.ROADS.size(), length * 0.001, climb, climb / maxf(length * 0.001, 1.0),
 			steepest * 100.0])

@@ -985,6 +985,20 @@ harness rather than off the screen:
   gradient **0.0022 to 0.0000**, worst height step across a building footprint
   **9.34 m to 0.00 m**, and street sample points buried in the ground **486 of
   1404 down to 12**, deepest **6.29 m to 1.97 m**.
+* **Roads nobody could see** — the network was there the whole time: 47 trunk
+  legs, 117 streets, 43,532 triangles of carriageway, every mesh present and
+  visible. What was missing was the stain the terrain paints under them, which
+  is what actually draws the network from any distance at all — at altitude the
+  carriageway mesh is sub-pixel. That stain is keyed on distance-to-road, and
+  distance-to-road came from a field baked at 256 samples over 36 km: **141 m
+  to a cell, for a carriageway fifteen metres wide**. It could not resolve a
+  road. Measured standing on the centreline, it reported a mean of **30.3 m
+  away and up to 84.7 m**, and at **303 of 1476** centreline points it said far
+  enough that the terrain painted no road there at all. The result was a faint
+  broken smear rather than a road network. The field is a broad phase now and
+  the segments are walked properly anywhere the answer is close enough to
+  matter: **0.0 m mean error, 0.0 m worst, 0 of 1476 points unpainted**, for
+  about 1.4 s more at world generation.
 * **Roads that go round things** — the trunk network was straight legs between
   fixed points, which on this terrain climbs a ridge, drops into a valley and
   climbs the next one. It is laid between the towns as they actually ended up —

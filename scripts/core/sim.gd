@@ -343,6 +343,20 @@ func road_distance(x: float, z: float) -> float:
 		return _road_distance_exact(x, z)
 	if absf(x) >= RF_HALF or absf(z) >= RF_HALF:
 		return 9999.0
+	# The baked field is a broad phase and nothing more. It is 256 samples over
+	# 36 km — 141 m to a cell — and a carriageway is fifteen metres wide, so it
+	# cannot resolve a road at all: measured standing on the centreline it
+	# reported a mean of 30 m away and up to 85 m, and at one point in five it
+	# said far enough that the terrain painted no road there. The network came
+	# out as a faint broken smear instead of roads. Anywhere the coarse answer
+	# is close enough to matter, the segments are walked properly. The threshold is
+	# the stain radius plus the worst error the coarse field was measured making.
+	var coarse := _sample_road_field(x, z)
+	if coarse > 170.0:
+		return coarse
+	return _road_distance_exact(x, z)
+
+func _sample_road_field(x: float, z: float) -> float:
 	var step := RF_HALF * 2.0 / float(RF_N - 1)
 	var fx := (x + RF_HALF) / step
 	var fz := (z + RF_HALF) / step
