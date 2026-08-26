@@ -274,11 +274,38 @@ lock, and something sitting behind a ridge is hidden until one of you comes up;
 anything within a couple of kilometres stays available so a target does not
 blink out as it crosses a hedge.
 
+The **scope** obeys the same rule, not just the lock. Painting a contact solid
+and then refusing to lock it is worse than not painting it, because you can see
+it and cannot understand what the radar is doing. A masked contact leaves a
+faded trace where it was last seen and nothing more.
+
 The AI uses the same fact the other way. An aeroplane being shot at, or running
 in on something that can shoot back, checks how much lower it would have to be
 for the ridge line to cover it -- and if there is something to get behind, goes
 down behind it and comes up late. If the ground between is open it stays high,
 because giving away the energy buys nothing.
+
+## Wrecks
+
+Nothing that dies stays intact.
+
+A **vehicle** loses its turret — the ammunition goes up and the one silhouette
+everybody recognises is the turret lying twenty metres away — the paint burns
+off what is left, and the hull sits there on fire for about half a minute
+before settling down to smoke. A handful of pieces are thrown clear with it.
+There is no physics terrain in this project: the ground is a height field and
+every vehicle does its own contact against it, so debris on a `RigidBody3D` had
+nothing to land on and fell for ever. Measured, 640 m below the airfield and
+still accelerating. Wreckage is ballistic against the height field instead,
+bounces once or twice and comes to rest.
+
+A **ship** over ninety metres **breaks her back**. The intact hull is put away
+and two sections are lofted from the same station profile either side of the
+fracture, each hung on a node at the break so it tips about the break rather
+than about the middle of a ship that no longer exists. They go down at
+different rates and different angles — the after section, where the machinery
+and most of the water is, goes first and steeper — with torn plating on both
+faces, fire that drowns before the smoke does, and flotsam left on the water.
 
 ## Chat
 
@@ -551,6 +578,12 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--masktest` | does terrain block a line, and does the radar respect it |
 | `--chattest` | `/`, a line of text, and whether the stick moved while typing |
 | `--shipnet` | what each end of a session thinks the fleet is doing |
+| `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
+| `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
+| `--townstest` | where the towns ended up, how level, and whether the streets are buried |
+| `--navaltest=WEAPON` | that weapon against a ship, hull before and after |
+| `--adminfrom=WHERE` | call traffic in while crewing a ship or a tank, and follow it |
+| `--autodiag` | what the autoland is commanding all the way down, and where it touches |
 | `--podch=N` | force a sensor channel and render it |
 | `--keytest=1` | driver seat keys: map, panels, and what the trigger does |
 | `--helitest` | hands off altitude drift, then the collective both ways |
@@ -917,6 +950,69 @@ harness rather than off the screen:
 * **Ships under command** — helm, telegraph, battery and tubes: an Arleigh Burke
   made 119 m in eight seconds (29.9 kts), answered the wheel, laid its mount on
   068 when ordered to 068, and fired.
+* **A fuse that measured to the wrong place** — a Sidewinder arriving at a
+  destroyer's bow was seventy metres from the ship's origin amidships, which is
+  the point the proximity fuse was measuring against. It flew through the ship
+  and went off in the sea beyond. The fuse now works against the target's
+  surface: measured, an AIM-9X 14.5 m from a corvette's origin with a 9.1 m
+  hull radius detonates on a 9 m fuse, and an AMRAAM at 15.7 m on a 13 m fuse.
+  The same arithmetic had been quietly under-fusing every large target in the
+  game.
+* **A ship's magazine** — the tubes fired AMRAAMs, and fired them straight up.
+  Vertically launched, at six hundred metres a second pulling a few g, the turn
+  radius is kilometres: the round simply carries on being vertical. Measured
+  closest approach to an aeroplane twelve kilometres out, **4584 m**, with nine
+  rounds wasted and the target untouched. Launched leaning at the contact
+  instead, on a dedicated naval round with the booster a ship can afford —
+  faster, longer burning, four times the reach and more than twice the warhead
+  — the closest approach is **6 m** and the aeroplane does not come home.
+* **The sea drew over the explosions** — a bomb into the water made a splash
+  with no fireball. Two things. The burst was drawn at the round's own position,
+  which by the time the water check trips is already under the surface. And
+  more importantly the sea and the fireball are both alpha transparent, and
+  transparent surfaces do not write depth — they are sorted, by object origin.
+  The sea is one mesh sixty kilometres across whose origin is the middle of the
+  world, so from anywhere out over the water it sorted in front and composited
+  86% opaque sea over the top of the explosion. It is drawn last now, and the
+  burst stands clear of the surface: measured 4.4 m above it instead of 0.3 m
+  below.
+* **The weapon camera** — see below; the same class of bug, and the same fix.
+* **Where towns go** — the settlements were dropped on fixed coordinates and
+  draped over whatever gradient ran through them, which on this terrain means a
+  street grid laid up a hillside and buildings climbing it. Each town is now
+  moved onto the flattest ground within reach of where it was wanted and stands
+  on a platform levelled into the height field. Measured across all four:
+  gradient **0.0022 to 0.0000**, worst height step across a building footprint
+  **9.34 m to 0.00 m**, and street sample points buried in the ground **486 of
+  1404 down to 12**, deepest **6.29 m to 1.97 m**.
+* **Roads that go round things** — the trunk network was straight legs between
+  fixed points, which on this terrain climbs a ridge, drops into a valley and
+  climbs the next one. It is laid between the towns as they actually ended up —
+  they move as much as 2.9 km, so roads drawn to the old sites ended in a field
+  — and each leg's waypoints are relaxed sideways toward lower ground, the way
+  a surveyor would. Cost is climb plus the square of the gradient plus a mild
+  charge per metre of tarmac, so a road goes a long way round a mountain and
+  not one metre round a molehill. Measured: **61.7 to 41.0 m of climb per km**
+  and the steepest pitch **49.4% to 41.1%**, for 23% more tarmac. Dropping the
+  gradient term brought the climb down but left a 59.9% wall in it, which is
+  what happens when you only count the total.
+* **Where the wheels go** — the autoland flew the glide slope to the aiming
+  point itself, so the aeroplane was eighteen metres up three hundred metres
+  out, the flare began before the runway and the wheels arrived on the
+  threshold lip. Measured, an F-22 touching at z=+1474 with the paved surface
+  ending at 1500 — landing on the runway to look at, and reported as a
+  touchdown off the paved surface because a few metres either way put it
+  outside. The slope is anchored on the threshold now, as a real three degree
+  approach is, and the flare starts higher, shallower, and keeps some thrust
+  until four metres. Across four types: touchdown moved 130 m further in and
+  the arrival softened from 7.85 to 5.31 m/s (F-22), 3.45 to 1.35 (C-130),
+  4.87 to 3.98 (A-10), with 614 m of runway to spare instead of 461.
+* **Watching the traffic from somewhere else** — called-in aircraft fly their
+  approach identically whether the player is in an aeroplane, a ship or a tank:
+  same position and throttle to the decimal. What did not work was looking at
+  them. A player on a ship is seeing through *that* vehicle's camera, so
+  pointing the aircraft camera at a landing aeroplane moved nothing, and the
+  traffic appeared not to be flying at all.
 * **Ships that fight** — an Arleigh Burke and a Steregushchiy put eight
   kilometres apart and left alone. Both opened fire, the corvette went down at
   9.2 s and a patrol boat with her, and the destroyer came out at sixty percent

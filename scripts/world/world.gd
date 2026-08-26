@@ -919,6 +919,11 @@ func _process(delta: float) -> void:
 				str(pod.active), str(pod.lasing), pod.mode,
 				str(is_instance_valid(pod.tracked)), str(player.designated.round()),
 				str(player.designated_node.name) if is_instance_valid(player.designated_node) else "none"])
+			# hold the lock right up to release: the pod's own processing can
+			# break it between designation and the shot
+			if is_instance_valid(_naval_ship):
+				player.target = _naval_ship
+				player.locked = true
 			print("[naval] release: %s" % ("away" if player.fire() == "" else "refused"))
 		elif _naval_t > 40.0:
 			_naval_test = false
