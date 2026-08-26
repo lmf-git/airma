@@ -1433,17 +1433,17 @@ func get_velocity() -> Vector3:
 		return get_meta("net_vel", Vector3.ZERO)
 	return linear_velocity
 
-func explode() -> void:
-	if not alive:
-		return
-	alive = false
-	wrecked = true
-	health = 0.0
+## Everything a destroyed aeroplane *looks* like, with none of the consequences.
+## A ghost of somebody else's aircraft has to come apart and burn on this screen
+## too — otherwise a jet you have just shot down goes still and stays whole —
+## but it must not emit `died`, which is what scores the kill and would score it
+## once on every machine in the session.
+func wreck_visuals() -> void:
 	Effects.explosion(get_tree().current_scene, global_position, 14.0)
 	for i in randi_range(2, 4):
 		break_part(_pick_part())
-	# the hulk keeps flying its ballistic arc, burning, until it hits something
-	angular_velocity = Vector3(randf_range(-2.5, 2.5), randf_range(-2.0, 2.0), randf_range(-3.5, 3.5))
+	angular_velocity = Vector3(randf_range(-2.5, 2.5), randf_range(-2.0, 2.0),
+		randf_range(-3.5, 3.5))
 	var burn_trail := Effects.trail_particles(Color(0.35, 0.33, 0.32), 4.0, 40)
 	burn_trail.lifetime = 3.2
 	burn_trail.emitting = true
@@ -1451,6 +1451,14 @@ func explode() -> void:
 	var embers := Effects.ember_particles(Color(1.0, 0.55, 0.18), 2.2, 26)
 	embers.emitting = true
 	add_child(embers)
+
+func explode() -> void:
+	if not alive:
+		return
+	alive = false
+	wrecked = true
+	health = 0.0
+	wreck_visuals()
 	var rd := Ragdoll.new()
 	rd.spawn_from(Transform3D(global_transform.basis, global_transform * cockpit_offset()),
 		linear_velocity * 0.35 + Vector3(0, 6.0, 0))

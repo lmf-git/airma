@@ -588,6 +588,9 @@ func fire_gun() -> bool:
 		Sim.net.rpc("net_ship_shot", fleet_idx, aim_yaw, aim_pitch)
 	return true
 
+func is_broken() -> bool:
+	return _broken
+
 func is_sinking() -> bool:
 	return _sinking >= 0.0
 
@@ -683,6 +686,24 @@ func _physics_process(delta: float) -> void:
 
 ## She goes down over the better part of a minute: way comes off, the list
 ## opens out, and the hull settles until the deck is under.
+## Where the two halves sit at a given point through the sinking, 0 to 1. The
+## after section, which is where the machinery and most of the water is, goes
+## down first and steeper. Shared, because a client is told how far along she is
+## rather than running the clock itself.
+func _pose_sections(t: float, down: float) -> void:
+	var l: float = float(KINDS[kind]["len"])
+	var age := t * 46.0
+	if is_instance_valid(_fore):
+		_fore.rotation.x = -clampf(age * 0.020, 0.0, 0.62)
+		_fore.rotation.z = list_ang * list_side * 0.4
+		_fore.position.y = -down * t * 0.25
+		_fore.position.z = l * 0.05 - clampf(age * 0.30, 0.0, 7.0)
+	if is_instance_valid(_aft):
+		_aft.rotation.x = clampf(age * 0.032, 0.0, 0.95)
+		_aft.rotation.z = list_ang * list_side * 1.3
+		_aft.position.y = -down * t * 0.85
+		_aft.position.z = l * 0.05 + clampf(age * 0.45, 0.0, 11.0)
+
 func _sink(delta: float) -> void:
 	_sinking += delta
 	speed = move_toward(speed, 0.0, delta * 0.9)
@@ -695,20 +716,7 @@ func _sink(delta: float) -> void:
 	rotation = Vector3(clampf(_sinking * 0.006, 0.0, 0.20), heading,
 		list_ang * list_side)
 	if _broken:
-		# The two halves tip about the fracture in opposite directions and the
-		# after section, which is where the machinery and most of the water is,
-		# goes down first and steeper.
-		var l: float = float(kd["len"])
-		if is_instance_valid(_fore):
-			_fore.rotation.x = -clampf(_sinking * 0.020, 0.0, 0.62)
-			_fore.rotation.z = list_ang * list_side * 0.4
-			_fore.position.y = -down * t * 0.25
-			_fore.position.z = l * 0.05 - clampf(_sinking * 0.30, 0.0, 7.0)
-		if is_instance_valid(_aft):
-			_aft.rotation.x = clampf(_sinking * 0.032, 0.0, 0.95)
-			_aft.rotation.z = list_ang * list_side * 1.3
-			_aft.position.y = -down * t * 0.85
-			_aft.position.z = l * 0.05 + clampf(_sinking * 0.45, 0.0, 11.0)
+		_pose_sections(t, down)
 	# the fire drowns before the smoke does
 	if is_instance_valid(_wreck_fire) and _sinking > 22.0:
 		_wreck_fire.emitting = false
@@ -919,12 +927,27 @@ func net_apply(pos: Vector3, yaw: float, hp: float, fl: float, fi: float,
 	if was and not alive:
 		Effects.explosion(get_tree().current_scene, global_position + Vector3(0, 6, 0),
 			float(KINDS[kind]["beam"]) * 1.6)
+		# She breaks up here too. Without this a client watched a ship it had
+		# just helped sink go quietly still and stay whole, while on the host
+		# she was in two pieces and burning.
+		_break_up()
 		remove_from_group("hittable")
 		remove_from_group("boardable")
 		Sim.report("%s sunk" % display_name(), Sim.Ev.GOOD)
 	if (flags & 2) != 0:
 		# going down: take the settle and the list straight from the host
-		list_ang = 1.15 * clampf(float(flags >> 8) / 255.0, 0.0, 1.0)
+		var frac: float = clampf(float(flags >> 8) / 255.0, 0.0, 1.0)
+		_sinking = frac * 46.0
+		list_ang = 1.15 * frac
+		var kd: Dictionary = KINDS[kind]
+		var down: float = float(kd["free"]) + float(kd["draught"]) + 6.0
+		global_position.y = Sim.WATER_LEVEL - down * frac
+		if _broken:
+			_pose_sections(frac, down)
+		if is_instance_valid(_wreck_fire):
+			_wreck_fire.emitting = frac < 0.48
+		if is_instance_valid(_wreck_smoke):
+			_wreck_smoke.emitting = frac < 0.87
 	rotation = Vector3(0.0, heading, list_ang * list_side)
 
 ## Orders from whoever holds the conn, applied on the host.

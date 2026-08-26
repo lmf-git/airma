@@ -124,6 +124,7 @@ var _vls_step := 0
 var _vls_ship: Node3D = null
 var _vls_best := 1e9
 var _town_test := false
+var _sky_test := false
 var _splash_aim := Vector3.INF
 var _splash_hit := Vector3.INF
 var _splash_r := 0.0
@@ -986,6 +987,40 @@ func _process(delta: float) -> void:
 						i, v.call("display_name"), _bat_hp[i], v.get("health"),
 						"SUNK" if not bool(v.get("alive")) else "afloat"])
 				get_tree().quit()
+	# The sky: how much cloud there is, how it is banded, and where the sun
+	# goes over a day.
+	if _sky_test:
+		_sky_test = false
+		for id in Weather.ids():
+			set_weather(id)
+			var near_b := 0
+			var far_b := 0
+			var near_p := 0
+			var far_p := 0
+			for d in weather.get_children():
+				if not (d is MultiMeshInstance3D):
+					continue
+				var mmi := d as MultiMeshInstance3D
+				var cnt: int = mmi.multimesh.instance_count
+				if String(mmi.name).begins_with("far_"):
+					far_b += 1
+					far_p += cnt
+				else:
+					near_b += 1
+					near_p += cnt
+			print("[sky] %-10s %6d puffs: %d near in %d batches, %d far in %d; %d decks; cloud %.0f to %.0f m" % [
+				id, near_p + far_p, near_p, near_b, far_p, far_b,
+				weather.deck_count(), weather.cloud_band().x, weather.cloud_band().y])
+		set_weather("scattered")
+		print("[sky] a day, by the solar model:")
+		for h in [0, 4, 6, 8, 12, 16, 18, 20, 22]:
+			var sa := weather.solar_angles(float(h))
+			weather.time_of_day = float(h)
+			weather._apply_sun(true)
+			print("[sky]   %02d:00  sun %+5.1f deg elevation, bearing %5.1f, light %.2f, ambient %.2f, daylight %.2f" % [
+				h, rad_to_deg(sa.x), rad_to_deg(sa.y), _sun.light_energy,
+				_env.ambient_light_energy, weather.daylight()])
+		get_tree().quit()
 	# Does a countermeasure actually break a shot? A SAM site fires at the
 	# player from close range; the aeroplane either dispenses or does not.
 	if _cm_test != "" and is_instance_valid(player):
@@ -1434,6 +1469,29 @@ func _process(delta: float) -> void:
 		var mark := int(_shipnet_t / 10.0)
 		if mark > _shipnet_said:
 			_shipnet_said = mark
+			var side0 := "single"
+			if net != null and net.active:
+				side0 = "host" if net.is_host else "client"
+			var afloat := 0
+			var sunk := 0
+			var broken := 0
+			var going := 0
+			for sh2 in get_tree().get_nodes_in_group("ships"):
+				var v2 := sh2 as Ship
+				if v2 == null:
+					continue
+				if v2.alive:
+					afloat += 1
+				else:
+					sunk += 1
+				if v2.is_broken():
+					broken += 1
+				if v2.is_sinking():
+					going += 1
+			print("[shipnet] %-8s sky: %s at %05.2f h, sun %+.1f deg, %d puffs | fleet: %d afloat, %d sunk, %d broken in two, %d going down" % [
+				side0, weather.current, weather.time_of_day,
+				rad_to_deg(weather.sun_elevation()), weather.puff_count(),
+				afloat, sunk, broken, going])
 			var side := "single"
 			if net != null and net.active:
 				side = "host" if net.is_host else "client %d" % net.my_id
@@ -4343,6 +4401,8 @@ func _parse_cmdline() -> void:
 			_vls_test = true
 		elif a == "--townstest":
 			_town_test = true
+		elif a == "--skytest":
+			_sky_test = true
 		elif a.begins_with("--cmtest="):
 			_cm_test = a.substr(9)
 		elif a == "--dctest":

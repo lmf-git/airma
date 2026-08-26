@@ -25,6 +25,7 @@ var _ai_acc := 0.0
 var _gnd_acc := 0.0
 var _ai_seen := {}
 var _ship_acc := 0.0
+var _wx_acc := 0.0
 var ship_conn := -1           # fleet index this peer has the conn of, -1 none
 var verbose := false
 var upnp_ready := false           # the router forwarded the port
@@ -144,6 +145,7 @@ func leave() -> void:
 	ship_conn = -1
 	ai_kinds.clear()
 	_ai_seen.clear()
+	_publish_weather.call_deferred()
 	veh_ghosts.clear()
 	foot_ghosts.clear()
 	ghosts.clear()
@@ -294,7 +296,13 @@ func net_state(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, thr: float,
 	if (flags & 16) != 0:
 		if g.alive:
 			g.alive = false
-			Effects.explosion(world, g.global_position, 12.0)
+			g.wrecked = true
+			g.wreck_visuals()
+	# both dispensers, so a remote aeroplane defending itself looks like one
+	if (flags & 32) != 0:
+		g.drop_flare()
+	if (flags & 64) != 0:
+		g.drop_chaff()
 	g.gear_down = bool(flags & 1)
 	g.hook_down = bool(flags & 2)
 	g.flaps = 1.0 if (flags & 4) else 0.0
@@ -407,6 +415,29 @@ func net_ai_gone(idx: PackedInt32Array) -> void:
 				Effects.explosion(world, g.global_position, 12.0)
 			g.queue_free()
 
+# --------------------------------------------------------------- weather
+## The sky is host-authoritative, like everything else that everyone has to
+## agree on. Two players flying the same sortie at different times of day, one
+## in daylight and one at dusk, is not a cosmetic difference: it changes what
+## you can see and what can see you.
+@rpc("authority", "call_remote", "reliable")
+func net_weather(id: String, hour: float, rate: float) -> void:
+	if is_host or world == null:
+		return
+	var w = world.get("weather")
+	if w == null or not is_instance_valid(w):
+		return
+	if String(w.current) != id:
+		world.call("set_weather", id)
+	w.time_of_day = hour
+	w.time_rate = rate
+
+func _publish_weather() -> void:
+	var w = world.get("weather")
+	if w == null or not is_instance_valid(w):
+		return
+	rpc("net_weather", String(w.current), float(w.time_of_day), float(w.time_rate))
+
 # ----------------------------------------------------------------- chat
 ## Text chat. Anyone may send; it goes to everybody including the sender, so
 ## one code path posts the line and the local echo cannot drift from what the
@@ -459,12 +490,24 @@ func net_ships(idx: PackedInt32Array, pos: PackedVector3Array,
 	if is_host or world == null:
 		return
 	rx += 1
+	var seen := {}
 	for i in idx.size():
+		seen[idx[i]] = true
 		var sh := _ship_by_index(idx[i])
 		if sh == null:
 			continue
 		sh.net_apply(pos[i], yaw[i], hp[i], dmg[i * 3], dmg[i * 3 + 1],
 			dmg[i * 3 + 2], flags[i])
+	# A hull the host has stopped publishing has gone to the bottom and been
+	# cleaned up there. A client never runs the sinking clock itself, so without
+	# this it keeps every wreck it has ever seen: measured, a host with seven
+	# ships afloat and a client holding ten.
+	for n in world.get_tree().get_nodes_in_group("ships"):
+		if not is_instance_valid(n) or not (n is Ship):
+			continue
+		var s2 := n as Ship
+		if s2.fleet_idx >= 0 and not seen.has(s2.fleet_idx) and not s2.alive:
+			s2.queue_free()
 
 ## The conn changes hands. The host stops letting the AI captain steer that
 ## hull and starts taking its wheel and telegraph from the peer instead.
@@ -600,7 +643,7 @@ func _publish_ships() -> void:
 ## eased onto the last reported pose on the physics tick.
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func net_vehicle(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, turret: float,
-		barrel: float) -> void:
+		barrel: float, flags: int = 1) -> void:
 	var t: Tank = veh_ghosts.get(id)
 	if t == null or not is_instance_valid(t):
 		t = Tank.new()
@@ -620,8 +663,13 @@ func net_vehicle(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, turret: f
 	t.linear_velocity = vel
 	t.turret_yaw = turret
 	t.turret_pitch = barrel
+	# A vehicle somebody else is driving used to have no way of saying it had
+	# died: the packet carried a pose and nothing else, so a tank destroyed on
+	# one screen simply stopped moving on every other one, intact and upright.
+	if (flags & 1) == 0 and bool(t.alive):
+		t.apply_damage(1.0e6)          # turret off, burning, the same as at home
 	if is_host:
-		rpc("net_vehicle", id, pos, rot, vel, turret, barrel)
+		rpc("net_vehicle", id, pos, rot, vel, turret, barrel, flags)
 
 @rpc("any_peer", "call_remote", "reliable")
 func net_fire(id: int, weapon: String, origin: Vector3, basis_q: Quaternion, vel: Vector3) -> void:
@@ -866,6 +914,10 @@ func _physics_process(delta: float) -> void:
 		if _ship_acc >= 0.2:
 			_ship_acc = 0.0
 			_publish_ships()
+		_wx_acc += RATE
+		if _wx_acc >= 2.0:      # the clock drifts slowly; so can the packet
+			_wx_acc = 0.0
+			_publish_weather()
 		_obj_acc += RATE
 		if _obj_acc >= 0.5:
 			_obj_acc = 0.0
@@ -902,7 +954,7 @@ func _physics_process(delta: float) -> void:
 	if tk != null and is_instance_valid(tk):
 		rpc("net_vehicle", my_id, tk.global_position,
 			tk.global_transform.basis.get_rotation_quaternion(), tk.linear_velocity,
-			tk.turret_yaw, tk.turret_pitch)
+			tk.turret_yaw, tk.turret_pitch, 1 if tk.alive else 0)
 		return
 	# on foot: send the walker instead of the jet
 	if world.get("on_foot"):
@@ -930,6 +982,10 @@ func _physics_process(delta: float) -> void:
 		flags |= 8
 	if not p.is_alive():
 		flags |= 16
+	if p.flare_active():
+		flags |= 32
+	if p.chaff_active():
+		flags |= 64
 	tx += 1
 	rpc("net_state", my_id, p.global_position,
 		p.global_transform.basis.get_rotation_quaternion(), p.linear_velocity,

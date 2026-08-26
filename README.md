@@ -87,6 +87,33 @@ including passengers riding in someone else's cargo hold — the hold owner is
 sent with the packet so occupants stay attached to the right aircraft rather
 than drifting in world space.
 
+**Everything that comes apart, comes apart on every screen.** Four things were
+being simulated on one machine and only hinted at on the others, all with the
+same shape of fault — the packet carried a pose and an alive flag and nothing
+about what the thing had *become*. A tank a remote player was driving simply
+stopped, upright and intact, instead of losing its turret and burning; a jet you
+had just shot down went still and stayed whole; a ship you had helped sink went
+quietly rigid rather than breaking in two. The vehicle packet carries an alive
+bit now, a downed aeroplane's ghost runs the same wreck it would at home (minus
+the `died` signal, which scores the kill and must fire once in the session
+rather than once per machine), a client breaks and settles a hull from the sink
+fraction the host sends, and flare and chaff bits mean a remote aeroplane
+defending itself looks like one.
+Finding that needed a two-client run with the fleet fighting: the client showed
+3 sunk and 2 broken in two while the host showed **seven ships and none of
+either**, because the host had already cleaned its wrecks up and a client, never
+running the sinking clock itself, kept every wreck it had ever seen. Ten hulls
+on one end, seven on the other. A hull the host stops publishing is now dropped.
+Both ends run 10 down to 7.
+
+**The sky is host-authoritative.** The weather preset, the clock and the rate it
+runs at all come from the host, pushed every couple of seconds and once more
+whenever somebody joins. Two players flying the same sortie at different times
+of day is not a cosmetic difference — it changes what you can see and what can
+see you. Verified with a client started on `clear` joining a host on `dusk`: it
+adopts the host's preset and the same 7541 puffs, and the two clocks stay within
+a couple of degrees of sun elevation.
+
 **The fleet replicates too.** Ships need no spawn roster: every peer lays the
 same fleet down in the same order at load, so a hull is addressed by its index
 in that plan and the host only has to say where it is and what state it is in.
@@ -480,6 +507,45 @@ clear of rising ground, with open ocean off the eastern coast.
   by slope, batched into 1,700 MultiMesh cells with per-cell visibility ranges
   so distant ground cover stops drawing entirely.
 
+## Sky and time of day
+
+The sun is placed by the standard solar position formulae from a clock, rather
+than being a fixed rotation per weather preset. It rises in the east, crosses to
+the south at noon and sets in the west, and everything that depends on the light
+hangs off its elevation: light energy and colour, ambient level, sky top and
+horizon, fog colour, and how the clouds are lit. Below the horizon the sun goes
+out, shadows switch off, the sky goes to a deep blue-black and the fill light
+takes over as moonlight. A day runs in four hours by default.
+
+Measured across a day at 45 degrees latitude:
+
+| time | elevation | bearing | sun energy |
+|---|---|---|---|
+| 04:00 | −9.9° | 058 | 0.00 |
+| 06:00 | +9.8° | 080 | 0.79 |
+| 12:00 | +59.0° | 180 | 1.05 |
+| 18:00 | +9.8° | 280 | 0.79 |
+| 20:00 | −9.9° | 302 | 0.00 |
+
+**Clouds** are three layers rather than one deck: cumulus with real vertical
+development from 2200 m, altocumulus around 5200 m, and cirrus at 9400 m where
+a jet cruises. The old single deck sat between 1180 and 4020 m — below the tops
+of the hills in places, and you climbed through the entire sky in the first
+thirty seconds. It now runs from **2121 m to 10158 m**, and there are three to
+sixteen thousand puffs in it depending on the weather rather than two hundred
+to eighteen hundred.
+
+That many billboards need **LOD**, and LOD needs the field cut into cells:
+Godot's visibility range works per node against that node's own bounds, so one
+node covering the whole sky is always in range of everything. Each cell of each
+layer gets a detailed batch of many small puffs drawn while you are near it and
+a coarse batch of a few large ones that stands in once you are not. The cells
+are twelve to twenty-two kilometres across, because each one is two draw calls
+and the field is ninety kilometres wide — cutting it into five kilometre cells
+produced four thousand batches, which is a worse problem than the one the cells
+were there to solve. It settles at 166 batches, most of them out of range at
+any moment.
+
 ## Weather
 
 Four presets, selectable in the hangar: **clear**, **scattered**, **overcast**
@@ -604,6 +670,7 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--chattest` | `/`, a line of text, and whether the stick moved while typing |
 | `--shipnet` | what each end of a session thinks the fleet is doing |
 | `--cmtest=WHAT` | flares, chaff, both or none against a SAM shot |
+| `--skytest` | cloud counts, batching and altitude band, and the sun across a day |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
 | `--townstest` | where the towns ended up, how level, and whether the streets are buried |
@@ -1038,6 +1105,15 @@ harness rather than off the screen:
   the segments are walked properly anywhere the answer is close enough to
   matter: **0.0 m mean error, 0.0 m worst, 0 of 1476 points unpainted**, for
   about 1.4 s more at world generation.
+* **A measurement that was measuring nothing** — the cloud altitudes read back
+  as 0 to 0 m however they were sampled, through three rewrites of the sampling
+  code and two of the build order. A two-instance MultiMesh built and read in
+  isolation settled it: `set_instance_transform` writes through the rendering
+  server, which is a stub in headless, so **every instance reads back as
+  identity there**. The write was correct the whole time — printing the source
+  transform gave (−29617, 2642, −28050) and the read-back gave zero on the next
+  line. Anything in this project that measures a MultiMesh by reading it back
+  is measuring the stub; the band is recorded as the field is built instead.
 * **Roads through the airfield, and buildings standing in them** — two faults
   that both came down to one number being asked to cover every case.
   The trunk network ran across the airfield: **362 of 4784** sample points
