@@ -181,16 +181,28 @@ func _physics_process(delta: float) -> void:
 		if best and best_gap < float(ws["fuse"]):
 			_hit(best, best_d)
 
+## Where a bomb goes on aiming at once whatever it was following has gone. A
+## laser spot is a *place*: the second and third rounds of a salvo were losing
+## guidance the moment the first one killed the thing they were all aimed at,
+## and finishing wherever they happened to be pointed — measured, 145 m out
+## while the leader landed at 19 m. That reads exactly like a bomb stopping
+## early or wandering off into its neighbours.
+var _last_aim := Vector3.INF
+
 func _guide(delta: float) -> void:
 	if target == null or not is_instance_valid(target):
+		_coast_to_mark(delta)
 		return
 	if target.has_method("is_alive") and not target.is_alive():
 		if Sim.debug_weapons:
 			print("[msl] %s dropped %s at age %.1f: target reported dead" % [
 				wid, str(target.name), age])
+		_last_aim = target.global_position
 		target = null
+		_coast_to_mark(delta)
 		return
 	var tpos: Vector3 = target.global_position
+	_last_aim = tpos
 	var tvel: Vector3 = Vector3.ZERO
 	if target.has_method("get_velocity"):
 		tvel = target.get_velocity()
@@ -278,11 +290,19 @@ func _guide(delta: float) -> void:
 	var closing := -rel.dot(los / dist)
 	var accel := omega.cross(vel) * N_GAIN
 	if ws["kind"] == "bomb":
-		# A guided bomb flies the line to the target: steer the velocity vector
-		# onto the line of sight and hold gravity off with the same authority.
-		# Leading a ballistic drop instead aims it hundreds of metres short.
-		var want := (tpos - global_position).normalized() * maxf(vel.length(), 1.0)
-		accel = (want - vel) * 1.8 + Vector3.UP * 9.81
+		# A guided bomb points at the target and lets gravity do the rest. It
+		# steers the *direction* of its velocity onto the line of sight and
+		# leaves the magnitude alone, so it noses over and accelerates down the
+		# slope the way a falling thing does.
+		#
+		# Holding gravity off with the same authority — which is what this did —
+		# makes it glide flat instead, and with a bomb's drag coefficient it
+		# then bleeds out: released from seven kilometres it arrived at the
+		# target's neighbourhood doing 59 m/s and expired at the end of its
+		# seventy second life, still two hundred metres short.
+		var v_dir := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
+		var want_dir := (tpos - global_position).normalized()
+		accel = (want_dir - v_dir) * maxf(vel.length(), 90.0) * 2.6
 	elif closing < -50.0:
 		accel *= 0.2
 	# A round that has slowed down cannot pull its rated g, which is what makes a
@@ -321,11 +341,35 @@ func _guide(delta: float) -> void:
 	# makes side force makes drag with it, as the square of the force and
 	# inversely with the air it has to work in, and that is precisely why a late
 	# hard break works: the round follows you and arrives with nothing left.
-	var lat := (accel - accel.project(vel.normalized())).length()
+	# Not for bombs. A bomb's steering term carries `+ UP * 9.81` to hold gravity
+	# off, and that is almost entirely lateral to a flat trajectory — so it read
+	# as a permanent hard turn and charged drag for it. Worse, the charge grows
+	# as the inverse square of speed, so the slower it got the harder it braked:
+	# a JDAM released from seven kilometres decelerated to 40 m/s two thousand
+	# metres up, tripped the "stopped flying" self-destruct and went off five
+	# kilometres short. A bomb's lift-induced drag is already in its own drag
+	# coefficient, which is an order of magnitude above a missile's.
+	var lat := (accel - accel.project(vel.normalized())).length() \
+		if String(ws["kind"]) != "bomb" else 0.0
 	if lat > 1.0:
 		var q: float = maxf(rho_g * vel.length_squared(), 1.0)
 		var bleed: float = float(ws.get("induced", 0.9)) * lat * lat / q * 1000.0
-		vel -= vel.normalized() * minf(bleed, vel.length() * 0.5) * delta
+		# and never more than a quarter of what it has left in a second, so a
+		# slow round cannot brake itself to a standstill
+		vel -= vel.normalized() * minf(bleed, vel.length() * 0.25) * delta
+
+## Keep flying the last place the target was, for a weapon that is aimed at
+## the ground rather than at a thing. A missile has nothing to coast to.
+func _coast_to_mark(_delta: float) -> void:
+	if String(ws["kind"]) != "bomb" or _last_aim == Vector3.INF:
+		return
+	var v_dir := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
+	var want_dir := (_last_aim - global_position).normalized()
+	var accel := (want_dir - v_dir) * maxf(vel.length(), 90.0) * 2.6
+	var g_max: float = ws["max_g"] * 9.81
+	if accel.length() > g_max:
+		accel = accel.normalized() * g_max
+	vel += accel * _delta
 
 func _hit(what: Node, miss := 0.0) -> void:
 	# a detonation out at the edge of the fuse envelope only peppers the target
@@ -382,6 +426,12 @@ func _die(big: bool) -> void:
 					nn = str(n.name)
 		print("[msl] %s died at age %.1f, %.0f m/s, closest %s at %.1f m (fuse %.1f), best pass %.1f m at age %.1f" % [
 			wid, age, vel.length(), nn, near, float(ws["fuse"]), _min_d, _min_age])
+	if ws["kind"] == "bomb" and Sim.salvo_watch:
+		var gh: float = Sim.height_at(global_position.x, global_position.z)
+		Sim.salvo_log.append("%s died at %.1fs, %.0f m from the mark, at %s — %.0f m above the ground there, %.0f m/s" % [
+			wid, age, global_position.distance_to(Sim.salvo_mark)
+			if Sim.salvo_mark != Vector3.INF else -1.0,
+			str(global_position.round()), global_position.y - gh, vel.length()])
 	if ws["kind"] == "bomb" and Sim.debug_weapons:
 		var nearest := 9999.0
 		var nm := "-"

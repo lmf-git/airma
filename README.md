@@ -790,6 +790,8 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--nettest` | host, host again without leaving, leave, host again; and the address shown |
 | `--cluttertest=AGL` | what a SAM battery can do about a target at that height |
 | `--breaktest=RNG[,ALT[,WEAPON]]` | a shot, then a full-power break: closest approach |
+| `--salvotest` | three JDAMs at one lased mark, and where each of them lands |
+| `--shaketest` | how steady the sensor head is on the aeroplane carrying it |
 | `--skytest` | cloud settings, how far the march reaches, and the sun across a day |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
@@ -1400,6 +1402,78 @@ harness rather than off the screen:
   waterline, so a hit at the hull detonated in the air above the deck. And the
   laser, having only a height field to intersect, painted the seabed 35 m under
   the target instead of the ship on it.
+
+## Locking a target
+
+`T` cycles the radar through hostile contacts. Four things stopped that working
+properly, and only one of them was the key.
+
+**Your own carrier was a valid target.** It carries no `team` at all and sits in
+the `hittable` group, so the hostility test — *does it have a team, and is that
+team mine?* — skipped it entirely and let it through. Press `T` near the fleet
+and you locked your own ship. A contact needs an explicit, differing team now.
+
+**So were laser designation spots.** They belong in `hittable` so a bomb's fuse
+finds them, but they are a place rather than a contact, and the radar cycled
+onto them.
+
+**Terrain masking rejected too much.** The line-of-sight ray began four metres
+above the aeroplane, so at low level or on the runway it marched straight
+through the ground underneath and reported every contact as masked. It ignores
+the first 250 m now.
+
+**And a duplicate name is not a name.** Set on a node before it joins the tree,
+a name that collides with a sibling is not suffixed by Godot — it is thrown away
+and replaced with a generated one. The second Type 45 and the second patrol boat
+were on the radar as `@Node3D@194` and `@Node3D@197`. Ships are numbered when
+they are built, and everything that puts a contact on screen asks for its
+display name rather than its node name.
+
+The **sensor head** had the same fault the weapon camera did. It is placed once
+per rendered frame from the aircraft's transform, and it was reading the stepped
+physics value while the aeroplane itself is drawn interpolated — so the pod view
+shook against a wing you can see in your own periphery. Measured against the
+aeroplane as drawn: **1.13 m of frame-to-frame wobble, worst 1.24 m**, now
+**0.0000 m**. The first version of that measurement compared the head to its own
+transform source, which is self-referential and reads zero however wrong it is.
+
+Discrete key presses are also latched from the input event rather than polled
+from `_physics_process`. `Input.is_action_just_pressed` is true only during the
+frame the press was registered, and physics runs at 120 Hz whether or not the
+renderer keeps up, so a press could in principle land between ticks and be gone
+before anything looked. Measured at 15, 30 and 120 fps, both approaches deliver
+all twelve presses of twelve — the latch is a guarantee rather than a
+demonstrated repair.
+
+## A salvo of bombs
+
+Dropping several JDAMs on one lased point turned up three faults stacked on top
+of each other, and two of them were self-inflicted.
+
+**Induced drag was being charged to a bomb.** The steering term for a guided
+bomb carried `+ UP * 9.81` to hold gravity off, which on a flat trajectory is
+almost entirely *lateral* — so the new turn-costs-energy rule read it as a
+permanent hard turn and billed it accordingly. The charge grows as the inverse
+square of speed, so the slower it got the harder it braked: a bomb released from
+seven kilometres decelerated to **40 m/s two thousand metres up**, tripped the
+"this round has stopped flying" self-destruct and went off five kilometres
+short. Bombs are exempt; their lift-induced drag is already in a drag
+coefficient an order of magnitude above a missile's.
+
+**Cancelling gravity was wrong anyway.** With it held off the bomb glides flat
+instead of nosing over, and with a bomb's drag it simply bleeds out — it reached
+the target's neighbourhood doing 59 m/s and expired at the end of its seventy
+second life, still two hundred metres short. It steers the *direction* of its
+velocity onto the line of sight now and leaves the magnitude to gravity, which
+is what a falling thing does. The same JDAM that used to take a corvette from
+1100 to 433 now takes it to below zero.
+
+**And the first bomb was disarming the rest.** When it killed what they were all
+aimed at, every round still in the air lost its target and finished wherever it
+happened to be pointed — the leader landing at 19 m and the follower at 145. A
+laser spot is a *place*: a bomb whose target has gone keeps flying the last
+position it had. Measured on a three-round salvo at one mark: **19 m and 8 m**,
+arriving six seconds apart.
 
 ## Defeating a missile
 

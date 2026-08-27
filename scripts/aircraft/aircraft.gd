@@ -1285,6 +1285,9 @@ class DesignatedSpot extends Node3D:
 		# in "hittable" so the fuse sweep finds it: a bomb that flies through
 		# its own designation and carries on is no use to anybody
 		add_to_group("hittable")
+		# ...but it is a place, not a contact. Without this the radar cycled
+		# onto the player's own laser spot.
+		add_to_group("no_lock")
 	var _life := 140.0
 	func is_alive() -> bool:
 		return true

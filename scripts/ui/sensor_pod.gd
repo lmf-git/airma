@@ -26,6 +26,11 @@ var _cam: Camera3D
 var _tex: TextureRect
 var _font: Font
 var _t := 0.0
+var diag := false
+var _diag_prev := Vector3.INF
+var shake_worst := 0.0
+var shake_sum := 0.0
+var shake_n := 0
 var _marker: Node3D
 var lasing := false
 var _beam: MeshInstance3D
@@ -306,6 +311,16 @@ func _ground_hit(origin: Vector3, dir: Vector3) -> Vector3:
 ## AC-130's picture was full of its own aeroplane. Read the hull line out of the
 ## section table and hang the head below it, on the port side for a gunship,
 ## which is where that aeroplane actually carries its sensors.
+## The pose to hang the sensor off. The *interpolated* one: the head is placed
+## in `_process`, once per rendered frame, while the aircraft it is bolted to
+## moves once per physics tick. Reading the stepped transform puts the camera a
+## fraction of a tick away from the aeroplane on every frame, which is a shake
+## you can see against your own wing — the same fault the weapon camera had.
+func _mount_xf(n: Node3D) -> Transform3D:
+	if n.is_inside_tree():
+		return n.get_global_transform_interpolated()
+	return n.global_transform
+
 func _head_origin() -> Vector3:
 	# On a ship the head is at the masthead, not wherever the parked aeroplane
 	# happens to be sitting on the ramp.
@@ -313,7 +328,7 @@ func _head_origin() -> Vector3:
 		var lift := 18.0
 		if host.has_method("mast_height"):
 			lift = float(host.call("mast_height"))
-		return host.global_position + Vector3(0, lift, 0)
+		return _mount_xf(host).origin + Vector3(0, lift, 0)
 	var z := -1.8
 	var bottom := -1.1
 	var half_w := 0.8
@@ -331,16 +346,17 @@ func _head_origin() -> Vector3:
 	var lat := 0.0
 	if bool(jet.spec.get("gunship", false)):
 		lat = -half_w * 0.72          # port blister, clear of the belly
-	return jet.global_transform * Vector3(lat, bottom - 0.5, z)
+	return _mount_xf(jet) * Vector3(lat, bottom - 0.5, z)
 
 func _aim_dir() -> Vector3:
 	if mode == POINT and is_instance_valid(tracked):
-		return (tracked.global_position - _head_origin()).normalized()
+		# the target is stepped too, so take its interpolated pose as well
+		return (_mount_xf(tracked).origin - _head_origin()).normalized()
 	if mode == AREA:
 		return (area_point - _head_origin()).normalized()
-	var b := jet.global_transform.basis
+	var b := _mount_xf(jet).basis
 	if host != null and is_instance_valid(host):
-		b = host.global_transform.basis
+		b = _mount_xf(host).basis
 	return (b * (Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) * Vector3(0, 0, -1))).normalized()
 
 func _process(delta: float) -> void:
@@ -359,8 +375,21 @@ func _process(delta: float) -> void:
 	var dir := _aim_dir()
 	_cam.fov = lerpf(_cam.fov, ZOOMS[zoom_step], clampf(delta * 8.0, 0.0, 1.0))
 	_cam.global_position = origin
-	var up := Vector3.UP if absf(dir.y) < 0.985 else jet.global_transform.basis.y
+	var up := Vector3.UP if absf(dir.y) < 0.985 else _mount_xf(jet).basis.y
 	_cam.look_at(origin + dir * 1000.0, up)
+	if diag:
+		# Against the aeroplane as it is *drawn*, always — not against whatever
+		# transform the head happens to use. Measuring the head against its own
+		# source is self-referential and reads zero however wrong it is.
+		var seen: Vector3 = jet.get_global_transform_interpolated().origin \
+			if jet.is_inside_tree() else jet.global_position
+		var rel: Vector3 = origin - seen
+		if _diag_prev != Vector3.INF:
+			var d := (rel - _diag_prev).length()
+			shake_worst = maxf(shake_worst, d)
+			shake_sum += d
+			shake_n += 1
+		_diag_prev = rel
 	_update_laser()
 	# hand the aim point to the aeroplane so a guided bomb can follow it
 	if jet != null and is_instance_valid(jet):

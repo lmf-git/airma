@@ -292,7 +292,7 @@ func _draw_bomb_cue() -> void:
 		label = "LASER"
 	elif jet.target != null and is_instance_valid(jet.target):
 		aim = (jet.target as Node3D).global_position
-		label = String(jet.target.name).left(14).to_upper()
+		label = Sim.label_of(jet.target).left(16).to_upper()
 	if aim != Vector3.INF and cam.is_position_behind(aim) == false:
 		var a := _project(aim)
 		# a diamond on the designated point

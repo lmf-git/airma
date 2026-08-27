@@ -160,6 +160,12 @@ var _fire_test := false
 var _fire_t := 0.0
 var _view_test := false
 var _view_t := 0.0
+var _shake_test := false
+var _shake_t := 0.0
+var _salvo_test := false
+var _salvo_t := 0.0
+var _salvo_dropped := 0
+var _salvo_aim := Vector3.INF
 var _lock_test := false
 var _lock_t := 0.0
 var _flap_test := false
@@ -1108,6 +1114,74 @@ func _process(delta: float) -> void:
 				h, rad_to_deg(sa.x), rad_to_deg(sa.y), _sun.light_energy,
 				_env.ambient_light_energy, weather.daylight()])
 		get_tree().quit()
+	# Several JDAMs at one lased point, released a couple of seconds apart.
+	if _salvo_test and is_instance_valid(player):
+		_salvo_t += delta
+		if _salvo_t > 2.0 and _salvo_aim == Vector3.INF:
+			var gx := 2400.0
+			var gz := -5200.0
+			_salvo_aim = Vector3(gx, Sim.height_at(gx, gz), gz)
+			var mark := GroundTarget.new()
+			mark.team = 1
+			mark.setup("radar")
+			add_child(mark)
+			mark.global_position = _salvo_aim
+			player.global_transform = Transform3D(Basis(),
+				_salvo_aim + Vector3(0, 2600.0, 7000.0))
+			player.linear_velocity = Vector3(0, 0, -240.0)
+			player.gear_down = false
+			player.gear_anim = 0.0
+			player.set_bays(true)
+			for k in player.bays:
+				player.bays[k]["anim"] = 1.0
+				player.bays[k]["open"] = true
+			pod.jet = player
+			if not pod.active:
+				pod.toggle()
+			pod.mode = pod.POINT
+			pod.tracked = mark
+			if not pod.lasing:
+				pod.toggle_laser()
+			pod._process(0.016)
+			player.locked = true
+			player.set_weapon(maxi(player.weapon_types.find("gbu32"), 0))
+			_reset_interp.call_deferred(player)
+			Sim.salvo_watch = true
+			Sim.salvo_mark = _salvo_aim
+			Sim.salvo_log.clear()
+			print("[salvo] lasing %s; three JDAMs, two seconds apart" % str(_salvo_aim.round()))
+		elif _salvo_aim != Vector3.INF and _salvo_dropped < 3 \
+				and _salvo_t > 4.0 + float(_salvo_dropped) * 2.0:
+			_salvo_dropped += 1
+			player.fire_cd = 0.0
+			var r := player.fire()
+			print("[salvo] release %d: %s" % [_salvo_dropped,
+				"away" if r == "" else r])
+		elif _salvo_dropped >= 3 and _salvo_t > 80.0:
+			_salvo_test = false
+			for entry in Sim.salvo_log:
+				print("[salvo]   %s" % String(entry))
+			print("[salvo] RESULT: %d released, %d detonated" % [
+				_salvo_dropped, Sim.salvo_log.size()])
+			get_tree().quit()
+	# How steady the sensor head is on the aeroplane carrying it.
+	if _shake_test and is_instance_valid(player):
+		_shake_t += delta
+		if _shake_t > 2.0 and not pod.active:
+			pod.jet = player
+			pod.toggle()
+			pod.diag = true
+			pod.shake_worst = 0.0
+			pod.shake_sum = 0.0
+			pod.shake_n = 0
+			player.in_roll = 0.35        # keep it manoeuvring, not gliding
+			player.in_pitch = 0.2
+		elif _shake_t > 26.0:
+			_shake_test = false
+			print("[pod] head against the aeroplane over %d frames: mean %.4f m, worst %.4f m" % [
+				pod.shake_n, pod.shake_sum / maxf(float(pod.shake_n), 1.0),
+				pod.shake_worst])
+			get_tree().quit()
 	# A missile launched from a given range at an aeroplane that then breaks
 	# hard at full power: how close does it get?
 	if _break_test and is_instance_valid(player):
@@ -2317,6 +2391,74 @@ func _process(delta: float) -> void:
 		_lock_t += delta
 		if _lock_t > 2.0:
 			_lock_test = false
+			# The key path, not just the lock logic: an action that is unbound,
+			# or a typing gate stuck open, stops T dead however well
+			# cycle_target works when called directly.
+			var evs := InputMap.action_get_events(&"cycle_target")
+			var names := PackedStringArray()
+			for ev in evs:
+				names.append(ev.as_text())
+			print("[lock] T path: action exists=%s bound to [%s]; Sim.typing=%s; chat open=%s" % [
+				str(InputMap.has_action(&"cycle_target")), ", ".join(names),
+				str(Sim.typing), str(is_instance_valid(chat) and chat.typing)])
+			print("[lock] Sim.tapped would return %s (it is gated on typing)" % [
+				str(not Sim.typing)])
+			# and the whole path for real: a T event through Godot's own input
+			# system, which is what `Input.is_action_just_pressed` reads
+			# Press it repeatedly: acquiring once is not cycling.
+			player.target = null
+			player.lock_presses_seen = 0
+			for press in 12:
+				var kd := InputEventKey.new()
+				kd.physical_keycode = KEY_T
+				kd.keycode = KEY_T
+				kd.pressed = true
+				Input.parse_input_event(kd)
+				# A whole frame between press and release, and more between
+				# presses: a person cannot press T twice inside one frame, and
+				# `parse_input_event` batches per frame, so doing it faster
+				# measures the queue rather than the game.
+				await get_tree().process_frame
+				await get_tree().process_frame
+				var ku := InputEventKey.new()
+				ku.physical_keycode = KEY_T
+				ku.keycode = KEY_T
+				ku.pressed = false
+				Input.parse_input_event(ku)
+				await get_tree().process_frame
+				await get_tree().process_frame
+				pass
+			var shipnames := PackedStringArray()
+			for shn in get_tree().get_nodes_in_group("ships"):
+				shipnames.append("%s(%s)" % [String(shn.name),
+					String(shn.call("display_name")) if shn.has_method("display_name")
+					else "?"])
+			print("[lock] ship node names: %s" % ", ".join(shipnames))
+			print("[lock] RELIABILITY: 12 presses sent, %d reached the handler" % [
+				player.lock_presses_seen])
+			player.target = null
+			var down := InputEventKey.new()
+			down.physical_keycode = KEY_T
+			down.keycode = KEY_T
+			down.pressed = true
+			Input.parse_input_event(down)
+			await get_tree().physics_frame
+			await get_tree().physics_frame
+			var up := InputEventKey.new()
+			up.physical_keycode = KEY_T
+			up.keycode = KEY_T
+			up.pressed = false
+			Input.parse_input_event(up)
+			if is_instance_valid(player.target):
+				var gs := PackedStringArray()
+				for g in player.target.get_groups():
+					gs.append(String(g))
+				print("[lock] after a real T press: target=%s  class=%s  groups=[%s]  team=%s" % [
+					String(player.target.name), player.target.get_class(),
+					", ".join(gs),
+					str(player.target.get("team")) if "team" in player.target else "none"])
+			else:
+				print("[lock] after a real T press: NONE")
 			var ships := get_tree().get_nodes_in_group("ships")
 			var tgt: Node3D = null
 			for sh in ships:
@@ -3345,6 +3487,9 @@ func _build_fleet() -> void:
 		var e: Array = plan[i]
 		var sh := Ship.new()
 		sh.setup(String(e[0]), int(e[3]))
+		# Unique, so a second ship of the same class does not have its name
+		# thrown away by the tree and replaced with "@Node3D@194".
+		sh.name = "%s %d" % [sh.name, i + 1]
 		sh.fleet_idx = i
 		# every peer lays the same fleet down in the same order, so the index is
 		# the whole address the network needs
@@ -4644,6 +4789,10 @@ func _parse_cmdline() -> void:
 			_nettest = true
 		elif a.begins_with("--cmtest="):
 			_cm_test = a.substr(9)
+		elif a == "--salvotest":
+			_salvo_test = true
+		elif a == "--shaketest":
+			_shake_test = true
 		elif a.begins_with("--breaktest="):
 			# range[,altitude[,weapon]]
 			var bits := a.substr(12).split(",")

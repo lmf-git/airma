@@ -108,6 +108,7 @@ func _pilot(delta: float) -> void:
 	if Sim.tapped(&"cycle_target") \
 			and not (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
 		cycle_target()
+		lock_presses_seen += 1
 	if Sim.tapped(&"chaff"):
 		drop_chaff()
 	if Sim.tapped(&"flare"):
@@ -174,6 +175,9 @@ func ref_speed_kt() -> float:
 	var v_stall := sqrt(2.0 * w / (1.225 * spec["wing_area"] * maxf(cl_max, 0.4)))
 	return v_stall * 1.3 * 1.94384
 
+## How many T presses actually reached the handler, for the harness.
+var lock_presses_seen := 0
+
 func cycle_target() -> void:
 	var w := current_weapon()
 	var ws := WeaponSpec.get_spec(w if w != "gun" else "aim9")
@@ -188,7 +192,12 @@ func cycle_target() -> void:
 		for n in get_tree().get_nodes_in_group(grp):
 			if not is_instance_valid(n) or n == self:
 				continue
-			if "team" in n and n.team == team:
+			# An explicit hostile team, not merely the absence of a friendly
+			# one. The carrier carries no `team` at all and sits in "hittable",
+			# so it passed this test and the radar cycled onto your own ship.
+			if not ("team" in n) or int(n.team) == team:
+				continue
+			if n.is_in_group("no_lock"):
 				continue
 			if n.has_method("is_alive") and not n.is_alive():
 				continue
@@ -198,6 +207,8 @@ func cycle_target() -> void:
 		say("no targets")
 		target = null
 		return
+	if Sim.debug_weapons:
+		print("[lock] %d hostile(s) in the world" % cand.size())
 	var fwd := -global_transform.basis.z
 	# Rank on angle *and* range. Sorting on boresight angle alone locks the
 	# radar onto whatever happens to be dead ahead, so a contact ninety
@@ -215,7 +226,10 @@ func cycle_target() -> void:
 	var visible_now: Array = cand.filter(func(n): return \
 		global_position.distance_to(n.global_position) < 2000.0 \
 		or Sim.line_of_sight(global_position + Vector3(0, 4, 0),
-			(n as Node3D).global_position + Vector3(0, 4, 0)))
+			(n as Node3D).global_position + Vector3(0, 4, 0), 250.0))
+	if Sim.debug_weapons:
+		print("[lock] %d within radar range, %d of those not terrain masked" % [
+			cand.size(), visible_now.size()])
 	if not visible_now.is_empty():
 		cand = visible_now
 	else:
@@ -226,12 +240,15 @@ func cycle_target() -> void:
 		say("no targets")
 		target = null
 		return
+	if Sim.debug_weapons:
+		print("[lock] %d candidate(s) survived: reach %.0f km, weapon %s" % [
+			cand.size(), reach * 0.001, w])
 	cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
 	var i := cand.find(target)
 	target = cand[(i + 1) % cand.size()]
 	lock_time = 0.0
 	var d := global_position.distance_to(target.global_position) * 0.001
-	say("target %s  %.1f km" % [target.name.left(14), d])
+	say("target %s  %.1f km" % [Sim.label_of(target).left(18), d])
 
 func on_weapon_hit(what: Node, _wid: String) -> void:
 	if what.has_method("is_alive") and not what.is_alive():

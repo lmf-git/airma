@@ -1,5 +1,7 @@
 class_name Carrier
 extends Node3D
+
+var team := 0
 ## A carrier parked in the eastern ocean: angled landing deck, four arrestor
 ## wires, island, catapults and an optical landing aid.
 
@@ -36,6 +38,9 @@ func build(at: Vector3, hdg: float) -> void:
 	deck = Sim.register_deck(Vector3(at.x, 0, at.z), hdg, Vector2(BEAM * 0.5 + 12.0, LEN * 0.5), DECK_Y)
 	for w in WIRES:
 		wire_points.append(w)
+	# It belongs to somebody. Without this the radar treated it as a contact
+	# with no allegiance, which the target filter read as hostile.
+	team = 0
 	add_to_group("carrier")
 	add_to_group("boardable")
 	add_to_group("hittable")

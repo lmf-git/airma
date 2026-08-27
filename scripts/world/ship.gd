@@ -119,7 +119,10 @@ func setup(k := "destroyer", t := 1) -> void:
 	health = float(kd["hp"])
 	cells_left = int(kd.get("vls", 0))
 	speed = float(kd["speed"])
-	name = String(kd["name"])
+	# Godot will not take a name it considers invalid and quietly substitutes a
+	# generated one, which is how a destroyer ended up on the radar as
+	# "@Node3D@197". Give it something legal to begin with.
+	name = String(kd["name"]).validate_node_name()
 	_build(kd)
 	add_to_group("hittable")
 	add_to_group("ships")
@@ -775,6 +778,8 @@ func launch_strategic(at: Vector3) -> bool:
 ## target the seeker can hold by itself.
 class _Aimpoint extends Node3D:
 	var team := 1
+	func _ready() -> void:
+		add_to_group("no_lock")     # a patch of ground, not a contact
 	func is_alive() -> bool:
 		return true
 	func hit_radius() -> float:

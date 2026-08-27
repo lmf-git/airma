@@ -36,6 +36,9 @@ var ui_modal := false
 ## the three helpers below instead, and they go quiet while a line is open.
 var typing := false
 ## Where the last explosion was drawn, for the harness.
+var salvo_watch := false
+var salvo_mark := Vector3.INF
+var salvo_log: Array = []
 var last_burst := Vector3.INF
 var last_burst_r := 0.0
 ## Sensor suite state, shared by the HUD, the pod and the map.
@@ -526,13 +529,22 @@ func report(text: String, kind: int = Ev.INFO) -> void:
 ## and previously duplicated inside the HUD where nothing else could reach it.
 ## The step is fine enough to catch a ridge line and coarse enough that a whole
 ## radar sweep's worth of calls costs nothing.
-func line_of_sight(from: Vector3, to: Vector3) -> bool:
+## `skip` ignores the first stretch of the ray. A radar is not blocked by the
+## ground its own aeroplane is standing on: with the eye four metres up and the
+## march starting immediately, every contact read as masked the moment you were
+## at low level or on the runway, and the answer to pressing T was "no radar
+## contacts" wherever you pointed it.
+func line_of_sight(from: Vector3, to: Vector3, skip := 0.0) -> bool:
 	var span := from.distance_to(to)
 	if span < 1.0:
 		return true
+	var t0: float = clampf(skip / span, 0.0, 0.9)
 	var steps := clampi(int(span / 180.0), 6, 48)
 	for i in range(1, steps):
-		var q: Vector3 = from.lerp(to, float(i) / float(steps))
+		var f := float(i) / float(steps)
+		if f < t0:
+			continue
+		var q: Vector3 = from.lerp(to, f)
 		if q.y < height_at(q.x, q.z) - 2.0:
 			return false
 	return true
@@ -552,14 +564,54 @@ func masking_depth(from: Vector3, to: Vector3) -> float:
 		worst = minf(worst, q.y - height_at(q.x, q.z))
 	return worst if worst < 1e8 else 0.0
 
+## What to call a thing on screen. A node's `name` is not it: set before the
+## node joins the tree, a name that collides with a sibling is replaced by Godot
+## with a generated one, so the second Type 45 and the second patrol boat showed
+## up on the radar as "@Node3D@194" and "@Node3D@197".
+func label_of(n: Node) -> String:
+	if n == null or not is_instance_valid(n):
+		return "—"
+	if n.has_method("display_name"):
+		return String(n.call("display_name"))
+	var nm := String(n.name)
+	return "contact" if nm.begins_with("@") else nm
+
 func strength(action: StringName) -> float:
 	return 0.0 if typing else Input.get_action_strength(action)
 
 func held(action: StringName) -> bool:
 	return not typing and Input.is_action_pressed(action)
 
+## Discrete key presses, latched from the input event rather than polled.
+##
+## `Input.is_action_just_pressed` is true only during the frame the press was
+## registered, and everything that reads it here does so from
+## `_physics_process`. Physics runs at 120 Hz and the renderer does not, so a
+## press could land between physics ticks and be gone before anyone looked —
+## which is why T cycled targets *sometimes*. Latching the press when the event
+## arrives and clearing it when somebody consumes it makes it exact: every press
+## is seen once, and no press is seen twice.
+var _taps := {}
+
+func _input(e: InputEvent) -> void:
+	if typing or not (e is InputEventKey or e is InputEventMouseButton):
+		return
+	if e is InputEventKey and (e as InputEventKey).echo:
+		return
+	for a in InputMap.get_actions():
+		if e.is_action_pressed(a):
+			_taps[a] = Time.get_ticks_msec()
+
 func tapped(action: StringName) -> bool:
-	return not typing and Input.is_action_just_pressed(action)
+	if typing:
+		return false
+	var at: int = _taps.get(action, 0)
+	if at == 0:
+		return false
+	_taps.erase(action)
+	# A press nobody looked at for a quarter of a second was meant for a screen
+	# that is no longer up; do not let it fire late.
+	return Time.get_ticks_msec() - at < 250
 
 # --------------------------------------------------------------------------
 func _add(action: StringName, events: Array) -> void:
