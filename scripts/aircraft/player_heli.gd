@@ -89,11 +89,12 @@ func _pilot(delta: float) -> void:
 		drop_chaff()
 	if Sim.tapped(&"flare"):
 		drop_flare()
-	if Sim.held(&"gun") and current_weapon() == "gun" and not Sim.ui_modal:
+	if (Sim.held(&"gun") or Sim.held(&"fire")) and current_weapon() == "gun" \
+			and not Sim.ui_modal:
 		fire_gun(get_tree().current_scene)
 	if Sim.tapped(&"fire") and not Sim.ui_modal:
 		if current_weapon() == "gun":
-			fire_gun(get_tree().current_scene)
+			pass                          # held above, for as long as it is held
 		else:
 			var r := fire()
 			if r != "":

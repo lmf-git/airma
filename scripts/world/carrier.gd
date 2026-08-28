@@ -27,15 +27,28 @@ const TOP_SPEED := 15.4
 var wire_points: Array = []          # [[worldA, worldB], ...] in deck space
 var heading := deg_to_rad(-20.0)
 
+## Just the model, for the menu turntable: no deck registered, no groups
+## joined, nothing that would have gameplay code find this one and put the
+## player on a carrier 256 m above the airfield.
+func build_preview() -> void:
+	_hull()
+	_deck_markings()
+	_island()
+
 func build(at: Vector3, hdg: float) -> void:
 	heading = hdg
-	position = Vector3(at.x, 0.0, at.z)
+	# On the sea, not above it. The hull was modelled about y = 0 and the ship
+	# placed at y = 0 as well, while the water sits at WATER_LEVEL -- so the
+	# whole carrier floated twenty-six metres clear of the surface with its
+	# bottom on show. Everything else here is measured from the waterline.
+	position = Vector3(at.x, Sim.WATER_LEVEL, at.z)
 	rotation.y = hdg
 	_hull()
 	_deck_markings()
 	_island()
 	_lights()
-	deck = Sim.register_deck(Vector3(at.x, 0, at.z), hdg, Vector2(BEAM * 0.5 + 12.0, LEN * 0.5), DECK_Y)
+	deck = Sim.register_deck(Vector3(at.x, 0, at.z), hdg,
+		Vector2(BEAM * 0.5 + 12.0, LEN * 0.5), Sim.WATER_LEVEL + DECK_Y)
 	for w in WIRES:
 		wire_points.append(w)
 	# It belongs to somebody. Without this the radar treated it as a contact
@@ -115,28 +128,118 @@ func _conn(delta: float) -> void:
 	cam.look_at(eye + Vector3(sin(aim_yaw) * cos(aim_pitch), sin(aim_pitch),
 		-cos(aim_yaw) * cos(aim_pitch)) * 500.0, Vector3.UP)
 
+## Draught below the waterline. The hull is modelled about y = 0 being the
+## surface, and the whole ship is then set down at `Sim.WATER_LEVEL`.
+const DRAUGHT := 11.5
+## Hangar deck edge: the top of the hull proper, just under the flight deck.
+const HULL_TOP := DECK_Y - 1.7
+
+## Stations from transom to stem: z as a fraction of the length, half-breadth
+## and flat-of-bottom as fractions of the half beam, and how far the forefoot
+## has risen towards the surface. A ship is a series of sections, and the shape
+## of those sections is the whole difference between a hull and a tube -- the
+## old one was a ten sided extrusion with no flat of bottom, no turn of bilge
+## and no forefoot, which is why the underside read as a length of pipe.
+const STATIONS := [
+	[-0.500, 0.90, 0.70, 0.00],
+	[-0.440, 0.97, 0.76, 0.00],
+	[-0.300, 1.00, 0.80, 0.00],
+	[-0.120, 1.00, 0.80, 0.00],
+	[ 0.060, 1.00, 0.78, 0.00],
+	[ 0.220, 0.98, 0.68, 0.02],
+	[ 0.340, 0.90, 0.46, 0.12],
+	[ 0.430, 0.70, 0.22, 0.38],
+	[ 0.480, 0.42, 0.08, 0.66],
+	[ 0.500, 0.10, 0.02, 0.88],
+]
+
+## The wetted section at a station: keel, flat of bottom, turn of bilge, up to
+## the waterline, and back across it.
+func _under_ring(z: float, hb: float, kw: float, keel: float) -> PackedVector3Array:
+	var d: float = -keel
+	var r := PackedVector3Array()
+	r.append(Vector3(0.0, keel, z))
+	r.append(Vector3(kw, keel, z))
+	r.append(Vector3(hb * 0.90, keel + d * 0.30, z))
+	r.append(Vector3(hb, keel + d * 0.64, z))
+	r.append(Vector3(hb, 0.0, z))
+	r.append(Vector3(-hb, 0.0, z))
+	r.append(Vector3(-hb, keel + d * 0.64, z))
+	r.append(Vector3(-hb * 0.90, keel + d * 0.30, z))
+	r.append(Vector3(-kw, keel, z))
+	return r
+
+## And the topside: waterline to hangar deck edge, with a little flare.
+func _top_ring(z: float, hb: float) -> PackedVector3Array:
+	var r := PackedVector3Array()
+	r.append(Vector3(hb, 0.0, z))
+	r.append(Vector3(hb * 0.99, HULL_TOP * 0.45, z))
+	r.append(Vector3(hb * 1.04, HULL_TOP, z))
+	r.append(Vector3(-hb * 1.04, HULL_TOP, z))
+	r.append(Vector3(-hb * 0.99, HULL_TOP * 0.45, z))
+	r.append(Vector3(-hb, 0.0, z))
+	return r
+
 func _hull() -> void:
-	var st := MeshKit.begin()
-	var rings := []
-	var prof := [
-		[-LEN * 0.5, 2.0, 3.0, 4.0],
-		[-LEN * 0.42, 12.0, 10.0, 9.0],
-		[-LEN * 0.15, 19.0, 12.0, 8.0],
-		[LEN * 0.20, 20.0, 12.0, 8.0],
-		[LEN * 0.42, 15.0, 11.0, 8.5],
-		[LEN * 0.5, 6.0, 7.0, 6.0],
-	]
-	for p in prof:
+	var half := BEAM * 0.5
+	var under: Array = []
+	var top: Array = []
+	for st0 in STATIONS:
+		var z: float = float(st0[0]) * LEN
+		var hb: float = maxf(half * float(st0[1]), 0.4)
+		var kw: float = half * float(st0[2])
+		var keel: float = -DRAUGHT * (1.0 - float(st0[3]))
+		under.append(_under_ring(z, hb, kw, keel))
+		top.append(_top_ring(z, hb))
+	# Anti-fouling below the waterline, ship's grey above it. Two lofts sharing
+	# the same waterline outline, so they meet on it exactly rather than being
+	# one mesh with a stripe painted near the join.
+	var su := MeshKit.begin()
+	MeshKit.loft(su, under, Vector3(0.0, -DRAUGHT * 0.5, 0.0))
+	add_child(MeshKit.mi(MeshKit.finish(su,
+		MeshKit.mat(Color(0.30, 0.09, 0.07), 0.85, 0.05)), "Underbody"))
+	var stp := MeshKit.begin()
+	MeshKit.loft(stp, top, Vector3(0.0, HULL_TOP * 0.5, 0.0))
+	add_child(MeshKit.mi(MeshKit.finish(stp,
+		MeshKit.mat(Color(0.23, 0.25, 0.27), 0.9, 0.12)), "Hull"))
+	# Boot topping: the dark band a ship carries at the waterline. Stood off the
+	# plating so it cannot fight with it for the same pixels.
+	var sb := MeshKit.begin()
+	var band: Array = []
+	for st1 in STATIONS:
+		var z1: float = float(st1[0]) * LEN
+		var hb1: float = maxf(half * float(st1[1]), 0.4) * 1.006
 		var r := PackedVector3Array()
-		var hw: float = p[1]
-		var hh: float = p[2]
-		var cy: float = DECK_Y - p[3] - hh
-		for i in 10:
-			var a := TAU * float(i) / 10.0
-			r.append(Vector3(cos(a) * hw, sin(a) * hh * 0.75 + cy, p[0]))
-		rings.append(r)
-	MeshKit.loft(st, rings, Vector3(0, DECK_Y - 14.0, 0))
-	add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.22, 0.24, 0.26), 0.9, 0.15)), "Hull"))
+		r.append(Vector3(hb1, 1.1, z1))
+		r.append(Vector3(hb1, -1.9, z1))
+		r.append(Vector3(-hb1, -1.9, z1))
+		r.append(Vector3(-hb1, 1.1, z1))
+		band.append(r)
+	MeshKit.loft(sb, band, Vector3.ZERO, false, false)
+	add_child(MeshKit.mi(MeshKit.finish(sb,
+		MeshKit.mat(Color(0.07, 0.07, 0.08), 0.8, 0.0)), "BootTopping"))
+	# Sponsons. The flight deck is twenty-two metres wider than the hull and
+	# overhangs to port; before this there was nothing at all underneath it, so
+	# the deck ended in mid-air over the sea.
+	var sp := MeshKit.begin()
+	var deck_under := DECK_Y - 2.6
+	for z2 in [-LEN * 0.34, -LEN * 0.10, LEN * 0.14, LEN * 0.32]:
+		MeshKit.box(sp, Vector3(13.0, 5.2, 26.0),
+			Vector3(-half - 5.0, deck_under - 2.0, z2))
+	for z3 in [-LEN * 0.28, LEN * 0.06]:
+		MeshKit.box(sp, Vector3(8.0, 4.4, 20.0),
+			Vector3(half + 3.0, deck_under - 1.8, z3))
+	# and the knuckle carrying the overhang the length of the port side
+	MeshKit.box(sp, Vector3(9.0, 3.0, LEN * 0.80),
+		Vector3(-half - 3.5, deck_under, -LEN * 0.02))
+	add_child(MeshKit.mi(MeshKit.finish(sp,
+		MeshKit.mat(Color(0.21, 0.23, 0.25), 0.9, 0.12)), "Sponsons"))
+	# transom: a flat stern with a rounded-down deck edge over it
+	var stern := MeshKit.begin()
+	MeshKit.box(stern, Vector3(half * 1.8, HULL_TOP + DRAUGHT, 3.0),
+		Vector3(0.0, (HULL_TOP - DRAUGHT) * 0.5, -LEN * 0.5 - 1.4))
+	add_child(MeshKit.mi(MeshKit.finish(stern,
+		MeshKit.mat(Color(0.23, 0.25, 0.27), 0.9, 0.12)), "Transom"))
 
 	# flight deck slab, wider than the hull and overhanging to port
 	var d := MeshKit.begin()

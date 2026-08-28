@@ -13,6 +13,26 @@ var target: Node3D = null
 var team := 0
 var armed := false
 var age := 0.0
+## Folding tail fins: how far in they sit in the tube, and how long after
+## leaving it they take to lock out.
+const FIN_STOWED := 0.06
+const FIN_OUT_AT := 0.30
+const FIN_OUT_OVER := 0.45
+var _fins: MeshInstance3D = null
+## Fired out of a canister rather than off an aeroplane: straight up, then over.
+##
+## And under its own booster. The `boost` in the weapon table is the sustainer
+## of a round that is *dropped* from an aeroplane already doing three hundred
+## knots -- 42 m/s^2 of it, which is ample when you start at speed and useless
+## when you start at rest pointing at the sky. Launched from a standstill the
+## round was still doing 34 m/s two seconds later, and the "it has stopped
+## flying, it must have hit something" check put it in the ground. A canister
+## round carries a launch booster; this is it.
+const VLS_OVER := 4.0
+const VLS_PITCH := 0.66          # about 38 degrees, the arc it settles onto
+const VLS_BOOST := 140.0
+const VLS_BOOST_FOR := 2.4
+var _vls := false
 var motor := 0.0
 var dead := false
 var _start_xf := Transform3D.IDENTITY
@@ -41,8 +61,19 @@ func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: 
 func _ready() -> void:
 	top_level = true
 	global_transform = _start_xf
-	var mi := MeshKit.mi(WeaponSpec.build_mesh(wid), "Body")
+	# A round that comes out of a canister is stowed with its fins folded flat
+	# against the body -- they have to be, the tube is barely wider than the
+	# round -- and they snap out once it is clear of the launcher. Built with
+	# them already deployed, a Kalibr stood in its tube with its tail sticking
+	# through the walls of it.
+	var folds: bool = bool(ws.get("folding", false))
+	_vls = folds
+	var mi := MeshKit.mi(WeaponSpec.build_mesh(wid, not folds), "Body")
 	add_child(mi)
+	if folds:
+		_fins = MeshKit.mi(WeaponSpec.build_fins(wid), "Fins")
+		_fins.scale = Vector3(FIN_STOWED, FIN_STOWED, 1.0)
+		add_child(_fins)
 	# The smoke follows the round's own girth rather than being one width for
 	# everything. A naval round is a foot and a half across and four and three
 	# quarter metres long — it should not leave the same thread behind it as a
@@ -88,13 +119,40 @@ func _physics_process(delta: float) -> void:
 	if dead:
 		return
 	age += delta
+	# Vertical launch, then over onto the bearing during the boost.
+	#
+	# A canister round leaves the tube pointing at the sky, and the ordinary
+	# guidance -- which trims a heading it is already roughly on -- cannot bring
+	# a round round through ninety degrees. Measured: launched at a mark 27.4 km
+	# away, the closest it came in thirty seconds was 26.9 km. It went straight
+	# up and stayed there. This is the pitch-over a vertical launch actually
+	# does, and once it is on the bearing the normal guidance has something it
+	# can work with.
+	if _vls and age > 0.30 and age < 0.30 + VLS_OVER and is_instance_valid(target):
+		var flat: Vector3 = target.global_position - global_position
+		flat.y = 0.0
+		if flat.length_squared() > 1.0:
+			var t: float = clampf((age - 0.30) / VLS_OVER, 0.0, 1.0)
+			var lofted: Vector3 = (flat.normalized() * cos(VLS_PITCH)
+				+ Vector3.UP * sin(VLS_PITCH)).normalized()
+			var want: Vector3 = Vector3.UP.slerp(lofted, t * t * (3.0 - 2.0 * t))
+			var sp: float = maxf(vel.length(), 1.0)
+			vel = vel.lerp(want * sp, clampf(delta * 2.6, 0.0, 1.0))
+	if _fins != null:
+		var fo: float = clampf((age - FIN_OUT_AT) / FIN_OUT_OVER, 0.0, 1.0)
+		var k: float = lerpf(FIN_STOWED, 1.0, fo * fo * (3.0 - 2.0 * fo))
+		_fins.scale = Vector3(k, k, 1.0)
 	if age > ws["life"]:
 		_die(false)
 		return
 	# --- separation: fall clear of the bay before the motor lights ---------
 	var boosting := false
 	if age < 0.28:
-		vel += Vector3.DOWN * (9.81 + _eject) * delta
+		# A round leaving a wing pylon is dropped clear before the motor lights.
+		# One leaving a canister is thrown *up* out of it, and pushing it down
+		# for the first quarter second undid most of the launch.
+		vel += (Vector3.UP * _eject - Vector3.DOWN * 9.81) * delta if _vls \
+			else Vector3.DOWN * (9.81 + _eject) * delta
 	else:
 		if not _trail.emitting:
 			_trail.emitting = true
@@ -103,6 +161,8 @@ func _physics_process(delta: float) -> void:
 		armed = age > ws["arm_time"]
 		boosting = age - 0.28 < ws["burn"]
 		var dir := -global_transform.basis.z
+		if _vls and age < VLS_BOOST_FOR:
+			vel += dir * VLS_BOOST * delta
 		if boosting:
 			vel += dir * ws["boost"] * delta
 			motor = 1.0
@@ -172,6 +232,16 @@ func _physics_process(delta: float) -> void:
 		_ground_burst(hit)
 		_die(true)
 		return
+	# A building is as solid as the ground it stands on. Without this a round
+	# aimed at a hangar flew through it and burst on the dirt on the far side,
+	# and a Maverick could be put through an office block from end to end.
+	if armed or age > 0.25:
+		var into := Obstacles.hit(to, 0.6)
+		if into >= 0:
+			global_position = to
+			_ground_burst(to)
+			_die(true)
+			return
 	if to.y < sea_bed:
 		# A missile that goes into the ground still has a warhead on it. It used
 		# to make a flash and do nothing, so a Sidewinder could be walked into a
@@ -183,7 +253,10 @@ func _physics_process(delta: float) -> void:
 		return
 	# a round that has stopped flying has arrived at something: go off rather
 	# than hang in the air next to the target
-	if armed and vel.length() < 40.0 and age > 1.5:
+	# ...but not while the booster is still burning: a round that has not got up
+	# to speed yet has not arrived anywhere.
+	if armed and vel.length() < 40.0 and age > 1.5 \
+			and not (_vls and age < VLS_BOOST_FOR + 0.6):
 		_die(true)
 		return
 	if Sim.debug_weapons and ws["kind"] == "bomb" and fmod(age, 1.0) < delta:
@@ -396,7 +469,14 @@ func _guide(delta: float) -> void:
 			target = null
 		return
 	var seeker_ang := rad_to_deg((-global_transform.basis.z).angle_to(los))
-	if seeker_ang > ws["seeker_fov"]:
+	# Only a round homing on something it has to *see* can lose it off the edge
+	# of the seeker. A weapon flying to a coordinate is on inertial guidance and
+	# has no seeker to point -- and a canister round leaves the tube straight up
+	# with its mark ninety degrees off the nose by definition, so this dropped
+	# every hypersonic 1.2 seconds after launch and left it flying on ballistic.
+	# Measured: mark 27.4 km away, closest approach 26.9 km, into the ground at
+	# six seconds.
+	if homes_on_a_thing and seeker_ang > ws["seeker_fov"]:
 		_seek_lost += delta
 		if _seek_lost > 1.2:
 			if Sim.debug_weapons:
@@ -463,7 +543,12 @@ func _guide(delta: float) -> void:
 		# steers is limited by the target. Using one number for both collapsed
 		# the horizon to a couple of hundred metres just as the round reached
 		# the pop-up range, so it ran at the last hill with no warning at all.
-		var sense: float = clampf(vel.length() * 4.5, 700.0, 2600.0)
+		# Four and a half seconds of warning was enough over the rolling country
+		# this was written against. It is not enough over a range: a cruise
+		# round let down to its run-in height and met ground rising faster than
+		# it could climb, and went into a hillside at 695 m with the ridge it
+		# had to cross never more than a kilometre and a half ahead of it.
+		var sense: float = clampf(vel.length() * 9.0, 1400.0, 6500.0)
 		var look: float = sense
 		if dist > pop:
 			look = minf(sense, maxf(dist - pop, 300.0))

@@ -1007,6 +1007,20 @@ func _draw_log(vp: Vector2) -> void:
 		_txt(Vector2(vp.x - 300.0, y), str(l["t"]), 14, col)
 		y += 19.0
 
+## Above this many sectors the banner stops naming them one by one.
+const COMPACT_SECTORS := 8
+
+func _sector_colour(z: Dictionary) -> Color:
+	if bool(z["locked"]):
+		return Color(0.4, 0.4, 0.42)
+	if bool(z["contested"]):
+		return AMBER
+	if int(z["team"]) == 0:
+		return Color(0.35, 0.75, 1.0)
+	if int(z["team"]) == 1:
+		return RED
+	return Color(0.75, 0.75, 0.78)
+
 ## Tickets, sector strip and the mode banner.
 func _draw_mode(vp: Vector2) -> void:
 	var st: Dictionary = mode.hud_state()
@@ -1037,27 +1051,53 @@ func _draw_mode(vp: Vector2) -> void:
 		y += 30.0
 	var zs: Array = st["zones"]
 	if not zs.is_empty():
-		var w := 44.0
-		var sx := cx - w * float(zs.size()) * 0.5
-		for z in zs:
-			var col := Color(0.75, 0.75, 0.78)
-			if z["locked"]:
-				col = Color(0.4, 0.4, 0.42)
-			elif z["contested"]:
-				col = AMBER
-			elif int(z["team"]) == 0:
-				col = Color(0.35, 0.75, 1.0)
-			elif int(z["team"]) == 1:
-				col = RED
-			_box(Rect2(sx + 5, y, w - 10, 26), col, 1.4)
-			var pr: float = (float(z["prog"]) + 1.0) * 0.5
-			draw_rect(Rect2(sx + 6, y + 20, (w - 12) * pr, 4), col)
-			_txt(Vector2(sx + 5, y + 19), str(z["label"]), 16, col,
-				HORIZONTAL_ALIGNMENT_CENTER, w - 10)
-			sx += w
-		y += 40.0
+		# A labelled box per sector is 44 px wide, which was fine for the five
+		# the map used to have and is eight hundred pixels of banner for the
+		# eighteen it has now. Past a handful the sectors become a strip of
+		# ticks -- still one mark each, still every state readable -- and the
+		# thing you actually steer by becomes the income.
+		if zs.size() <= COMPACT_SECTORS:
+			var w := 44.0
+			var sx := cx - w * float(zs.size()) * 0.5
+			for z in zs:
+				var col := _sector_colour(z)
+				_box(Rect2(sx + 5, y, w - 10, 26), col, 1.4)
+				var pr: float = (float(z["prog"]) + 1.0) * 0.5
+				draw_rect(Rect2(sx + 6, y + 20, (w - 12) * pr, 4), col)
+				_txt(Vector2(sx + 5, y + 19), str(z["label"]), 16, col,
+					HORIZONTAL_ALIGNMENT_CENTER, w - 10)
+				sx += w
+			y += 40.0
+		else:
+			var tick := 9.0
+			var sw: float = tick * float(zs.size())
+			var sx2: float = cx - sw * 0.5
+			for z2 in zs:
+				var col2 := _sector_colour(z2)
+				# a tick, filled by how far its capture has got
+				draw_rect(Rect2(sx2 + 1.0, y + 2.0, tick - 2.0, 18.0),
+					Color(col2.r, col2.g, col2.b, 0.22))
+				var pr2: float = (float(z2["prog"]) + 1.0) * 0.5
+				draw_rect(Rect2(sx2 + 1.0, y + 20.0 - 18.0 * pr2, tick - 2.0,
+					18.0 * pr2), col2)
+				sx2 += tick
+			y += 26.0
+			_txt(Vector2(0, y), "SECTORS %d / %d" % [int(st["held"]), zs.size()],
+				13, Color(0.72, 0.82, 0.92), HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+			y += 19.0
+			if str(st.get("objective", "")) != "":
+				_txt(Vector2(0, y), "OBJECTIVE  %s" % str(st["objective"]), 14,
+					AMBER, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+				y += 20.0
 	if int(st["cp"]) > 0:
-		_txt(Vector2(0, y), "COMMAND POINTS %d" % int(st["cp"]), 14, Color(0.7, 1.0, 0.8),
+		var rate: float = float(st.get("cp_rate", 0.0))
+		var line := "COMMAND POINTS %d" % int(st["cp"])
+		if rate > 0.0:
+			line += "      +%d / min" % int(round(rate))
+		else:
+			line += "      no income"
+		_txt(Vector2(0, y), line, 14,
+			Color(0.7, 1.0, 0.8) if rate > 0.0 else Color(0.85, 0.7, 0.55),
 			HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 	if str(st["result"]) != "":
 		_txt(Vector2(0, vp.y * 0.34), str(st["result"]), 30,

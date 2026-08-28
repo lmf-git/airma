@@ -4,12 +4,28 @@ extends Node3D
 ## Everything is instanced through MultiMeshInstance3D so a few thousand
 ## buildings cost a handful of draw calls.
 
+## Centre, radius, density, tallest, name. Everything here has to sit inside the
+## 18 km box the ground mask and the road distance field cover, or its streets
+## are drawn but not painted and its buildings stand on unmade ground.
 const TOWNS := [
-	# centre, radius, density, tallest, name
 	[Vector3(-2300, 0, -5200), 900.0, 0.62, 26.0, "Kestrel"],
 	[Vector3(2600, 0, 4200), 1500.0, 0.70, 72.0, "Rampart City"],
 	[Vector3(-1900, 0, 3100), 520.0, 0.55, 14.0, "Vane"],
 	[Vector3(2100, 0, -9200), 620.0, 0.58, 18.0, "Northgate"],
+	[Vector3(-9800, 0, -1400), 780.0, 0.60, 22.0, "Marrow"],
+	[Vector3(8200, 0, -13500), 540.0, 0.52, 15.0, "Ashfen"],
+	[Vector3(-12500, 0, 8600), 900.0, 0.64, 30.0, "Coldharbour"],
+	[Vector3(6400, 0, 12800), 700.0, 0.58, 20.0, "Selby"],
+	[Vector3(-6200, 0, -14200), 460.0, 0.50, 12.0, "Tarn"],
+	[Vector3(12800, 0, 2400), 620.0, 0.56, 17.0, "Quayhead"],
+	# villages: small, low and spread to the edges of the inhabited box, so a
+	# conquest has ground to fight over rather than five objectives in a huddle
+	[Vector3(-15200, 0, -8200), 420.0, 0.48, 11.0, "Redd"],
+	[Vector3(11600, 0, -4200), 500.0, 0.52, 14.0, "Saltmarsh"],
+	[Vector3(-3400, 0, 14800), 560.0, 0.54, 16.0, "Brackwater"],
+	[Vector3(9800, 0, 10400), 480.0, 0.50, 13.0, "Fen End"],
+	[Vector3(-16000, 0, 1200), 440.0, 0.49, 12.0, "Stonebridge"],
+	[Vector3(1800, 0, -16200), 520.0, 0.53, 15.0, "Harrow"],
 ]
 
 var _rng := RandomNumberGenerator.new()
@@ -38,11 +54,31 @@ var sites: Array = []
 
 func plan() -> void:
 	_streets.clear()
-	_site_towns()
+	# Siting sixteen towns on the flattest ground within reach of where each was
+	# wanted, then routing a trunk network to them and surveying its cut and
+	# fill, is the same answer every run and about three seconds of arriving at
+	# it. The streets themselves are pure geometry off the result, so they are
+	# cheap enough to lay out again either way.
+	var cached_sites: Variant = WorldBake.get_baked("town_sites")
+	var cached_roads: Variant = WorldBake.get_baked("roads")
+	# At least the named towns, not exactly them: `sites` carries the distant
+	# clusters as well now, so an equality check against the hand-written list
+	# never matched and the whole network was routed from scratch every launch
+	# -- twenty-eight seconds of it.
+	var hit: bool = cached_sites is Array and cached_roads is Dictionary \
+		and (cached_sites as Array).size() >= TOWNS.size()
+	if hit:
+		sites = cached_sites
+		Sim.load_road_state(cached_roads)
+	else:
+		_site_towns()
 	for t in sites:
 		_plan_town_streets(t["c"], t["r"])
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
-	Sim.register_segments(_streets)
+	if not hit:
+		Sim.register_segments(_streets)
+		WorldBake.put("town_sites", sites)
+		WorldBake.put("roads", Sim.road_state())
 	_stats["streets"] = _streets.size()
 
 ## Put each town on the flattest ground within reach of where it was wanted,
@@ -50,6 +86,69 @@ func plan() -> void:
 ## do not lay a grid of streets up the side of a mountain and live on the
 ## staircase. Both halves matter — moving alone still leaves a gradient, and
 ## levelling alone puts a cliff round a town that should never have been there.
+## Settlement clusters elsewhere in the world, and the names their towns take.
+##
+## The map is twelve hundred kilometres across and everything anybody had built
+## on it stood inside a thirty-six kilometre box around one airfield. These are
+## found rather than written down, because a coordinate picked by hand lands in
+## the ocean as often as not once the continent field decides where the land is:
+## the map is swept for places with enough dry, workable ground, far from home
+## and far from each other.
+const REGIONS := 4
+const REGION_TOWNS := 4
+const REGION_NAMES := [
+	["Calder", "Vasser Bay", "Ostmark", "Pell"],
+	["Sarn", "Hollowfield", "Ridgeway", "Anselm"],
+	["Kettering", "Draymoor", "Lowry", "Fenwick"],
+	["Aubrey", "Stannard", "Colm", "Harrowgate"],
+]
+
+## How much of a disc is dry, workable land, 0 to 1.
+static func _land_score(c: Vector2, r: float) -> float:
+	var dry := 0.0
+	var n := 0
+	for i in 7:
+		for j in 7:
+			var q := c + Vector2(float(i - 3), float(j - 3)) * (r / 3.0)
+			if q.distance_to(c) > r:
+				continue
+			n += 1
+			var h := Sim.height_at(q.x, q.y)
+			if h > Sim.WATER_LEVEL + 30.0 and h < 1500.0:
+				dry += 1.0
+	return dry / maxf(float(n), 1.0)
+
+static func find_regions() -> Array:
+	var found: Array = []
+	var cand: Array = []
+	var reach := 380000.0
+	var step := 26000.0
+	var x := -reach
+	while x <= reach:
+		var z := -reach
+		while z <= reach:
+			var c := Vector2(x, z)
+			# well clear of home, or it is not a different part of the world
+			if c.length() > 110000.0:
+				var sc := _land_score(c, 13000.0)
+				if sc > 0.82:
+					cand.append([sc - Sim.site_roughness(c, 9000.0) * 2.0, c])
+			z += step
+		x += step
+	cand.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0])
+	for e in cand:
+		var c2: Vector2 = e[1]
+		var ok := true
+		for g in found:
+			if c2.distance_to(g as Vector2) < 130000.0:
+				ok = false
+				break
+		if ok:
+			found.append(c2)
+		if found.size() >= REGIONS:
+			break
+	return found
+
 func _site_towns() -> void:
 	sites.clear()
 	var pads: Array = []
@@ -58,6 +157,13 @@ func _site_towns() -> void:
 		var r: float = float(t[1])
 		var best := want
 		var best_rough: float = Sim.site_roughness(want, r)
+		# Every *candidate* was tested for dry land, but the position the town
+		# was asked for never was -- so a settlement wanted somewhere that
+		# turned out to be under water stayed there unless something else beat
+		# it on roughness, and open sea is very smooth.
+		if Sim.height_at(want.x, want.y) < Sim.WATER_LEVEL + 25.0 \
+				or not Sim.clear_of_airfield(want.x, want.y):
+			best_rough = 1e9
 		var step: float = r * 0.45
 		for i in range(-3, 4):
 			for j in range(-3, 4):
@@ -74,9 +180,36 @@ func _site_towns() -> void:
 					best_rough = rough
 					best = q
 		sites.append({"c": best, "r": r, "density": float(t[2]),
-			"tallest": float(t[3]), "name": String(t[4]),
+			"tallest": float(t[3]), "name": String(t[4]), "region": 0,
 			"was": want, "rough": best_rough})
 		pads.append({"c": best, "r": r})
+	# and the clusters elsewhere on the map, each with its own towns
+	var regions := find_regions()
+	for ri in regions.size():
+		var rc: Vector2 = regions[ri]
+		for ti in REGION_TOWNS:
+			var ang: float = TAU * (float(ti) + 0.35) / float(REGION_TOWNS)
+			var want2: Vector2 = rc + Vector2(cos(ang), sin(ang)) * 7200.0
+			var rad: float = [1100.0, 720.0, 560.0, 480.0][ti % 4]
+			var best2 := want2
+			var rough2: float = 1e9
+			for i2 in range(-3, 4):
+				for j2 in range(-3, 4):
+					var q2: Vector2 = want2 + Vector2(float(i2), float(j2)) * (rad * 0.7)
+					if Sim.height_at(q2.x, q2.y) < Sim.WATER_LEVEL + 30.0:
+						continue
+					var rg: float = Sim.site_roughness(q2, rad)
+					if rg < rough2:
+						rough2 = rg
+						best2 = q2
+			if rough2 > 1e8:
+				continue                      # nowhere dry enough here
+			sites.append({"c": best2, "r": rad,
+				"density": [0.66, 0.58, 0.54, 0.50][ti % 4],
+				"tallest": [46.0, 24.0, 17.0, 13.0][ti % 4],
+				"name": String(REGION_NAMES[ri % REGION_NAMES.size()][ti % 4]),
+				"region": ri + 1, "was": want2, "rough": rough2})
+			pads.append({"c": best2, "r": rad})
 	Sim.register_town_pads(pads)
 	# The trunk network, laid to where the towns actually ended up.
 	#
@@ -100,18 +233,43 @@ func _site_towns() -> void:
 	nodes.append(Vector2(-5200.0, -13000.0))
 	var first_town := 2
 	var n_towns: int = sites.size()
+	# The home network: every town in the airfield's region hangs off the bypass
+	# and is rung to its neighbours. Only that region -- a settlement four
+	# hundred kilometres away joining a bypass beside this runway would be a
+	# single trunk road across an ocean.
+	var home: Array = []
 	for i in n_towns:
-		# each town joins whichever end of the bypass is nearer
-		var tc: Vector2 = nodes[first_town + i]
+		if int((sites[i] as Dictionary).get("region", 0)) == 0:
+			home.append(first_town + i)
+	for hi in home:
+		var tc: Vector2 = nodes[hi]
 		var gate: int = 0 if tc.distance_to(nodes[0]) < tc.distance_to(nodes[1]) else 1
-		links.append([gate, first_town + i])
-	# and the towns to each other, in a ring, so it reads as a network
-	for i in n_towns:
-		links.append([first_town + i, first_town + (i + 1) % n_towns])
+		links.append([gate, hi])
+	for i2 in home.size():
+		links.append([home[i2], home[(i2 + 1) % home.size()]])
 	var depot := first_town + n_towns
-	links.append([depot, first_town])
-	links.append([depot + 1, first_town + mini(1, n_towns - 1)])
-	links.append([depot + 2, first_town])
+	links.append([depot, home[0]])
+	links.append([depot + 1, home[mini(1, home.size() - 1)]])
+	links.append([depot + 2, home[0]])
+	# and every other cluster gets a network of its own, joined up among itself
+	# and to nothing else: they are different parts of the world.
+	var by_region: Dictionary = {}
+	for i3 in n_towns:
+		var rg: int = int((sites[i3] as Dictionary).get("region", 0))
+		if rg == 0:
+			continue
+		if not by_region.has(rg):
+			by_region[rg] = []
+		(by_region[rg] as Array).append(first_town + i3)
+	for rg2 in by_region:
+		var lot: Array = by_region[rg2]
+		if lot.size() < 2:
+			continue
+		for i4 in lot.size():
+			links.append([lot[i4], lot[(i4 + 1) % lot.size()]])
+		# a cross link, so a cluster reads as a network and not as a loop
+		if lot.size() >= 4:
+			links.append([lot[0], lot[2]])
 	var wanted: Array = []
 	for pair in links:
 		if pair[0] < nodes.size() and pair[1] < nodes.size() and pair[0] != pair[1]:
@@ -134,24 +292,36 @@ func _plan_town_streets(centre: Vector2, radius: float) -> void:
 
 func build() -> void:
 	_rng.seed = 20260821
+	Obstacles.clear()
 	if _streets.is_empty():
 		plan()
-	for t in sites:
-		_town(t["c"], float(t["r"]), float(t["density"]), float(t["tallest"]))
+	var tm := [Time.get_ticks_msec()]
+	var mark := func(what: String) -> void:
+		var now := Time.get_ticks_msec()
+		_stats["ms_" + what] = now - int(tm[0])
+		tm[0] = now
+	for b in _plan_all_towns():
+		_town_build(b)
+	mark.call("towns")
 	_military(Vector3(-1500, 0, -6600))
 	_farms()
+	mark.call("farms")
 	_build_roads()
+	_build_structures()
+	mark.call("roads")
 	_powerlines()
 	_comms_masts()
 	_fences()
 	_windfarm()
 	_utility_props()
+	mark.call("utility")
 	_scatter_nature()
+	mark.call("nature")
 	_town_detail()
+	mark.call("detail")
 	_landmarks()
 	_home_base()
-	if OS.is_debug_build():
-		print("[scenery] ", _stats)
+	mark.call("landmarks")
 
 # -------------------------------------------------------------- town detail
 ## Street furniture: the things you only see when you are down among them.
@@ -517,6 +687,9 @@ func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false) -> void
 		mm.set_instance_transform(i, xforms[i])
 	mmi.multimesh = mm
 	add_child(mmi)
+	# and into the obstacle field, so it is something you can fly into rather
+	# than something you fly through
+	Obstacles.add_batch(mesh, xforms)
 	if breakable:
 		var centre := Vector3.ZERO
 		var rad := 0.0
@@ -548,6 +721,8 @@ func count_standing(pos: Vector3, radius: float) -> int:
 
 func damage_area(pos: Vector3, radius: float) -> int:
 	var hits := 0
+	# A building you can no longer see is a building you can no longer hit.
+	Obstacles.kill_near(pos, radius)
 	for b in _breakable:
 		var c: Vector3 = b["centre"]
 		if c.distance_to(pos) > float(b["radius"]) + radius:
@@ -572,12 +747,22 @@ func damage_area(pos: Vector3, radius: float) -> int:
 		b["dead"] = dead
 	return hits
 
-func _town(centre: Vector2, radius: float, density: float, tallest: float) -> void:
-	var kinds := [
-		_block_mesh(1.0, 1.0, 1.0, Color(0.26, 0.25, 0.23), Color(0.70, 0.67, 0.61)),
-		_block_mesh(1.0, 1.0, 1.0, Color(0.22, 0.23, 0.25), Color(0.58, 0.59, 0.60)),
-		_block_mesh(1.0, 1.0, 1.0, Color(0.29, 0.24, 0.21), Color(0.64, 0.58, 0.51)),
-	]
+## Where every building in one town goes.
+##
+## Ten towns of these cost four and a half seconds -- every candidate site asks
+## the height field, the road distance field and the buildable test -- and none
+## of it touches the scene tree, so it goes to the worker pool a town at a time
+## and then straight into the bake. Each town carries its own generator seeded
+## from its index, because one shared sequence read by ten threads is neither
+## deterministic nor safe.
+func _town_plan(idx: int) -> Array:
+	var t: Dictionary = sites[idx]
+	var centre: Vector2 = t["c"]
+	var radius: float = float(t["r"])
+	var density: float = float(t["density"])
+	var tallest: float = float(t["tallest"])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4111 + idx * 6907
 	var buckets := [[], [], []]
 	var block := 128.0
 	# buildings, packed into the blocks with a setback from the kerb
@@ -585,10 +770,10 @@ func _town(centre: Vector2, radius: float, density: float, tallest: float) -> vo
 	var n := int(radius / step)
 	for gx in range(-n, n + 1):
 		for gz in range(-n, n + 1):
-			var px := centre.x + gx * step + _rng.randf_range(-1.5, 1.5)
-			var pz := centre.y + gz * step + _rng.randf_range(-1.5, 1.5)
+			var px := centre.x + gx * step + rng.randf_range(-1.5, 1.5)
+			var pz := centre.y + gz * step + rng.randf_range(-1.5, 1.5)
 			var d := Vector2(px - centre.x, pz - centre.y).length() / radius
-			if d > 1.0 or _rng.randf() > density * (1.3 - d * 0.8):
+			if d > 1.0 or rng.randf() > density * (1.3 - d * 0.8):
 				continue
 			# keep clear of the kerb
 			var fx := absf(fmod(absf(px - centre.x) + block * 0.5, block) - block * 0.5)
@@ -596,21 +781,51 @@ func _town(centre: Vector2, radius: float, density: float, tallest: float) -> vo
 			if fx < 15.0 or fz < 15.0:
 				continue
 			var core: float = clampf(1.0 - d * 1.35, 0.0, 1.0)
-			var h: float = lerpf(7.0, tallest, pow(core, 1.7) * _rng.randf_range(0.35, 1.0))
-			var w: float = _rng.randf_range(17.0, 24.0) * (1.0 + core * 0.3)
-			var dep: float = _rng.randf_range(17.0, 24.0) * (1.0 + core * 0.3)
+			var h: float = lerpf(7.0, tallest, pow(core, 1.7) * rng.randf_range(0.35, 1.0))
+			var w: float = rng.randf_range(17.0, 24.0) * (1.0 + core * 0.3)
+			var dep: float = rng.randf_range(17.0, 24.0) * (1.0 + core * 0.3)
 			# Sized first, then sited: the clearance a building needs from a
 			# road depends on how big the building is, and half of a wide one
 			# is most of the carriageway.
 			if not Sim.buildable(px, pz, 0.90, 6.0, maxf(w, dep) * 0.5):
 				continue
-			var xf := Transform3D(Basis(Vector3.UP, _rng.randf_range(-0.015, 0.015)).scaled(
+			var xf := Transform3D(Basis(Vector3.UP, rng.randf_range(-0.015, 0.015)).scaled(
 				Vector3(w, h, dep)), Vector3(px, Sim.height_at(px, pz) - 0.5, pz))
-			buckets[_rng.randi() % 3].append(xf)
+			buckets[rng.randi() % 3].append(xf)
+	return buckets
+
+var _town_out: Array = []
+
+func _town_slice(i: int) -> void:
+	_town_out[i] = _town_plan(i)
+
+## Every town's buildings, planned on the pool or read back from the bake.
+func _plan_all_towns() -> Array:
+	var cached: Variant = WorldBake.get_baked("town_plans")
+	if cached is Array and (cached as Array).size() == sites.size():
+		return cached
+	_town_out = []
+	_town_out.resize(sites.size())
+	var gid := WorkerThreadPool.add_group_task(_town_slice, sites.size(), -1, true,
+		"town layout")
+	WorkerThreadPool.wait_for_group_task_completion(gid)
+	var out := _town_out
+	_town_out = []
+	WorldBake.put("town_plans", out)
+	return out
+
+## Turn one town's plan into meshes. Main thread: it hangs things in the tree.
+func _town_build(buckets: Array) -> void:
+	var kinds := [
+		_block_mesh(1.0, 1.0, 1.0, Color(0.26, 0.25, 0.23), Color(0.70, 0.67, 0.61)),
+		_block_mesh(1.0, 1.0, 1.0, Color(0.22, 0.23, 0.25), Color(0.58, 0.59, 0.60)),
+		_block_mesh(1.0, 1.0, 1.0, Color(0.29, 0.24, 0.21), Color(0.64, 0.58, 0.51)),
+	]
 	for i in 3:
-		_scatter(kinds[i], buckets[i], "Town%d" % i, true)
-		town_xforms.append_array(buckets[i])
-		_stats["buildings"] = int(_stats.get("buildings", 0)) + buckets[i].size()
+		var lot: Array = buckets[i]
+		_scatter(kinds[i], lot, "Town%d" % i, true)
+		town_xforms.append_array(lot)
+		_stats["buildings"] = int(_stats.get("buildings", 0)) + lot.size()
 
 ## True when a point falls inside a town footprint, so nothing tall gets planted
 ## on top of the buildings.
@@ -732,41 +947,47 @@ const SCAT_SPECIES := {
 	"sand": ["rock", "bush"],
 }
 
+## Trees, rocks and bushes over the whole map.
+##
+## A hundred and fifty thousand candidate points, each asking the height field
+## about ten times over -- once for the water test, four for the drawn surface,
+## four for the slope, and the biome on top. That was four and a quarter seconds
+## of the start on its own, and none of it touches the scene tree, so it goes to
+## the worker pool in slices.
+##
+## Each slice carries its own generator seeded from its index rather than
+## drawing from the shared one, because a single sequence read by several
+## threads is neither deterministic nor safe. The layout is different from the
+## one the serial version produced; it is the same layout every run.
+const SCAT_TASKS := 24
+## Per slice, so the total is a round 150,000 without an integer division that
+## quietly loses the remainder.
+const SCAT_PER_TASK := 6250
+
+var _scat_out: Array = []
+
 func _scatter_nature() -> void:
 	var meshes := {"tree": _tree_mesh(), "pine": _pine_mesh(), "rock": _rock_mesh(),
 		"bush": _bush_mesh()}
 	var cells := {}
-	for i in 150000:
-		var x := _rng.randf_range(-SCAT_HALF * SCAT_CELL, SCAT_HALF * SCAT_CELL)
-		var z := _rng.randf_range(-SCAT_HALF * SCAT_CELL * 1.6, SCAT_HALF * SCAT_CELL * 1.6)
-		if absf(x) < 330.0 and absf(z) < 2150.0:
-			continue                                        # keep the field clear
-		var y := Sim.height_at(x, z)
-		if y < Sim.WATER_LEVEL + 2.0 or y > 2400.0:
-			continue
-		# On the surface as it is drawn, not as the field computes it. The two
-		# part company by more than the height of a tree as soon as the cells
-		# get coarse, and a tree standing on the analytic height then hangs in
-		# the air above the triangles — which is what you see looking up at the
-		# underside of the ground.
-		y = Terrain.surface_height(x, z)
-		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
-			continue
-		var slope := Sim.normal_at(x, z).y
-		if slope < 0.55:
-			continue                                        # nothing clings to a cliff
-		var biome := Sim.biome_kind(x, z, y, slope)
-		if _rng.randf() > float(SCAT_DENSITY.get(biome, 0.3)):
-			continue
-		var options: Array = SCAT_SPECIES.get(biome, ["bush"])
-		var kind: String = options[_rng.randi() % options.size()]
-		var sc := _rng.randf_range(0.7, 1.7)
-		var xf := Transform3D(Basis(Vector3.UP, _rng.randf() * TAU).scaled(
-			Vector3(sc, sc * _rng.randf_range(0.8, 1.35), sc)), Vector3(x, y - 0.4, z))
-		var key := "%s_%d_%d" % [kind, int(floor(x / SCAT_CELL)), int(floor(z / SCAT_CELL))]
-		if not cells.has(key):
-			cells[key] = []
-		cells[key].append(xf)
+	var cached: Variant = WorldBake.get_baked("scatter")
+	if cached is Dictionary and not (cached as Dictionary).is_empty():
+		cells = cached
+	else:
+		_scat_out = []
+		_scat_out.resize(SCAT_TASKS)
+		var gid := WorkerThreadPool.add_group_task(_scat_slice, SCAT_TASKS, -1, true,
+			"nature scatter")
+		WorkerThreadPool.wait_for_group_task_completion(gid)
+		for t in SCAT_TASKS:
+			var got: Array = _scat_out[t]
+			for e in got:
+				var key: String = e[0]
+				if not cells.has(key):
+					cells[key] = []
+				cells[key].append(e[1])
+		_scat_out = []
+		WorldBake.put("scatter", cells)
 	for key in cells:
 		var kind: String = key.split("_")[0]
 		var mmi := MultiMeshInstance3D.new()
@@ -786,6 +1007,43 @@ func _scatter_nature() -> void:
 		add_child(mmi)
 		_stats[kind] = int(_stats.get(kind, 0)) + list.size()
 		_stats["scatter_cells"] = int(_stats.get("scatter_cells", 0)) + 1
+
+## Runs on a worker. Reads the height, road and biome fields, which are all
+## built by now and none of which it writes to.
+func _scat_slice(t: int) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20260821 + t * 7919
+	var out: Array = []
+	for i in SCAT_PER_TASK:
+		var x := rng.randf_range(-SCAT_HALF * SCAT_CELL, SCAT_HALF * SCAT_CELL)
+		var z := rng.randf_range(-SCAT_HALF * SCAT_CELL * 1.6, SCAT_HALF * SCAT_CELL * 1.6)
+		if absf(x) < 330.0 and absf(z) < 2150.0:
+			continue                                        # keep the field clear
+		var y := Sim.height_at(x, z)
+		if y < Sim.WATER_LEVEL + 2.0 or y > 2400.0:
+			continue
+		# On the surface as it is drawn, not as the field computes it. The two
+		# part company by more than the height of a tree as soon as the cells
+		# get coarse, and a tree standing on the analytic height then hangs in
+		# the air above the triangles -- which is what you see looking up at the
+		# underside of the ground.
+		y = Terrain.surface_height(x, z)
+		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
+			continue
+		var slope := Sim.normal_at(x, z).y
+		if slope < 0.55:
+			continue                                        # nothing clings to a cliff
+		var biome := Sim.biome_kind(x, z, y, slope)
+		if rng.randf() > float(SCAT_DENSITY.get(biome, 0.3)):
+			continue
+		var options: Array = SCAT_SPECIES.get(biome, ["bush"])
+		var kind: String = options[rng.randi() % options.size()]
+		var sc := rng.randf_range(0.7, 1.7)
+		var xf := Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(
+			Vector3(sc, sc * rng.randf_range(0.8, 1.35), sc)), Vector3(x, y - 0.4, z))
+		out.append(["%s_%d_%d" % [kind, int(floor(x / SCAT_CELL)),
+			int(floor(z / SCAT_CELL))], xf])
+	_scat_out[t] = out
 
 func _bush_mesh() -> ArrayMesh:
 	var st := MeshKit.begin()
@@ -876,31 +1134,203 @@ func _wall_mesh() -> ArrayMesh:
 ## Trunk roads and town streets as a single hugging surface. Sampled tightly so
 ## it follows the ground instead of floating over it, with a kerb strip either
 ## side to hide the seam.
-func _build_roads() -> void:
-	var st := MeshKit.begin()
-	var kerb := MeshKit.begin()
-	for r in Sim.ROADS:
-		_ribbon(st, kerb, r[0], r[1], 7.5)
-	for r in _streets:
-		_ribbon(st, kerb, r[0], r[1], 5.0)
-	add_child(MeshKit.mi(MeshKit.finish(kerb, MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)), "Kerbs"))
-	add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)), "Roads"))
+## Carriageways and kerbs for every road and street on the map.
+##
+## Four height samples every eleven metres of every leg, and with sixteen towns
+## on the map that is over three seconds. None of it touches the scene tree, so
+## a leg at a time goes to the worker pool and only the two meshes are made
+## here.
+var _road_jobs: Array = []
+var _road_out: Array = []
 
-func _ribbon(st: SurfaceTool, kerb: SurfaceTool, a: Vector2, b: Vector2, half: float) -> void:
+func _build_roads() -> void:
+	_road_jobs = []
+	for r in Sim.ROADS:
+		_road_jobs.append([r[0], r[1], 7.5])
+	for r in _streets:
+		_road_jobs.append([r[0], r[1], 5.0])
+	_road_out = []
+	_road_out.resize(_road_jobs.size())
+	var gid := WorkerThreadPool.add_group_task(_ribbon_job, _road_jobs.size(), -1,
+		true, "road surfaces")
+	WorkerThreadPool.wait_for_group_task_completion(gid)
+	# Sized once. Appending 450 arrays onto a growing PackedVector3Array
+	# reallocates and copies the whole thing over and over.
+	var ns := 0
+	var nk := 0
+	for o0 in _road_out:
+		ns += ((o0 as Array)[0] as PackedVector3Array).size()
+		nk += ((o0 as Array)[1] as PackedVector3Array).size()
+	var surf := PackedVector3Array()
+	var kerb := PackedVector3Array()
+	surf.resize(ns)
+	kerb.resize(nk)
+	var ws := 0
+	var wk := 0
+	for o in _road_out:
+		var a0: PackedVector3Array = (o as Array)[0]
+		for v in a0:
+			surf[ws] = v
+			ws += 1
+		var b0: PackedVector3Array = (o as Array)[1]
+		for v2 in b0:
+			kerb[wk] = v2
+			wk += 1
+	_road_jobs = []
+	_road_out = []
+	add_child(MeshKit.mi(_flat_mesh(kerb,
+		MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)), "Kerbs"))
+	add_child(MeshKit.mi(_flat_mesh(surf,
+		MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)), "Roads"))
+
+## Viaducts and tunnel portals.
+##
+## The alignment crosses low ground on a deck and high ground in a bore, and
+## neither is laid on the terrain -- which is the point, it is what stops the
+## road gouging a trench or climbing a mountain. But with nothing drawn for
+## them, a road simply stopped at one side of a valley and started again at the
+## other, and disappeared into a hillside with no way in.
+const PIER_STEP := 90.0
+const DECK_HALF := 8.5
+
+func _build_structures() -> void:
+	var st := MeshKit.begin()
+	var dark := MeshKit.begin()
+	var decks := 0
+	var piers := 0
+	for br in Sim.road_bridges:
+		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
+		if pts.size() < 2:
+			continue
+		decks += 1
+		var since := 0.0
+		for i in range(pts.size() - 1):
+			var a2: Vector2 = pts[i]
+			var b2: Vector2 = pts[i + 1]
+			var run := a2.distance_to(b2)
+			if run < 0.5:
+				continue
+			var dir := (b2 - a2) / run
+			var nrm := Vector2(-dir.y, dir.x)
+			var ya: float = ys[i]
+			var yb: float = ys[i + 1]
+			# the running surface
+			var p0 := Vector3(a2.x + nrm.x * DECK_HALF, ya, a2.y + nrm.y * DECK_HALF)
+			var p1 := Vector3(a2.x - nrm.x * DECK_HALF, ya, a2.y - nrm.y * DECK_HALF)
+			var p2 := Vector3(b2.x - nrm.x * DECK_HALF, yb, b2.y - nrm.y * DECK_HALF)
+			var p3 := Vector3(b2.x + nrm.x * DECK_HALF, yb, b2.y + nrm.y * DECK_HALF)
+			MeshKit.quad_n(st, p0, p1, p2, p3, Vector3.UP)
+			# the box girder under it, so the deck has a thickness
+			var u0 := p0 - Vector3(0, 1.9, 0)
+			var u1 := p1 - Vector3(0, 1.9, 0)
+			var u2 := p2 - Vector3(0, 1.9, 0)
+			var u3 := p3 - Vector3(0, 1.9, 0)
+			MeshKit.quad_n(st, u1, u0, u3, u2, Vector3.DOWN)
+			MeshKit.quad_n(st, p0, p3, u3, u0, Vector3(nrm.x, 0, nrm.y))
+			MeshKit.quad_n(st, p2, p1, u1, u2, Vector3(-nrm.x, 0, -nrm.y))
+			# parapets
+			for sx in [1.0, -1.0]:
+				var e0 := Vector3(a2.x + nrm.x * DECK_HALF * sx, ya + 0.55,
+					a2.y + nrm.y * DECK_HALF * sx)
+				var e1 := Vector3(b2.x + nrm.x * DECK_HALF * sx, yb + 0.55,
+					b2.y + nrm.y * DECK_HALF * sx)
+				var i0 := e0 - Vector3(nrm.x * 0.4 * sx, 0, nrm.y * 0.4 * sx)
+				var i1 := e1 - Vector3(nrm.x * 0.4 * sx, 0, nrm.y * 0.4 * sx)
+				MeshKit.quad_n(st, e0, e1, i1, i0, Vector3.UP)
+			# and a pier every so often, down to whatever is underneath
+			since += run
+			if since >= PIER_STEP:
+				since = 0.0
+				var g: float = Sim.height_at(b2.x, b2.y)
+				var clear: float = yb - 1.9 - g
+				if clear > 5.0:
+					piers += 1
+					MeshKit.box(st, Vector3(4.4, clear, 4.4),
+						Vector3(b2.x, g + clear * 0.5, b2.y))
+	var portals := 0
+	for tn in Sim.road_tunnels:
+		var tp: PackedVector2Array = tn.get("pts", PackedVector2Array())
+		var ty: PackedFloat32Array = tn.get("ys", PackedFloat32Array())
+		if tp.size() < 2:
+			continue
+		for endi in [0, tp.size() - 1]:
+			portals += 1
+			var at: Vector2 = tp[endi]
+			var toward: Vector2 = tp[1] if endi == 0 else tp[tp.size() - 2]
+			var d2 := (at - toward).normalized()
+			var y2: float = ty[endi]
+			# a headwall standing in the hillside, with the bore cut into it
+			var face := at + d2 * 2.0
+			var side := Vector2(-d2.y, d2.x)
+			MeshKit.box(st, Vector3(3.0, 13.0, 2.5),
+				Vector3(face.x + side.x * 9.5, y2 + 4.5, face.y + side.y * 9.5))
+			MeshKit.box(st, Vector3(3.0, 13.0, 2.5),
+				Vector3(face.x - side.x * 9.5, y2 + 4.5, face.y - side.y * 9.5))
+			MeshKit.box(st, Vector3(22.0, 2.6, 2.5),
+				Vector3(face.x, y2 + 10.4, face.y))
+			# the mouth itself: a dark recess so it reads as an opening
+			MeshKit.box(dark, Vector3(15.0, 8.6, 5.0),
+				Vector3(at.x - d2.x * 3.0, y2 + 4.2, at.y - d2.y * 3.0))
+	add_child(MeshKit.mi(MeshKit.finish(st,
+		MeshKit.mat(Color(0.58, 0.57, 0.55), 0.92, 0.0)), "RoadStructures"))
+	add_child(MeshKit.mi(MeshKit.finish(dark,
+		MeshKit.mat(Color(0.04, 0.04, 0.05), 0.98, 0.0)), "TunnelMouths"))
+	_stats["viaducts"] = decks
+	_stats["piers"] = piers
+	_stats["portals"] = portals
+
+func _ribbon_job(i: int) -> void:
+	var j: Array = _road_jobs[i]
+	_road_out[i] = _ribbon(j[0], j[1], float(j[2]))
+
+## Ground-hugging triangles need no normal but up, so the mesh is a vertex list
+## and nothing else.
+func _flat_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
+	var m := ArrayMesh.new()
+	if verts.is_empty():
+		return m
+	var nrm := PackedVector3Array()
+	nrm.resize(verts.size())
+	nrm.fill(Vector3.UP)
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = nrm
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	m.surface_set_material(0, mat)
+	return m
+
+## Runs on a worker. Returns [carriageway, kerbs].
+func _ribbon(a: Vector2, b: Vector2, half: float) -> Array:
+	var surf := PackedVector3Array()
+	var kerb := PackedVector3Array()
 	var len2 := a.distance_to(b)
 	if len2 < 1.0:
-		return
-	var steps := maxi(int(len2 / 11.0), 2)
+		return [surf, kerb]
+	# One quad is enough for a leg shorter than a step. Routing chops the trunk
+	# network into thousands of short segments, and a floor of two steps gave
+	# every fifteen metre piece of road four rows of height samples and
+	# thirty-six vertices it had no detail to put in them.
+	var steps := maxi(int(round(len2 / (11.0 if half > 6.0 else 17.0))), 1)
 	var dir := (b - a).normalized()
 	var nrm := Vector2(-dir.y, dir.x)
-	var prev := []
+	var prev: Array = []
 	for i in steps + 1:
 		var t := float(i) / float(steps)
 		var p := a.lerp(b, t)
-		var row := []
+		var row: Array = []
 		for k in [-1.55, -1.0, 1.0, 1.55]:
 			var q: Vector2 = p + nrm * half * float(k)
 			var y := Sim.height_at(q.x, q.y)
+			if half > 6.0:
+				# A trunk road on an embankment or a bridge rides on the design
+				# surface, not on whatever is underneath it. Drawn on the ground
+				# instead, a crossing was painted along the seabed and the road
+				# ran through the water.
+				var rs := Sim.road_surface(q.x, q.y)
+				if rs.y > 0.35:
+					y = maxf(y, rs.x)
 			row.append(Vector3(q.x, y + 0.16, q.y))
 		# lift the surface to the highest of the two kerbs so it never sinks in
 		var top: float = maxf(row[1].y, row[2].y)
@@ -909,15 +1339,20 @@ func _ribbon(st: SurfaceTool, kerb: SurfaceTool, a: Vector2, b: Vector2, half: f
 		row[0] = Vector3(row[0].x, minf(row[0].y, top) - 0.04, row[0].z)
 		row[3] = Vector3(row[3].x, minf(row[3].y, top) - 0.04, row[3].z)
 		if i > 0:
-			_strip(st, prev[1], prev[2], row[2], row[1])
+			_strip(surf, prev[1], prev[2], row[2], row[1])
 			_strip(kerb, prev[0], prev[1], row[1], row[0])
 			_strip(kerb, prev[2], prev[3], row[3], row[2])
 		prev = row
+	return [surf, kerb]
 
-func _strip(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
-	for v in [a, b, c, a, c, d]:
-		st.set_normal(Vector3.UP)
-		st.add_vertex(v)
+func _strip(out: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3,
+		d: Vector3) -> void:
+	out.append(a)
+	out.append(b)
+	out.append(c)
+	out.append(a)
+	out.append(c)
+	out.append(d)
 
 # ---------------------------------------------------------------- infrastructure
 const PYLON_ROUTES := [

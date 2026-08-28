@@ -854,6 +854,18 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var belly := 1.15 if gear_anim > 0.9 else 0.9
 	if agl < belly and (gear_anim < 0.9 or absf(b.y.dot(Vector3.UP)) < 0.72):
 		_impact(vel.length())
+	# Buildings, hangars, masts and pylons. Nothing in the world used to be
+	# solid except the ground, so a low pass down a main street went straight
+	# through the office blocks. Only asked for below the height of the tallest
+	# thing standing, which is where the answer can be anything but "no".
+	if alive and agl < OBSTACLE_CEILING:
+		var span: float = float(spec.get("span", 12.0)) * 0.5
+		var struck := Obstacles.hit(pos, span)
+		if struck >= 0:
+			var sc := Scenery.current
+			if is_instance_valid(sc):
+				sc.damage_area(Obstacles.centre_of(struck), maxf(span, 8.0))
+			_impact(maxf(vel.length(), 30.0))
 	if agl < -2.0:
 		_impact(200.0)
 	if pos.y < Sim.WATER_LEVEL and ground < Sim.WATER_LEVEL:
@@ -1521,6 +1533,10 @@ func _report_part(id: String) -> void:
 		"stab_r": "right stabilator", "fin_l": "left fin", "fin_r": "right fin",
 		"canopy": "canopy"}.get(id, id)
 	Sim.report("%s gone" % pretty, Sim.Ev.BAD)
+
+## Above this there is nothing to hit: the tallest mast on the map plus the
+## span of the biggest thing that can fly into it.
+const OBSTACLE_CEILING := 220.0
 
 func _impact(speed: float) -> void:
 	if Sim.debug_weapons:

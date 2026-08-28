@@ -24,6 +24,7 @@ var noise_cont := FastNoiseLite.new()
 ## wall to anything that floats: the sea stopped at the coast, so a ship could
 ## never get inland and the only water on the map was around the outside of it.
 var noise_river := FastNoiseLite.new()
+var noise_river2 := FastNoiseLite.new()
 var noise_lo := FastNoiseLite.new()
 var noise_hi := FastNoiseLite.new()
 var noise_det := FastNoiseLite.new()
@@ -94,6 +95,15 @@ func _setup_noise() -> void:
 	noise_river.fractal_lacunarity = 2.0
 	noise_river.fractal_gain = 0.4
 
+	# A second, independent set of channels, running at a different scale and
+	# across a different grain, so the map has more than one river system.
+	noise_river2.seed = 8807
+	noise_river2.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise_river2.frequency = 0.0000181
+	noise_river2.fractal_octaves = 2
+	noise_river2.fractal_lacunarity = 2.0
+	noise_river2.fractal_gain = 0.45
+
 	noise_lo.seed = 1337
 	noise_lo.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	noise_lo.frequency = 0.000055
@@ -123,6 +133,43 @@ func _setup_noise() -> void:
 	noise_det.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	noise_det.frequency = 0.0035
 	noise_det.fractal_octaves = 2
+
+## Water in the channel where it meets the sea, how far inland it stays at that
+## depth, and over what distance it then climbs out of it.
+const NAV_DEPTH := 16.0
+const NAV_FLAT := 95000.0
+const NAV_RISE := 150000.0
+
+## Carve one river. `rv` is the channel field at the point, zero on the
+## centreline; `home` is 1 near the airfield and 0 out where the continents
+## take over.
+##
+## The old cut was measured against the land it ran through -- deep near the
+## sea, shallow in the hills -- which reads correctly and is useless, because a
+## channel that is merely lower than its banks is still four hundred metres up
+## and bone dry. Nothing could float more than a few kilometres from the coast.
+## The bed is set by how far inland it is instead: a fathom under the surface at
+## the estuary and level for the best part of a hundred kilometres, then
+## climbing. Where the land around it is high that becomes a flooded gorge with
+## navigable water at the bottom, which is the point.
+func _river(h: float, x: float, _z: float, rv: float, home: float) -> float:
+	var out := h
+	var chan: float = 1.0 - smoothstep(0.0, 0.045, rv)
+	if chan > 0.0 and h > WATER_LEVEL - 120.0:
+		var low: float = clampf(1.0 - (h - WATER_LEVEL) / 1100.0, 0.0, 1.0)
+		out -= lerpf(14.0, 210.0, low * low) * chan * chan
+	if home <= 0.0:
+		return out
+	var inland: float = maxf(COAST_X - x, 0.0)
+	var bed: float = WATER_LEVEL - NAV_DEPTH
+	if inland > NAV_FLAT:
+		bed += pow((inland - NAV_FLAT) / NAV_RISE, 1.4) * 1300.0
+	# flat bottom along the centreline, valley sides out to the rim
+	var prof: float = 1.0 - smoothstep(0.022, 0.085, rv)
+	var w: float = prof * prof * home
+	if w > 0.0 and bed < out:
+		out = lerpf(out, bed, w)
+	return out
 
 ## How "airfield flat" a spot is: 1 = perfectly level apron, 0 = open terrain.
 ## Airfields. There was exactly one, at the origin, hard-wired into the height
@@ -224,14 +271,22 @@ func height_at(x: float, z: float) -> float:
 			var floor_y: float = lerpf(-1500.0, -160.0, smoothstep(0.0, 0.45, landness))
 			h = lerpf(floor_y, h, smoothstep(0.0, 0.62, landness))
 	# Rivers. The channel is where the field crosses zero, so it runs as a line
-	# rather than a patch, and it cuts deeper the closer it gets to the sea —
-	# a gorge in the hills, a navigable estuary at the bottom.
-	var rv: float = absf(noise_river.get_noise_2d(x, z))
-	var chan: float = 1.0 - smoothstep(0.0, 0.045, rv)
-	if chan > 0.0 and h > WATER_LEVEL - 120.0:
-		var low: float = clampf(1.0 - (h - WATER_LEVEL) / 1100.0, 0.0, 1.0)
-		var cut: float = lerpf(14.0, 210.0, low * low)
-		h -= cut * chan * chan
+	# rather than a patch. Two of them, from two fields, so the country has
+	# more than one river in it.
+	# The navigable bed reaches a long way out, because a river is measured
+	# from the coast it runs to and not from the airfield. Gating it with the
+	# same 55 km fade the coastal shelf uses cut every channel off 26 km inland,
+	# which is not a river system, it is an inlet.
+	var home: float = 1.0 - smoothstep(200000.0, 450000.0, Vector2(x, z).length())
+	# Sampled with x squashed, which is what points the rivers at the sea. The
+	# channel is the contour where the field crosses zero, and the contours of
+	# an isotropic field run in whatever direction they please -- so the map had
+	# rivers, and not one of them went anywhere. Compressing the x axis makes
+	# the field vary slowly east-west and quickly north-south, and its contours
+	# then run predominantly east-west, down the country and into the ocean.
+	h = _river(h, x, z, absf(noise_river.get_noise_2d(x * 0.28, z)), home)
+	h = _river(h, x, z, absf(noise_river2.get_noise_2d(
+		x * 0.34 + z * 0.10, z + x * 0.06)), home)
 	# Settlements stand on ground that has been levelled for them. Towns are
 	# built where the land is workable, not draped over whatever gradient
 	# happens to run through the middle of them — a street grid laid across a
@@ -256,12 +311,35 @@ func height_at(x: float, z: float) -> float:
 			# reached the limit, in the middle of the road.
 			var carry: float = 1.0 - smoothstep(ROAD_FILL_MAX,
 				ROAD_FILL_MAX * 2.2, rs.x - h)
+			# And the same limit the other way up. Fill was capped -- an
+			# embankment past a certain height becomes a bridge -- but the cut
+			# never was, so a road crossing a ridge dug itself in as deep as the
+			# surveyed profile wanted and left a slot through the hill with the
+			# carriageway at the bottom of it. Past this the corridor lets go
+			# and the road climbs over instead, which is what a road does.
+			carry *= 1.0 - smoothstep(ROAD_CUT_MAX, ROAD_CUT_MAX * 2.4, h - rs.x)
 			# and a town has already been levelled: a road through it runs on
 			# the made ground, not through a cutting of its own. Fighting the
 			# pad left a fourteen metre step under the buildings.
 			carry *= 1.0 - pad_w
-			if carry > 0.0:
-				h = lerpf(h, rs.x, rs.y * carry)
+			# The carriageway itself is always levelled; only the grading out to
+			# either side of it eases off. A road traversing a hillside is a
+			# bench cut into the slope -- level across its width, with a little
+			# cut above and a little fill below -- and capping the earthworks
+			# without this left the surface simply lying on the hill at whatever
+			# angle the hill happened to be, which measured 17% across the
+			# carriageway and is not a road.
+			var core: float = clampf((rs.y - 0.82) / 0.18, 0.0, 1.0)
+			var w: float = maxf(rs.y * carry, core)
+			# And the bound holds here, at the point being asked about, not only
+			# at the survey stations. The profile is clamped to the ground every
+			# 110 m; a knoll standing between two of those stations sits above
+			# the straight line joining them and was cut clean through -- 152 m
+			# deep at worst, which is a gorge with a road at the bottom of it.
+			var target: float = clampf(rs.x, rs.z - ROAD_CUT_MAX,
+				rs.z + ROAD_FILL_MAX)
+			if w > 0.0:
+				h = lerpf(h, target, w)
 	# The aerodrome last, and it wins. A town levelled itself on top of the
 	# runway and the pavement ended up fifty-seven metres under the ground it
 	# was supposed to be lying on: the field is the one surface in the world
@@ -362,6 +440,9 @@ const ROAD_HALF := 7.5           # carriageway half width
 const ROAD_SHOULDER := 24.0      # graded shoulder either side of it
 const ROAD_GRADE := 0.062        # steepest gradient a trunk road is built to
 const ROAD_FILL_MAX := 14.0      # tallest embankment before it becomes a bridge
+## Deepest cutting. Over a 31.5 m graded half-width that is about a one in two
+## and a half batter, which is what a cutting through rock actually looks like.
+const ROAD_CUT_MAX := 16.0
 
 var _road_lines: Array = []      # trunk network as polylines, in build order
 var _road_prof: Array = []       # the made height at each of their vertices
@@ -372,8 +453,46 @@ var _in_survey := false
 ## already keeps a road off the worst ground; this is the cut and fill that
 ## follows. Without it the carriageway is draped over every hummock in the
 ## noise field and the surface pitches like a switchback.
+## The untouched ground under each surveyed vertex, kept so the design profile
+## can be held near it.
+var _natural: Array = []
+
+## A road may cut into a rise and fill across a dip, but only so far.
+##
+## Grading alone holds a constant 6.2% whatever the country does, and over a
+## range that puts the design surface hundreds of metres under the hill -- at
+## worst, measured, a kilometre under it. The corridor then dutifully carved the
+## ground down to meet it, which is why the trunk network ran through slots in
+## the landscape instead of over it. Beyond a cutting's depth and an
+## embankment's height the road gives up and follows the ground, and takes the
+## gradient that comes with it.
+func _hold_to_ground(li: int, y: PackedFloat32Array,
+		cut := ROAD_CUT_MAX, fill := ROAD_FILL_MAX) -> PackedFloat32Array:
+	if li >= _natural.size():
+		return y
+	var g: PackedFloat32Array = _natural[li]
+	for i in mini(y.size(), g.size()):
+		y[i] = clampf(y[i], g[i] - cut, g[i] + fill)
+	return y
+
+## After the structures are known: everything that is not being carried on a
+## deck or driven through a hill goes back to being ordinary earthworks, and is
+## held to a cutting and an embankment again.
+func _hold_open_ground() -> void:
+	for li in _road_prof.size():
+		if li >= _natural.size():
+			continue
+		var y: PackedFloat32Array = _road_prof[li]
+		var g: PackedFloat32Array = _natural[li]
+		for i in mini(y.size(), g.size()):
+			if _in_structure(li, i):
+				continue
+			y[i] = clampf(y[i], g[i] - ROAD_CUT_MAX, g[i] + ROAD_FILL_MAX)
+		_road_prof[li] = y
+
 func _survey_roads() -> void:
 	_in_survey = true
+	_natural = []
 	var dense: Array = []
 	for line in _road_lines:
 		var pl: PackedVector2Array = line
@@ -383,17 +502,36 @@ func _survey_roads() -> void:
 		var fine := PackedVector2Array([pl[0]])
 		for i in range(pl.size() - 1):
 			var d: float = pl[i].distance_to(pl[i + 1])
-			var steps: int = maxi(1, int(round(d / 110.0)))
+			# 45 m, not 110. The profile is held to the ground at its stations,
+			# so anything standing between two of them is invisible to that
+			# clamp -- and a knoll between stations was cut clean through, a
+			# hundred and fifty metres deep at worst.
+			var steps: int = maxi(1, int(round(d / 45.0)))
 			for k in range(1, steps + 1):
 				fine.append(pl[i].lerp(pl[i + 1], float(k) / float(steps)))
 		var y := PackedFloat32Array()
 		y.resize(fine.size())
 		for i in fine.size():
 			y[i] = height_at(fine[i].x, fine[i].y)
+		# The ground the earthworks start from, read at the same point in the
+		# pipeline the corridor runs at -- before the aerodrome levels
+		# everything around it. Captured after it instead, the reference near
+		# the field was two hundred metres below the ground the corridor was
+		# actually cutting into, and the clamp let the road dig straight through
+		# the hill it was supposed to be bounding.
+		var nat := PackedFloat32Array()
+		nat.resize(fine.size())
+		var was_siting := _siting
+		_siting = true
+		for i2 in fine.size():
+			nat[i2] = height_at(fine[i2].x, fine[i2].y)
+		_siting = was_siting
 		dense.append(fine)
+		_natural.append(nat)
 		_road_prof.append(y)
 	for li in dense.size():
-		_road_prof[li] = _rule_grade(dense[li], _road_prof[li], 2)
+		_road_prof[li] = _hold_to_ground(li,
+			_rule_grade(dense[li], _road_prof[li], 2), TUNNEL_MAX, VIADUCT_MAX)
 	# Where two routes run into or alongside each other they have to agree about
 	# the height. Surveyed independently, a pair crossing at a junction came out
 	# eight metres apart six metres from one another: a step down the side of
@@ -407,7 +545,12 @@ func _survey_roads() -> void:
 		for li in dense.size():
 			# no easing inside the loop: the low pass filter pulled every tie
 			# straight back out again and the crossings never converged
-			_road_prof[li] = _rule_grade(dense[li], _road_prof[li], 1, false)
+			# graded to what a structure allows, so the alignment can hold its
+			# gradient through a hill instead of being dragged over the top of
+			# it; what is left in the open is pulled back to the ground below
+			_road_prof[li] = _hold_to_ground(li,
+				_rule_grade(dense[li], _road_prof[li], 1, false),
+				TUNNEL_MAX, VIADUCT_MAX)
 		if debug_roads:
 			print("[survey] pass %d: worst neighbour disagreement %.2f m" % [
 				pass_i + 1, _worst_tie(dense)])
@@ -419,17 +562,32 @@ func _survey_roads() -> void:
 			y[i] = maxf(y[i], WATER_LEVEL + 2.5)
 		_road_prof[li] = y
 	_road_lines = dense
+	# Classify, hold the open ground, then grade again and hold again. The last
+	# thing every relaxation pass did was clamp, so a station the clamp moved
+	# was never re-graded against its neighbours and the profile could step 70 m
+	# over a 46 m leg -- a wall across the carriageway, inside a tunnel.
+	for settle in 3:
+		_classify_structures()
+		_hold_open_ground()
+		for li3 in _road_prof.size():
+			_road_prof[li3] = _rule_grade(dense[li3], _road_prof[li3], 1, false)
+	_classify_structures()
+	_hold_open_ground()
 	_index_corridor()
 	# The painted network has to follow the earthworks, or the carriageway is
 	# stained across ground that was never levelled for it.
+	# Only the legs actually laid on the ground. A tunnel is inside the hill and
+	# a bridge is above it, so neither is painted onto the terrain, stained into
+	# the ground mask, or drawn as a ribbon lying on the country.
 	ROADS = []
-	for line in dense:
-		var pl: PackedVector2Array = line
+	for li2 in dense.size():
+		var pl: PackedVector2Array = dense[li2]
 		for i in range(pl.size() - 1):
+			if _in_structure(li2, i) or _in_structure(li2, i + 1):
+				continue
 			ROADS.append([pl[i], pl[i + 1]])
 	if not _road_field.is_empty():
 		_build_road_field()
-	_note_bridges()
 	_in_survey = false
 
 ## Hold the ruling gradient along one road. Cutting first and filling after
@@ -588,37 +746,90 @@ func _tie_junctions(lines: Array) -> void:
 ## Where the made height stands too far above the land to be an embankment, the
 ## road is carried instead. Recorded as spans so the scenery can put a deck and
 ## piers under them.
-func _note_bridges() -> void:
+## Where the alignment cannot simply be cut or filled into the country, the road
+## needs a structure: a bridge over the low ground, a tunnel through the high.
+##
+## Without them a road has exactly two options, both wrong. Carve, and it leaves
+## a slot through the hill with the carriageway at the bottom. Refuse to carve,
+## and it climbs the hill instead, which is where the 22% gradients came from.
+## A structure is the third answer: the alignment holds its grade and the ground
+## is left completely alone underneath it.
+##
+## Marked per surveyed station and then grouped into runs, because a road does
+## not tunnel through every hummock -- a structure has to earn its length.
+## A structure has to earn itself twice over: it must be long enough to be worth
+## building and deep enough that there is no sensible alternative. Length alone
+## put a third of the whole network -- 268 km of it -- underground, because a
+## grade rule held against rolling country is in cut nearly everywhere.
+const TUNNEL_MIN := 420.0        # shorter than this, cut it or climb it
+const TUNNEL_DEEP := 38.0        # and the hill has to be at least this thick
+const BRIDGE_MIN := 130.0        # shorter than this, fill it
+const BRIDGE_HIGH := 24.0        # and the ground has to fall at least this far
+const TUNNEL_MAX := 220.0        # deepest a tunnel is allowed to be driven
+const VIADUCT_MAX := 110.0       # tallest a viaduct is allowed to stand
+
+var road_tunnels: Array = []     # {a, b, ya, yb}
+## Per surveyed station, whether the road is inside a structure there. The
+## corridor leaves the ground alone across those, and the surface is drawn as a
+## deck or not at all rather than painted on the hillside.
+var _road_struct: Array = []
+
+func _classify_structures() -> void:
 	road_bridges = []
+	road_tunnels = []
+	_road_struct = []
 	for li in _road_lines.size():
 		var pl: PackedVector2Array = _road_lines[li]
 		var prof: PackedFloat32Array = _road_prof[li]
-		var open := false
-		var start := Vector2.ZERO
-		var start_y := 0.0
-		var last := Vector2.ZERO
-		var last_y := 0.0
-		for i in range(pl.size() - 1):
-			var d: float = pl[i].distance_to(pl[i + 1])
-			var steps: int = clampi(int(d / 40.0), 2, 40)
-			for k in steps + 1:
-				var t := float(k) / float(steps)
-				var q: Vector2 = pl[i].lerp(pl[i + 1], t)
-				var wy: float = lerpf(prof[i], prof[i + 1], t)
-				var carried: bool = wy - height_at(q.x, q.y) > ROAD_FILL_MAX * 1.6
-				if carried and not open:
-					open = true
-					start = q
-					start_y = wy
-				elif not carried and open:
-					open = false
-					if start.distance_to(last) > 45.0:
-						road_bridges.append({"a": start, "b": last,
-							"ya": start_y, "yb": last_y})
-				last = q
-				last_y = wy
-		if open and start.distance_to(last) > 45.0:
-			road_bridges.append({"a": start, "b": last, "ya": start_y, "yb": last_y})
+		var nat: PackedFloat32Array = _natural[li] if li < _natural.size() else prof
+		var flags := PackedByteArray()
+		flags.resize(pl.size())
+		for i in pl.size():
+			var over: float = prof[i] - nat[i]          # + fill, - cut
+			flags[i] = 1 if over > ROAD_FILL_MAX else (2 if -over > ROAD_CUT_MAX else 0)
+		# group the runs, and only keep the ones long enough to be worth building
+		var i0 := 0
+		while i0 < flags.size():
+			if flags[i0] == 0:
+				i0 += 1
+				continue
+			var kind: int = flags[i0]
+			var i1 := i0
+			while i1 + 1 < flags.size() and flags[i1 + 1] == kind:
+				i1 += 1
+			var run: float = pl[i0].distance_to(pl[i1])
+			var extreme := 0.0
+			for k3 in range(i0, i1 + 1):
+				extreme = maxf(extreme, absf(prof[k3] - nat[k3]))
+			var worth_it: bool = run >= (BRIDGE_MIN if kind == 1 else TUNNEL_MIN) \
+				and extreme >= (BRIDGE_HIGH if kind == 1 else TUNNEL_DEEP)
+			if worth_it:
+				# the whole run, not just its ends: a span follows the
+				# alignment, and a deck drawn as one straight beam between the
+				# abutments leaves the road beside it
+				var pts := PackedVector2Array()
+				var ys := PackedFloat32Array()
+				for k2 in range(i0, i1 + 1):
+					pts.append(pl[k2])
+					ys.append(prof[k2])
+				var rec := {"a": pl[i0], "b": pl[i1],
+					"ya": prof[i0], "yb": prof[i1], "pts": pts, "ys": ys}
+				if kind == 1:
+					road_bridges.append(rec)
+				else:
+					road_tunnels.append(rec)
+			else:
+				for k in range(i0, i1 + 1):
+					flags[k] = 0                        # cut or fill it instead
+			i0 = i1 + 1
+		_road_struct.append(flags)
+
+## Is the road inside a structure at this station?
+func _in_structure(li: int, i: int) -> bool:
+	if li >= _road_struct.size():
+		return false
+	var f: PackedByteArray = _road_struct[li]
+	return i < f.size() and f[i] != 0
 
 const CORR_CELL := 64.0
 
@@ -634,8 +845,20 @@ func _index_corridor() -> void:
 	for li in _road_lines.size():
 		var pl: PackedVector2Array = _road_lines[li]
 		var prof: PackedFloat32Array = _road_prof[li]
+		# and the ground the earthworks started from, so the cut can be bounded
+		# against the centreline rather than against whatever is under the point
+		# being asked about -- which differs across the width of the road and
+		# tips the carriageway over as soon as the bound bites
+		var nat: PackedFloat32Array = _natural[li] if li < _natural.size() \
+			else prof
 		for i in range(pl.size() - 1):
-			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1]])
+			# A leg inside a structure moves no earth at all: the deck is above
+			# the ground or the bore is inside the hill, and either way the
+			# country under it is untouched.
+			if _in_structure(li, i) or _in_structure(li, i + 1):
+				continue
+			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1],
+				nat[i], nat[i + 1]])
 	var pad: float = ROAD_HALF + ROAD_SHOULDER
 	for idx in _corr.size():
 		var a: Vector2 = _corr[idx][0]
@@ -655,21 +878,34 @@ func _index_corridor() -> void:
 						bucket.append(idx)
 						_corr_grid[key] = bucket
 
+## The land as it was before any road was built on it. The corridor is the only
+## thing `_in_survey` switches off, which is exactly the difference between the
+## finished ground and the ground the earthworks started from -- so this is what
+## a cutting or an embankment should be measured against. Comparing the road
+## against the hillside beside it instead cannot tell a road running along the
+## floor of a valley from a road in a ninety metre trench.
+func natural_height_at(x: float, z: float) -> float:
+	var was := _in_survey
+	_in_survey = true
+	var h := height_at(x, z)
+	_in_survey = was
+	return h
+
 ## The made surface at a point: its height and how much of it applies here,
 ## falling from the whole carriageway out to nothing at the edge of the graded
 ## shoulder. Zero weight means the land is left as it was.
-func road_surface(x: float, z: float) -> Vector2:
+## Returns (made height, how much of it applies, the ground it was cut from).
+func road_surface(x: float, z: float) -> Vector3:
 	if _corr.is_empty() or _road_prof.size() != _road_lines.size():
-		return Vector2.ZERO
-	if absf(x) >= RF_HALF or absf(z) >= RF_HALF:
-		return Vector2.ZERO
+		return Vector3.ZERO
 	var reach: float = ROAD_HALF + ROAD_SHOULDER
 	var key: int = int(floor(x / CORR_CELL)) * 65536 + int(floor(z / CORR_CELL))
 	if not _corr_grid.has(key):
-		return Vector2.ZERO
+		return Vector3.ZERO
 	var p := Vector2(x, z)
 	var best := 1e9
 	var ysum := 0.0
+	var gsum := 0.0
 	var wsum := 0.0
 	for idx in (_corr_grid[key] as PackedInt32Array):
 		var leg: Array = _corr[idx]
@@ -685,10 +921,12 @@ func road_surface(x: float, z: float) -> Vector2:
 			# a five metre step down the middle of the road.
 			var k: float = 1.0 / (d * d + 1.5)
 			ysum += lerpf(float(leg[2]), float(leg[3]), t) * k
+			gsum += lerpf(float(leg[4]), float(leg[5]), t) * k
 			wsum += k
 	if best > reach or wsum <= 0.0:
-		return Vector2.ZERO
-	return Vector2(ysum / wsum, 1.0 - smoothstep(ROAD_HALF, reach, best))
+		return Vector3.ZERO
+	return Vector3(ysum / wsum, 1.0 - smoothstep(ROAD_HALF, reach, best),
+		gsum / wsum)
 
 ## A road between two places that goes round the hills instead of over them.
 ## Straight legs are cheap and look it: a trunk road driven at a constant
@@ -701,20 +939,29 @@ func route(a: Vector2, b: Vector2) -> Array:
 	# Always at least two legs, so every road gets relaxed. A short link left
 	# as one straight segment has no waypoints to move and takes whatever
 	# gradient lies between its ends: that is where the 53% pitches came from.
-	var n: int = clampi(int(span / 700.0), 2, 16)
+	# More waypoints and a much harder search than this used to do. The old
+	# three passes over six offsets along one fixed normal was enough when the
+	# corridor could carve whatever it liked to smooth the result out; now that
+	# the earthworks are limited, the route itself has to be the answer, and a
+	# road with a waypoint every four hundred metres can actually follow a
+	# contour round a spur instead of driving at it. Routing is baked, so this
+	# is paid once.
+	var n: int = clampi(int(span / 420.0), 3, 30)
 	var dir := (b - a).normalized()
 	var nrm := Vector2(-dir.y, dir.x)
 	var pts: Array = [a]
 	for i in range(1, n):
 		pts.append(a.lerp(b, float(i) / float(n)))
 	pts.append(b)
-	var reach: float = minf(span * 0.22, 2600.0)
-	for _pass in 3:
+	var reach: float = minf(span * 0.17, 1700.0)
+	for _pass in 8:
 		for i in range(1, pts.size() - 1):
 			var p: Vector2 = pts[i]
 			var best: Vector2 = p
 			var best_cost := _road_cost(pts[i - 1], p, pts[i + 1])
-			for k in [-1.0, -0.6, -0.3, 0.3, 0.6, 1.0]:
+			# across the route and along it: a waypoint that can only slide
+			# sideways cannot shorten a climb by moving down the line of it
+			for k in [-1.0, -0.72, -0.45, -0.22, 0.22, 0.45, 0.72, 1.0]:
 				var q: Vector2 = p + nrm * (reach * k)
 				if height_at(q.x, q.y) < WATER_LEVEL + 6.0:
 					continue
@@ -725,7 +972,7 @@ func route(a: Vector2, b: Vector2) -> Array:
 					best_cost = cost
 					best = q
 			pts[i] = best
-		reach *= 0.45
+		reach *= 0.62
 	var out: Array = []
 	for i in range(pts.size() - 1):
 		out.append([pts[i], pts[i + 1]])
@@ -766,7 +1013,12 @@ func _road_cost(prev: Vector2, p: Vector2, next: Vector2) -> float:
 			# wall, because the total height gained is the same. Squared, so a
 			# few percent costs nothing and half a gradient costs everything.
 			var grade := rise / maxf(run, 1.0)
-			cost += grade * grade * run * 90.0
+			cost += grade * grade * run * 260.0
+			# and anything past what a trunk road is built to is not a gradient
+			# to be traded off against distance, it is a route that does not
+			# work: priced accordingly.
+			var over: float = maxf(grade - ROAD_GRADE, 0.0)
+			cost += over * over * run * 9000.0
 			# and a trunk road does not run across an active airfield. Without
 			# this the network cut straight through the approach and the apron
 			# on its way between the field and the towns: 362 sample points in
@@ -776,7 +1028,11 @@ func _road_cost(prev: Vector2, p: Vector2, next: Vector2) -> float:
 			if on_runway(q.x, q.y):
 				cost += run * 4000.0
 			last = h
-		cost += d * 0.085                     # and so is every metre of tarmac
+		# Every metre of tarmac, and enough of a price on it that the router
+		# takes a road round a hill and not round three counties. Costed too
+		# cheaply against the gradient terms the roads wandered all over the
+		# country to save a couple of percent of climb.
+		cost += d * 0.55
 	return cost
 
 var _segments: Array = []          # every road and street, filled by Scenery
@@ -814,6 +1070,33 @@ var _road_field := PackedFloat32Array()
 ## the site and the shoulders blend out over the last fifth of the radius.
 var _town_pads: Array = []
 
+## Everything the height field and the road drawing depend on that comes out of
+## routing the network: the pads the towns stand on, the trunk legs, the
+## surveyed profile, the bridges and the corridor index. All of it is the same
+## every run, and arriving at it costs the better part of three seconds, so it
+## goes to disk with the rest of the bake.
+func road_state() -> Dictionary:
+	return {"pads": _town_pads, "roads": ROADS, "lines": _road_lines,
+		"prof": _road_prof, "bridges": road_bridges, "corr": _corr,
+		"grid": _corr_grid, "segs": _segments, "tunnels": road_tunnels,
+		"struct": _road_struct, "natural": _natural}
+
+func load_road_state(d: Dictionary) -> void:
+	_town_pads = d["pads"]
+	ROADS = d["roads"]
+	_road_lines = d["lines"]
+	_road_prof = d["prof"]
+	road_bridges = d["bridges"]
+	_corr = d["corr"]
+	_corr_grid = d["grid"]
+	_segments = d["segs"]
+	road_tunnels = d.get("tunnels", [])
+	_road_struct = d.get("struct", [])
+	_natural = d.get("natural", [])
+	_index_segments()
+	# cached in its own right, so this is a read rather than a bake
+	_build_road_field()
+
 func register_town_pads(sites: Array) -> void:
 	_town_pads.clear()
 	for site in sites:
@@ -848,33 +1131,150 @@ func site_roughness(c: Vector2, r: float) -> float:
 
 func register_segments(segs: Array) -> void:
 	_segments = segs
+	_index_segments()
 	_build_road_field()
 
 ## Bake a distance-to-road field once. The terrain asks for this at every one of
 ## a hundred thousand vertices, and walking a hundred-plus segments each time
 ## was costing more than the rest of world generation put together.
+##
+## 256 x 256 texels against 164 segments is ten and a half million distance
+## tests, and in GDScript that was thirteen and a half seconds of a twenty-four
+## second start -- the single largest thing between launching the game and
+## seeing it. Three things fixed it, in order of what they were worth: the rows
+## go out to the worker pool, the segments are flattened into a float array so
+## the inner loop is not unboxing Variants out of an array of arrays, and a
+## bounding box reject skips the projection for segments that cannot win.
+const RF_STRIDE := 9             # ax az dx dz 1/len2 minx maxx minz maxz
+
+var _rf_segs := PackedFloat32Array()
+var _rf_rows: Array = []
+var _rf_count := 0
+
 func _build_road_field() -> void:
+	var t0 := Time.get_ticks_msec()
+	var cached: Variant = WorldBake.get_baked("road_field")
+	if cached is PackedFloat32Array and (cached as PackedFloat32Array).size() == RF_N * RF_N:
+		_road_field = cached
+		road_field_ms = Time.get_ticks_msec() - t0
+		return
+	var all: Array = []
+	all.append_array(ROADS)
+	all.append_array(_segments)
+	_rf_segs = PackedFloat32Array()
+	_rf_segs.resize(all.size() * RF_STRIDE)
+	for i in all.size():
+		var a: Vector2 = all[i][0]
+		var b: Vector2 = all[i][1]
+		var d := b - a
+		var k := i * RF_STRIDE
+		_rf_segs[k] = a.x
+		_rf_segs[k + 1] = a.y
+		_rf_segs[k + 2] = d.x
+		_rf_segs[k + 3] = d.y
+		_rf_segs[k + 4] = 1.0 / maxf(d.length_squared(), 1e-9)
+		_rf_segs[k + 5] = minf(a.x, b.x)
+		_rf_segs[k + 6] = maxf(a.x, b.x)
+		_rf_segs[k + 7] = minf(a.y, b.y)
+		_rf_segs[k + 8] = maxf(a.y, b.y)
+	_rf_count = all.size()
+	_rf_rows = []
+	_rf_rows.resize(RF_N)
+	# One task per row, each writing only its own slot of a pre-sized array and
+	# reading only immutable input. Nothing here touches the scene tree, which
+	# is the line that matters for doing this off the main thread at all.
+	var gid := WorkerThreadPool.add_group_task(_rf_row, RF_N, -1, true,
+		"road distance field")
+	WorkerThreadPool.wait_for_group_task_completion(gid)
 	_road_field = PackedFloat32Array()
 	_road_field.resize(RF_N * RF_N)
-	var step := RF_HALF * 2.0 / float(RF_N - 1)
 	for j in RF_N:
-		var z := -RF_HALF + float(j) * step
-		for i in RF_N:
-			var x := -RF_HALF + float(i) * step
-			_road_field[j * RF_N + i] = _road_distance_exact(x, z)
+		var row: PackedFloat32Array = _rf_rows[j]
+		for i2 in RF_N:
+			_road_field[j * RF_N + i2] = row[i2]
+	_rf_rows = []
+	_rf_segs = PackedFloat32Array()
+	WorldBake.put("road_field", _road_field)
+	road_field_ms = Time.get_ticks_msec() - t0
+
+var road_field_ms := 0
+
+func _rf_row(j: int) -> void:
+	var step := RF_HALF * 2.0 / float(RF_N - 1)
+	var z := -RF_HALF + float(j) * step
+	var row := PackedFloat32Array()
+	row.resize(RF_N)
+	var m := _rf_count
+	for i in RF_N:
+		var x := -RF_HALF + float(i) * step
+		var best2 := 1e18
+		for s in m:
+			var k := s * RF_STRIDE
+			var ox: float = maxf(maxf(_rf_segs[k + 5] - x, x - _rf_segs[k + 6]), 0.0)
+			var oz: float = maxf(maxf(_rf_segs[k + 7] - z, z - _rf_segs[k + 8]), 0.0)
+			if ox * ox + oz * oz >= best2:
+				continue
+			var px: float = x - _rf_segs[k]
+			var pz: float = z - _rf_segs[k + 1]
+			var dx: float = _rf_segs[k + 2]
+			var dz: float = _rf_segs[k + 3]
+			var t: float = clampf((px * dx + pz * dz) * _rf_segs[k + 4], 0.0, 1.0)
+			var qx: float = px - dx * t
+			var qz: float = pz - dz * t
+			var d2: float = qx * qx + qz * qz
+			if d2 < best2:
+				best2 = d2
+		row[i] = sqrt(best2)
+	_rf_rows[j] = row
+
+const SEG_CELL := 256.0
+var _seg_grid: Dictionary = {}   # cell key -> Array of [a, b]
+
+## Index every road and street into a coarse grid. Walking all of them for one
+## answer was affordable while everything was inside an 18 km box; with
+## settlements spread across the map it is thousands of segments per call.
+func _index_segments() -> void:
+	_seg_grid = {}
+	for src in [ROADS, _segments]:
+		for r in src:
+			var a: Vector2 = r[0]
+			var b: Vector2 = r[1]
+			var steps: int = maxi(1, int(a.distance_to(b) / (SEG_CELL * 0.5)))
+			var seen: Dictionary = {}
+			for k in steps + 1:
+				var q: Vector2 = a.lerp(b, float(k) / float(steps))
+				var key: int = int(floor(q.x / SEG_CELL)) * 1048576 \
+					+ int(floor(q.y / SEG_CELL))
+				if seen.has(key):
+					continue
+				seen[key] = true
+				if not _seg_grid.has(key):
+					_seg_grid[key] = []
+				(_seg_grid[key] as Array).append(r)
 
 func _road_distance_exact(x: float, z: float) -> float:
 	var p := Vector2(x, z)
 	var best := 1e9
-	for r in ROADS:
-		best = minf(best, _seg_dist(p, r[0], r[1]))
-		if best < 1.0:
-			return best
-	for r in _segments:
-		best = minf(best, _seg_dist(p, r[0], r[1]))
-		if best < 1.0:
-			return best
-	return best
+	if _seg_grid.is_empty():
+		for r0 in ROADS:
+			best = minf(best, _seg_dist(p, r0[0], r0[1]))
+		for r1 in _segments:
+			best = minf(best, _seg_dist(p, r1[0], r1[1]))
+		return best
+	# the nine cells around the point: a segment further away than a cell and a
+	# half cannot be the nearest one to anything in the middle cell
+	var ci := int(floor(x / SEG_CELL))
+	var cj := int(floor(z / SEG_CELL))
+	for dj in range(-1, 2):
+		for di in range(-1, 2):
+			var key2: int = (ci + di) * 1048576 + (cj + dj)
+			if not _seg_grid.has(key2):
+				continue
+			for r in (_seg_grid[key2] as Array):
+				best = minf(best, _seg_dist(p, r[0], r[1]))
+				if best < 1.0:
+					return best
+	return best if best < SEG_CELL else 9999.0
 
 ## Distance in metres from (x, z) to the nearest road or street centreline,
 ## bilinearly sampled from the baked field.
@@ -882,7 +1282,10 @@ func road_distance(x: float, z: float) -> float:
 	if _road_field.is_empty():
 		return _road_distance_exact(x, z)
 	if absf(x) >= RF_HALF or absf(z) >= RF_HALF:
-		return 9999.0
+		# outside the baked box the segments are walked directly, which the
+		# grid makes cheap -- otherwise every settlement beyond it would be
+		# built as though it had no streets
+		return _road_distance_exact(x, z)
 	# The baked field is a broad phase and nothing more. It is 256 samples over
 	# 36 km — 141 m to a cell — and a carriageway is fifteen metres wide, so it
 	# cannot resolve a road at all: measured standing on the centreline it
@@ -900,12 +1303,11 @@ func _sample_road_field(x: float, z: float) -> float:
 	var step := RF_HALF * 2.0 / float(RF_N - 1)
 	var fx := (x + RF_HALF) / step
 	var fz := (z + RF_HALF) / step
-	var i := int(fx)
-	var j := int(fz)
-	if i >= RF_N - 1:
-		i = RF_N - 2
-	if j >= RF_N - 1:
-		j = RF_N - 2
+	# Clamped both ways. Asked about somewhere outside the baked box -- which
+	# happens now that there are settlements beyond it -- this indexed the array
+	# four hundred thousand elements before its start.
+	var i: int = clampi(int(fx), 0, RF_N - 2)
+	var j: int = clampi(int(fz), 0, RF_N - 2)
 	var tx := fx - float(i)
 	var tz := fz - float(j)
 	var a: float = _road_field[j * RF_N + i]
@@ -944,17 +1346,14 @@ func buildable(x: float, z: float, flat := 0.86, clearance := 4.0,
 ## in the approach path or on the airfield itself.
 ## True when nothing of the given half-width would be standing in a road here.
 func clear_of_roads(x: float, z: float, half: float) -> bool:
-	if _road_field.is_empty():
+	if _road_field.is_empty() and _seg_grid.is_empty():
 		return true
-	if _sample_road_field(x, z) > 170.0 + half:
-		return true
-	var p := Vector2(x, z)
-	for r in ROADS:
-		if _seg_dist(p, r[0], r[1]) < 13.0 + half:   # carriageway plus kerbs
-			return false
-	for r in _segments:
-		if _seg_dist(p, r[0], r[1]) < 8.0 + half:
-			return false
+	# Through the guarded, grid-indexed distance rather than a walk of every
+	# road on the map: this used to sample the baked field with no bounds check
+	# and then compare against all nine thousand legs, which was tolerable while
+	# everything built stood inside one box and is not now.
+	if road_distance(x, z) < 13.0 + half:            # carriageway plus kerbs
+		return false
 	return true
 
 func clear_of_airfield(x: float, z: float) -> bool:
@@ -1051,7 +1450,16 @@ func biome_colour(x: float, z: float, y: float, slope: float) -> Color:
 		r += c.r * k
 		g += c.g * k
 		b += c.b * k
-	return Color(r, g, b)
+	var out := Color(r, g, b)
+	# Under the sea. The biome field is a function of height, moisture and
+	# slope, and knows nothing about the waterline -- so the seabed came out as
+	# grassland, and there was meadow under three hundred metres of water. Sand
+	# in the shallows, grading to silt and then to bare rock as it drops away.
+	if y < WATER_LEVEL:
+		var deep: float = clampf((WATER_LEVEL - y) / 150.0, 0.0, 1.0)
+		var bed := Color(0.46, 0.42, 0.33).lerp(Color(0.17, 0.18, 0.19), deep)
+		out = out.lerp(bed, clampf((WATER_LEVEL - y) / 10.0, 0.0, 1.0))
+	return out
 
 ## Dominant biome name, used by the scatter to pick a species.
 func biome_kind(x: float, z: float, y: float, slope: float) -> String:

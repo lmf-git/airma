@@ -42,40 +42,72 @@ func _ready() -> void:
 	set_process(false)
 
 ## Shaded relief over biome colour, sampled straight from the world fields.
+##
+## 512 x 512 pixels, each of them three height samples, a biome lookup and a
+## road distance -- two seconds of the start. The rows go out to the worker
+## pool, and the finished image is kept on disk, so only the very first launch
+## after a change to the world ever pays for it.
+var _map_rows: Array = []
+var map_stats := {}
+
 func bake() -> void:
 	var t0 := Time.get_ticks_msec()
-	var img := Image.create(RES, RES, false, Image.FORMAT_RGB8)
-	var step := HALF * 2.0 / float(RES)
-	for j in RES:
-		var z := -HALF + float(j) * step
-		for i in RES:
-			var x := -HALF + float(i) * step
-			var h := Sim.height_at(x, z)
-			var c: Color
-			if h < Sim.WATER_LEVEL:
-				c = Color(0.06, 0.16, 0.26).lerp(Color(0.10, 0.24, 0.34),
-					clampf((h + 400.0) / 400.0, 0.0, 1.0))
-			else:
-				c = Sim.biome_colour(x, z, h, 1.0)
-				# hill shade from the local gradient, sun from the north west
-				var dx := Sim.height_at(x + step, z) - h
-				var dz := Sim.height_at(x, z + step) - h
-				var shade: float = clampf(0.72 + (-dx - dz) / (step * 0.55), 0.35, 1.5)
-				c = Color(c.r * shade, c.g * shade, c.b * shade)
-				if Sim.road_distance(x, z) < step * 0.8:
-					c = c.lerp(Color(0.14, 0.14, 0.15), 0.75)
-			img.set_pixel(i, j, c)
+	var buf: PackedByteArray
+	var cached: Variant = WorldBake.get_baked("map_relief")
+	if cached is PackedByteArray and (cached as PackedByteArray).size() == RES * RES * 3:
+		buf = cached
+	else:
+		_map_rows = []
+		_map_rows.resize(RES)
+		var gid := WorkerThreadPool.add_group_task(_bake_row, RES, -1, true,
+			"map relief")
+		WorkerThreadPool.wait_for_group_task_completion(gid)
+		buf = PackedByteArray()
+		buf.resize(RES * RES * 3)
+		for j in RES:
+			var row: PackedByteArray = _map_rows[j]
+			for k in RES * 3:
+				buf[j * RES * 3 + k] = row[k]
+		_map_rows = []
+		WorldBake.put("map_relief", buf)
+	var img := Image.create_from_data(RES, RES, false, Image.FORMAT_RGB8, buf)
 	_tex = ImageTexture.create_from_image(img)
 	var land := 0
 	var sea := 0
-	for j2 in RES:
-		for i2 in RES:
-			if img.get_pixel(i2, j2).b > img.get_pixel(i2, j2).g:
-				sea += 1
-			else:
-				land += 1
-	print("[map] relief baked %dx%d over +-%.0f km in %d ms: %d land, %d sea" % [
-		RES, RES, HALF * 0.001, Time.get_ticks_msec() - t0, land, sea])
+	for k2 in range(0, buf.size(), 3):
+		if buf[k2 + 2] > buf[k2 + 1]:
+			sea += 1
+		else:
+			land += 1
+	map_stats = {"res": RES, "ms": Time.get_ticks_msec() - t0, "land": land,
+		"sea": sea}
+
+## Runs on a worker. Reads the height, biome and road fields and nothing else.
+func _bake_row(j: int) -> void:
+	var step := HALF * 2.0 / float(RES)
+	var z := -HALF + float(j) * step
+	var row := PackedByteArray()
+	row.resize(RES * 3)
+	for i in RES:
+		var x := -HALF + float(i) * step
+		var h := Sim.height_at(x, z)
+		var c: Color
+		if h < Sim.WATER_LEVEL:
+			c = Color(0.06, 0.16, 0.26).lerp(Color(0.10, 0.24, 0.34),
+				clampf((h + 400.0) / 400.0, 0.0, 1.0))
+		else:
+			c = Sim.biome_colour(x, z, h, 1.0)
+			# hill shade from the local gradient, sun from the north west
+			var dx := Sim.height_at(x + step, z) - h
+			var dz := Sim.height_at(x, z + step) - h
+			var shade: float = clampf(0.72 + (-dx - dz) / (step * 0.55), 0.35, 1.5)
+			c = Color(c.r * shade, c.g * shade, c.b * shade)
+			if Sim.road_distance(x, z) < step * 0.8:
+				c = c.lerp(Color(0.14, 0.14, 0.15), 0.75)
+		row[i * 3] = int(clampf(c.r, 0.0, 1.0) * 255.0)
+		row[i * 3 + 1] = int(clampf(c.g, 0.0, 1.0) * 255.0)
+		row[i * 3 + 2] = int(clampf(c.b, 0.0, 1.0) * 255.0)
+	_map_rows[j] = row
 
 func toggle() -> void:
 	visible = not visible

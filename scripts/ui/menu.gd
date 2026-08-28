@@ -272,6 +272,43 @@ func _crewable_ships() -> Array:
 			out.append(k)
 	return out
 
+## The stats page for anything afloat, the carrier included.
+func _fill_sea(kind: String) -> void:
+	for c in _stats.get_children():
+		c.queue_free()
+	var rows: Array = []
+	if kind == "carrier":
+		_blurb.text = "Fleet carrier\n\nThe aeroplanes are the armament. Four wires on an angled deck, two bow catapults, and nothing that shoots.\n\nW/S engine order, A/D helm, mouse looks out from the island, U to hand over."
+		rows = [
+			["ROLE", 1.0, "fleet carrier"],
+			["LENGTH", clampf(Carrier.LEN / 340.0, 0.05, 1.0), "%d m" % int(Carrier.LEN)],
+			["BEAM", clampf(Carrier.BEAM / 45.0, 0.05, 1.0), "%d m" % int(Carrier.BEAM)],
+			["TOP SPEED", clampf(Carrier.TOP_SPEED / 20.0, 0.05, 1.0),
+				"%.0f kts" % (Carrier.TOP_SPEED * 1.94384)],
+			["ARRESTOR WIRES", 1.0, "%d" % Carrier.WIRES.size()],
+			["ARMAMENT", 0.05, "none"],
+		]
+	else:
+		var kd: Dictionary = Ship.KINDS[kind]
+		var sub: bool = bool(kd.get("sub", false))
+		_blurb.text = "%s\n\n%s\n\nW/S engine order, A/D helm, mouse lays the battery, left click fires, U to hand over." % [
+			str(kd["name"]),
+			"Runs deep and shoots from under the surface." if sub
+			else "Surface combatant."]
+		rows = [
+			["ROLE", 1.0, "submarine" if sub else String(kd.get("class", "warship"))],
+			["LENGTH", clampf(float(kd["len"]) / 200.0, 0.05, 1.0), "%d m" % int(kd["len"])],
+			["TOP SPEED", clampf(float(kd["speed"]) / 20.0, 0.05, 1.0),
+				"%.0f kts" % (float(kd["speed"]) * 1.94384)],
+			["HULL", clampf(float(kd["hp"]) / 2500.0, 0.05, 1.0), "%d" % int(kd["hp"])],
+			["GUNS", clampf(float(int(kd.get("guns", 0))) / 3.0, 0.02, 1.0),
+				"%d" % int(kd.get("guns", 0))],
+			["LAUNCH CELLS", clampf(float(int(kd.get("vls", 0))) / 40.0, 0.02, 1.0),
+				"%d" % int(kd.get("vls", 0))],
+		]
+	for r in rows:
+		_stats.add_child(_stat_row(str(r[0]), float(r[1]), str(r[2])))
+
 func _rebuild_cards() -> void:
 	if _grid == null:
 		return
@@ -282,6 +319,16 @@ func _rebuild_cards() -> void:
 	# without having to know the GROUND tab exists
 	# a ship you can take command of: the ones with a gun on the foredeck
 	if faction == "" or faction == "sea":
+		# The carrier first: she is the biggest thing afloat and she is not in
+		# `Ship.KINDS`, so nothing would ever have listed her.
+		var cb := Button.new()
+		cb.custom_minimum_size = Vector2(152, 62)
+		cb.text = "Fleet carrier\n%.0f m, %.0f kts" % [Carrier.LEN,
+			Carrier.TOP_SPEED * 1.94384]
+		cb.add_theme_font_size_override("font_size", 12)
+		cb.pressed.connect(_select.bind("sea:carrier"))
+		_grid.add_child(cb)
+		_cards["sea:carrier"] = cb
 		for k in _crewable_ships():
 			var sd: Dictionary = Ship.KINDS[k]
 			var sb := Button.new()
@@ -361,6 +408,15 @@ func _select(id: String) -> void:
 		]
 		for r in vrows:
 			_stats.add_child(_stat_row(str(r[0]), float(r[1]), str(r[2])))
+		jet_changed.emit(id)
+		return
+	if id.begins_with("sea:"):
+		# Anything afloat used to fall through to `JetSpec.get_spec`, so
+		# choosing a destroyer showed you an aeroplane's thrust to weight ratio
+		# and its wing loading.
+		for k2 in _cards:
+			_cards[k2].modulate = Color(1, 1, 1) if k2 != id else Color(0.55, 1.0, 0.75)
+		_fill_sea(id.substr(4))
 		jet_changed.emit(id)
 		return
 	for k in _cards:

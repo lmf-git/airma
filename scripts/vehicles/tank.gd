@@ -11,6 +11,7 @@ signal dismount_requested()
 const WHEELS_PER_SIDE := 7
 const TRACK_HALF := 1.72          # half track width, wheel centreline
 const WHEEL_R := 0.42
+const TEL_WHEEL_R := 0.72         # a lorry tyre, not a road wheel
 const REST := 0.55                # suspension travel at rest
 const MAX_SPEED := 18.0           # governed, about 65 km/h
 const POWER := 1_100_000.0        # 1500 hp at the sprockets
@@ -34,12 +35,17 @@ const KINDS := {
 	"msta": {"name": "2S19 Msta-S", "class": "spg", "hull": Color(0.25, 0.29, 0.21),
 			 "hp": 185.0, "power": 500_000.0, "top": 13.0, "gun": 940.0,
 			 "muzzle": 590.0, "reload": 10.0, "blast": 27.0},
+	# `muzzle` is the launch speed the ballistic solution is worked out from, and
+	# for a rocket it has to stand in for the whole boost -- a rocket is not a
+	# shell that leaves at its top speed and coasts. At 420 m/s the arc closes
+	# at v^2/g, which is eighteen kilometres, so an M270 could not reach twenty:
+	# these are set from the reach the launcher is supposed to have.
 	"m270": {"name": "M270 MLRS", "class": "mlrs", "hull": Color(0.28, 0.31, 0.25),
 			 "hp": 160.0, "power": 480_000.0, "top": 15.0, "gun": 420.0,
-			 "muzzle": 420.0, "reload": 26.0, "blast": 19.0, "salvo": 12, "ripple": 0.55},
+			 "muzzle": 630.0, "reload": 26.0, "blast": 19.0, "salvo": 12, "ripple": 0.55},
 	"bm30": {"name": "BM-30 Smerch", "class": "mlrs", "hull": Color(0.24, 0.28, 0.20),
 			 "hp": 150.0, "power": 440_000.0, "top": 14.0, "gun": 470.0,
-			 "muzzle": 450.0, "reload": 30.0, "blast": 21.0, "salvo": 12, "ripple": 0.6},
+			 "muzzle": 780.0, "reload": 30.0, "blast": 21.0, "salvo": 12, "ripple": 0.6},
 	# Transporter erector launchers. These do not shoot: they raise a canister
 	# and send a missile, and the missile does the rest. Everything that makes
 	# them worth having is in the round, so the vehicle is a chassis and a
@@ -125,8 +131,15 @@ func setup(t := 0, k := "m1a2") -> void:
 	health = float(kd["hp"])
 	# a launcher carries canisters, not a salvo of rockets
 	rounds_left = int(kd.get("rounds", kd.get("salvo", 1)))
-	mass = 62000.0
-	inertia = Vector3(120000.0, 140000.0, 60000.0)
+	# A launcher is a lorry with a canister on it, not a main battle tank. At a
+	# tank's 62 tonnes the suspension had to be wound up to hold it, and every
+	# bump then threw it.
+	if vclass() == "tel":
+		mass = 34000.0
+		inertia = Vector3(90000.0, 110000.0, 34000.0)
+	else:
+		mass = 62000.0
+		inertia = Vector3(120000.0, 140000.0, 60000.0)
 	can_sleep = false
 	continuous_cd = true
 	linear_damp_mode = RigidBody3D.DAMP_MODE_REPLACE
@@ -206,7 +219,7 @@ func _build() -> void:
 			w.position = Vector3(sx * TRACK_HALF, -0.18, z)
 			add_child(w)
 			_road_wheels.append({"node": w, "side": sx, "lat": sx * TRACK_HALF, "z": z,
-				"rest_y": -0.18, "comp": 0.0})
+				"rest_y": -0.18, "r": WHEEL_R, "comp": 0.0})
 
 	# turret and gun
 	_turret = Node3D.new()
@@ -446,7 +459,13 @@ func _physics_process(delta: float) -> void:
 		turret_pitch = aim_pitch
 	_gun_cd = maxf(_gun_cd - delta, 0.0)
 	_coax_cd = maxf(_coax_cd - delta, 0.0)
-	if _gun_cd <= 0.0 and int(KINDS[kind].get("salvo", 1)) <= 1:
+	# A gun reloads from the bustle for as long as the crew is alive, so its
+	# "rounds on the rails" go back to one the moment the breech is clear. A
+	# launcher does not: it carries the canisters it was loaded with, and when
+	# they have gone it has to go back for more. Without this exception an
+	# Oreshnik with one round on the vehicle had an unlimited supply of them.
+	if _gun_cd <= 0.0 and int(KINDS[kind].get("salvo", 1)) <= 1 \
+			and vclass() != "tel":
 		rounds_left = 1
 	if not alive:
 		return
@@ -456,17 +475,32 @@ func _physics_process(delta: float) -> void:
 	# Without this the turret laid on the mirror image of the target: the fall
 	# of shot was right because the solution supplies its own vector, but the
 	# tubes visibly pointed twenty degrees the other way.
-	var yaw_err := wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI)
-	_turret.rotation.y += clampf(yaw_err, -0.9 * delta, 0.9 * delta)
-	var max_el: float = deg_to_rad(70.0) if vclass() != "mbt" else deg_to_rad(20.0)
-	_mantlet.rotation.x = lerp_angle(_mantlet.rotation.x,
-		clampf(turret_pitch, deg_to_rad(-9.0), max_el), clampf(delta * 2.2, 0, 1))
+	if vclass() == "tel":
+		# A launcher does not lay. The round is guided and turns onto the
+		# bearing itself once it is off the rail, so the vehicle has nothing to
+		# aim -- it raises the canister to near vertical, fires, and puts it
+		# back down. Slewing the erector round to a compass bearing like a gun
+		# turret was both wrong and the reason it looked like a tank.
+		_turret.rotation.y = 0.0
+		var want_up: float = 1.0 if _erect_wanted() else 0.0
+		_erect = move_toward(_erect, want_up, delta * ERECT_RATE)
+		_mantlet.rotation.x = _erect * ERECT_ANGLE
+	else:
+		var yaw_err := wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI)
+		_turret.rotation.y += clampf(yaw_err, -0.9 * delta, 0.9 * delta)
+		var max_el: float = deg_to_rad(70.0) if vclass() != "mbt" else deg_to_rad(20.0)
+		_mantlet.rotation.x = lerp_angle(_mantlet.rotation.x,
+			clampf(turret_pitch, deg_to_rad(-9.0), max_el), clampf(delta * 2.2, 0, 1))
 	_wheel_spin += speed / WHEEL_R * delta
 	for w in _road_wheels:
 		var n: Node3D = w["node"]
 		n.position.y = lerpf(n.position.y, float(w["rest_y"]) + float(w["comp"]),
 			clampf(delta * 14.0, 0, 1))
 		n.transform.basis = Basis(Vector3(1, 0, 0), _wheel_spin) * Basis(Vector3(0, 0, 1), PI * 0.5)
+
+## Hull half-width, for the obstacle test. A launcher on six axles is longer
+## than a tank but no wider, and this only has to keep it out of a wall.
+const HULL_R := 1.9
 
 func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# A knocked out tank keeps its suspension. Skipping the whole physics step
@@ -481,6 +515,23 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var fwd := -xf.basis.z
 	speed = state.linear_velocity.dot(fwd)
 
+	# Buildings. There is no world collision mesh -- the ground exists only
+	# because the wheels look it up -- so a wall has to be pushed out of the
+	# same way. Shove the hull clear along the shortest axis out of the
+	# footprint and kill the part of the velocity that was driving into it,
+	# which stops a tank climbing a tower block one frame at a time.
+	var struck := Obstacles.hit(xf.origin, HULL_R)
+	if struck >= 0:
+		var out := xf.origin - Obstacles.centre_of(struck)
+		out.y = 0.0
+		if out.length_squared() < 0.01:
+			out = fwd * -1.0
+		out = out.normalized()
+		state.transform.origin += out * 0.35
+		var into: float = state.linear_velocity.dot(out)
+		if into < 0.0:
+			state.linear_velocity -= out * into
+
 	var contacts := 0
 	var k: float = mass * 9.81 * 2.6 / REST
 	# Damped for the wheels this vehicle actually has, and probed where they
@@ -488,12 +539,20 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# six axles a side was sprung for a tank's running gear and its wheels were
 	# tested a foot outboard of themselves — which is what had it bouncing.
 	var c: float = 1.05 * sqrt(k * mass / maxf(float(_road_wheels.size()), 1.0))
+	# Shared out over the wheels this vehicle has, not over the seven-a-side
+	# running gear of a tank. A launcher on six axles a side was having its
+	# weight held up by fourteen imaginary wheels, four of which were not there.
+	var per: float = 2.0 / maxf(float(_road_wheels.size()), 1.0)
 	for w in _road_wheels:
 		var lat: float = float(w.get("lat", float(w["side"]) * TRACK_HALF))
 		var lp := Vector3(lat, float(w["rest_y"]), float(w["z"]))
 		var wp: Vector3 = xf * lp
 		var ground := Sim.height_at(wp.x, wp.z)
-		var comp: float = (ground + WHEEL_R) - wp.y
+		# and its own radius: a lorry tyre is not a road wheel, and testing a
+		# 0.72 m wheel as though it were 0.42 m buried a third of every tyre in
+		# the ground and dropped the chassis with it.
+		var wr: float = float(w.get("r", WHEEL_R))
+		var comp: float = (ground + wr) - wp.y
 		w["comp"] = clampf(comp, -REST, REST * 0.6)
 		if comp <= 0.0:
 			continue
@@ -502,7 +561,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		var n := Sim.normal_at(wp.x, wp.z)
 		var arm := wp - xf.origin
 		var pv := state.linear_velocity + state.angular_velocity.cross(arm)
-		var fn: float = maxf(k * comp - c * pv.dot(n), 0.0) / float(WHEELS_PER_SIDE * 2) * 2.0
+		var fn: float = maxf(k * comp - c * pv.dot(n), 0.0) * per
 		fn = minf(fn, mass * 9.81 * 1.6)
 		var f := n * fn
 		# tracks: strong lateral bite, drive split left and right for steering
@@ -517,13 +576,11 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		# power limited tractive effort: strong off the mark, tailing off with
 		# road speed the way a real drivetrain does
 		var want: float = side_cmd * float(KINDS[kind]["top"]) * (0.65 if grip < 0.9 else 1.0)
-		var avail: float = minf(DRIVE_MAX, float(KINDS[kind]["power"]) / maxf(absf(v_roll), 3.0)) \
-			/ float(WHEELS_PER_SIDE * 2) * 2.0
+		var avail: float = minf(DRIVE_MAX, float(KINDS[kind]["power"]) / maxf(absf(v_roll), 3.0)) * per
 		var drive: float = clampf((want - v_roll) * mass * 0.30, -avail, avail)
 		drive -= signf(v_roll) * ROLL_RESIST * fn
 		if in_brake:
-			drive = clampf(-v_roll * mass * 2.0, -BRAKE / float(WHEELS_PER_SIDE),
-				BRAKE / float(WHEELS_PER_SIDE))
+			drive = clampf(-v_roll * mass * 2.0, -BRAKE * per * 0.5, BRAKE * per * 0.5)
 		var mu_roll: float = 1.5 * grip
 		drive = clampf(drive, -mu_roll * fn, mu_roll * fn)
 		f += roll_dir * drive
@@ -565,10 +622,10 @@ func _build_tel_chassis(st: SurfaceTool, body: Material, dark: Material) -> void
 			w.mesh = cyl
 			w.material_override = MeshKit.mat(Color(0.09, 0.09, 0.10), 0.95, 0.0)
 			w.rotation_degrees = Vector3(0, 0, 90)
-			w.position = Vector3(sx2 * 1.42, 0.42, z)
+			w.position = Vector3(sx2 * 1.42, TEL_WHEEL_R, z)
 			add_child(w)
 			_road_wheels.append({"node": w, "side": sx2, "lat": sx2 * 1.42, "z": z,
-				"rest_y": 0.42, "comp": 0.0})
+				"rest_y": TEL_WHEEL_R, "r": TEL_WHEEL_R, "comp": 0.0})
 	# the erector and its canisters live on the turret node, as with everything
 	# else, so laying and elevating work unchanged
 	_turret = Node3D.new()
@@ -759,6 +816,24 @@ func fire_main(world: Node) -> bool:
 
 ## How far the piece still is from the bearing and elevation it needs, in
 ## radians: the worst of the two axes. Zero means it is laid and may fire.
+## How far up the canister goes, 0 stowed to 1 vertical, and how fast. Four
+## seconds to erect is about what a real one takes.
+const ERECT_ANGLE := deg_to_rad(86.0)
+const ERECT_RATE := 0.25
+var _erect := 0.0
+
+## Is there anything worth standing the canister up for? It goes back down when
+## there is not, because a launcher sitting on the road with its tube in the air
+## is a launcher that has already been seen.
+func _erect_wanted() -> bool:
+	if rounds_left <= 0 or not alive:
+		return false
+	if map_target != Vector3.INF:
+		return true
+	if is_instance_valid(_ai_target):
+		return true
+	return occupied
+
 ## Send one. A TEL does not need to be laid the way a gun does — the round is
 ## guided and will turn onto the bearing itself — so all this has to do is get
 ## it off the rail cleanly and pointed up.
@@ -779,6 +854,10 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 			display_name(), rng * 0.001,
 			float(spec.get("range", 100000.0)) * 0.001], Sim.Ev.BAD)
 		return false
+	if _erect < 0.97:
+		Sim.report("%s: erecting — %d%%" % [display_name(), int(_erect * 100.0)],
+			Sim.Ev.INFO)
+		return false
 	_gun_cd = float(kd["reload"])
 	rounds_left -= 1
 	var id: String = String(kd.get("missile", "kalibr"))
@@ -786,17 +865,14 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	# Spawning it in the air on a computed bearing meant the round never
 	# appeared to leave the vehicle — it simply existed, already flying.
 	var from: Vector3 = global_position + Vector3(0, 3.0, 0)
+	# Straight out of the tube, wherever the tube happens to be pointing, and
+	# the tube points up. No lean onto the bearing: the round does that itself
+	# once it is clear, and a canister launch that comes out already heading
+	# for the target is the thing that made these look like guns.
 	var dir := Vector3.UP
 	if is_instance_valid(_muzzle):
 		from = _muzzle.global_position
 		dir = -_muzzle.global_transform.basis.z
-	var flat := Vector2(mark.x - from.x, mark.z - from.z)
-	var brg := atan2(flat.x, -flat.y)
-	# steeply up, leaning onto the bearing: a canister launch, not a gun
-	var el := deg_to_rad(72.0)
-	var want := Vector3(sin(brg) * cos(el), sin(el), -cos(brg) * cos(el)).normalized()
-	# mostly along the tube, leaning onto the bearing as it clears
-	dir = dir.lerp(want, 0.45).normalized()
 	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 	var m := Missile.new()
 	var aim := _TelMark.new()
@@ -808,8 +884,13 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	m.team = team
 	world.add_child(m)
 	store_released.emit(m)
-	Sim.report("%s: %s away — %d left" % [display_name(),
-		String(WeaponSpec.get_spec(id)["short"]), rounds_left], Sim.Ev.BAD)
+	# Where it is going, not just that it has gone. A canister launch goes
+	# straight up and turns over out of sight, so without this there is nothing
+	# to tell you whether it is on its way to the mark or simply leaving.
+	var brg: float = rad_to_deg(atan2(mark.x - from.x, -(mark.z - from.z)))
+	Sim.report("%s: %s away — %.0f km on %03d, %d left" % [display_name(),
+		String(WeaponSpec.get_spec(id)["short"]), rng * 0.001,
+		int(wrapf(brg, 0.0, 360.0)), rounds_left], Sim.Ev.BAD)
 	return true
 
 ## A place for the round to guide onto. A patch of ground is not a contact, so
@@ -828,6 +909,13 @@ class _TelMark extends Node3D:
 ## How far the piece still is from the bearing and elevation it needs, in
 ## radians: the worst of the two axes. Zero means it is laid and may fire.
 func lay_error() -> float:
+	# A launcher has nothing to lay. The round turns onto the bearing itself
+	# once it is off the rail, so the erector never slews -- and asking it how
+	# far its turret is from the target bearing therefore never returned zero,
+	# and the launcher sat there "laying" for ever. What it is actually waiting
+	# for is the canister to finish coming up.
+	if vclass() == "tel":
+		return (1.0 - _erect) * PI
 	var aim := ground_aim()
 	if aim == Vector3.INF:
 		return PI

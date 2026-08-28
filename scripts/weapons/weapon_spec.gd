@@ -98,7 +98,7 @@ static func _db() -> Dictionary:
 	# plus `loft` plus a long burn.
 	"kalibr": {
 		"name": "3M-14 Kalibr", "short": "KLB", "kind": "cruise",
-		"mass": 1780.0, "length": 6.20, "dia": 0.533, "fin": 0.90,
+		"folding": true, "mass": 1780.0, "length": 6.20, "dia": 0.533, "fin": 0.90,
 		"boost": 42.0, "burn": 280.0, "max_g": 11.0, "drag": 0.00028,
 		"ref_speed": 260.0,
 		"life": 340.0, "range": 150000.0, "seeker_fov": 60.0, "lock_time": 1.4,
@@ -110,7 +110,7 @@ static func _db() -> Dictionary:
 	},
 	"zircon": {
 		"name": "3M22 Zircon", "short": "ZRC", "kind": "radar",
-		"mass": 2400.0, "length": 8.40, "dia": 0.60, "fin": 0.80,
+		"folding": true, "mass": 2400.0, "length": 8.40, "dia": 0.60, "fin": 0.80,
 		"boost": 210.0, "burn": 90.0, "max_g": 15.0, "drag": 0.00009,
 		"ref_speed": 1900.0,
 		"life": 220.0, "range": 96000.0, "seeker_fov": 45.0, "lock_time": 1.2,
@@ -123,7 +123,7 @@ static func _db() -> Dictionary:
 	},
 	"fattah": {
 		"name": "Fattah-1", "short": "FTH", "kind": "radar",
-		"mass": 3200.0, "length": 12.0, "dia": 0.86, "fin": 1.05,
+		"folding": true, "mass": 3200.0, "length": 12.0, "dia": 0.86, "fin": 1.05,
 		"boost": 240.0, "burn": 70.0, "max_g": 12.0, "drag": 0.00010,
 		"ref_speed": 1700.0,
 		"life": 240.0, "range": 120000.0, "seeker_fov": 40.0, "lock_time": 1.4,
@@ -136,7 +136,7 @@ static func _db() -> Dictionary:
 	},
 	"oreshnik": {
 		"name": "Oreshnik", "short": "ORE", "kind": "radar",
-		"mass": 9000.0, "length": 14.5, "dia": 1.60, "fin": 1.10,
+		"folding": true, "mass": 9000.0, "length": 14.5, "dia": 1.60, "fin": 1.10,
 		"boost": 260.0, "burn": 110.0, "max_g": 9.0, "drag": 0.00008,
 		"ref_speed": 2400.0,
 		"life": 320.0, "range": 180000.0, "seeker_fov": 40.0, "lock_time": 1.6,
@@ -253,7 +253,27 @@ static func _db() -> Dictionary:
 	}
 
 ## Low-poly store body used both as a carried visual and as the flying round.
-static func build_mesh(id: String) -> ArrayMesh:
+## The tail fins, on their own, so a round that leaves a canister can unfold
+## them once it is clear instead of standing in the tube with them already out.
+static func build_fins(id: String) -> ArrayMesh:
+	var s := get_spec(id)
+	var L: float = s["length"]
+	var r: float = s["dia"] * 0.5
+	var half := L * 0.5
+	var fin: float = s["fin"]
+	var st := MeshKit.begin()
+	for i in 4:
+		var a := TAU * (float(i) + 0.5) / 4.0
+		var u := Vector3(cos(a), sin(a), 0.0)
+		var v := Vector3(0, 0, 1)
+		var poly := PackedVector2Array([
+			Vector2(r * 0.8, half - L * 0.20), Vector2(r + fin, half - L * 0.02),
+			Vector2(r + fin, half), Vector2(r * 0.8, half)])
+		MeshKit.prism(st, poly, u, v, u.cross(v).normalized(),
+			PackedFloat32Array([0.014, 0.010, 0.010, 0.014]))
+	return MeshKit.finish(st, MeshKit.mat(s["colour"], 0.55, 0.10))
+
+static func build_mesh(id: String, with_tail := true) -> ArrayMesh:
 	var s := get_spec(id)
 	var L: float = s["length"]
 	var r: float = s["dia"] * 0.5
@@ -273,11 +293,12 @@ static func build_mesh(id: String) -> ArrayMesh:
 		var a := TAU * (float(i) + 0.5) / 4.0
 		var u := Vector3(cos(a), sin(a), 0.0)
 		var v := Vector3(0, 0, 1)
-		var poly := PackedVector2Array([
-			Vector2(r * 0.8, half - L * 0.20), Vector2(r + fin, half - L * 0.02),
-			Vector2(r + fin, half), Vector2(r * 0.8, half)])
-		MeshKit.prism(st, poly, u, v, u.cross(v).normalized(),
-			PackedFloat32Array([0.014, 0.010, 0.010, 0.014]))
+		if with_tail:
+			var poly := PackedVector2Array([
+				Vector2(r * 0.8, half - L * 0.20), Vector2(r + fin, half - L * 0.02),
+				Vector2(r + fin, half), Vector2(r * 0.8, half)])
+			MeshKit.prism(st, poly, u, v, u.cross(v).normalized(),
+				PackedFloat32Array([0.014, 0.010, 0.010, 0.014]))
 		if s["kind"] != "bomb":
 			var poly2 := PackedVector2Array([
 				Vector2(r * 0.8, -half + L * 0.26), Vector2(r + fin * 0.62, -half + L * 0.30),

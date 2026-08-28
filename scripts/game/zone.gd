@@ -19,6 +19,16 @@ var _ring: MeshInstance3D
 var _mat_flag: StandardMaterial3D
 var _mat_ring: StandardMaterial3D
 
+## What the sector is called on the map, when it stands on something.
+var place := ""
+## Command points a minute this sector pays whoever holds it.
+var income := 30.0
+## Garrisons are built when the sector matters, not when the match starts.
+## Twenty sectors laid out at once meant a hundred and twenty crewed assets
+## standing in fields nobody had flown over yet.
+var _wants_garrison := false
+var _has_garrison := false
+
 func build(nm: String, at: Vector3, r: float, team: int, garrison := true) -> void:
 	label = nm
 	radius = r
@@ -27,9 +37,19 @@ func build(nm: String, at: Vector3, r: float, team: int, garrison := true) -> vo
 	position = Vector3(at.x, Sim.height_at(at.x, at.z), at.z)
 	_build_mast()
 	_build_ring()
-	if garrison:
-		_build_garrison()
+	_wants_garrison = garrison
 	add_to_group("zones")
+
+## Stand the garrison up, once. Called when the sector goes live or when
+## somebody gets near enough to see that it is empty.
+func ensure_garrison() -> void:
+	if _has_garrison or not _wants_garrison:
+		return
+	_has_garrison = true
+	_build_garrison()
+
+func has_garrison() -> bool:
+	return _has_garrison
 
 func _build_mast() -> void:
 	var st := MeshKit.begin()
@@ -107,28 +127,29 @@ func alive_assets() -> int:
 	return n
 
 ## Advance capture from whoever is standing in the ring.
-func tick(delta: float) -> void:
+##
+## `holders` is the list of everything that can hold ground, gathered once for
+## the whole match rather than once per sector: this used to walk the entire
+## `hittable` group itself, which with five sectors was five passes a frame and
+## with twenty would have been twenty.
+func tick(delta: float, holders: Array) -> void:
 	if locked:
 		return
 	var friendly := 0
 	var hostile := 0
-	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or (n.has_method("is_alive") and not n.is_alive()):
+	var r2 := radius * radius
+	for h in holders:
+		var p: Vector3 = h[0]
+		var dx: float = p.x - global_position.x
+		var dz: float = p.z - global_position.z
+		if dx * dx + dz * dz > r2:
 			continue
-		if n is GroundTarget:
-			continue
-		var p: Vector3 = n.global_position
-		if Vector2(p.x - global_position.x, p.z - global_position.z).length() > radius:
-			continue
-		if n is Aircraft and (n as Aircraft).agl > 260.0:
-			continue                                   # too high to hold ground
-		var t: int = n.team if "team" in n else 0
-		if t == 0:
+		if int(h[1]) == 0:
 			friendly += 1
 		else:
 			hostile += 1
 	# losing the garrison flips a point on its own
-	var wrecked := assets.size() > 0 and alive_assets() == 0
+	var wrecked := _has_garrison and assets.size() > 0 and alive_assets() == 0
 	contested = friendly > 0 and hostile > 0
 	var rate := 0.0
 	if wrecked and owner_team != 0:

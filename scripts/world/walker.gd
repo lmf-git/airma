@@ -122,6 +122,9 @@ func exit_frame(scene: Node) -> void:
 	frame_owner = null
 	on_floor = false
 
+## Shoulder width, near enough, for deciding what he fits through.
+const BODY_R := 0.42
+
 func _physics_process(delta: float) -> void:
 	if not cam.current or dead:
 		return
@@ -152,11 +155,29 @@ func _physics_process(delta: float) -> void:
 	if on_floor and not crouching and Sim.tapped(&"fire"):
 		vel.y = JUMP
 		on_floor = false
+	var was := global_position
 	global_position += vel * delta
+
+	# Buildings are solid. Try the move; if it puts you inside a wall, keep
+	# whichever axis of it is clear, so you slide along the face instead of
+	# sticking to it.
+	if Obstacles.hit(global_position, BODY_R) >= 0:
+		var try_x := Vector3(global_position.x, global_position.y, was.z)
+		var try_z := Vector3(was.x, global_position.y, global_position.z)
+		if Obstacles.hit(try_x, BODY_R) < 0:
+			global_position = try_x
+		elif Obstacles.hit(try_z, BODY_R) < 0:
+			global_position = try_z
+		else:
+			global_position = Vector3(was.x, global_position.y, was.z)
 
 	# ground contact, with a landing that can hurt
 	_fall_peak = minf(_fall_peak, vel.y)
-	var ground := Sim.height_at(global_position.x, global_position.z)
+	# A roof is a floor. `top_at` only answers for a point actually over a
+	# footprint, and you cannot walk into the side of one, so this only ever
+	# catches you coming down onto it.
+	var ground := maxf(Sim.height_at(global_position.x, global_position.z),
+		Obstacles.top_at(global_position.x, global_position.z))
 	if global_position.y <= ground:
 		global_position.y = ground
 		if not on_floor and _fall_peak < -13.0:

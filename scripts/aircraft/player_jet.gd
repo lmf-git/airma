@@ -123,12 +123,17 @@ func _pilot(delta: float) -> void:
 				fire_gunship(get_tree().current_scene, aim)
 			else:
 				say("no aim point — ALT+right click for the pod, CTRL+T to designate")
-	elif Sim.held(&"gun") and current_weapon() == "gun" and not Sim.ui_modal:
+	elif (Sim.held(&"gun") or Sim.held(&"fire")) and current_weapon() == "gun" \
+			and not Sim.ui_modal:
+		# Held, on either control. The trigger only fired the gun on the *tap*,
+		# so with the gun selected and the trigger squeezed you got one burst
+		# and nothing more until you let go and pulled again -- five seconds of
+		# ammunition delivered four rounds at a time.
 		if not fire_gun(get_tree().current_scene) and ammo <= 0:
 			say("gun dry")
 	if Sim.tapped(&"fire") and not Sim.ui_modal:
 		if current_weapon() == "gun":
-			fire_gun(get_tree().current_scene)
+			pass                          # already firing, above, for as long as it is held
 		else:
 			var r := fire()
 			if r == "":
