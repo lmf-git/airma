@@ -39,6 +39,86 @@ static func puff_texture() -> GradientTexture2D:
 		_puff.height = 96
 	return _puff
 
+## A soft line rather than a disc: solid across the middle of the narrow axis,
+## fading to nothing at both edges, so a stretched quad reads as a filament.
+static var _streak: GradientTexture2D = null
+
+static func streak_texture() -> GradientTexture2D:
+	if _streak == null:
+		var g := Gradient.new()
+		g.set_color(0, Color(1, 1, 1, 0))
+		g.set_color(1, Color(1, 1, 1, 0))
+		g.add_point(0.5, Color(1, 1, 1, 1))
+		g.add_point(0.28, Color(1, 1, 1, 0.55))
+		g.add_point(0.72, Color(1, 1, 1, 0.55))
+		_streak = GradientTexture2D.new()
+		_streak.gradient = g
+		_streak.fill = GradientTexture2D.FILL_LINEAR
+		_streak.fill_from = Vector2(0.0, 0.5)
+		_streak.fill_to = Vector2(1.0, 0.5)
+		_streak.width = 32
+		_streak.height = 4
+	return _streak
+
+## Wingtip vortices. These were drawn with the rocket smoke builder: a square
+## quad wearing a round puff texture, spun to a random angle and grown to two
+## and a half times size — which is a ball, and a wingtip vortex is a line.
+## This emits thin filaments laid along the flight path instead.
+static func vortex_particles(colour: Color, length := 3.0, amount := 48) -> GPUParticles3D:
+	var p := GPUParticles3D.new()
+	var pm := ParticleProcessMaterial.new()
+	# a little way aft, so the streak has a direction to lie along and holds it
+	pm.direction = Vector3(0, 0, 1)
+	pm.spread = 1.5
+	pm.initial_velocity_min = 5.0
+	pm.initial_velocity_max = 9.0
+	pm.gravity = Vector3.ZERO
+	pm.damping_min = 0.0
+	pm.damping_max = 0.3
+	pm.scale_min = 0.85
+	pm.scale_max = 1.15
+	# no tumbling: a filament that has been spun to a random angle is a smear
+	pm.angle_min = 0.0
+	pm.angle_max = 0.0
+	var curve := Curve.new()
+	curve.add_point(Vector2(0.0, 0.35))
+	curve.add_point(Vector2(0.30, 1.0))
+	curve.add_point(Vector2(1.0, 1.25))
+	var ct := CurveTexture.new()
+	ct.curve = curve
+	pm.scale_curve = ct
+	var grad := Gradient.new()
+	grad.set_color(0, Color(1, 1, 1, 0.0))
+	grad.set_color(1, Color(1, 1, 1, 0.0))
+	grad.add_point(0.16, Color(1, 1, 1, 0.72))
+	grad.add_point(0.62, Color(1, 1, 1, 0.34))
+	var gt := GradientTexture1D.new()
+	gt.gradient = grad
+	pm.color_ramp = gt
+	pm.color = colour
+	p.process_material = pm
+	var qm := QuadMesh.new()
+	qm.size = Vector2(length * 0.035, length)     # long and thin, not square
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
+	# aligns the quad's long axis with the particle's velocity: a streak
+	m.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	m.billboard_keep_scale = true
+	m.render_priority = 6
+	m.albedo_texture = streak_texture()
+	m.albedo_color = Color(1, 1, 1, 1)
+	m.vertex_color_use_as_albedo = true
+	m.disable_receive_shadows = true
+	qm.material = m
+	p.draw_pass_1 = qm
+	p.amount = amount
+	p.lifetime = 1.1
+	p.local_coords = false
+	p.explosiveness = 0.0
+	return p
+
 static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float, team: int) -> void:
 	var t := Tracer.new()
 	t.vel = vel
@@ -60,6 +140,9 @@ static func nuke(world: Node, pos: Vector3, lethal: float) -> void:
 	flash.omni_range = lethal * 3.0
 	flash.position = pos + Vector3(0, lethal * 0.10, 0)
 	world.add_child(flash)
+	# and the screen goes white for anybody who can see it
+	if world.has_method("nuke_flash"):
+		world.call("nuke_flash", pos, lethal)
 	var fb := _NukeBall.new()
 	fb.lethal = lethal
 	fb.flash = flash
@@ -69,8 +152,45 @@ static func nuke(world: Node, pos: Vector3, lethal: float) -> void:
 	for i in 10:
 		var a := TAU * float(i) / 10.0
 		dust(world, pos + Vector3(cos(a), 0.0, sin(a)) * lethal * 0.35, lethal * 0.12)
+	# black smoke off the firestorm, feeding the column for a good while
+	var smoke := trail_particles(Color(0.50, 0.46, 0.42), lethal * 0.26, 120)
+	smoke.lifetime = 34.0
+	smoke.position = pos
+	smoke.emitting = true
+	var spm := smoke.process_material as ParticleProcessMaterial
+	if spm != null:
+		spm.direction = Vector3(0, 1, 0)
+		spm.spread = 22.0
+		spm.initial_velocity_min = lethal * 0.04
+		spm.initial_velocity_max = lethal * 0.11
+		# a wide spread of sizes, so they do not read as a row of identical beads
+		spm.scale_min = 0.55
+		spm.scale_max = 2.2
+		spm.angle_min = -180.0
+		spm.angle_max = 180.0
+		spm.angular_velocity_min = -12.0
+		spm.angular_velocity_max = 12.0
+		spm.gravity = Vector3(0, lethal * 0.012, 0)
+		spm.damping_min = 0.0
+		spm.damping_max = 0.4
+		# Lighter, and never fully opaque: ninety per cent alpha on a near
+		# black puff is a solid dark bead, and a hundred of them is a bag of
+		# marbles rather than a cloud.
+		var sg := Gradient.new()
+		sg.set_color(0, Color(0.85, 0.72, 0.58, 0.0))
+		sg.set_color(1, Color(0.42, 0.39, 0.36, 0.0))
+		sg.add_point(0.10, Color(0.72, 0.60, 0.48, 0.42))
+		sg.add_point(0.45, Color(0.56, 0.52, 0.48, 0.34))
+		sg.add_point(0.80, Color(0.46, 0.43, 0.40, 0.18))
+		var sgt := GradientTexture1D.new()
+		sgt.gradient = sg
+		spm.color_ramp = sgt
+	_one_shot(world, smoke, 4.0)
 
 class _NukeBall extends Node3D:
+	## How long the column stands. A mushroom cloud is a landmark for minutes,
+	## not the twenty-six seconds this used to get.
+	const LIFE := 165.0
 	var lethal := 1000.0
 	var flash: OmniLight3D = null
 	var _t := 0.0
@@ -78,6 +198,7 @@ class _NukeBall extends Node3D:
 	var _stem: MeshInstance3D
 	var _cap: MeshInstance3D
 	var _mat: StandardMaterial3D
+	var _smoke: ShaderMaterial
 
 	func _ready() -> void:
 		top_level = true
@@ -95,42 +216,127 @@ class _NukeBall extends Node3D:
 		_ball.mesh = sm
 		_ball.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_ball)
+		# The column and the cap are smoke. A solid mesh in a flat dark colour
+		# reads as exactly what it is -- a black cylinder -- so this breaks the
+		# surface up with noise and lets the silhouette go soft, which is what
+		# makes a cloud read as a volume rather than an object.
+		var ssh := Shader.new()
+		ssh.code = """
+shader_type spatial;
+render_mode cull_disabled, diffuse_burley, depth_draw_opaque;
+uniform vec3 tint : source_color = vec3(0.09, 0.085, 0.08);
+uniform float opacity : hint_range(0.0, 1.0) = 0.9;
+uniform float t = 0.0;
+varying vec3 lp;
+
+float h31(vec3 p) {
+	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float vnoise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float n000 = h31(i);
+	float n100 = h31(i + vec3(1.0, 0.0, 0.0));
+	float n010 = h31(i + vec3(0.0, 1.0, 0.0));
+	float n110 = h31(i + vec3(1.0, 1.0, 0.0));
+	float n001 = h31(i + vec3(0.0, 0.0, 1.0));
+	float n101 = h31(i + vec3(1.0, 0.0, 1.0));
+	float n011 = h31(i + vec3(0.0, 1.0, 1.0));
+	float n111 = h31(i + vec3(1.0, 1.0, 1.0));
+	return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+		mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+void vertex() {
+	lp = VERTEX;
+}
+
+void fragment() {
+	// billowing: three octaves, drifting slowly upward
+	vec3 q = lp * 1.7 + vec3(0.0, -t * 0.06, 0.0);
+	float n = vnoise(q) * 0.55 + vnoise(q * 2.3) * 0.30 + vnoise(q * 5.1) * 0.15;
+	// soft edges: the silhouette thins out instead of ending at a hard rim
+	float rim = 1.0 - abs(dot(normalize(NORMAL), normalize(VIEW)));
+	float a = opacity * smoothstep(0.06, 0.62, n) * (1.0 - pow(rim, 1.5) * 0.85);
+	// the billows are lighter where they catch the light and dirtier in the
+	// folds, which is most of what makes a cloud read as a cloud
+	ALBEDO = tint * (0.72 + 0.75 * n);
+	ALPHA = clamp(a, 0.0, 1.0);
+	ROUGHNESS = 1.0;
+}
+"""
+		_smoke = ShaderMaterial.new()
+		_smoke.shader = ssh
+		# tapered and many sided: a straight-walled fourteen sided pipe is the
+		# other half of why it looked like a cylinder
 		var cy := CylinderMesh.new()
-		cy.top_radius = 1.0
-		cy.bottom_radius = 1.0
+		cy.top_radius = 1.35
+		cy.bottom_radius = 0.55
 		cy.height = 2.0
-		cy.radial_segments = 14
-		cy.material = _mat
+		cy.radial_segments = 26
+		cy.rings = 8
+		cy.material = _smoke
 		_stem = MeshInstance3D.new()
 		_stem.mesh = cy
 		_stem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_stem)
+		var capm := SphereMesh.new()
+		capm.radius = 1.0
+		capm.height = 2.0
+		capm.radial_segments = 18
+		capm.rings = 10
+		capm.material = _smoke
 		_cap = MeshInstance3D.new()
-		_cap.mesh = sm
+		_cap.mesh = capm
 		_cap.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_cap)
 
 	func _process(delta: float) -> void:
 		_t += delta
-		var f: float = clampf(_t / 26.0, 0.0, 1.0)
+		# Two clocks. The column takes about half a minute to climb and spread;
+		# it then *stands there*. Running the shape and the fade off one
+		# twenty-six second timer meant the whole thing was gone before the
+		# blast had finished settling, and it faded out white.
+		var grow: float = clampf(_t / 30.0, 0.0, 1.0)
+		var life: float = clampf(_t / LIFE, 0.0, 1.0)
 		# fireball: fast expansion, then it cools and lifts into the cap
 		var br: float = lethal * (0.10 + 0.30 * clampf(_t / 3.0, 0.0, 1.0))
-		var rise: float = lethal * 1.1 * pow(f, 0.65)
-		_ball.scale = Vector3.ONE * br * (1.0 - 0.55 * f)
+		var rise: float = lethal * 1.1 * pow(grow, 0.65)
+		_ball.scale = Vector3.ONE * br * (1.0 - 0.55 * grow)
 		_ball.position = Vector3(0, br * 0.6 + rise * 0.25, 0)
-		_stem.scale = Vector3(lethal * 0.10 * (1.0 + f), maxf(rise, 1.0) * 0.5, lethal * 0.10 * (1.0 + f))
+		_stem.scale = Vector3(lethal * 0.10 * (1.0 + grow), maxf(rise, 1.0) * 0.5,
+			lethal * 0.10 * (1.0 + grow))
 		_stem.position = Vector3(0, rise * 0.5, 0)
-		_cap.scale = Vector3(lethal * 0.42 * f, lethal * 0.20 * f, lethal * 0.42 * f)
+		# the cap keeps spreading long after it has stopped climbing
+		var spread: float = 0.42 * grow + 0.30 * life
+		_cap.scale = Vector3(lethal * spread, lethal * (0.20 * grow + 0.06 * life),
+			lethal * spread)
 		_cap.position = Vector3(0, rise, 0)
-		# glowing white, cooling through orange to a grey column
+		# The fireball glows white, cools through orange and goes out.
 		var heat: float = clampf(1.0 - _t / 5.0, 0.0, 1.0)
 		_mat.albedo_color = Color(1.0, 0.55 + 0.40 * heat, 0.28 + 0.45 * heat,
-			clampf(1.0 - f * 0.85, 0.0, 1.0))
+			clampf(1.0 - grow * 0.9, 0.0, 1.0))
+		# The column is smoke, and smoke off a firestorm is black. It was
+		# painted the same cooling orange as the fireball and faded to nothing
+		# with it, so there was never any smoke to see.
+		var soot: float = clampf(_t / 7.0, 0.0, 1.0)
+		# Cooling to a lit grey-brown, not to soot. A column painted near black
+		# is what smoke looks like in shadow; in daylight a cloud that size is
+		# a bright dirty grey on the sunward side, and setting the albedo to
+		# 0.08 meant no amount of sun could make it read as anything but a hole
+		# cut in the sky.
+		_smoke.set_shader_parameter("tint", Vector3(
+			lerpf(1.0, 0.46, soot), lerpf(0.62, 0.42, soot), lerpf(0.30, 0.38, soot)))
+		_smoke.set_shader_parameter("opacity",
+			clampf(minf(_t / 1.5, 1.0) * (1.0 - pow(life, 2.4)), 0.0, 0.94))
+		_smoke.set_shader_parameter("t", _t)
 		if is_instance_valid(flash):
 			flash.light_energy = 240.0 * pow(clampf(1.0 - _t / 1.6, 0.0, 1.0), 2.0)
 			if _t > 1.7:
 				flash.queue_free()
-		if f >= 1.0:
+		if life >= 1.0:
 			queue_free()
 
 ## A round entering the sea: a column of spray rather than a fireball.
@@ -150,7 +356,7 @@ static func splash(world: Node, pos: Vector3, size: float) -> void:
 		pm.initial_velocity_min = size * 1.8
 		pm.initial_velocity_max = size * 4.2
 		pm.gravity = Vector3(0, -16.0, 0)
-	world.add_child(p)
+	_one_shot(world, p)
 	# and a ring of spray running outward from the entry point
 	for i in 8:
 		var a := TAU * float(i) / 8.0
@@ -184,6 +390,39 @@ static func dust(world: Node, pos: Vector3, scale := 3.0) -> void:
 	e.life_max = 0.5
 	world.add_child(e)
 	e.global_position = pos
+
+## How many smoke plumes are allowed to exist at once. Nothing was leaking —
+## every piece of wreckage does expire — but a warhead that flattens a town
+## spawns one plume per piece, all in the same instant. Measured after a single
+## launcher round: 254 live emitters and 182 ms a frame on foot afterwards.
+## Past this many, a new piece burns without a plume of its own; the fires you
+## can already see are doing the work.
+const SMOKE_BUDGET := 40
+static var _smoking := 0
+
+static func smoke_slot() -> bool:
+	if _smoking >= SMOKE_BUDGET:
+		return false
+	_smoking += 1
+	return true
+
+static func release_smoke_slot() -> void:
+	_smoking = maxi(_smoking - 1, 0)
+
+## Put a one-shot emitter into the world and take it out again when it is spent.
+## Nothing did the second half: every splash and every column of smoke stayed in
+## the tree for the rest of the session with its process material live. Measured
+## after one launcher round, 250 of them were parented straight to the world and
+## walking around afterwards cost 182 ms a frame.
+static func _one_shot(world: Node, p: GPUParticles3D, extra := 2.0) -> void:
+	world.add_child(p)
+	var tree := world.get_tree()
+	if tree == null:
+		return
+	var t := tree.create_timer(p.lifetime + extra, false)
+	t.timeout.connect(func() -> void:
+		if is_instance_valid(p):
+			p.queue_free())
 
 static func trail_particles(colour: Color, size := 0.6, amount := 48) -> GPUParticles3D:
 	# Rocket smoke: alpha-blended puffs that expand and fade. Additive smoke reads

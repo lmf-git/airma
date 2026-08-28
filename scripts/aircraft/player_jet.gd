@@ -243,9 +243,22 @@ func cycle_target() -> void:
 	if Sim.debug_weapons:
 		print("[lock] %d candidate(s) survived: reach %.0f km, weapon %s" % [
 			cand.size(), reach * 0.001, w])
-	cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
-	var i := cand.find(target)
-	target = cand[(i + 1) % cand.size()]
+	# Two orders, deliberately. Which contact to take when the radar is empty is
+	# a question about the here and now, so that one is ranked on cost. Which
+	# contact comes *next* must not be: cost is boresight angle plus range, you
+	# turn toward whatever you just locked, that makes it rank first again, and
+	# the next press hands back the same neighbour. T walked between two
+	# contacts for ever and never reached the third — which is exactly what
+	# "it works sometimes" looks like from the cockpit.
+	var order := cand.duplicate()
+	order.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
+	var i := order.find(target)
+	if i < 0:
+		# nothing held, or what was held is gone: take the best one there is
+		cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
+		target = cand[0]
+	else:
+		target = order[(i + 1) % order.size()]
 	lock_time = 0.0
 	var d := global_position.distance_to(target.global_position) * 0.001
 	say("target %s  %.1f km" % [Sim.label_of(target).left(18), d])
@@ -270,14 +283,14 @@ func explode() -> void:
 ## test harness and available as a demo.
 func _auto_pilot(delta: float) -> void:
 	_auto_t += delta
-	var kias := ias * 1.94384
+	var _kias := ias * 1.94384
 	match auto:
 		"takeoff":
 			throttle = 1.0
 			wheel_brake = _auto_t < 1.0
 			if on_ground:
 				flaps = 1.0
-				in_pitch = 0.6 if kias > 145.0 else 0.0
+				in_pitch = 0.6 if ias > rotate_speed() else 0.0
 				in_roll = 0.0
 				in_yaw = clampf(-global_position.x * 0.05 - linear_velocity.x * 0.2, -0.5, 0.5)
 			else:

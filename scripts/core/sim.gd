@@ -2,7 +2,7 @@ extends Node
 ## Global services: input map bootstrap, the analytic terrain field, mission
 ## configuration and scoring. Autoloaded as `Sim`.
 
-const WORLD_HALF := 70000.0      # world extends +/- 70 km
+const WORLD_HALF := 600000.0     # world extends +/- 600 km
 const COAST_X := 15000.0         # open water east of here
 const WATER_LEVEL := -35.0
 const RUNWAY_LEN := 3000.0       # 36/18, aligned with the Z axis
@@ -14,6 +14,16 @@ signal mission_event(text: String, kind: int)   # kind: 0 info, 1 good, 2 bad
 
 enum Ev { INFO, GOOD, BAD }
 
+## Continents. The world used to be one landmass with an ocean bolted to the
+## east of it, which was tolerable across forty kilometres and absurd across six
+## hundred: half the map was sea and the half that was not had no coastline in
+## it anywhere. This decides, at a scale of a couple of hundred kilometres,
+## where there is land at all.
+var noise_cont := FastNoiseLite.new()
+## Rivers and the basins they run into. A continent with no water in it is a
+## wall to anything that floats: the sea stopped at the coast, so a ship could
+## never get inland and the only water on the map was around the outside of it.
+var noise_river := FastNoiseLite.new()
 var noise_lo := FastNoiseLite.new()
 var noise_hi := FastNoiseLite.new()
 var noise_det := FastNoiseLite.new()
@@ -37,6 +47,7 @@ var ui_modal := false
 var typing := false
 ## Where the last explosion was drawn, for the harness.
 var salvo_watch := false
+var salvo_weapon := "gbu32"
 var salvo_mark := Vector3.INF
 var salvo_log: Array = []
 var last_burst := Vector3.INF
@@ -59,6 +70,30 @@ func _ready() -> void:
 	_setup_input()
 
 func _setup_noise() -> void:
+	# The home field, before anything can ask for a height. Registering it from
+	# the world's _ready was too late: the terrain had already been built by
+	# then, with no fields in the list at all, so nothing flattened the airfield
+	# and the runway ended up buried under the ground it was supposed to be on.
+	fields.clear()
+	register_field(Vector2.ZERO, 0.0, RUNWAY_ELEV)
+
+	noise_cont.seed = 20260827
+	noise_cont.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	# a shade over two hundred kilometres to a lobe, so a continent is a day's
+	# flying across and the seas between them are real seas
+	noise_cont.frequency = 0.0000047
+	noise_cont.fractal_octaves = 3
+	noise_cont.fractal_lacunarity = 2.3
+	noise_cont.fractal_gain = 0.45
+
+	noise_river.seed = 5150
+	noise_river.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	# long meandering channels rather than a mesh of streams
+	noise_river.frequency = 0.0000135
+	noise_river.fractal_octaves = 2
+	noise_river.fractal_lacunarity = 2.0
+	noise_river.fractal_gain = 0.4
+
 	noise_lo.seed = 1337
 	noise_lo.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	noise_lo.frequency = 0.000055
@@ -73,12 +108,15 @@ func _setup_noise() -> void:
 
 	noise_temp.seed = 515
 	noise_temp.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	noise_temp.frequency = 0.000028
+	# Thirty-six kilometres to a lobe gave mottling, not regions: across a
+	# twelve hundred kilometre world every biome was a patch a few minutes wide
+	# and there was no such thing as "the desert" or "the northern forest".
+	noise_temp.frequency = 0.0000062
 	noise_temp.fractal_octaves = 2
 
 	noise_moist.seed = 811
 	noise_moist.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	noise_moist.frequency = 0.000041
+	noise_moist.frequency = 0.0000085
 	noise_moist.fractal_octaves = 3
 
 	noise_det.seed = 7
@@ -87,11 +125,56 @@ func _setup_noise() -> void:
 	noise_det.fractal_octaves = 2
 
 ## How "airfield flat" a spot is: 1 = perfectly level apron, 0 = open terrain.
+## Airfields. There was exactly one, at the origin, hard-wired into the height
+## field and into every question about what you are rolling on — so the other
+## side had nowhere to operate from and every aeroplane in the world staged off
+## the same strip.
+var fields: Array = []           # {"at": Vector2, "yaw": float, "elev": float}
+var _siting := false
+
+## Put a field on the map. Its elevation is read from the land as it is *before*
+## the field is there, so it sits at the natural height of its site instead of
+## dragging the country up or down to meet it.
+func register_field(at: Vector2, yaw: float, elev := INF) -> Dictionary:
+	var e := elev
+	if e == INF:
+		_siting = true
+		e = height_at(at.x, at.y)
+		_siting = false
+	var f := {"at": at, "yaw": yaw, "elev": e}
+	fields.append(f)
+	return f
+
+## How much of a given field applies at a point, in that field's own frame.
+func field_factor(fd: Dictionary, x: float, z: float) -> float:
+	var d: Vector2 = Vector2(x, z) - (fd["at"] as Vector2)
+	var c := cos(-float(fd["yaw"]))
+	var sn := sin(-float(fd["yaw"]))
+	var lx: float = d.x * c - d.y * sn
+	var lz: float = d.x * sn + d.y * c
+	# The levelled area has to be big enough for the mesh to draw it. Out where
+	# the rings are coarse a cell is kilometres across, so a strip two by four
+	# was smaller than one triangle and the flattening was invisible: the
+	# pavement sat thirteen metres under the ground it was supposed to be on.
+	var cell: float = Terrain.cell_at(x, z)
+	var pad: float = maxf(cell * 2.5, 0.0)
+	var dx := maxf(absf(lx) - (950.0 + pad), 0.0)
+	var dz := maxf(absf(lz) - (1950.0 + pad), 0.0)
+	return 1.0 - smoothstep(0.0, maxf(2600.0, cell * 4.0), sqrt(dx * dx + dz * dz))
+
 func flat_factor(x: float, z: float) -> float:
-	var dx := maxf(absf(x) - 950.0, 0.0)
-	var dz := maxf(absf(z) - 1950.0, 0.0)
-	var d := sqrt(dx * dx + dz * dz)
-	return 1.0 - smoothstep(0.0, 2600.0, d)
+	var best := 0.0
+	for fd in fields:
+		best = maxf(best, field_factor(fd, x, z))
+	return best
+
+## Where a point sits in a field's own frame, so runway and taxiway tests can be
+## written once and asked of any of them.
+func field_local(fd: Dictionary, x: float, z: float) -> Vector2:
+	var d: Vector2 = Vector2(x, z) - (fd["at"] as Vector2)
+	var c := cos(-float(fd["yaw"]))
+	var sn := sin(-float(fd["yaw"]))
+	return Vector2(d.x * c - d.y * sn, d.x * sn + d.y * c)
 
 ## Terrain elevation in metres. Single source of truth: the visual mesh, the
 ## landing gear and the crash test all sample this.
@@ -108,27 +191,87 @@ func height_at(x: float, z: float) -> float:
 	var cap := 55.0 + axis * axis * 2500.0
 	if h > cap:
 		h = cap + (h - cap) * 0.12
-	# the land runs out to the east: a coastal shelf dropping into open ocean
-	var sea := smoothstep(COAST_X, COAST_X + 9000.0, x)
+	# The land runs out to the east: a coastal shelf dropping into open ocean.
+	# Held to the home region — beyond that the continents below decide, or the
+	# whole eastern half of a six hundred kilometre world is one flat sea.
+	var far: float = smoothstep(55000.0, 150000.0, Vector2(x, z).length())
+	var sea := smoothstep(COAST_X, COAST_X + 9000.0, x) * (1.0 - far)
 	if sea > 0.0:
 		h = lerpf(h, -240.0, sea)
-	var f := flat_factor(x, z)
-	if f > 0.0:
-		h = lerpf(h, RUNWAY_ELEV, f)
+	# Continents. Near home the shape is fixed: the airfield, the towns and the
+	# roads are all sited on ground that has to stay where it is. Further out
+	# the large scale field takes over and puts oceans, inland seas and islands
+	# where it likes.
+	if far > 0.0:
+		var cont := noise_cont.get_noise_2d(x, z)
+		var landness: float = lerpf(1.0, smoothstep(-0.10, 0.16, cont), far)
+		if landness < 1.0:
+			# a shelf, then the deep: not a cliff straight to the bottom
+			var floor_y: float = lerpf(-1500.0, -160.0, smoothstep(0.0, 0.45, landness))
+			h = lerpf(floor_y, h, smoothstep(0.0, 0.62, landness))
+	# Rivers. The channel is where the field crosses zero, so it runs as a line
+	# rather than a patch, and it cuts deeper the closer it gets to the sea —
+	# a gorge in the hills, a navigable estuary at the bottom.
+	var rv: float = absf(noise_river.get_noise_2d(x, z))
+	var chan: float = 1.0 - smoothstep(0.0, 0.045, rv)
+	if chan > 0.0 and h > WATER_LEVEL - 120.0:
+		var low: float = clampf(1.0 - (h - WATER_LEVEL) / 1100.0, 0.0, 1.0)
+		var cut: float = lerpf(14.0, 210.0, low * low)
+		h -= cut * chan * chan
 	# Settlements stand on ground that has been levelled for them. Towns are
 	# built where the land is workable, not draped over whatever gradient
 	# happens to run through the middle of them — a street grid laid across a
 	# hillside is a staircase, and the buildings climb it.
+	var pad_w := 0.0
 	for pad in _town_pads:
 		var pc: Vector2 = pad["c"]
 		var pr: float = pad["r"]
 		var d := Vector2(x - pc.x, z - pc.y).length()
 		if d < pr * 1.60:
-			h = lerpf(h, float(pad["y"]),
-				1.0 - smoothstep(pr * 1.06, pr * 1.60, d))
+			var w: float = 1.0 - smoothstep(pr * 1.06, pr * 1.60, d)
+			h = lerpf(h, float(pad["y"]), w)
+			pad_w = maxf(pad_w, w)
+	# Made road: cut into the rise, filled across the dip, the spoil graded out
+	# to either side. Where the fill would be an absurd embankment the road is
+	# on a deck instead and the ground underneath is left alone.
+	if not _in_survey and not _corr.is_empty():
+		var rs := road_surface(x, z)
+		if rs.y > 0.0:
+			# Eased out rather than switched off. A hard cut off left an eight
+			# metre cliff down one side of the carriageway wherever the fill
+			# reached the limit, in the middle of the road.
+			var carry: float = 1.0 - smoothstep(ROAD_FILL_MAX,
+				ROAD_FILL_MAX * 2.2, rs.x - h)
+			# and a town has already been levelled: a road through it runs on
+			# the made ground, not through a cutting of its own. Fighting the
+			# pad left a fourteen metre step under the buildings.
+			carry *= 1.0 - pad_w
+			if carry > 0.0:
+				h = lerpf(h, rs.x, rs.y * carry)
+	# The aerodrome last, and it wins. A town levelled itself on top of the
+	# runway and the pavement ended up fifty-seven metres under the ground it
+	# was supposed to be lying on: the field is the one surface in the world
+	# that other things have to give way to.
+	if not _siting:
+		for fd in fields:
+			var ff := field_factor(fd, x, z)
+			if ff > 0.0:
+				h = lerpf(h, float(fd["elev"]), ff)
 	if not decks.is_empty():
 		h = maxf(h, deck_height(x, z))
 	return h
+
+## How much of a settlement's levelled platform applies at a point. Zero is
+## open country, one is inside the town proper.
+func pad_weight(x: float, z: float) -> float:
+	var w := 0.0
+	for pad in _town_pads:
+		var pc: Vector2 = pad["c"]
+		var pr: float = pad["r"]
+		var d := Vector2(x - pc.x, z - pc.y).length()
+		if d < pr * 1.60:
+			w = maxf(w, 1.0 - smoothstep(pr * 1.06, pr * 1.60, d))
+	return w
 
 func normal_at(x: float, z: float) -> Vector3:
 	const E := 3.0
@@ -139,7 +282,11 @@ func normal_at(x: float, z: float) -> Vector3:
 	return Vector3(hl - hr, 2.0 * E, hd - hu).normalized()
 
 func on_runway(x: float, z: float) -> bool:
-	return absf(x) <= RUNWAY_HALF_W and absf(z) <= RUNWAY_LEN * 0.5
+	for fd in fields:
+		var l := field_local(fd, x, z)
+		if absf(l.x) <= RUNWAY_HALF_W and absf(l.y) <= RUNWAY_LEN * 0.5:
+			return true
+	return false
 
 ## Paved surfaces (runway, taxiway loop, apron) roll better than grass.
 func surface_grip(x: float, z: float) -> float:
@@ -147,10 +294,12 @@ func surface_grip(x: float, z: float) -> float:
 		return 1.0
 	if on_runway(x, z):
 		return 1.0
-	if absf(x) >= 60.0 and absf(x) <= 92.0 and absf(z) <= RUNWAY_LEN * 0.5:
-		return 1.0
-	if absf(z) <= 1560.0 and absf(x) <= 95.0:
-		return 1.0
+	for fd in fields:
+		var l := field_local(fd, x, z)
+		if absf(l.x) >= 60.0 and absf(l.x) <= 92.0 and absf(l.y) <= RUNWAY_LEN * 0.5:
+			return 1.0
+		if absf(l.y) <= 1560.0 and absf(l.x) <= 95.0:
+			return 1.0
 	return 0.45
 
 ## Road network, shared by the terrain painter and the placement rules. It is
@@ -171,11 +320,361 @@ var ROADS: Array = [
 ## over it. `link` is a list of index pairs into `points`.
 func build_roads(points: Array, links: Array) -> void:
 	ROADS = []
+	_road_lines = []
+	_road_prof = []
+	_corr = []
+	_corr_grid = {}
+	road_bridges = []
+	# Collected apart and only published at the end: routing calls height_at,
+	# and a half filled network is a road with no surveyed height to read.
+	var lines: Array = []
 	for pair in links:
 		var a: Vector2 = points[pair[0]]
 		var b: Vector2 = points[pair[1]]
-		for seg in route(a, b):
-			ROADS.append(seg)
+		var segs := route(a, b)
+		var line := PackedVector2Array()
+		for i in segs.size():
+			ROADS.append(segs[i])
+			if i == 0:
+				line.append(segs[i][0])
+			line.append(segs[i][1])
+		if line.size() > 1:
+			lines.append(line)
+	_road_lines = lines
+	_survey_roads()
+
+# -------------------------------------------------------------- road corridor
+const ROAD_HALF := 7.5           # carriageway half width
+const ROAD_SHOULDER := 24.0      # graded shoulder either side of it
+const ROAD_GRADE := 0.062        # steepest gradient a trunk road is built to
+const ROAD_FILL_MAX := 14.0      # tallest embankment before it becomes a bridge
+
+var _road_lines: Array = []      # trunk network as polylines, in build order
+var _road_prof: Array = []       # the made height at each of their vertices
+var road_bridges: Array = []     # spans carried on a deck: {a, b, ya, yb}
+var _in_survey := false
+
+## Work out what height the made road actually sits at, leg by leg. Routing
+## already keeps a road off the worst ground; this is the cut and fill that
+## follows. Without it the carriageway is draped over every hummock in the
+## noise field and the surface pitches like a switchback.
+func _survey_roads() -> void:
+	_in_survey = true
+	var dense: Array = []
+	for line in _road_lines:
+		var pl: PackedVector2Array = line
+		# Chained at survey spacing first. Profiled at the routing waypoints the
+		# road runs dead straight in elevation for seven hundred metres at a
+		# time, and every hummock between them turns into an embankment.
+		var fine := PackedVector2Array([pl[0]])
+		for i in range(pl.size() - 1):
+			var d: float = pl[i].distance_to(pl[i + 1])
+			var steps: int = maxi(1, int(round(d / 110.0)))
+			for k in range(1, steps + 1):
+				fine.append(pl[i].lerp(pl[i + 1], float(k) / float(steps)))
+		var y := PackedFloat32Array()
+		y.resize(fine.size())
+		for i in fine.size():
+			y[i] = height_at(fine[i].x, fine[i].y)
+		dense.append(fine)
+		_road_prof.append(y)
+	for li in dense.size():
+		_road_prof[li] = _rule_grade(dense[li], _road_prof[li], 2)
+	# Where two routes run into or alongside each other they have to agree about
+	# the height. Surveyed independently, a pair crossing at a junction came out
+	# eight metres apart six metres from one another: a step down the side of
+	# the carriageway with no slope in between.
+	if debug_roads:
+		print("[survey] %d lines, %d vertices, worst neighbour disagreement %.1f m" % [
+			dense.size(), _vertex_count(dense), _worst_tie(dense)])
+	for pass_i in 24:
+		_weld_parallels(dense)
+		_tie_junctions(dense)
+		for li in dense.size():
+			# no easing inside the loop: the low pass filter pulled every tie
+			# straight back out again and the crossings never converged
+			_road_prof[li] = _rule_grade(dense[li], _road_prof[li], 1, false)
+		if debug_roads:
+			print("[survey] pass %d: worst neighbour disagreement %.2f m" % [
+				pass_i + 1, _worst_tie(dense)])
+	if debug_roads:
+		print("[survey] after tying: worst neighbour disagreement %.1f m" % _worst_tie(dense))
+	for li in dense.size():
+		var y: PackedFloat32Array = _road_prof[li]
+		for i in y.size():
+			y[i] = maxf(y[i], WATER_LEVEL + 2.5)
+		_road_prof[li] = y
+	_road_lines = dense
+	_index_corridor()
+	# The painted network has to follow the earthworks, or the carriageway is
+	# stained across ground that was never levelled for it.
+	ROADS = []
+	for line in dense:
+		var pl: PackedVector2Array = line
+		for i in range(pl.size() - 1):
+			ROADS.append([pl[i], pl[i + 1]])
+	if not _road_field.is_empty():
+		_build_road_field()
+	_note_bridges()
+	_in_survey = false
+
+## Hold the ruling gradient along one road. Cutting first and filling after
+## leaves both limits satisfied: nothing rises faster than the gradient, and by
+## the second pair nothing falls faster either.
+func _rule_grade(pl: PackedVector2Array, src: PackedFloat32Array, passes: int,
+		smooth := true) -> PackedFloat32Array:
+	var y := PackedFloat32Array(src)
+	for _pass in passes:
+		for i in range(1, y.size()):
+			y[i] = minf(y[i], y[i - 1] + ROAD_GRADE * pl[i - 1].distance_to(pl[i]))
+		for i in range(y.size() - 2, -1, -1):
+			y[i] = minf(y[i], y[i + 1] + ROAD_GRADE * pl[i].distance_to(pl[i + 1]))
+		for i in range(1, y.size()):
+			y[i] = maxf(y[i], y[i - 1] - ROAD_GRADE * pl[i - 1].distance_to(pl[i]))
+		for i in range(y.size() - 2, -1, -1):
+			y[i] = maxf(y[i], y[i + 1] - ROAD_GRADE * pl[i].distance_to(pl[i + 1]))
+		if smooth:
+			for i in range(1, y.size() - 1):
+				y[i] = lerpf(y[i], (y[i - 1] + y[i + 1]) * 0.5, 0.25)
+	return y
+
+var debug_roads := false
+
+## Lay the network out again. The command line is parsed after the world has
+## already built its roads, so the harness needs a way to watch the survey.
+func resurvey_roads() -> void:
+	_road_prof = []
+	_corr = []
+	_survey_roads()
+
+func _vertex_count(lines: Array) -> int:
+	var n := 0
+	for l in lines:
+		n += (l as PackedVector2Array).size()
+	return n
+
+const TIE_CELL := 96.0
+
+## Bucket every leg of the network by ground cell, so a point can ask what runs
+## near it without walking all eight hundred of them.
+func _leg_index(lines: Array) -> Array:
+	var legs: Array = []
+	for li in lines.size():
+		var pl: PackedVector2Array = lines[li]
+		var y: PackedFloat32Array = _road_prof[li]
+		for j in range(pl.size() - 1):
+			legs.append([li, j, pl[j], pl[j + 1], y[j], y[j + 1]])
+	var grid: Dictionary = {}
+	for idx in legs.size():
+		var a: Vector2 = legs[idx][2]
+		var b: Vector2 = legs[idx][3]
+		var steps: int = maxi(1, int(a.distance_to(b) / (TIE_CELL * 0.5)))
+		for k in steps + 1:
+			var q: Vector2 = a.lerp(b, float(k) / float(steps))
+			var ci := int(floor(q.x / TIE_CELL))
+			var cj := int(floor(q.y / TIE_CELL))
+			for oi in [-1, 0, 1]:
+				for oj in [-1, 0, 1]:
+					var key: int = (ci + oi) * 65536 + (cj + oj)
+					if not grid.has(key):
+						grid[key] = PackedInt32Array()
+					var bucket: PackedInt32Array = grid[key]
+					if bucket.is_empty() or bucket[bucket.size() - 1] != idx:
+						bucket.append(idx)
+						grid[key] = bucket
+	return [legs, grid]
+
+## What the network looks like from one point: every stretch of road running
+## within `reach` of it, as [height there, distance, the point on it]. Measuring
+## vertex to vertex missed the case that actually matters -- two roads crossing
+## at a shallow angle, five metres apart, whose nearest waypoints are fifty
+## metres from one another and so were never compared at all.
+func _legs_near(index: Array, li: int, i: int, p: Vector2, reach: float) -> Array:
+	var legs: Array = index[0]
+	var grid: Dictionary = index[1]
+	var key: int = int(floor(p.x / TIE_CELL)) * 65536 + int(floor(p.y / TIE_CELL))
+	if not grid.has(key):
+		return []
+	var out: Array = []
+	for idx in (grid[key] as PackedInt32Array):
+		var leg: Array = legs[idx]
+		# a road is not a junction with the stretch of itself it stands on
+		if int(leg[0]) == li and absi(int(leg[1]) - i) < 6:
+			continue
+		var a: Vector2 = leg[2]
+		var ab: Vector2 = (leg[3] as Vector2) - a
+		var t: float = clampf((p - a).dot(ab) / maxf(ab.length_squared(), 0.001), 0.0, 1.0)
+		var foot: Vector2 = a + ab * t
+		var d: float = p.distance_to(foot)
+		if d > reach:
+			continue
+		out.append([lerpf(float(leg[4]), float(leg[5]), t), d, foot])
+	return out
+
+## The largest height difference a driver would see between the road under the
+## wheels and another stretch of road running alongside it.
+func _worst_tie(lines: Array) -> float:
+	var index := _leg_index(lines)
+	var worst := 0.0
+	for li in lines.size():
+		var pl: PackedVector2Array = lines[li]
+		var y: PackedFloat32Array = _road_prof[li]
+		for i in pl.size():
+			for near in _legs_near(index, li, i, pl[i], 40.0):
+				worst = maxf(worst, absf(y[i] - float(near[0])))
+	return worst
+
+## Two routes that end up running a few metres apart are one road, not two.
+## Left alone they each cut their own corridor and the strip between them is a
+## step down the middle of the carriageway. This draws them onto each other.
+func _weld_parallels(lines: Array) -> void:
+	const WELD := 34.0
+	var index := _leg_index(lines)
+	var moved: Array = []
+	for li in lines.size():
+		moved.append((lines[li] as PackedVector2Array).duplicate())
+	for li in lines.size():
+		var pl: PackedVector2Array = lines[li]
+		var mi: PackedVector2Array = moved[li]
+		for i in pl.size():
+			var pull := Vector2.ZERO
+			var wsum := 0.0
+			for near in _legs_near(index, li, i, pl[i], WELD):
+				var w: float = 1.0 - float(near[1]) / WELD
+				pull += (near[2] as Vector2) * w
+				wsum += w
+			if wsum > 0.0:
+				mi[i] = mi[i].lerp(pull / wsum, clampf(wsum * 0.35, 0.0, 0.5))
+		moved[li] = mi
+	for li in lines.size():
+		lines[li] = moved[li]
+
+## Pull the surveyed heights of neighbouring stretches together, hardest where
+## they are closest, so junctions, parallel runs and switchbacks come out level
+## with each other instead of a step apart.
+func _tie_junctions(lines: Array) -> void:
+	const TIE := 70.0
+	var index := _leg_index(lines)
+	for li in lines.size():
+		var pl: PackedVector2Array = lines[li]
+		var y: PackedFloat32Array = _road_prof[li]
+		var out := PackedFloat32Array(y)
+		for i in y.size():
+			var ysum := 0.0
+			var wsum := 0.0
+			for near in _legs_near(index, li, i, pl[i], TIE):
+				var w: float = 1.0 - float(near[1]) / TIE
+				w *= w
+				ysum += float(near[0]) * w
+				wsum += w
+			if wsum > 0.0:
+				out[i] = lerpf(y[i], ysum / wsum, clampf(wsum * 0.6, 0.0, 0.9))
+		_road_prof[li] = out
+
+## Where the made height stands too far above the land to be an embankment, the
+## road is carried instead. Recorded as spans so the scenery can put a deck and
+## piers under them.
+func _note_bridges() -> void:
+	road_bridges = []
+	for li in _road_lines.size():
+		var pl: PackedVector2Array = _road_lines[li]
+		var prof: PackedFloat32Array = _road_prof[li]
+		var open := false
+		var start := Vector2.ZERO
+		var start_y := 0.0
+		var last := Vector2.ZERO
+		var last_y := 0.0
+		for i in range(pl.size() - 1):
+			var d: float = pl[i].distance_to(pl[i + 1])
+			var steps: int = clampi(int(d / 40.0), 2, 40)
+			for k in steps + 1:
+				var t := float(k) / float(steps)
+				var q: Vector2 = pl[i].lerp(pl[i + 1], t)
+				var wy: float = lerpf(prof[i], prof[i + 1], t)
+				var carried: bool = wy - height_at(q.x, q.y) > ROAD_FILL_MAX * 1.6
+				if carried and not open:
+					open = true
+					start = q
+					start_y = wy
+				elif not carried and open:
+					open = false
+					if start.distance_to(last) > 45.0:
+						road_bridges.append({"a": start, "b": last,
+							"ya": start_y, "yb": last_y})
+				last = q
+				last_y = wy
+		if open and start.distance_to(last) > 45.0:
+			road_bridges.append({"a": start, "b": last, "ya": start_y, "yb": last_y})
+
+const CORR_CELL := 64.0
+
+## Every corridor leg, and which cells of a coarse grid each one touches.
+## height_at asks for this on every call, and walking eight hundred legs to
+## answer it cost more than the rest of the height field put together.
+var _corr: Array = []            # [a, b, ya, yb]
+var _corr_grid: Dictionary = {}  # cell key -> PackedInt32Array of leg indices
+
+func _index_corridor() -> void:
+	_corr = []
+	_corr_grid = {}
+	for li in _road_lines.size():
+		var pl: PackedVector2Array = _road_lines[li]
+		var prof: PackedFloat32Array = _road_prof[li]
+		for i in range(pl.size() - 1):
+			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1]])
+	var pad: float = ROAD_HALF + ROAD_SHOULDER
+	for idx in _corr.size():
+		var a: Vector2 = _corr[idx][0]
+		var b: Vector2 = _corr[idx][1]
+		var steps: int = maxi(1, int(a.distance_to(b) / (CORR_CELL * 0.5)))
+		for k in steps + 1:
+			var q: Vector2 = a.lerp(b, float(k) / float(steps))
+			var ci := int(floor((q.x - pad) / CORR_CELL))
+			var cj := int(floor((q.y - pad) / CORR_CELL))
+			for oi in 3:
+				for oj in 3:
+					var key: int = (ci + oi) * 65536 + (cj + oj)
+					if not _corr_grid.has(key):
+						_corr_grid[key] = PackedInt32Array()
+					var bucket: PackedInt32Array = _corr_grid[key]
+					if bucket.is_empty() or bucket[bucket.size() - 1] != idx:
+						bucket.append(idx)
+						_corr_grid[key] = bucket
+
+## The made surface at a point: its height and how much of it applies here,
+## falling from the whole carriageway out to nothing at the edge of the graded
+## shoulder. Zero weight means the land is left as it was.
+func road_surface(x: float, z: float) -> Vector2:
+	if _corr.is_empty() or _road_prof.size() != _road_lines.size():
+		return Vector2.ZERO
+	if absf(x) >= RF_HALF or absf(z) >= RF_HALF:
+		return Vector2.ZERO
+	var reach: float = ROAD_HALF + ROAD_SHOULDER
+	var key: int = int(floor(x / CORR_CELL)) * 65536 + int(floor(z / CORR_CELL))
+	if not _corr_grid.has(key):
+		return Vector2.ZERO
+	var p := Vector2(x, z)
+	var best := 1e9
+	var ysum := 0.0
+	var wsum := 0.0
+	for idx in (_corr_grid[key] as PackedInt32Array):
+		var leg: Array = _corr[idx]
+		var a: Vector2 = leg[0]
+		var ab: Vector2 = (leg[1] as Vector2) - a
+		var t: float = clampf((p - a).dot(ab) / maxf(ab.length_squared(), 0.001), 0.0, 1.0)
+		var d: float = p.distance_to(a + ab * t)
+		if d < best:
+			best = d
+		if d < reach:
+			# Blended, not nearest wins. Where two routes ran eleven metres
+			# apart the carriageway snapped to one or the other and there was
+			# a five metre step down the middle of the road.
+			var k: float = 1.0 / (d * d + 1.5)
+			ysum += lerpf(float(leg[2]), float(leg[3]), t) * k
+			wsum += k
+	if best > reach or wsum <= 0.0:
+		return Vector2.ZERO
+	return Vector2(ysum / wsum, 1.0 - smoothstep(ROAD_HALF, reach, best))
 
 ## A road between two places that goes round the hills instead of over them.
 ## Straight legs are cheap and look it: a trunk road driven at a constant
@@ -223,6 +722,19 @@ func route(a: Vector2, b: Vector2) -> Array:
 ## round a molehill.
 func _road_cost(prev: Vector2, p: Vector2, next: Vector2) -> float:
 	var cost := 0.0
+	# Water is not ground. Routing only ever counted the climb, so a leg that
+	# happened to run down a river or across an inlet was cheap — and the road
+	# was then painted straight over the water.
+	for pair0 in [[prev, p], [p, next]]:
+		var f0: Vector2 = pair0[0]
+		var t0: Vector2 = pair0[1]
+		var wet := 0
+		var probes: int = clampi(int(f0.distance_to(t0) / 160.0), 2, 24)
+		for i in probes + 1:
+			var q: Vector2 = f0.lerp(t0, float(i) / float(probes))
+			if height_at(q.x, q.y) < WATER_LEVEL + 3.0:
+				wet += 1
+		cost += float(wet) / float(probes + 1) * 90000.0
 	for pair in [[prev, p], [p, next]]:
 		var f: Vector2 = pair[0]
 		var t: Vector2 = pair[1]
@@ -466,21 +978,40 @@ var _bw := PackedFloat32Array([0, 0, 0, 0, 0, 0, 0])
 
 ## Fills the shared weight buffer and returns it. Do not hold on to the result.
 func biome_weights(x: float, z: float, y: float, slope: float) -> PackedFloat32Array:
-	var temp: float = clampf((noise_temp.get_noise_2d(x, z) + 1.0) * 0.5
+	# Latitude first, weather second. Without a band running with the map there
+	# is no reason for the far north to be colder than the middle, so climate
+	# was noise alone and the world had no geography to it — the same patchwork
+	# everywhere. `z` is north-south, so this is the only term that can make a
+	# pole cold and a middle latitude hot.
+	var lat: float = clampf(absf(z) / (WORLD_HALF * 0.85), 0.0, 1.0)
+	var band: float = 1.0 - lat * 1.25
+	# the dry belts sit either side of the hot middle, the way they do on Earth
+	var belt: float = clampf(1.0 - absf(lat - 0.32) * 3.0, 0.0, 1.0)
+	var temp: float = clampf(band * 0.70
+		+ (noise_temp.get_noise_2d(x, z) + 1.0) * 0.5 * 0.42
 		- clampf((y - 300.0) / 2200.0, 0.0, 1.0) * 0.85, 0.0, 1.0)
 	var moist: float = clampf((noise_moist.get_noise_2d(x, z) + 1.0) * 0.5
-		+ clampf(1.0 - absf(y - WATER_LEVEL) / 900.0, 0.0, 1.0) * 0.25, 0.0, 1.0)
+		+ clampf(1.0 - absf(y - WATER_LEVEL) / 900.0, 0.0, 1.0) * 0.25
+		- belt * 0.66, 0.0, 1.0)
 	var steep: float = clampf((0.90 - slope) / 0.34, 0.0, 1.0)
+	# Snow keyed on height alone, so a polar plain at sea level was grass and
+	# the only white in the world was on the mountains. Cold is cold.
 	_bw[B_SNOW] = clampf((y - 1500.0) / 700.0, 0.0, 1.0) * (1.0 - steep * 0.7) \
-		* clampf(1.0 - temp * 1.4, 0.0, 1.0) + clampf((y - 2400.0) / 500.0, 0.0, 1.0)
+		* clampf(1.0 - temp * 1.4, 0.0, 1.0) + clampf((y - 2400.0) / 500.0, 0.0, 1.0) \
+		+ clampf((0.18 - temp) / 0.18, 0.0, 1.0) * 1.6
 	_bw[B_ROCK] = steep + clampf((y - 1100.0) / 1400.0, 0.0, 1.0) * 0.5
 	_bw[B_FOREST] = clampf(moist * 1.5 - 0.35, 0.0, 1.0) * clampf(temp * 1.6, 0.0, 1.0) \
 		* clampf(1.0 - (y - 200.0) / 1500.0, 0.0, 1.0)
-	_bw[B_GRASS] = clampf(1.0 - absf(moist - 0.55) * 2.4, 0.0, 1.0) \
+	# and grass was drawn so broadly that it won nearly everywhere it was not
+	# outright excluded, which is why the map read as one green sheet
+	_bw[B_GRASS] = clampf(1.0 - absf(moist - 0.55) * 3.2, 0.0, 1.0) * 0.85 \
 		* clampf(1.0 - (y - 400.0) / 1600.0, 0.0, 1.0)
 	_bw[B_STEPPE] = clampf(0.62 - moist, 0.0, 1.0) * 1.7 * clampf(temp * 1.3, 0.0, 1.0)
+	# Desert wanted moisture under 0.30 *and* temperature over 0.55 at once,
+	# which almost never happened: there was no desert anywhere in the world,
+	# only the thin band of beach sand along the shore.
 	_bw[B_SAND] = clampf(1.0 - absf(y - WATER_LEVEL) / 26.0, 0.0, 1.0) * 1.4 \
-		+ clampf(0.30 - moist, 0.0, 1.0) * clampf(temp - 0.55, 0.0, 1.0) * 3.0
+		+ clampf(0.40 - moist, 0.0, 1.0) * clampf(temp - 0.30, 0.0, 1.0) * 7.0
 	_bw[B_MARSH] = clampf(moist - 0.72, 0.0, 1.0) * 2.2 \
 		* clampf(1.0 - absf(y - WATER_LEVEL) / 140.0, 0.0, 1.0)
 	var total := 0.0
@@ -534,6 +1065,76 @@ func report(text: String, kind: int = Ev.INFO) -> void:
 ## march starting immediately, every contact read as masked the moment you were
 ## at low level or on the runway, and the answer to pressing T was "no radar
 ## contacts" wherever you pointed it.
+## Who is already being shot at, and by how many. Without this every hull in
+## the fleet picked the same inbound round -- the nearest one -- and emptied
+## cells at it together while everything else came through untouched.
+var _engaged: Dictionary = {}
+
+func engage_count(threat: Node) -> int:
+	if not is_instance_valid(threat):
+		return 0
+	var rec: Variant = _engaged.get(threat.get_instance_id())
+	if rec == null:
+		return 0
+	# an assignment goes stale: the round it was fired at arrives or is killed
+	if Time.get_ticks_msec() - int((rec as Array)[0]) > 9000:
+		return 0
+	return int((rec as Array)[1])
+
+func claim_engagement(threat: Node) -> void:
+	if not is_instance_valid(threat):
+		return
+	var key := threat.get_instance_id()
+	var n := engage_count(threat)
+	_engaged[key] = [Time.get_ticks_msec(), n + 1]
+
+## Whose part of the world this is. Culture varies by region rather than by
+## anything the mission declares, so the props and the paint in a town match
+## the country it stands in — and the country changes as you fly across the map.
+func region_faction(x: float, z: float) -> String:
+	var n := noise_cont.get_noise_2d(x * 1.7 + 90000.0, z * 1.7 - 40000.0)
+	var m := noise_cont.get_noise_2d(z * 1.3 - 15000.0, x * 1.3 + 62000.0)
+	var pick := int(floor((n * 0.5 + m * 0.5 + 1.0) * 3.0))
+	match clampi(pick, 0, 5):
+		0:
+			return "usa"
+		1:
+			return "uk"
+		2:
+			return "france"
+		3:
+			return "russia"
+		4:
+			return "china"
+		_:
+			return "iran"
+
+## Places worth flying to, and whose they are. Filled by the scenery.
+var landmarks: Array = []
+
+func register_landmark(nm: String, faction: String, at: Vector3, h: float) -> void:
+	landmarks.append({"name": nm, "faction": faction, "at": at, "h": h})
+
+## The stone a country builds in, near enough. Used for the landmarks so each
+## one reads as belonging somewhere before you are close enough to see what it
+## is.
+func faction_colour(faction: String) -> Color:
+	match faction:
+		"france":
+			return Color(0.42, 0.38, 0.34)
+		"uk":
+			return Color(0.58, 0.52, 0.40)
+		"usa":
+			return Color(0.52, 0.66, 0.60)
+		"russia":
+			return Color(0.66, 0.60, 0.52)
+		"china":
+			return Color(0.60, 0.46, 0.36)
+		"iran":
+			return Color(0.44, 0.56, 0.62)
+		_:
+			return Color(0.72, 0.68, 0.56)
+
 func line_of_sight(from: Vector3, to: Vector3, skip := 0.0) -> bool:
 	var span := from.distance_to(to)
 	if span < 1.0:
@@ -545,7 +1146,16 @@ func line_of_sight(from: Vector3, to: Vector3, skip := 0.0) -> bool:
 		if f < t0:
 			continue
 		var q: Vector3 = from.lerp(to, f)
-		if q.y < height_at(q.x, q.z) - 2.0:
+		var g := height_at(q.x, q.z)
+		# Ground under the sea masks nothing. Everything afloat sits at the
+		# water line, so a sight line between two ships runs *below* it — and
+		# the seabed is terrain, so a shoal a few metres proud of the ray
+		# blocked two ships looking at each other across open water. What is
+		# under the sea is under the sea; only what stands above it is in the
+		# way.
+		if g <= WATER_LEVEL:
+			continue
+		if q.y < g - 2.0:
 			return false
 	return true
 
@@ -580,6 +1190,8 @@ func strength(action: StringName) -> float:
 	return 0.0 if typing else Input.get_action_strength(action)
 
 func held(action: StringName) -> bool:
+	if _blocked.has(action):
+		return false
 	return not typing and Input.is_action_pressed(action)
 
 ## Discrete key presses, latched from the input event rather than polled.
@@ -593,6 +1205,24 @@ func held(action: StringName) -> bool:
 ## is seen once, and no press is seen twice.
 var _taps := {}
 
+## Buttons that were already down when something changed under them. A mouse
+## press that launched the mission is still held on the first frame of it, and
+## everything that reads the trigger by polling saw a shoot command the instant
+## you arrived — so choosing a vehicle fired its weapon.
+var _blocked: Dictionary = {}
+
+func block_until_released(actions: Array) -> void:
+	for a in actions:
+		_blocked[a] = true
+		_taps.erase(a)
+
+func _process(_delta: float) -> void:
+	if _blocked.is_empty():
+		return
+	for a in _blocked.keys():
+		if not Input.is_action_pressed(a):
+			_blocked.erase(a)
+
 func _input(e: InputEvent) -> void:
 	if typing or not (e is InputEventKey or e is InputEventMouseButton):
 		return
@@ -603,7 +1233,7 @@ func _input(e: InputEvent) -> void:
 			_taps[a] = Time.get_ticks_msec()
 
 func tapped(action: StringName) -> bool:
-	if typing:
+	if typing or _blocked.has(action):
 		return false
 	var at: int = _taps.get(action, 0)
 	if at == 0:
@@ -665,7 +1295,10 @@ func _setup_input() -> void:
 	_add(&"weapon_7",     [_key(KEY_7)])
 	_add(&"weapon_8",     [_key(KEY_8)])
 	_add(&"cycle_target", [_key(KEY_T)])
-	_add(&"camera",       [_key(KEY_C)])
+	# C is flares now, so the view moved to P. Night vision wanted a key that
+	# works in every seat and every view, and N was the obvious one.
+	_add(&"camera",       [_key(KEY_P)])
+	_add(&"night_vision", [_key(KEY_N)])
 	_add(&"look_back",    [_key(KEY_Z)])
 	_add(&"freelook",     [_key(KEY_ALT), _key(KEY_META)])
 	_add(&"interact",     [_key(KEY_U)])
@@ -673,14 +1306,21 @@ func _setup_input() -> void:
 	_add(&"panel_left",   [_key(KEY_BRACKETLEFT)])
 	_add(&"panel_right",  [_key(KEY_BRACKETRIGHT)])
 	_add(&"laser",        [_key(KEY_L)])
-	_add(&"gunner_station", [_key(KEY_G)])
+	# Not G: that is the landing gear, and on the gunship the two fought over
+	# the same key — you could not raise the gear without being thrown into the
+	# battery, or take the battery without cycling the gear.
+	_add(&"gunner_station", [_key(KEY_J)])
 	_add(&"radar_out",    [_key(KEY_EQUAL)])
 	_add(&"radar_in",     [_key(KEY_MINUS)])
-	_add(&"respawn",      [_key(KEY_R)])
+	_add(&"dive",         [_key(KEY_PAGEDOWN)])
+	_add(&"surface",      [_key(KEY_PAGEUP)])
 	_add(&"pause_menu",   [_key(KEY_ESCAPE)])
 	_add(&"assist",       [_key(KEY_H)])
-	_add(&"flare",        [_key(KEY_N)])
+	_add(&"flare",        [_key(KEY_C)])
 	_add(&"chaff",        [_key(KEY_B)])
 	_add(&"mouse_fly",    [_key(KEY_SEMICOLON)])
 	_add(&"map",          [_key(KEY_M), _key(KEY_F1)])
-	_add(&"time_slow",    [_key(KEY_BACKSLASH)])
+	# Not backslash: `cycle_weapon` is already there, and `tapped` erases the
+	# press when it is read, so whichever of the two was polled first that frame
+	# ate the other. Cycling the weapon and slowing time fought over one key.
+	_add(&"time_slow",    [_key(KEY_APOSTROPHE)])

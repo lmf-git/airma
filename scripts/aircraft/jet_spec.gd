@@ -13,9 +13,17 @@ const FACTIONS := {
 	"civil": {"name": "CIVIL", "bloc": "neutral"},
 }
 
+## True when this airframe actually has reheat. Equal military and maximum
+## thrust means there is nothing to light — a high-bypass turbofan or a
+## turboprop — and neither the plume nor the throttle gate should pretend
+## otherwise.
+static func has_reheat(id: String) -> bool:
+	var sp := get_spec(id)
+	return float(sp.get("thrust_ab", 0.0)) > float(sp.get("thrust_mil", 1.0)) * 1.04
+
 static func ids() -> PackedStringArray:
 	return PackedStringArray(["f22", "f35", "f16", "f15", "a10", "su57", "su35", "mig29",
-		"j20", "typhoon", "rafale", "ac130", "c130",
+		"j20", "typhoon", "rafale", "b2", "h20", "ac130", "c130",
 		"ah64", "mi28", "z10", "tiger", "a320", "dash8", "c172", "bell206"])
 
 static func ids_for(faction: String) -> PackedStringArray:
@@ -212,8 +220,8 @@ static func _db() -> Dictionary:
 				{"pos": Vector3(4.85, -0.05, 0.4), "weapon": "aim9", "tip": true},
 				{"pos": Vector3(-3.15, -0.55, 1.0), "weapon": "aim120"},
 				{"pos": Vector3(3.15, -0.55, 1.0), "weapon": "aim120"},
-				{"pos": Vector3(-2.05, -0.72, 1.3), "weapon": "gbu32"},
-				{"pos": Vector3(2.05, -0.72, 1.3), "weapon": "gbu32"},
+				{"pos": Vector3(-2.05, -0.72, 1.3), "weapon": "agm88"},
+				{"pos": Vector3(2.05, -0.72, 1.3), "weapon": "agm84"},
 			]},
 		],
 		"shape": {
@@ -277,8 +285,8 @@ static func _db() -> Dictionary:
 				{"pos": Vector3(7.30, -0.55, 0.6), "weapon": "aim9", "tip": true},
 				{"pos": Vector3(-5.10, -0.85, 0.9), "weapon": "gbu32"},
 				{"pos": Vector3(5.10, -0.85, 0.9), "weapon": "gbu32"},
-				{"pos": Vector3(-3.30, -0.95, 1.1), "weapon": "gbu32"},
-				{"pos": Vector3(3.30, -0.95, 1.1), "weapon": "gbu32"},
+				{"pos": Vector3(-3.30, -0.95, 1.1), "weapon": "agm65"},
+				{"pos": Vector3(3.30, -0.95, 1.1), "weapon": "agm65"},
 				{"pos": Vector3(-1.60, -1.05, 1.2), "weapon": "aim120"},
 				{"pos": Vector3(1.60, -1.05, 1.2), "weapon": "aim120"},
 			]},
@@ -297,13 +305,20 @@ static func _db() -> Dictionary:
 				[5.0, 0.80, 0.76, 0.0, 2.6],
 				[6.6, 0.60, 0.58, 0.0, 2.4],
 			],
-			"wing": {"poly": [Vector2(-1.9, -1.5), Vector2(1.5, -1.5), Vector2(1.5, 8.76), Vector2(-1.5, 8.76)],
-					 "y": -0.72, "t_root": 0.46, "t_tip": 0.20},
-			"stab": {"poly": [Vector2(4.6, 0.6), Vector2(6.8, 0.6), Vector2(6.8, 3.4), Vector2(4.6, 3.4)],
-					 "y": 0.30, "t_root": 0.20, "t_tip": 0.12},
+			# Every other aeroplane here writes a wing as (span, chord); this one
+			# was written (chord, span), which built a metre-and-a-half stub with
+			# ten metres of chord on it. Span 17.53 m, straight leading edge,
+			# taper on the trailing edge — which is what an A-10 wing is.
+			"wing": {"poly": [Vector2(1.0, 0.30), Vector2(8.76, 0.50), Vector2(8.76, 2.40), Vector2(1.0, 3.90)],
+					 "y": -0.62, "t_root": 0.44, "t_tip": 0.20},
+			# Tailplane span 5.9 m, and the fins stand on its tips rather than
+			# floating inboard of it: they were at 2.55 while the stab did not
+			# begin until 4.6, so they were not attached to anything.
+			"stab": {"poly": [Vector2(0.45, 5.00), Vector2(2.95, 5.30), Vector2(2.95, 6.90), Vector2(0.45, 7.05)],
+					 "y": 0.22, "t_root": 0.22, "t_tip": 0.13},
 			"fins": [
-				{"x": 2.55, "cant": 0.0, "poly": [Vector2(4.7, 0.35), Vector2(5.4, 2.35), Vector2(6.9, 2.35), Vector2(6.9, 0.4)], "t": 0.16},
-				{"x": -2.55, "cant": 0.0, "poly": [Vector2(4.7, 0.35), Vector2(5.4, 2.35), Vector2(6.9, 2.35), Vector2(6.9, 0.4)], "t": 0.16},
+				{"x": 2.86, "cant": 0.0, "poly": [Vector2(5.00, 0.30), Vector2(5.65, 2.85), Vector2(6.95, 2.85), Vector2(7.05, 0.40)], "t": 0.17},
+				{"x": -2.86, "cant": 0.0, "poly": [Vector2(5.00, 0.30), Vector2(5.65, 2.85), Vector2(6.95, 2.85), Vector2(7.05, 0.40)], "t": 0.17},
 			],
 			"vents": [],
 			"canopy": {"z0": -6.4, "z1": -4.0, "w": 0.58, "h": 0.50, "y": 0.90},
@@ -313,6 +328,149 @@ static func _db() -> Dictionary:
 			],
 			"nozzles": [Vector3(1.70, 0.95, 4.3), Vector3(-1.70, 0.95, 4.3)],
 			"nozzle_kind": "round",
+		},
+	},
+	# ------------------------------------------------------------------ B-2
+	"b2": {
+		"faction": "usa",
+		"name": "B-2A Spirit",
+		"role": "Stealth heavy bomber",
+		"blurb": "A flying wing with no tail to speak of and nothing hanging\noutside it. Fifty-two metres of span, four buried turbofans and\ntwo bays that take the heavy weapons — including the B83.\nSlow, enormous, and very hard to see.",
+		"mass": 126000.0,
+		"inertia": Vector3(9400000.0, 11800000.0, 3100000.0),
+		"wing_area": 478.0, "span": 52.4, "aspect": 5.75,
+		"cl_alpha": 4.6, "cl_max_aoa": deg_to_rad(16.0), "cd0": 0.0132, "oswald": 0.86,
+		"flap_cl": 0.55,
+		# four F118s and no reheat on any of them
+		# four F118s, and she needs all of it: at a quarter of her weight in
+		# thrust the roll is long enough as it is
+		"thrust_mil": 340000.0, "thrust_ab": 340000.0, "spool": 2.6,
+		"pitch_torque": 12800000.0, "roll_torque": 3600000.0, "yaw_torque": 1900000.0,
+		"pitch_damp": 7400000.0, "roll_damp": 2900000.0, "yaw_damp": 5200000.0,
+		# a flying wing is weak in yaw by construction: it has no fin
+		"pitch_stab": 3100000.0, "yaw_stab": 900000.0,
+		"max_pitch_rate": 0.30, "max_roll_rate": 1.05,
+		"fuel": 75000.0, "sfc_mil": 0.31, "sfc_ab": 0.31,
+		"vne": 300.0, "g_limit": 2.6,
+		# the whole point of the aeroplane
+		"stealth": 0.04,
+		"gear": [
+			{"pos": Vector3(0.0, -2.35, -6.6), "r": 0.60, "steer": true, "brake": false, "len": 1.70},
+			{"pos": Vector3(-3.70, -2.25, 1.40), "r": 0.80, "steer": false, "brake": true, "len": 1.55},
+			{"pos": Vector3(3.70, -2.25, 1.40), "r": 0.80, "steer": false, "brake": true, "len": 1.55},
+		],
+		"bays": [
+			{"id": "left_main", "kind": "internal", "pivot": Vector3(-1.05, -1.30, 0.6),
+			 "door_span": 2.10, "door_len": 7.4, "door_angle": 74.0, "open_time": 1.9,
+			 "drag": 0.030, "side": -1,
+			 "stations": [
+				{"pos": Vector3(-1.45, -1.20, -2.2), "weapon": "gbu32"},
+				{"pos": Vector3(-2.35, -1.15, 0.9), "weapon": "gbu32"},
+				{"pos": Vector3(-1.45, -1.20, 3.6), "weapon": "b83"},
+			]},
+			{"id": "right_main", "kind": "internal", "pivot": Vector3(1.05, -1.30, 0.6),
+			 "door_span": 2.10, "door_len": 7.4, "door_angle": 74.0, "open_time": 1.9,
+			 "drag": 0.030, "side": 1,
+			 "stations": [
+				{"pos": Vector3(1.45, -1.20, -2.2), "weapon": "gbu32"},
+				{"pos": Vector3(2.35, -1.15, 0.9), "weapon": "gbu32"},
+				{"pos": Vector3(1.45, -1.20, 3.6), "weapon": "b61"},
+			]},
+		],
+		"shape": {
+			"paint": Color(0.19, 0.20, 0.22), "dark": Color(0.09, 0.09, 0.10),
+			"glass": Color(0.32, 0.30, 0.20),
+			# a broad shallow centre body rather than a fuselage
+			"sections": [
+				[-10.4, 0.55, 0.30, 0.00, 2.4],
+				[-8.6, 1.70, 0.72, 0.06, 2.6],
+				[-6.0, 2.75, 1.10, 0.10, 2.8],
+				[-3.0, 3.35, 1.34, 0.06, 3.0],
+				[0.2, 3.50, 1.40, 0.00, 3.1],
+				[3.6, 3.15, 1.16, -0.06, 3.0],
+				[7.0, 2.35, 0.80, -0.10, 2.8],
+				[10.4, 1.30, 0.44, -0.12, 2.6],
+			],
+			# thirty-three degrees of sweep and the sawtooth trailing edge
+			"wing": {"poly": [Vector2(2.2, -10.2), Vector2(26.2, 5.30), Vector2(26.2, 7.10),
+					 Vector2(14.6, 4.60), Vector2(8.4, 10.30), Vector2(2.2, 10.40)],
+					 "y": -0.10, "t_root": 1.05, "t_tip": 0.16},
+			"canopy": {"z0": -9.1, "z1": -6.5, "w": 1.05, "h": 0.52, "y": 1.30},
+			# dorsal inlets, hidden from anything looking up at her
+			"intakes": [
+				{"pos": Vector3(2.70, 1.05, -3.6), "size": Vector3(1.7, 0.95, 3.4), "yaw": 0.0},
+				{"pos": Vector3(-2.70, 1.05, -3.6), "size": Vector3(1.7, 0.95, 3.4), "yaw": 0.0},
+			],
+			# slot exhausts on top of the wing, not cans hanging off the back
+			"nozzles": [Vector3(3.30, 0.85, 5.4), Vector3(-3.30, 0.85, 5.4)],
+			"nozzle_kind": "flat",
+		},
+	},
+	# ------------------------------------------------------------------ H-20
+	"h20": {
+		"faction": "china",
+		"name": "H-20",
+		"role": "Stealth heavy bomber",
+		"blurb": "The other side's flying wing. Shorter ranged than the Spirit and\na little quicker with it, carrying its load in one long bay down\nthe spine of the centre body.",
+		"mass": 108000.0,
+		"inertia": Vector3(7900000.0, 9900000.0, 2600000.0),
+		"wing_area": 402.0, "span": 45.0, "aspect": 5.04,
+		"cl_alpha": 4.5, "cl_max_aoa": deg_to_rad(16.0), "cd0": 0.0139, "oswald": 0.84,
+		"flap_cl": 0.55,
+		"thrust_mil": 280000.0, "thrust_ab": 280000.0, "spool": 2.5,
+		"pitch_torque": 10600000.0, "roll_torque": 3100000.0, "yaw_torque": 1700000.0,
+		"pitch_damp": 6300000.0, "roll_damp": 2500000.0, "yaw_damp": 4500000.0,
+		"pitch_stab": 2700000.0, "yaw_stab": 820000.0,
+		"max_pitch_rate": 0.33, "max_roll_rate": 1.15,
+		"fuel": 62000.0, "sfc_mil": 0.33, "sfc_ab": 0.33,
+		"vne": 315.0, "g_limit": 2.7,
+		"stealth": 0.05,
+		"gear": [
+			{"pos": Vector3(0.0, -2.20, -6.0), "r": 0.56, "steer": true, "brake": false, "len": 1.60},
+			{"pos": Vector3(-3.35, -2.10, 1.20), "r": 0.74, "steer": false, "brake": true, "len": 1.45},
+			{"pos": Vector3(3.35, -2.10, 1.20), "r": 0.74, "steer": false, "brake": true, "len": 1.45},
+		],
+		"bays": [
+			{"id": "left_main", "kind": "internal", "pivot": Vector3(-0.95, -1.20, 0.4),
+			 "door_span": 1.90, "door_len": 6.8, "door_angle": 72.0, "open_time": 1.8,
+			 "drag": 0.028, "side": -1,
+			 "stations": [
+				{"pos": Vector3(-1.30, -1.10, -1.9), "weapon": "gbu32"},
+				{"pos": Vector3(-2.10, -1.05, 1.1), "weapon": "gbu32"},
+				{"pos": Vector3(-1.30, -1.10, 3.4), "weapon": "agm84"},
+			]},
+			{"id": "right_main", "kind": "internal", "pivot": Vector3(0.95, -1.20, 0.4),
+			 "door_span": 1.90, "door_len": 6.8, "door_angle": 72.0, "open_time": 1.8,
+			 "drag": 0.028, "side": 1,
+			 "stations": [
+				{"pos": Vector3(1.30, -1.10, -1.9), "weapon": "gbu32"},
+				{"pos": Vector3(2.10, -1.05, 1.1), "weapon": "gbu32"},
+				{"pos": Vector3(1.30, -1.10, 3.4), "weapon": "b61"},
+			]},
+		],
+		"shape": {
+			"paint": Color(0.17, 0.18, 0.20), "dark": Color(0.08, 0.08, 0.09),
+			"glass": Color(0.28, 0.32, 0.26),
+			"sections": [
+				[-9.4, 0.50, 0.28, 0.00, 2.4],
+				[-7.7, 1.55, 0.66, 0.06, 2.6],
+				[-5.4, 2.50, 1.02, 0.09, 2.8],
+				[-2.7, 3.05, 1.24, 0.05, 3.0],
+				[0.2, 3.20, 1.30, 0.00, 3.1],
+				[3.2, 2.90, 1.08, -0.06, 3.0],
+				[6.3, 2.15, 0.74, -0.09, 2.8],
+				[9.4, 1.20, 0.40, -0.11, 2.6],
+			],
+			"wing": {"poly": [Vector2(2.0, -9.2), Vector2(22.5, 4.80), Vector2(22.5, 6.40),
+					 Vector2(12.8, 4.20), Vector2(7.6, 9.30), Vector2(2.0, 9.40)],
+					 "y": -0.09, "t_root": 0.96, "t_tip": 0.15},
+			"canopy": {"z0": -8.2, "z1": -5.9, "w": 0.98, "h": 0.50, "y": 1.22},
+			"intakes": [
+				{"pos": Vector3(2.45, 0.98, -3.2), "size": Vector3(1.6, 0.90, 3.2), "yaw": 0.0},
+				{"pos": Vector3(-2.45, 0.98, -3.2), "size": Vector3(1.6, 0.90, 3.2), "yaw": 0.0},
+			],
+			"nozzles": [Vector3(3.00, 0.80, 4.9), Vector3(-3.00, 0.80, 4.9)],
+			"nozzle_kind": "flat",
 		},
 	},
 	# ------------------------------------------------------------------ F-15
@@ -870,7 +1028,7 @@ static func _db() -> Dictionary:
 		"inertia": Vector3(1400000.0, 1650000.0, 780000.0),
 		"wing_area": 162.1, "span": 40.4, "aspect": 10.1,
 		"cl_alpha": 5.2, "cl_max_aoa": deg_to_rad(17.0), "cd0": 0.0216, "oswald": 0.82, "flap_cl": 1.10,
-		"thrust_mil": 296875.0, "thrust_ab": 372400.0, "spool": 2.4,
+		"thrust_mil": 296875.0, "thrust_ab": 296875.0, "spool": 2.4,
 		"pitch_torque": 9200000.0, "roll_torque": 1250000.0, "yaw_torque": 1500000.0,
 		"pitch_damp": 4600000.0, "roll_damp": 1050000.0, "yaw_damp": 3200000.0,
 		"pitch_stab": 2600000.0, "yaw_stab": 3400000.0,

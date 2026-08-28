@@ -792,6 +792,14 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--breaktest=RNG[,ALT[,WEAPON]]` | a shot, then a full-power break: closest approach |
 | `--salvotest` | three JDAMs at one lased mark, and where each of them lands |
 | `--shaketest` | how steady the sensor head is on the aeroplane carrying it |
+| `--navsensor` | a ship's sensor: point track, area track, laser, scope, tubes and armament |
+| `--geomtest` | every airframe's built mesh against the dimensions it flies on |
+| `--tanksensor` | the commander's sight on an armoured vehicle: does it open, where does it sit, who has the mouse, does lasing lay the piece |
+| `--culltest` | fire rays at every airframe, vehicle and hull and count the ones that meet a face turned away — a hole you see through |
+| `--roadtest` | the trunk network's gradient, cross fall and earthworks |
+| `--skirttest` | how far terrain hangs below the ground at the ring seams, which is what a submarine is looking at |
+| `--lodtest` | ask the chunks either side of every ring boundary how high the ground is at the same point, and compare |
+| `--salvotest=WEAPON` | that weapon at a lased mark, and where each round lands |
 | `--skytest` | cloud settings, how far the march reaches, and the sun across a day |
 | `--splashtest` | a bomb into open water: is the fireball anywhere you could see it |
 | `--vlstest` | do a ship's tubes actually reach an aeroplane twelve kilometres out |
@@ -1503,6 +1511,275 @@ break works in reality.
 
 None of it stops a missile killing something that flies straight: three bandits
 still go down in the standard dogfight.
+
+## Does the model match the numbers?
+
+An aeroplane's aerodynamics read the spec; its shape is built from a separate
+set of polygons in the same entry, and nothing ever compared the two. The A-10's
+wing was written on the wrong axes — `(chord, span)` where every other airframe
+uses `(span, chord)` — which built a metre-and-a-half stub with ten metres of
+chord, and the flight model went on using 17.53 m of span regardless. Nothing
+said a word.
+
+`--geomtest` builds every airframe and measures the mesh against its own figures.
+All twenty-one now agree to a fraction of a percent: the A-10 builds **17.5 m
+against a spec of 17.5**.
+
+Getting the check right took a second pass. Comparing a helicopter's width to
+its `span` failed all five of them by a factor of three, because the widest
+thing on a helicopter is the rotor disc and `span` refers to the stub wing.
+Rotary airframes are measured against rotor diameter instead.
+
+## The curtain under the seabed
+
+"I can see skirts of terrain when in a submarine." Each chunk carries a vertical
+curtain around its edge so a coarser neighbour cannot show daylight through the
+ring seam. It was `cell * 0.35`, and on the outer rings a cell is nearly two
+kilometres — so the curtain hung **12 m under every chunk edge, 9 m on average**.
+Above water you never see it. Under water it is the only thing down there.
+
+The stitching that pulls a fine edge onto its coarse neighbour leaves a seam of
+**0.000061 m**. The curtain was covering a crack four orders of magnitude
+smaller than itself. `--skirttest` measures both, taking each chunk's lowest
+vertex against the ground at the chunk's own vertex positions:
+
+| | worst drop | mean | seam |
+|---|---|---|---|
+| before | 12.00 m | 9.16 m | 0.000061 m |
+| after | 0.60 m | 0.50 m | 0.000061 m |
+
+Getting the measurement right mattered as much as the fix. Sampling the ground
+on a ten-by-ten grid over each chunk's footprint reported **51.95 m**: on a ring
+with 1.9 km cells that grid misses the low ground entirely, and the difference
+was read as curtain. Sampled at the chunk's own vertices it comes out at exactly
+the `clampf(cell * 0.35, 1, 12)` the code asks for.
+
+### Does the stitching hold across a change of detail?
+
+The seam stat is not evidence that it does. It checks that a fine chunk's own
+edge vertex sits on the line between its neighbours — that the edge is
+*straight*. It never asks the coarse chunk on the other side where **its** edge
+is, and it only looks at two of the four sides.
+
+`--lodtest` reads the built meshes and asks both chunks how high the ground is
+at the same point on the boundary:
+
+```
+ring 0 -> 1 (cell   15 m ->   30 m): worst 0.0000 m
+ring 6 -> 7 (cell  960 m -> 1920 m): worst 0.0000 m
+560 boundary points had two chunks drawing them, 0 had only one
+disagreement between the two sides: mean 0.00000 m, worst 0.0000 m
+```
+
+Exact agreement at every boundary, every ring — so the ring seams are watertight
+and the curtain under them is covering nothing at all. The 0.6 m that remains is
+insurance for the outermost ring, which has no neighbour to be stitched to.
+
+Getting *that* measurement right took a correction too. The first run reported a
+**1249 m** disagreement, which reads as terrain tearing itself apart. The chunks
+were fine — `C-15360_-3840` and `C-23040_-7680` both answered 1214.8 m. The water
+plane is a child of the terrain as well, and it was answering "the ground is at
+-35 m" at every point on every boundary.
+
+`--seamtest` was reporting "T junction gaps: mean 8.86 m, worst 257.67 m", which
+reads as though the terrain were full of two hundred metre holes and made
+shrinking the curtain look reckless. It measures the *raw height field*: how far
+the fine chunk's extra vertex sits off the straight edge its coarse neighbour
+draws — the deviation the stitching then takes out by putting that vertex
+exactly on the line. Both figures are printed together now, so the 257 m and the
+0.000061 m can be read as the same sentence.
+
+## A commander's sight
+
+Armour had a sensor page it could never reach. `_process` shut the pod on any
+frame a tank was crewed, so opening it closed it again in the same frame, and
+the action menu never offered it in the first place.
+
+The pod already generalises to whatever is carrying it, but two things assumed
+an aeroplane and one assumed a ship. `_draw_contacts` returned early on a null
+`jet`, so a crewed hull — ship or tank — drew no contacts at all. `_sensor_input`
+read the aeroplane's stores, so with the page up on a ship, pressing `1` changed
+the weapon on the jet parked back at the field. And the sight was hung at
+`mast_height`, eighteen metres, which on a tank is eighteen metres above its own
+turret.
+
+Lasing hands the mark to whatever is holding the sensor: a ship lays its tubes
+on it, and a tank writes it to the fire-mission slot the map view already uses,
+which is what a self-propelled gun does with a laser. While the page is up the
+mouse belongs to the sight — unguarded, looking around walked the fall of shot
+out and threw away the mission the sight had just handed over.
+
+| | before | after |
+|---|---|---|
+| page stays open in a tank | closed the same frame | open across 12 frames |
+| sight height above the hull | 18.00 m | 2.65 m |
+| turret under a mouse sweep, sight up | 0.572 rad | 0.000 rad |
+| lasing sets the fire mission | no path at all | set, 0.0 m from the target |
+| contacts drawn on the sight | 0 | 9 |
+
+## Roads that are built, not draped
+
+The routing already took a road round the worst of the ground. What happened
+after that was nothing: the carriageway followed whatever the noise field put
+under it, so a trunk road pitched **34.7% at its worst** and fell **6.0% across
+its own width** on average — a switchback with a camber like a ditch.
+
+A road is surveyed now. Each route is chained at 110 m, the ground height read
+along it, and the profile put through a cut-and-fill cone filter: nothing may
+rise faster than the ruling gradient of 6.2%, and once that has pulled the
+profile down through the hills, nothing may fall faster either, which raises it
+across the dips. `height_at` then blends the land toward that surface over the
+carriageway and grades the spoil out over a 24 m shoulder.
+
+Three things had to be added before it read as one network rather than a dozen
+separate cuttings:
+
+- **Junctions.** Two routes crossing at a shallow angle were surveyed
+  independently and disagreed by 8 m five metres apart — a step down the middle
+  of the road. Comparing waypoint to waypoint missed it entirely, because their
+  nearest waypoints were fifty metres apart. Every vertex is now measured
+  against the nearest *stretch* of every other road, including the road itself
+  where it doubles back, and pulled toward the common height.
+- **Parallel runs.** Two routes converging on the same town ran 9 m apart for a
+  stretch and each cut its own corridor. They are drawn onto each other.
+- **Towns.** A settlement is already levelled. The corridor fought the platform
+  and left a **13.98 m step under Northgate's buildings**; the pad wins inside
+  the town now.
+
+| | before | after |
+|---|---|---|
+| gradient along the road | mean 2.9%, worst 34.7% | mean 2.7%, 95th 6.2%, worst 7.8% |
+| cross fall over the carriageway | mean 6.0%, worst 108.6% | mean 0.1%, 95th 0.1% |
+| worst town footprint step | 13.98 m | 0.00 m, all four towns |
+
+`height_at` is called for every terrain vertex and every wheel on the ground, so
+the corridor is answered from a 64 m grid index rather than by walking all 846
+legs. Terrain build cost is unchanged.
+
+## Parts you could see through
+
+"A lot of the vehicle engines and parts don't have backface culling so I can see
+through them from some angles." Culling was not missing; the faces were pointing
+the wrong way, and a face pointing away is not drawn at all.
+
+`--culltest` fires 220 rays at each model from all round it and counts the ones
+whose nearest triangle faces away — which is exactly a hole. It found four
+separate faults:
+
+- `prism` decided which way a face pointed by comparing it with the polygon
+  centroid. On a concave planform — a wing with a root extension — the centroid
+  is outside the outline, and panels came out inside out. **The F-16's wings
+  failed 4.2% of all viewing angles.** Faces are given their outward normal
+  explicitly now, from the winding of the outline.
+- `loft` used one centre for a whole hull. On anything long and thin — a
+  nacelle, a duct — a face's normal is nearly perpendicular to the line from
+  that centre and the sign came down to rounding. It uses the local section
+  axis instead.
+- The intake ducts were lofted **open at both ends**, so where one ran into the
+  fuselage there was a hole straight into the airframe, and the well behind the
+  lip had no inner skin.
+- Nozzle shrouds and the A-10's nacelles were tubes open at the back.
+
+Rays that see through the skin: **27 in 3402 → 10 in 6137** with the vehicles
+and ships included. Every airframe that was bad is now at zero, and airframe
+dimensions are unchanged.
+
+## A ship is not a sphere
+
+`hit_radius()` returned the ship's **beam**. A Steregushchiy is 105 m long and
+11 m wide, so a round that arrived on the forecastle was scored as a 20 m miss.
+Worse, the fuse measured to the skin while the damage falloff still divided by
+the distance to the *origin*, and divided it by the fuse radius rather than the
+warhead's lethal radius — so a round always detonated near the edge of its own
+fuse envelope and therefore always did the floor.
+
+And the sea was checked before the fuse. A Harpoon crossing the surface a few
+metres from a corvette was killed by the water and went off as a splash.
+
+Four fixes: ships answer `surface_gap()` against an oriented hull box; the miss
+handed to the warhead is that gap; falloff scales on the lethal radius; and the
+fuse is asked before the sea is. The round also holds for its closest approach
+rather than going off the moment the target enters the envelope, and the cruise
+terminal phase leads the ship instead of chasing where it was.
+
+A Harpoon from an F-16, released at 16 km from 4200 m, sea-skimming at 33 m:
+
+| | gap off the hull | hull |
+|---|---|---|
+| before | went off in the sea | 1100 → 987 |
+| after | **0.4 m** | 1100 → 523, flooding |
+
+## A ship's armament, on the bridge
+
+The armament line lived inside a `has_gun()` test, so a **submarine — whose only
+weapon is its tubes — was told nothing at all**: not what was selected, not
+whether it could fire. It is always drawn now, the readiness shown belongs to
+the *selected* weapon rather than always to the gun, and the bridge says what
+the sensor has the ship laid on and how far away it is.
+
+Switching itself was never broken: with the sensor page shut, cycling runs
+`main -> vls -> main -> vls` and the number keys select directly. There was
+simply nothing on screen to say so.
+
+## A ship's sensor
+
+A crewed hull sets the pod's `host` and leaves `jet` as whatever it was — which,
+once the player has walked off an aeroplane, is null. Every guard in the sensor
+read `jet`, so on a ship `_process` returned at the first line and `designate()`
+at the second: **no point track, no area track, no laser, nothing**. The sensor
+now works off whatever is carrying it, aeroplane or hull, and hands what it is
+holding to that thing — an aeroplane keeps it as a radar target, a ship as what
+its tubes and battery are laid on.
+
+Firing the tubes from the conn also ignored the designation entirely and shot at
+whatever happened to be nearest, which makes a targeting sensor decorative.
+
+And a warship has a mast full of antennas and no scope. The radar panel was
+written against the aeroplane and read `jet` for position, heading, team and
+target, so there was nothing to put on the bridge. It takes a source now, and
+the bridge draws one: measured, **10 contacts inside 40 km** from a destroyer,
+with the same terrain masking the cockpit page uses.
+
+## The strategic round, and what stopped it
+
+A submarine launch was flattening nothing at all. Three faults in a row, two of
+them mine from this session.
+
+The **seeker's terrain masking** dropped the track nine tenths of a second off
+the rail: a lofted shot at a target twenty-two kilometres away has the horizon
+in the way by definition. Masking now applies only to a round homing on
+something that has to be *seen* — an aeroplane or a vehicle. A weapon flying to
+a coordinate does not care what is between it and the place.
+
+**Proportional navigation flies an intercept, not an arc.** With the track back,
+the round nosed over off the rail, threw away the loft it launched with and flew
+into a mountain six kilometres short. It has a lofted midcourse now — the aim
+point is raised in proportion to the distance still to run and comes down as it
+closes — and it steers by pointing its velocity vector rather than by leading,
+because leading a patch of ground at Mach four carried it four kilometres past.
+
+The loft had to be applied **before the line of sight is taken**. Putting it
+after was the same as not having it: proportional navigation steers on `los` and
+never looks at the target position again, which is why three consecutive changes
+produced byte-identical results.
+
+Measured on the same target: **0 of 1912 structures destroyed, then 1402**.
+
+## Skirts you could see from the sea
+
+The terrain hides the cracks where two LOD rings meet behind vertical skirts,
+and the skirt depth was `cell * 3` with nothing capping it. On the outermost
+ring a cell is 1920 m, so every chunk out there trailed a **five and a half
+kilometre curtain** beneath it — invisible from above and unmissable from a
+submarine. It is clamped to twelve metres now, which is far more than the
+boundary stitching leaves to cover: the T-junction residual is 0.00006 m.
+
+    ring 0    15 m cell     45 m  ->   5 m
+    ring 7  1920 m cell   5760 m  ->  12 m
+
+The reference project in `refenrece/PlanetTerrain (Best)` does the same thing —
+`clampf(cell_m * skirt_cells, 0.4, 5.0)` — and reaches the same conclusion in a
+comment: "LOD gaps are only ever a few meters."
 
 ## Code health
 

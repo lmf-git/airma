@@ -4,13 +4,29 @@ extends Control
 ## biome fields the terrain uses, with hill shading; everything else is drawn
 ## live on top.
 
-const RES := 192
-const HALF := 20000.0          # metres covered by the baked image, each way
+## The relief image. It covered twenty kilometres each way while the world is
+## seventy and the terrain reaches ninety-two — so the map drew a small square
+## of ground in the middle of a great deal of nothing, which is exactly what one
+## chunk looks like. It now covers the whole world, and at enough resolution
+## that the extra ground is worth having.
+const RES := 512
+const HALF := 600000.0         # metres covered by the baked image, each way
 
 var jet: Node = null
 var world: Node = null
 var tank: Node = null          # set while driving, enables map fire missions
-var zoom := 1.0
+var ship: Node = null          # set while crewing, enables strategic aiming
+## Where the strategic round has been sent, or INF.
+var strategic_mark := Vector3.INF
+
+## What the map is holding as an aiming point. `_strategic_strike` asks for this.
+func target_point() -> Vector3:
+	return strategic_mark
+## Zoom one used to frame forty kilometres; the same view of the same ground is
+## now a little over three, so the map does not open showing the whole planet.
+## Opens framing about forty kilometres, which is the ground you actually fly
+## over; the rest of the six hundred is there to be zoomed out to.
+var zoom := 29.0
 var centre := Vector2.ZERO     # world metres
 var follow := true
 var _tex: ImageTexture
@@ -27,6 +43,7 @@ func _ready() -> void:
 
 ## Shaded relief over biome colour, sampled straight from the world fields.
 func bake() -> void:
+	var t0 := Time.get_ticks_msec()
 	var img := Image.create(RES, RES, false, Image.FORMAT_RGB8)
 	var step := HALF * 2.0 / float(RES)
 	for j in RES:
@@ -49,6 +66,16 @@ func bake() -> void:
 					c = c.lerp(Color(0.14, 0.14, 0.15), 0.75)
 			img.set_pixel(i, j, c)
 	_tex = ImageTexture.create_from_image(img)
+	var land := 0
+	var sea := 0
+	for j2 in RES:
+		for i2 in RES:
+			if img.get_pixel(i2, j2).b > img.get_pixel(i2, j2).g:
+				sea += 1
+			else:
+				land += 1
+	print("[map] relief baked %dx%d over +-%.0f km in %d ms: %d land, %d sea" % [
+		RES, RES, HALF * 0.001, Time.get_ticks_msec() - t0, land, sea])
 
 func toggle() -> void:
 	visible = not visible
@@ -67,19 +94,30 @@ func _gui_input(e: InputEvent) -> void:
 	if e is InputEventMouseButton:
 		var mb := e as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
-			zoom = clampf(zoom * 1.25, 0.35, 14.0)
+			zoom = clampf(zoom * 1.25, 1.0, 400.0)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
-			zoom = clampf(zoom / 1.25, 0.35, 14.0)
+			zoom = clampf(zoom / 1.25, 1.0, 400.0)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
-			# right click lays a fire mission for an artillery piece
+			# right click lays a fire mission for an artillery piece, and the
+			# aiming point for a strategic launch when you are in the boat that
+			# carries one. There was no path at all for the latter: the map
+			# only ever spoke to a tank, and `_strategic_strike` asked the map
+			# for a `target_point` it did not have — so aiming the round on the
+			# map silently did nothing and the only way to send it was the pod.
+			var vp := get_viewport_rect().size
+			var org := vp * 0.5
+			var scl := minf(vp.x, vp.y) * 0.86 * zoom / (HALF * 2.0)
+			var w := centre + (mb.position - org) / scl
+			var at := Vector3(w.x, Sim.height_at(w.x, w.y), w.y)
 			if tank != null and is_instance_valid(tank) and tank.is_indirect():
-				var vp := get_viewport_rect().size
-				var org := vp * 0.5
-				var scl := minf(vp.x, vp.y) * 0.86 * zoom / (HALF * 2.0)
-				var w := centre + (mb.position - org) / scl
-				tank.map_target = Vector3(w.x, Sim.height_at(w.x, w.y), w.y)
+				tank.map_target = at
 				Sim.report("fire mission: %.1f km" % (
 					tank.global_position.distance_to(tank.map_target) * 0.001), Sim.Ev.INFO)
+			elif ship != null and is_instance_valid(ship) and ship.can_launch():
+				strategic_mark = at
+				ship.strategic_aim = at
+				Sim.report("aiming point set: %.0f km" % (
+					ship.global_position.distance_to(at) * 0.001), Sim.Ev.INFO)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			_drag = mb.pressed
 			if mb.pressed:
@@ -170,6 +208,12 @@ func _draw() -> void:
 			int(jet.global_position.y * 3.28084)], Color(0.7, 1.0, 0.8))
 
 	# artillery fire mission marker
+	# where the strategic round has been sent
+	if strategic_mark != Vector3.INF:
+		var sp := _w2s(Vector2(strategic_mark.x, strategic_mark.z), org, ppm)
+		draw_arc(sp, 9.0, 0.0, TAU, 20, Color(1.0, 0.45, 0.2), 1.8)
+		draw_line(sp - Vector2(13, 0), sp + Vector2(13, 0), Color(1.0, 0.45, 0.2), 1.4)
+		draw_line(sp - Vector2(0, 13), sp + Vector2(0, 13), Color(1.0, 0.45, 0.2), 1.4)
 	if tank != null and is_instance_valid(tank) and tank.is_indirect():
 		var tp := _w2s(Vector2(tank.global_position.x, tank.global_position.z), org, ppm)
 		draw_rect(Rect2(tp - Vector2(4, 4), Vector2(8, 8)), Color(0.4, 1.0, 0.5), false, 2.0)

@@ -19,6 +19,7 @@ var _start_xf := Transform3D.IDENTITY
 var _eject := 0.0
 var _trail: GPUParticles3D
 var _flame: MeshInstance3D
+var _glow: OmniLight3D
 var _seek_lost := 0.0
 var _mask_check := 0.0
 var _masked := false
@@ -67,6 +68,17 @@ func _ready() -> void:
 		_flame.visible = false
 		_flame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_flame)
+		# A motor is a light. The cone was drawn additively and lit nothing at
+		# all, so at night a round in boost was a faint smear against a black
+		# sky instead of the brightest thing for a mile.
+		_glow = OmniLight3D.new()
+		_glow.light_color = Color(1.0, 0.72, 0.42)
+		_glow.light_energy = 0.0
+		_glow.omni_range = 30.0 + bore * 120.0
+		_glow.omni_attenuation = 1.4
+		_glow.shadow_enabled = false
+		_glow.position = Vector3(0, 0, ws["length"] * 0.5 + 1.0)
+		add_child(_glow)
 	if target and target.has_method("warn_missile") and ws["kind"] != "bomb":
 		target.warn_missile()
 	reset_physics_interpolation()
@@ -94,10 +106,16 @@ func _physics_process(delta: float) -> void:
 		if boosting:
 			vel += dir * ws["boost"] * delta
 			motor = 1.0
+			if _glow:
+				# guttering a little, the way a solid motor does
+				_glow.light_energy = 5.5 + sin(age * 47.0) * 0.8
 		else:
 			motor = 0.0
 			if _flame:
 				_flame.visible = false
+			if _glow and _glow.light_energy > 0.0:
+				# it does not switch off: the nozzle stays hot for a moment
+				_glow.light_energy = maxf(_glow.light_energy - delta * 9.0, 0.0)
 		var sp := vel.length()
 		var rho: float = 1.225 * exp(-maxf(global_position.y, 0.0) / 8500.0)
 		vel -= vel.normalized() * ws["drag"] * rho / 1.225 * sp * sp * delta
@@ -113,6 +131,30 @@ func _physics_process(delta: float) -> void:
 		global_transform.basis = Basis.looking_at(fwd, up)
 
 	# --- terminal checks --------------------------------------------------
+	# Some rounds do not arrive as one thing. A bus carrying re-entry vehicles,
+	# or a cluster bomb carrying bomblets, opens at a set height and lets its
+	# load finish the job.
+	if armed and not _split and ws.has("mirv"):
+		var bed: float = maxf(Sim.height_at(global_position.x, global_position.z),
+			Sim.WATER_LEVEL)
+		if global_position.y - bed < float(ws.get("mirv_at", 1000.0)):
+			_open_up()
+			return
+	if _fuse_check(from, to):
+		return
+	# A round sent to a *place* has nothing to fuse on: an aiming point is a
+	# bare node, not a contact, so the proximity fuse never sees it. The
+	# strategic round flew past the mark it could not quite turn onto -- best
+	# pass 1.7 km -- and carried on into the sea three kilometres beyond, where
+	# its four kilometre warhead did nothing to what it had been sent at. It
+	# bursts at its closest approach instead, which is what an airburst is.
+	if armed and is_instance_valid(target) and target.is_in_group("no_lock"):
+		var dm := global_position.distance_to(target.global_position)
+		if dm < _mark_best:
+			_mark_best = dm
+		elif _mark_best < 9000.0 and dm > _mark_best + 15.0:
+			_die(true)
+			return
 	# The sea is a surface, not a window. Testing only against the height field
 	# let a weapon aimed at a ship swim down to the seabed a couple of hundred
 	# metres below and go off there, harming nothing on the way past.
@@ -151,35 +193,77 @@ func _physics_process(delta: float) -> void:
 		print("[bomb] age=%.1f armed=%s spd=%.0f  to target=%.1f  tgt=%s" % [
 			age, str(armed), vel.length(), td,
 			str(target.name) if target and is_instance_valid(target) else "none"])
-	if armed:
-		# sweep the travelled segment: at 1 km/s closing speed a point test would
-		# step straight past a 9 m fuse radius
-		var best: Node = null
-		var best_gap := 1e9
-		var best_d := 1e9
-		for n in get_tree().get_nodes_in_group("hittable"):
-			if not is_instance_valid(n) or n == shooter:
-				continue
-			if n.has_method("is_alive") and not n.is_alive():
-				continue
-			if ("team" in n) and n.team == team and n != target:
-				continue
-			var np: Vector3 = n.global_position
-			var d := Geometry3D.get_closest_point_to_segment(np, from, to).distance_to(np)
-			# Against the target's *surface*, not its origin. A destroyer is a
-			# hundred and fifty five metres long with its origin amidships, so a
-			# Sidewinder arriving at the bow was seventy metres from the point
-			# this used to measure — far outside any fuse radius. It flew
-			# through the ship and went off in the sea beyond, and the same
-			# arithmetic quietly under-fused every large target in the game.
-			var r: float = n.hit_radius() if n.has_method("hit_radius") else 0.0
-			var gap: float = d - r
-			if gap < best_gap:
-				best_gap = gap
-				best_d = d
-				best = n
-		if best and best_gap < float(ws["fuse"]):
-			_hit(best, best_d)
+## Has the round arrived at what it was aimed at during this step? Answered
+## before the sea and the ground are, because those checks end the round then
+## and there: a Harpoon crossing the surface a few metres from a corvette was
+## killed by the water and went off as a splash, and the ship took the edge of
+## a ground burst instead of the warhead.
+func _fuse_check(from: Vector3, to: Vector3) -> bool:
+	if not armed:
+		return false
+	# Not bombs. A bomb is an area weapon and has its own, much bigger burst;
+	# fusing it against the first thing inside eleven metres would give one
+	# target a direct hit and let everything else in the blast off entirely.
+	if String(ws["kind"]) == "bomb":
+		return false
+	# sweep the travelled segment: at 1 km/s closing speed a point test would
+	# step straight past a 9 m fuse radius
+	var best: Node = null
+	var best_gap := 1e9
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or n == shooter:
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if ("team" in n) and n.team == team and n != target:
+			continue
+		var np: Vector3 = n.global_position
+		var near: Vector3 = Geometry3D.get_closest_point_to_segment(np, from, to)
+		var d := near.distance_to(np)
+		# Against the target's *surface*, not its origin. A destroyer is a
+		# hundred and fifty five metres long with its origin amidships, so a
+		# Sidewinder arriving at the bow was seventy metres from the point this
+		# used to measure — far outside any fuse radius. It flew through the
+		# ship and went off in the sea beyond, and the same arithmetic quietly
+		# under-fused every large target in the game.
+		var gap: float = d
+		if n.has_method("surface_gap"):
+			gap = n.surface_gap(near)
+		elif n.has_method("hit_radius"):
+			gap = d - n.hit_radius()
+		if gap < best_gap:
+			best_gap = gap
+			best = n
+	# ...and always the thing it was actually sent at, even when that is not a
+	# radar contact. An interceptor is fired at a missile, and a missile is
+	# deliberately not in the contact list.
+	if is_instance_valid(target) and not target.is_in_group("hittable") \
+			and target.has_method("hit_radius"):
+		var tp2: Vector3 = target.global_position
+		var d2 := Geometry3D.get_closest_point_to_segment(tp2, from, to).distance_to(tp2)
+		var gap2: float = d2 - float(target.call("hit_radius"))
+		if gap2 < best_gap:
+			best_gap = gap2
+			best = target
+	if best == null or best_gap >= float(ws["fuse"]):
+		_last_gap = 1e9
+		return false
+	# Hold for the closest approach. Going off the instant the target came
+	# inside the envelope meant a round always detonated at the far edge of its
+	# own fuse radius and never actually struck what it was aimed at. Each step
+	# already measures the closest point on the length travelled, so once that
+	# stops shrinking the pass is over. Not held past the surface, though --
+	# there is nothing on the other side of it to wait for.
+	# only held while there is somewhere left to go: the step that would put the
+	# round through the surface is the last chance it gets
+	var sea: float = maxf(Sim.height_at(to.x, to.z), Sim.WATER_LEVEL)
+	if best == target and best_gap > 1.5 and best_gap < _last_gap - 0.05 \
+			and to.y > sea:
+		_last_gap = best_gap
+		return false
+	# the gap to the skin, which is what the fuse just measured
+	_hit(best, maxf(best_gap, 0.0))
+	return true
 
 ## Where a bomb goes on aiming at once whatever it was following has gone. A
 ## laser spot is a *place*: the second and third rounds of a salvo were losing
@@ -210,8 +294,12 @@ func _guide(delta: float) -> void:
 		tvel = target.linear_velocity
 
 	# IR seekers can be spoofed by flares
-	if ws["flare_bait"] > 0.0 and target.has_method("flare_active") and target.flare_active():
-		if randf() < ws["flare_bait"] * delta * 2.0:
+	# Not every entry carries one: the hypersonics and the re-entry vehicles
+	# have no infrared seeker to spoof, and reading the key straight threw on
+	# every guidance tick the moment one of them was in the air.
+	var bait: float = float(ws.get("flare_bait", 0.0))
+	if bait > 0.0 and target.has_method("flare_active") and target.flare_active():
+		if randf() < bait * delta * 2.0:
 			target = null
 			return
 	# and radar seekers by chaff, which until now nothing carried: a radar round
@@ -223,7 +311,13 @@ func _guide(delta: float) -> void:
 	# is why anyone being shot at by a radar missile goes low, and until now it
 	# bought nothing at all: the seeker tracked a target at fifty feet exactly
 	# as well as one at forty thousand.
-	if String(ws["kind"]) == "radar":
+	# Clutter is about picking an aeroplane out of the ground behind it. A round
+	# aimed at something that *is* on the ground is not competing with clutter —
+	# it is looking at the thing the clutter is made of — so applying this to
+	# air-to-ground weapons dropped every Maverick's lock a couple of seconds
+	# after launch and put it in the dirt.
+	if String(ws["kind"]) == "radar" and target is Aircraft \
+			and not bool(ws.get("anti_radiation", false)):
 		var tgt_agl: float = tpos.y - Sim.height_at(tpos.x, tpos.z)
 		var look_down: float = clampf((global_position.y - tpos.y) / 900.0, 0.0, 1.0)
 		var low: float = 1.0 - smoothstep(120.0, 1400.0, tgt_agl)
@@ -247,6 +341,23 @@ func _guide(delta: float) -> void:
 				print("[msl] %s decoyed by chaff at age %.1f" % [wid, age])
 			target = null
 			return
+	# A lofted midcourse, applied before the line of sight is taken — putting it
+	# after was the same as not having it at all, since proportional navigation
+	# steers on `los` and never looks at the target position again.
+	#
+	# PN flies the shortest path to an intercept, which for a ballistic round
+	# sent twenty kilometres means nosing over off the rail, throwing away the
+	# loft it launched with and arriving flat — into whatever high ground is in
+	# the way. Measured: into a mountain six kilometres short. Aiming high and
+	# letting the aim point come down as it closes keeps the arc.
+	if bool(ws.get("loft", false)):
+		var flat_d := Vector2(tpos.x - global_position.x,
+			tpos.z - global_position.z).length()
+		# Tapered off over the last few kilometres so the round comes down onto
+		# the target rather than being carried past it: aiming high all the way
+		# in overshot by seven kilometres.
+		var taper: float = clampf((flat_d - 3000.0) / 7000.0, 0.0, 1.0)
+		tpos.y += clampf(flat_d * 0.35, 0.0, 20000.0) * taper
 	var los := tpos - global_position
 	var dist := los.length()
 	if dist < _min_d:
@@ -258,10 +369,24 @@ func _guide(delta: float) -> void:
 	# round already in the air is a real defence and it did nothing: the missile
 	# tracked straight through the hill. Checked a few times a second rather
 	# than every frame — it is a ray march, and there can be a lot of rounds up.
+	# Only for a round homing on something that has to be *seen*. A weapon
+	# flying to a coordinate does not care what is between it and the place —
+	# and a lofted ballistic shot at a target twenty kilometres away has the
+	# whole horizon in the way by definition. This dropped the submarine's
+	# strategic round nine tenths of a second off the rail, every time, and it
+	# then flew on unguided and hit nothing.
+	# ...and a cruise weapon is exactly that. It runs in at thirty metres with
+	# the target behind the ground it is hugging, so it is masked by definition
+	# from the moment it lets down — and being masked returned out of here
+	# before any guidance ran at all, which left it with no lift and nothing but
+	# gravity. It went into the deck twelve kilometres short, every time, with
+	# the mountain it was supposed to cross still ahead of it.
+	var is_cruise: bool = String(ws["kind"]) == "cruise"
+	var homes_on_a_thing: bool = (target is Aircraft or target is Tank) and not is_cruise
 	_mask_check -= delta
 	if _mask_check <= 0.0:
 		_mask_check = 0.25
-		_masked = not Sim.line_of_sight(global_position, tpos)
+		_masked = homes_on_a_thing and not Sim.line_of_sight(global_position, tpos)
 	if _masked:
 		_seek_lost += delta
 		if _seek_lost > 0.6:
@@ -289,6 +414,109 @@ func _guide(delta: float) -> void:
 	var omega := los.cross(rel) / maxf(los.length_squared(), 1.0)
 	var closing := -rel.dot(los / dist)
 	var accel := omega.cross(vel) * N_GAIN
+	if bool(ws.get("loft", false)):
+		# A ballistic round flies an arc, it does not run an intercept. Point
+		# the velocity vector at the aim point and let the loft above bend the
+		# arc: proportional navigation leads a *moving* target, and leading a
+		# patch of ground at Mach four simply carried it four kilometres past.
+		var lv := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
+		accel = ((tpos - global_position).normalized() - lv) \
+			* maxf(vel.length(), 120.0) * 1.1
+	if String(ws["kind"]) == "cruise":
+		# Sea skimming. A cruise missile does not fly the line to its target: it
+		# runs in on the deck, under the horizon of anything looking for it, and
+		# only comes up at the very end. Steering straight at a ship from
+		# altitude would be a much easier thing to shoot down and would waste
+		# the whole point of a weapon with two minutes of fuel.
+		var pop: float = float(ws.get("pop", 2600.0))
+		var deck: float = float(ws.get("cruise_alt", 30.0))
+		# Lead the ship. Steering at where it is now leaves the round chasing a
+		# moving deck: at four hundred metres a second over the last two and a
+		# half kilometres a corvette travels most of its own length, and the
+		# warhead went off eight metres off the side instead of against it.
+		var lead: Vector3 = tpos
+		var tv := Vector3.ZERO
+		if "linear_velocity" in target:
+			tv = target.linear_velocity
+		elif target.has_method("get_velocity"):
+			tv = target.call("get_velocity")
+		if tv.length_squared() > 0.01:
+			var tof: float = dist / maxf(vel.length(), 60.0)
+			lead += tv * minf(tof, 14.0)
+		# Terrain following, and it has to look at the ground it is about to
+		# cross rather than at one point in the distance. Reading the height at
+		# a waypoint eighteen hundred metres ahead and flying the straight line
+		# to it puts the round through every ridge standing between the two: at
+		# sea that never shows, and over land it hit the first hill it met.
+		# Along the ground track, not the line of sight. Released high above a
+		# target at sea level the sight line points steeply down, so a waypoint
+		# "1755 m ahead" along it was barely ahead at all in plan -- the
+		# terrain samples covered a few hundred metres of ground and the
+		# let-down had almost no horizontal distance to happen over.
+		var step: Vector3 = Vector3(lead.x - global_position.x, 0.0,
+			lead.z - global_position.z)
+		step = step.normalized() if step.length() > 1.0 \
+			else -global_transform.basis.z
+		# Two distances, and they are not the same thing. How far ahead the
+		# round has to *see* is set by how long it takes to do anything about
+		# what it finds -- four and a half seconds of flight. How far ahead it
+		# steers is limited by the target. Using one number for both collapsed
+		# the horizon to a couple of hundred metres just as the round reached
+		# the pop-up range, so it ran at the last hill with no warning at all.
+		var sense: float = clampf(vel.length() * 4.5, 700.0, 2600.0)
+		var look: float = sense
+		if dist > pop:
+			look = minf(sense, maxf(dist - pop, 300.0))
+		var clear := -1e9
+		var probes := 9
+		for k in probes + 1:
+			var q: Vector3 = global_position + step * (sense * float(k) / float(probes))
+			clear = maxf(clear, maxf(Sim.height_at(q.x, q.z), Sim.WATER_LEVEL))
+		var aim := lead
+		if dist > pop:
+			var ahead: Vector3 = global_position + step * look
+			# Let down at a sensible angle. The waypoint is eighteen hundred
+			# metres ahead and the cruise height is thirty, so from a release at
+			# three thousand the round was pointed fifty-nine degrees at the
+			# ground -- and at four hundred metres a second it cannot pull out
+			# of that. It went in twelve kilometres short of the target with the
+			# mountain still ahead of it.
+			var floor_y: float = clear + deck
+			var above: float = global_position.y - floor_y
+			# Eased onto the cruise height, not driven at it. A steady
+			# twenty degree let-down arrives at thirty metres still going down
+			# at a hundred and thirty metres a second, and arresting that takes
+			# eighty metres it does not have -- so it flew through the cruise
+			# height and into the ground. Letting the descent shrink with the
+			# height still to lose gives it a flare instead of an arrival.
+			# Aim a fraction of the way down to the cruise height, so the
+			# let-down eases off as it arrives instead of driving through it.
+			# Scaling by the height it could still pull out of looks more
+			# principled and is wrong: the waypoint is most of two kilometres
+			# ahead and the round steers at it the whole way, so it does not
+			# get to use that pull-out and simply flew into the deck.
+			# The constant is what stops the fraction asymptoting: without it
+			# the descent halves for ever and a sea skimmer never gets down,
+			# which left one cruising in at six hundred metres.
+			var glide: float = minf(look * 0.36, above * 0.45 + 18.0)
+			var want_y: float = maxf(floor_y, global_position.y - glide)
+			aim = Vector3(ahead.x, want_y, ahead.z)
+		elif dist > 900.0 and aim.y < clear + deck * 0.35:
+			# Even on the run in: a target in the next valley is still behind a
+			# ridge, and diving at it from here means diving into the ridge.
+			# Inside the last kilometre it commits: a target sitting on the
+			# high ground *is* the highest thing ahead, and holding a floor
+			# above it flew the round over its head by a hundred and fifty
+			# metres.
+			aim = Vector3(aim.x, clear + deck * 0.35, aim.z)
+		var cv := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
+		var cw := (aim - global_position).normalized()
+		accel = (cw - cv) * maxf(vel.length(), 80.0) * 2.0 + Vector3.UP * 9.81
+		var cg: float = ws["max_g"] * 9.81
+		if accel.length() > cg:
+			accel = accel.normalized() * cg
+		vel += accel * delta
+		return
 	if ws["kind"] == "bomb":
 		# A guided bomb points at the target and lets gravity do the rest. It
 		# steers the *direction* of its velocity onto the line of sight and
@@ -361,7 +589,11 @@ func _guide(delta: float) -> void:
 ## Keep flying the last place the target was, for a weapon that is aimed at
 ## the ground rather than at a thing. A missile has nothing to coast to.
 func _coast_to_mark(_delta: float) -> void:
-	if String(ws["kind"]) != "bomb" or _last_aim == Vector3.INF:
+	# Bombs and cruise weapons both aim at a place. A cruise missile whose ship
+	# is sunk by somebody else on the way in should still arrive; it used to
+	# carry straight on and hit the sea.
+	var k := String(ws["kind"])
+	if (k != "bomb" and k != "cruise") or _last_aim == Vector3.INF:
 		return
 	var v_dir := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
 	var want_dir := (_last_aim - global_position).normalized()
@@ -371,9 +603,74 @@ func _coast_to_mark(_delta: float) -> void:
 		accel = accel.normalized() * g_max
 	vel += accel * _delta
 
+var _last_gap := 1e9
+var _mark_best := 1e9
+var _split := false
+
+
+## Let the load go. Each child is thrown off the bus with a little sideways
+## velocity, so by the time they are down they cover a footprint rather than
+## all arriving at the same point — which would be a very expensive way of
+## building one crater.
+func _open_up() -> void:
+	if _split:
+		return
+	_split = true
+	var _kids: Array = []
+	var count: int = int(ws.get("mirv", 0))
+	var child: String = String(ws.get("mirv_child", ""))
+	if count <= 0 or child == "":
+		return
+	var spread: float = float(ws.get("mirv_spread", 400.0))
+	# how long the children have left to fall decides how much sideways speed
+	# it takes to cover the footprint
+	var bed: float = maxf(Sim.height_at(global_position.x, global_position.z),
+		Sim.WATER_LEVEL)
+	var fall: float = sqrt(maxf(2.0 * maxf(global_position.y - bed, 10.0) / 9.81, 0.5))
+	var lateral: float = spread / maxf(fall, 0.5)
+	var fwd := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
+	var right := fwd.cross(Vector3.UP).normalized()
+	if right.length_squared() < 0.1:
+		right = Vector3.RIGHT
+	var up := right.cross(fwd).normalized()
+	for i in count:
+		var a := TAU * float(i) / float(count) + randf() * 0.3
+		var rad: float = lerpf(0.35, 1.0, randf())
+		var kick: Vector3 = (right * cos(a) + up * sin(a)) * lateral * rad
+		var m := Missile.new()
+		var dir: Vector3 = (vel + kick).normalized()
+		var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
+		var xf := Transform3D(Basis.looking_at(dir, up_ref), global_position)
+		m.launch(child, xf, vel + kick, shooter, target)
+		m.team = team
+		get_tree().current_scene.add_child(m)
+		_kids.append(m)
+	# Hand the camera on. The bus frees itself here, so anything riding it lost
+	# its subject the moment the load went — the view cut back to the launcher
+	# and you never saw the warheads arrive, which reads as the round simply
+	# never landing.
+	var scn := get_tree().current_scene
+	if scn != null and scn.has_method("hand_weapon_cam") and not _kids.is_empty():
+		scn.call("hand_weapon_cam", self, _kids[0])
+	if Sim.debug_weapons:
+		print("[msl] %s opened at %.0f m: %d x %s over about %.0f m" % [
+			wid, global_position.y - bed, count, child, spread])
+	Effects.explosion(get_tree().current_scene, global_position, 5.0, false)
+	queue_free()
+
+
+
 func _hit(what: Node, miss := 0.0) -> void:
-	# a detonation out at the edge of the fuse envelope only peppers the target
-	var falloff: float = clampf(1.0 - miss / maxf(ws["fuse"], 0.1), 0.22, 1.0)
+	# A detonation out at the edge of the envelope only peppers the target. Two
+	# things were wrong with the arithmetic. The miss handed in was measured to
+	# the target's origin while the fuse that triggered it was measured to the
+	# skin, so against anything large the two disagreed by the length of the
+	# ship. And scaling by the fuse radius meant a round always went off close
+	# to the edge of its own fuse envelope and therefore always did the floor:
+	# a Harpoon against a corvette took a tenth of its hull off. The warhead's
+	# lethal radius is what the falloff belongs to.
+	var reach: float = float(ws.get("lethal", maxf(float(ws["fuse"]), 1.0)))
+	var falloff: float = clampf(1.0 - miss / maxf(reach, 0.1), 0.22, 1.0)
 	if what.has_method("take_hit"):
 		what.take_hit(ws["damage"] * falloff, _from_who())
 	if shooter and shooter.has_method("on_weapon_hit"):
@@ -424,9 +721,24 @@ func _die(big: bool) -> void:
 				if dd2 < near:
 					near = dd2
 					nn = str(n.name)
-		print("[msl] %s died at age %.1f, %.0f m/s, closest %s at %.1f m (fuse %.1f), best pass %.1f m at age %.1f" % [
-			wid, age, vel.length(), nn, near, float(ws["fuse"]), _min_d, _min_age])
-	if ws["kind"] == "bomb" and Sim.salvo_watch:
+		var skin := -1.0
+		for n in get_tree().get_nodes_in_group("hittable"):
+			if is_instance_valid(n) and str(n.name) == nn and n.has_method("surface_gap"):
+				skin = n.call("surface_gap", global_position)
+		print("[msl] %s died at age %.1f, %.0f m/s, closest %s at %.1f m (%.1f m off its hull, fuse %.1f), best pass %.1f m at age %.1f" % [
+			wid, age, vel.length(), nn, near, skin, float(ws["fuse"]), _min_d, _min_age])
+	if Sim.salvo_watch and wid == Sim.salvo_weapon:
+		var hitname := "—"
+		var hitd := 1e9
+		for n in get_tree().get_nodes_in_group("hittable"):
+			if not is_instance_valid(n) or n == shooter:
+				continue
+			var dd: float = n.global_position.distance_to(global_position)
+			var rr: float = n.hit_radius() if n.has_method("hit_radius") else 0.0
+			if dd - rr < hitd:
+				hitd = dd - rr
+				hitname = "%s (gap %.0f m, radius %.0f)" % [Sim.label_of(n), dd - rr, rr]
+		Sim.salvo_log.append("nearest hittable at death: %s" % hitname)
 		var gh: float = Sim.height_at(global_position.x, global_position.z)
 		Sim.salvo_log.append("%s died at %.1fs, %.0f m from the mark, at %s — %.0f m above the ground there, %.0f m/s" % [
 			wid, age, global_position.distance_to(Sim.salvo_mark)
@@ -454,7 +766,15 @@ func _die(big: bool) -> void:
 		for n in get_tree().get_nodes_in_group("hittable"):
 			if not is_instance_valid(n) or not n.has_method("take_hit"):
 				continue
+			# Measured to the hull, not to the middle of it. Against a ninety
+			# metre ship the centre is forty-five metres from a hit on the bow,
+			# so a Harpoon that went off against the side of a corvette was
+			# scored as a distant near miss and took a tenth of its hull off.
 			var d: float = n.global_position.distance_to(global_position)
+			if n.has_method("surface_gap"):
+				d = maxf(n.surface_gap(global_position), 0.0)
+			elif n.has_method("hit_radius"):
+				d = maxf(d - n.hit_radius(), 0.0)
 			if d < lethal:
 				n.take_hit(float(ws["damage"]) * clampf(1.0 - d / lethal, 0.15, 1.0), _from_who())
 				hit += 1
@@ -481,3 +801,20 @@ func get_velocity() -> Vector3:
 
 func _enter_tree() -> void:
 	add_to_group("missiles")
+	# Something a surface-to-air round can be sent after. Deliberately not
+	# "hittable": that group is the radar picture and the lock list, and every
+	# round in the air would clutter both. An interceptor reaches its target
+	# through the fuse's "always the thing it was sent at" path instead.
+	add_to_group("interceptable")
+
+## A missile is a thin-skinned thing at close range: anything that reaches it
+## kills it.
+func is_alive() -> bool:
+	return not dead
+
+func hit_radius() -> float:
+	return 2.5
+
+func take_hit(_amount: float, _from: Node = null) -> void:
+	if not dead:
+		_die(true)

@@ -241,7 +241,11 @@ static func build(spec: Dictionary) -> Dictionary:
 		var nst_local := MeshKit.begin() if vector_nozzles else nst
 		if round_nozzle:
 			# convergent-divergent can: shroud, feathered petals, then the throat
-			MeshKit.cone(nst_local, nr * 1.16, nr * 1.10, -1.7, -0.55, n, 14, false)
+			# capped: the shroud was a tube open at both ends, so between the
+			# petals and the burner cone there was a ring you saw straight
+			# through the aeroplane by. Both caps are hidden, one in the
+			# fuselage and one behind the burner.
+			MeshKit.cone(nst_local, nr * 1.16, nr * 1.10, -1.7, -0.55, n, 14, true)
 			var petals := 12
 			for i in petals:
 				var a0 := TAU * float(i) / float(petals)
@@ -280,7 +284,16 @@ static func build(spec: Dictionary) -> Dictionary:
 	MeshKit.cone(nst, 0.05, 0.005, 0.0, -1.1, Vector3(0, sections[0][3], sections[0][0]), 6)
 	root.add_child(MeshKit.mi(MeshKit.finish(nst, mat_dark), "Nozzles"))
 
-	var glow_mat := MeshKit.mat(Color(0.05, 0.03, 0.02), 0.4, 0.0, Color(0.55, 0.16, 0.05))
+	# A high-bypass turbofan has no reheat, so nothing in its exhaust glows. The
+	# afterburner *plume* was already suppressed for these, but the cone inside
+	# the nozzle was lit regardless and `_animate` drives it to seven times
+	# emission at full throttle — so the A-10 still had two orange afterburners
+	# out of engines that physically cannot light one.
+	var has_reheat: bool = float(spec.get("thrust_ab", 0.0)) \
+		> float(spec.get("thrust_mil", 1.0)) * 1.04
+	var glow_mat: StandardMaterial3D = MeshKit.mat(Color(0.05, 0.03, 0.02), 0.4, 0.0,
+		Color(0.55, 0.16, 0.05)) if has_reheat \
+		else MeshKit.mat(Color(0.045, 0.045, 0.05), 0.75, 0.05)
 	for n in nozzles:
 		var gst := MeshKit.begin()
 		MeshKit.cone(gst, nr * 0.72, nr * 0.30, -0.5, 0.5, Vector3.ZERO, 12, true)
@@ -294,7 +307,9 @@ static func build(spec: Dictionary) -> Dictionary:
 					break
 		gmi.position = Vector3.ZERO if host != root else n
 		host.add_child(gmi)
-		out["burners"].append(gmi)
+		# only a reheated engine is handed to the animation to be lit
+		if has_reheat:
+			out["burners"].append(gmi)
 
 	# Afterburner plume. A flat additive cone just reads as a grey paper cone, so
 	# this shades along the axis: white hot at the throat, through the blue
@@ -332,7 +347,8 @@ void fragment() {
 	flame_mat.shader = flame_sh
 	flame_mat.set_shader_parameter("plume_len", 4.2)
 	flame_mat.set_shader_parameter("heat", 1.0)
-	for n in nozzles:
+	# no reheat, no plume either
+	for n in (nozzles if has_reheat else []):
 		var fst := MeshKit.begin()
 		MeshKit.cone(fst, nr * 0.80, 0.03, 0.0, 4.2, Vector3.ZERO, 8, false)
 		var fmi := MeshKit.mi(MeshKit.finish(fst, flame_mat.duplicate()), "AB")
@@ -399,6 +415,9 @@ void fragment() {
 			root.add_child(MeshKit.mi(MeshKit.finish(pst, mat_paint), "Nacelle"))
 			var fst2 := MeshKit.begin()
 			MeshKit.cone(fst2, pr * 0.80, pr * 0.20, -pl * 0.42, -pl * 0.18, pp, 12, true)
+			# turbine bullet in the tailpipe. Without it the nacelle was a tube
+			# open at the back and you could see through the engine.
+			MeshKit.cone(fst2, pr * 0.74, pr * 0.26, pl * 0.5, pl * 0.28, pp, 12, true)
 			root.add_child(MeshKit.mi(MeshKit.finish(fst2, mat_dark), "FanFace"))
 
 	# ------------------------------------------------------- side firing battery
@@ -530,8 +549,11 @@ void fragment() {
 			out["parts"]["canard_" + ("r" if cside > 0 else "l")] = pivot
 
 	# ---------------------------------------------------------------- stabilators
-	var stb: Dictionary = sh["stab"]
-	var poly: Array = stb["poly"]
+	# Optional. A flying wing has no tailplane at all: it trims and controls on
+	# elevons along its own trailing edge, and asking for a stabilator it does
+	# not have would only put one there.
+	var stb: Dictionary = sh.get("stab", {})
+	var poly: Array = stb.get("poly", [])
 	var zmin := 1e9
 	var zmax := -1e9
 	var xr := 1e9
@@ -539,17 +561,18 @@ void fragment() {
 		zmin = minf(zmin, p.y)
 		zmax = maxf(zmax, p.y)
 		xr = minf(xr, p.x)
-	var hinge_z := lerpf(zmin, zmax, 0.42)
-	for side in [1.0, -1.0]:
-		var pivot := Node3D.new()
-		pivot.name = "Stab" + ("R" if side > 0 else "L")
-		pivot.position = Vector3(xr * side, stb["y"], hinge_z)
-		var sst := MeshKit.begin()
-		_add_planform(sst, stb, side, Vector3(-xr * side, -stb["y"], -hinge_z))
-		pivot.add_child(MeshKit.mi(MeshKit.finish(sst, mat_paint), "Mesh"))
-		root.add_child(pivot)
-		out["stabs"].append(pivot)
-		out["parts"]["stab_" + ("r" if side > 0 else "l")] = pivot
+	if not poly.is_empty():
+		var hinge_z := lerpf(zmin, zmax, 0.42)
+		for side in [1.0, -1.0]:
+			var pivot := Node3D.new()
+			pivot.name = "Stab" + ("R" if side > 0 else "L")
+			pivot.position = Vector3(xr * side, stb["y"], hinge_z)
+			var sst := MeshKit.begin()
+			_add_planform(sst, stb, side, Vector3(-xr * side, -stb["y"], -hinge_z))
+			pivot.add_child(MeshKit.mi(MeshKit.finish(sst, mat_paint), "Mesh"))
+			root.add_child(pivot)
+			out["stabs"].append(pivot)
+			out["parts"]["stab_" + ("r" if side > 0 else "l")] = pivot
 
 	# ---------------------------------------------------------------- gear
 	var mat_strut := MeshKit.mat(Color(0.62, 0.64, 0.66), 0.35, 0.85)
@@ -813,13 +836,26 @@ static func _add_intake(st: SurfaceTool, at: Vector3, size: Vector3, yaw: float,
 			var rz: float = lx * sin(yaw) + lz * cos(yaw)
 			out.append(at + Vector3(rx, ly, rz))
 		rings.append(out)
-	MeshKit.loft(st, rings, at, false, false)
+	# Close the aft end. The duct was lofted open at both ends, so where it runs
+	# into the fuselage there was a hole straight into the airframe: a ray that
+	# found it came out the far side and you looked through the aeroplane. The
+	# cap is buried in the fuselage and never seen.
+	MeshKit.loft(st, rings, at, false, true)
 	# inlet face: a dark recessed cap just inside the lip
 	var cap: PackedVector3Array = rings[0]
 	var sunk := PackedVector3Array()
 	for pt in cap:
 		sunk.append(pt + Vector3(sin(yaw), 0, cos(yaw)) * (length * 0.30))
 	MeshKit.loft(st, [cap, sunk], at, false, true)
+	# and a liner just inside it. The well was a single skin facing outward, so
+	# looking into the intake from an angle you saw nothing at all where its far
+	# wall should be and the sky came through the side of the aeroplane.
+	var lin_a := PackedVector3Array()
+	var lin_b := PackedVector3Array()
+	for k in cap.size():
+		lin_a.append(at + (cap[k] - at) * 0.985)
+		lin_b.append(at + (sunk[k] - at) * 0.985)
+	MeshKit.loft(st, [lin_a, lin_b], at, false, false, true)
 	# boundary layer splitter between the duct and the fuselage
 	var sp := PackedVector2Array([
 		Vector2(-length * 0.48, -hh * 0.9), Vector2(length * 0.35, -hh * 0.75),

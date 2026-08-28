@@ -147,9 +147,349 @@ func build() -> void:
 	_windfarm()
 	_utility_props()
 	_scatter_nature()
+	_town_detail()
+	_landmarks()
 	_home_base()
 	if OS.is_debug_build():
 		print("[scenery] ", _stats)
+
+# -------------------------------------------------------------- town detail
+## Street furniture: the things you only see when you are down among them.
+## Drawn with a visibility range so they cost nothing from the air — a town is
+## a grey smudge from twenty thousand feet and a place with lamp posts and
+## planters in it when you are taxiing through, which is the whole point.
+##
+## What gets built is chosen by the country the town stands in and the biome
+## around it, so a town in the desert does not get the same street trees as one
+## in the pine forest, and the paint changes with the border.
+const PROP_FADE := 520.0
+
+func _town_detail() -> void:
+	var made := 0
+	for t in sites:
+		var c: Vector2 = t["c"]
+		var r: float = float(t["r"])
+		var faction: String = Sim.region_faction(c.x, c.y)
+		var ground: float = Sim.height_at(c.x, c.y)
+		var biome: String = Sim.biome_kind(c.x, c.y, ground,
+			Sim.normal_at(c.x, c.y).y)
+		var lamp: Array = []
+		var seat: Array = []
+		var kiosk: Array = []
+		var planter: Array = []
+		for seg in _streets:
+			var a: Vector2 = seg[0]
+			var b: Vector2 = seg[1]
+			if a.distance_to(c) > r * 1.2 and b.distance_to(c) > r * 1.2:
+				continue
+			var run := a.distance_to(b)
+			if run < 40.0:
+				continue
+			var dir := (b - a) / run
+			var side := Vector2(-dir.y, dir.x)
+			var step := 38.0
+			var n := int(run / step)
+			for i in range(1, n):
+				var along: float = float(i) * step
+				for sx in [-1.0, 1.0]:
+					var q: Vector2 = a + dir * along + side * (sx * 9.5)
+					var gy: float = Terrain.surface_height(q.x, q.y)
+					if gy < Sim.WATER_LEVEL + 1.0:
+						continue
+					var xf := Transform3D(Basis(Vector3.UP,
+						atan2(dir.x, -dir.y)), Vector3(q.x, gy, q.y))
+					if i % 2 == 0:
+						lamp.append(xf)
+					elif i % 5 == 1:
+						seat.append(xf)
+					elif i % 7 == 3:
+						planter.append(xf)
+					elif i % 11 == 5:
+						kiosk.append(xf)
+		var tone: Color = Sim.faction_colour(faction)
+		made += _detail_batch(_lamp_mesh(tone), lamp, "Lamps_%s" % String(t["name"]))
+		made += _detail_batch(_seat_mesh(tone, biome), seat, "Seats_%s" % String(t["name"]))
+		made += _detail_batch(_kiosk_mesh(tone, faction), kiosk,
+			"Kiosks_%s" % String(t["name"]))
+		made += _detail_batch(_planter_mesh(tone, biome), planter,
+			"Planters_%s" % String(t["name"]))
+		_stats["town_faction_" + faction] = int(_stats.get("town_faction_" + faction, 0)) + 1
+	_stats["street_props"] = made
+
+func _detail_batch(mesh: Mesh, xforms: Array, nm: String) -> int:
+	if xforms.is_empty() or mesh == null:
+		return 0
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = nm
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = mesh
+	mm.instance_count = xforms.size()
+	for i in xforms.size():
+		mm.set_instance_transform(i, xforms[i])
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# the LOD itself: nothing at all beyond half a kilometre
+	mmi.visibility_range_end = PROP_FADE
+	mmi.visibility_range_end_margin = 90.0
+	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	add_child(mmi)
+	return xforms.size()
+
+func _lamp_mesh(tone: Color) -> ArrayMesh:
+	var st := MeshKit.begin()
+	MeshKit.cone(st, 0.09, 0.06, 0.0, 5.4, Vector3.ZERO, 6, true)
+	MeshKit.box(st, Vector3(0.14, 0.10, 1.1), Vector3(0, 5.4, -0.45))
+	MeshKit.box(st, Vector3(0.34, 0.16, 0.62), Vector3(0, 5.28, -0.95))
+	return MeshKit.finish(st, MeshKit.mat(tone.darkened(0.45), 0.6, 0.35))
+
+func _seat_mesh(tone: Color, biome: String) -> ArrayMesh:
+	var st := MeshKit.begin()
+	# stone in the dry country, timber where there are trees to cut
+	var stone: bool = biome == "desert" or biome == "rock"
+	MeshKit.box(st, Vector3(1.9, 0.14, 0.52), Vector3(0, 0.46, 0))
+	if stone:
+		MeshKit.box(st, Vector3(1.9, 0.42, 0.44), Vector3(0, 0.21, 0))
+	else:
+		for sx in [-0.75, 0.75]:
+			MeshKit.box(st, Vector3(0.10, 0.44, 0.44), Vector3(sx, 0.22, 0))
+		MeshKit.box(st, Vector3(1.9, 0.44, 0.10), Vector3(0, 0.72, 0.21))
+	var col: Color = Color(0.62, 0.60, 0.56) if stone else Color(0.40, 0.28, 0.17)
+	return MeshKit.finish(st, MeshKit.mat(col.lerp(tone, 0.25), 0.8, 0.0))
+
+func _kiosk_mesh(tone: Color, faction: String) -> ArrayMesh:
+	var st := MeshKit.begin()
+	MeshKit.box(st, Vector3(2.2, 2.6, 1.9), Vector3(0, 1.3, 0))
+	match faction:
+		"russia", "china":
+			# a flat canopy on posts, which is what a street kiosk looks like there
+			MeshKit.box(st, Vector3(3.0, 0.14, 2.6), Vector3(0, 2.72, 0))
+		"uk", "usa":
+			# a pitched roof and a hanging sign
+			MeshKit.cone(st, 1.7, 0.1, 2.6, 3.5, Vector3.ZERO, 4, true)
+			MeshKit.box(st, Vector3(1.3, 0.5, 0.08), Vector3(0, 2.1, -1.0))
+		_:
+			# an awning, angled out over the front
+			MeshKit.box(st, Vector3(2.6, 0.10, 1.5), Vector3(0, 2.5, -1.2))
+	return MeshKit.finish(st, MeshKit.mat(tone.lightened(0.12), 0.7, 0.05))
+
+func _planter_mesh(tone: Color, biome: String) -> ArrayMesh:
+	var st := MeshKit.begin()
+	MeshKit.cone(st, 0.75, 0.62, 0.0, 0.75, Vector3.ZERO, 8, true)
+	match biome:
+		"desert":
+			# a palm: a bare stem and a crown
+			MeshKit.cone(st, 0.13, 0.09, 0.75, 4.4, Vector3.ZERO, 6, true)
+			for k in 6:
+				var a := TAU * float(k) / 6.0
+				MeshKit.box(st, Vector3(2.0, 0.07, 0.34),
+					Vector3(cos(a) * 0.9, 4.3, sin(a) * 0.9))
+		"snow", "rock":
+			MeshKit.cone(st, 0.9, 0.05, 0.75, 3.8, Vector3.ZERO, 7, true)
+		_:
+			MeshKit.cone(st, 0.16, 0.11, 0.75, 2.6, Vector3.ZERO, 6, true)
+			MeshKit.cone(st, 1.25, 0.2, 2.4, 4.6, Vector3.ZERO, 8, true)
+	return MeshKit.finish(st, MeshKit.mat(tone.lerp(Color(0.22, 0.36, 0.18), 0.6),
+		0.85, 0.0))
+
+# ---------------------------------------------------------------- landmarks
+## Something to fly at. The map runs to six hundred kilometres and almost all of
+## it is empty ground; these give it places, and each one tells you whose
+## country you are over. Every one is built out of the same primitives as the
+## rest of the scenery, sited on the drawn surface so it does not float, and put
+## far enough out that reaching one is a trip rather than a taxi.
+const LANDMARKS := [
+	{"id": "eiffel",   "name": "Iron Tower",       "faction": "france",
+	 "at": Vector2(-88000.0, -132000.0), "h": 324.0},
+	{"id": "clock",    "name": "Great Clock",      "faction": "uk",
+	 "at": Vector2(-141000.0, -61000.0), "h": 96.0},
+	{"id": "liberty",  "name": "Liberty",          "faction": "usa",
+	 "at": Vector2(-163000.0, 44000.0), "h": 93.0},
+	{"id": "onion",    "name": "Onion Domes",      "faction": "russia",
+	 "at": Vector2(-38000.0, -258000.0), "h": 65.0},
+	{"id": "pagoda",   "name": "Great Pagoda",     "faction": "china",
+	 "at": Vector2(-212000.0, -119000.0), "h": 74.0},
+	{"id": "wall",     "name": "The Long Wall",    "faction": "china",
+	 "at": Vector2(-188000.0, -156000.0), "h": 9.0},
+	{"id": "pyramid",  "name": "Great Pyramid",    "faction": "civil",
+	 "at": Vector2(-47000.0, 197000.0), "h": 139.0},
+	{"id": "minaret",  "name": "Blue Minarets",    "faction": "iran",
+	 "at": Vector2(-186000.0, 118000.0), "h": 58.0},
+	{"id": "opera",    "name": "Harbour Shells",   "faction": "civil",
+	 "at": Vector2(-96000.0, 268000.0), "h": 65.0},
+	{"id": "colossus", "name": "Standing Colossus", "faction": "civil",
+	 "at": Vector2(-238000.0, -204000.0), "h": 108.0},
+]
+
+func _landmarks() -> void:
+	var built := 0
+	for lm in LANDMARKS:
+		# On the surface as drawn, and never in the sea. Half of them fell in
+		# the water on the first try, so rather than drop those, walk a spiral
+		# out from where it was wanted until there is dry ground under it.
+		var at: Vector2 = lm["at"]
+		var g: float = Terrain.surface_height(at.x, at.y)
+		if g < Sim.WATER_LEVEL + 6.0:
+			var found := false
+			for ring in range(1, 60):
+				var step: float = float(ring) * 2500.0
+				for k in 12:
+					var a := TAU * float(k) / 12.0
+					var q := at + Vector2(cos(a), sin(a)) * step
+					if absf(q.x) > Sim.WORLD_HALF or absf(q.y) > Sim.WORLD_HALF:
+						continue
+					var gg: float = Terrain.surface_height(q.x, q.y)
+					if gg >= Sim.WATER_LEVEL + 6.0:
+						at = q
+						g = gg
+						found = true
+						break
+				if found:
+					break
+			if not found:
+				push_warning("landmark %s found no dry ground near %s"
+					% [String(lm["name"]), str(at.round())])
+				continue
+		var node := _landmark_mesh(String(lm["id"]), float(lm["h"]),
+			Sim.faction_colour(String(lm["faction"])))
+		if node == null:
+			continue
+		node.name = String(lm["name"]).replace(" ", "")
+		node.position = Vector3(at.x, g, at.y)
+		add_child(node)
+		Sim.register_landmark(String(lm["name"]), String(lm["faction"]),
+			Vector3(at.x, g, at.y), float(lm["h"]))
+		built += 1
+	_stats["landmarks"] = built
+
+## Each one is a handful of primitives, not a model: enough silhouette that you
+## know what you are looking at from a mile up, which is the only range anybody
+## will see them from.
+func _landmark_mesh(id: String, h: float, tone: Color) -> Node3D:
+	var st := MeshKit.begin()
+	var pale := MeshKit.mat(tone, 0.7, 0.05)
+	match id:
+		"eiffel":
+			# four splayed legs, two decks and a spire
+			for sx in [-1.0, 1.0]:
+				for sz in [-1.0, 1.0]:
+					var foot := Vector3(sx * h * 0.16, 0.0, sz * h * 0.16)
+					MeshKit.cone(st, h * 0.020, h * 0.008, 0.0, h * 0.62,
+						foot, 6, true)
+			MeshKit.box(st, Vector3(h * 0.30, h * 0.012, h * 0.30),
+				Vector3(0, h * 0.185, 0))
+			MeshKit.box(st, Vector3(h * 0.16, h * 0.012, h * 0.16),
+				Vector3(0, h * 0.40, 0))
+			MeshKit.cone(st, h * 0.045, h * 0.006, h * 0.40, h * 0.94,
+				Vector3.ZERO, 8, true)
+			MeshKit.cone(st, h * 0.008, h * 0.001, h * 0.94, h, Vector3.ZERO, 6, true)
+		"clock":
+			MeshKit.box(st, Vector3(h * 0.20, h * 0.72, h * 0.20),
+				Vector3(0, h * 0.36, 0))
+			# the faces, one to each side
+			for a in 4:
+				var ang := TAU * float(a) / 4.0
+				MeshKit.box(st, Vector3(h * 0.13, h * 0.13, h * 0.02),
+					Vector3(sin(ang) * h * 0.105, h * 0.66, cos(ang) * h * 0.105))
+			MeshKit.cone(st, h * 0.13, h * 0.005, h * 0.76, h, Vector3.ZERO, 8, true)
+		"liberty":
+			# plinth, star fort, figure, arm and torch
+			MeshKit.box(st, Vector3(h * 0.52, h * 0.10, h * 0.52),
+				Vector3(0, h * 0.05, 0))
+			MeshKit.box(st, Vector3(h * 0.30, h * 0.32, h * 0.30),
+				Vector3(0, h * 0.26, 0))
+			MeshKit.cone(st, h * 0.10, h * 0.07, h * 0.42, h * 0.86,
+				Vector3.ZERO, 10, true)
+			MeshKit.cone(st, h * 0.030, h * 0.026, h * 0.72, h * 0.99,
+				Vector3(h * 0.09, 0, 0), 6, true)
+			MeshKit.cone(st, h * 0.045, h * 0.012, h * 0.99, h * 1.06,
+				Vector3(h * 0.09, 0, 0), 8, true)
+		"onion":
+			MeshKit.box(st, Vector3(h * 0.62, h * 0.34, h * 0.62),
+				Vector3(0, h * 0.17, 0))
+			var spots := [Vector3(0, 0, 0), Vector3(h * 0.26, 0, h * 0.26),
+				Vector3(-h * 0.26, 0, h * 0.26), Vector3(h * 0.26, 0, -h * 0.26),
+				Vector3(-h * 0.26, 0, -h * 0.26)]
+			for i in spots.size():
+				var big: float = 1.0 if i == 0 else 0.62
+				var base := (spots[i] as Vector3) + Vector3(0, h * 0.34, 0)
+				MeshKit.cone(st, h * 0.075 * big, h * 0.085 * big, 0.0,
+					h * 0.26 * big, base, 10, true)
+				var top := base + Vector3(0, h * 0.26 * big, 0)
+				# the dome: fat in the middle, drawn to a point
+				MeshKit.cone(st, h * 0.085 * big, h * 0.10 * big, 0.0,
+					h * 0.07 * big, top, 12, true)
+				MeshKit.cone(st, h * 0.10 * big, h * 0.005 * big, h * 0.07 * big,
+					h * 0.24 * big, top, 12, true)
+		"pagoda":
+			var tiers := 7
+			for i in tiers:
+				var f := 1.0 - float(i) / float(tiers) * 0.62
+				var y := h * 0.06 + float(i) * h * 0.115
+				MeshKit.box(st, Vector3(h * 0.26 * f, h * 0.085, h * 0.26 * f),
+					Vector3(0, y, 0))
+				# the eaves, wider than the storey they sit on
+				MeshKit.cone(st, h * 0.21 * f, h * 0.05 * f, y + h * 0.045,
+					y + h * 0.085, Vector3.ZERO, 4, true)
+			MeshKit.cone(st, h * 0.02, h * 0.004, h * 0.86, h, Vector3.ZERO, 6, true)
+		"wall":
+			# a long rampart with towers along it, running over the ground
+			var seg := 26
+			for i in seg:
+				var x := (float(i) - float(seg) * 0.5) * 260.0
+				var z := sin(float(i) * 0.7) * 190.0
+				var gy: float = Terrain.surface_height(x, z)
+				MeshKit.box(st, Vector3(250.0, h, 22.0), Vector3(x, gy + h * 0.5, z))
+				if i % 4 == 0:
+					MeshKit.box(st, Vector3(34.0, h * 2.0, 34.0),
+						Vector3(x, gy + h, z))
+		"pyramid":
+			# stepped, so it reads as masonry rather than a cone
+			var steps := 14
+			for i in steps:
+				var f := 1.0 - float(i) / float(steps)
+				MeshKit.box(st, Vector3(h * 1.05 * f, h / float(steps), h * 1.05 * f),
+					Vector3(0, h * (float(i) + 0.5) / float(steps), 0))
+		"minaret":
+			MeshKit.box(st, Vector3(h * 0.70, h * 0.30, h * 0.70),
+				Vector3(0, h * 0.15, 0))
+			MeshKit.cone(st, h * 0.32, h * 0.30, h * 0.30, h * 0.38,
+				Vector3.ZERO, 14, true)
+			MeshKit.cone(st, h * 0.30, h * 0.02, h * 0.38, h * 0.66,
+				Vector3.ZERO, 14, true)
+			for sx in [-1.0, 1.0]:
+				for sz in [-1.0, 1.0]:
+					var b := Vector3(sx * h * 0.40, 0.0, sz * h * 0.40)
+					MeshKit.cone(st, h * 0.035, h * 0.030, 0.0, h * 0.82, b, 8, true)
+					MeshKit.cone(st, h * 0.045, h * 0.004, h * 0.82, h, b, 8, true)
+		"opera":
+			# a row of leaning shells on a podium
+			MeshKit.box(st, Vector3(h * 1.5, h * 0.14, h * 0.9),
+				Vector3(0, h * 0.07, 0))
+			for i in 4:
+				var f2 := 1.0 - float(i) * 0.17
+				var x2 := (float(i) - 1.5) * h * 0.34
+				MeshKit.cone(st, h * 0.30 * f2, h * 0.02, h * 0.14, h * f2,
+					Vector3(x2, 0, sin(float(i)) * h * 0.10), 10, false)
+		"colossus":
+			MeshKit.box(st, Vector3(h * 0.44, h * 0.12, h * 0.44),
+				Vector3(0, h * 0.06, 0))
+			for sx2 in [-1.0, 1.0]:
+				MeshKit.cone(st, h * 0.055, h * 0.045, h * 0.12, h * 0.52,
+					Vector3(sx2 * h * 0.10, 0, 0), 8, true)
+			MeshKit.box(st, Vector3(h * 0.28, h * 0.30, h * 0.18),
+				Vector3(0, h * 0.67, 0))
+			MeshKit.cone(st, h * 0.085, h * 0.075, h * 0.82, h * 0.95,
+				Vector3.ZERO, 10, true)
+			# a raised arm
+			MeshKit.cone(st, h * 0.040, h * 0.032, h * 0.62, h * 1.0,
+				Vector3(h * 0.20, 0, 0), 8, true)
+		_:
+			return null
+	var mi := MeshKit.mi(MeshKit.finish(st, pale), "Mesh")
+	var root := Node3D.new()
+	root.add_child(mi)
+	return root
 
 # ---------------------------------------------------------------- buildings
 func _block_mesh(w: float, h: float, d: float, roof: Color, wall: Color) -> ArrayMesh:
@@ -404,6 +744,12 @@ func _scatter_nature() -> void:
 		var y := Sim.height_at(x, z)
 		if y < Sim.WATER_LEVEL + 2.0 or y > 2400.0:
 			continue
+		# On the surface as it is drawn, not as the field computes it. The two
+		# part company by more than the height of a tree as soon as the cells
+		# get coarse, and a tree standing on the analytic height then hangs in
+		# the air above the triangles — which is what you see looking up at the
+		# underside of the ground.
+		y = Terrain.surface_height(x, z)
 		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
 			continue
 		var slope := Sim.normal_at(x, z).y

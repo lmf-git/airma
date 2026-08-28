@@ -37,6 +37,7 @@ var bays := {}                   # id -> {open, anim, drag, kind}
 var stores := []                 # {bay, idx, weapon, node, gone}
 var selected := 0                # index into weapon_types
 var weapon_types: Array = []
+var _reach_cache: Dictionary = {}
 var gun_cd := 0.0
 var fire_cd := 0.0
 var target: Node3D = null
@@ -156,8 +157,12 @@ func setup(id: String) -> void:
 	spec = JetSpec.get_spec(id)
 	_model = JetFactory.build(spec)
 	add_child(_model["root"])
-	_stab_r = _model["stabs"][0]
-	_stab_l = _model["stabs"][1]
+	# A flying wing has no tailplane: it controls in pitch on the elevons along
+	# its own trailing edge. Reaching for stabs[0] on one threw before the
+	# stores were read, which left the aeroplane with no weapons at all.
+	var stabs: Array = _model["stabs"]
+	_stab_r = stabs[0] if stabs.size() > 0 else null
+	_stab_l = stabs[1] if stabs.size() > 1 else null
 	_ab = _model["ab"]
 	_nozzles = _model.get("nozzles", [])
 	_gear_nodes = _model["gear"]
@@ -174,7 +179,10 @@ func setup(id: String) -> void:
 	mass = spec["mass"]
 	inertia = spec["inertia"]
 	fuel = spec["fuel"]
-	ammo = spec["gun"]["rounds"]
+	# Not every aeroplane has one. A bomber carries no gun at all, and reaching
+	# for its rounds threw here — before the stores were read, so it came out
+	# of the hangar with an empty weapon list.
+	ammo = int((spec.get("gun", {}) as Dictionary).get("rounds", 0))
 	can_sleep = false
 	continuous_cd = true
 	# The project default damping would otherwise be *added* to ours and quietly
@@ -209,7 +217,7 @@ func setup(id: String) -> void:
 				"node": _model["stores"][str(bay["id"], "#", i)], "gone": false,
 			})
 			i += 1
-	weapon_types = ["gun"]
+	weapon_types = ["gun"] if spec.has("gun") else []
 	for s in stores:
 		if not weapon_types.has(s["weapon"]):
 			weapon_types.append(s["weapon"])
@@ -466,15 +474,8 @@ func _animate(delta: float) -> void:
 ## Wingtip vortices, the transonic vapour cone and low-level speed streaks.
 func _build_aero_fx() -> void:
 	for tip in _model.get("tips", []):
-		var p := Effects.trail_particles(Color(1, 1, 1), 1.1, 40)
-		p.lifetime = 1.1
+		var p := Effects.vortex_particles(Color(1, 1, 1), 3.2, 40)
 		p.emitting = false
-		p.local_coords = false
-		var pm: ParticleProcessMaterial = p.process_material
-		pm.gravity = Vector3.ZERO
-		pm.initial_velocity_min = 0.0
-		pm.initial_velocity_max = 1.2
-		pm.spread = 25.0
 		p.position = tip
 		_model["root"].add_child(p)
 		_vortex.append(p)
@@ -688,7 +689,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# What the aerodynamic surfaces can do. Vectoring aircraft keep a little of
 	# this at low speed for the tails sitting in the jet wash, but most of their
 	# low speed authority now comes from the nozzles themselves, below.
-	var tvc: float = spec["tvc"] * clampf(power, 0.15, 1.0)
+	var tvc: float = float(spec.get("tvc", 0.0)) * clampf(power, 0.15, 1.0)
 	var auth := maxf(qn, tvc * 0.35)
 	var rr := av.dot(fwd)
 	var pr := av.dot(right)
@@ -1094,13 +1095,36 @@ func fire() -> String:
 	# A point track is on a thing, and things move. Freezing the designation into
 	# a spot at release meant a bomb aimed at a ship arrived where the ship had
 	# been twenty seconds earlier, which is outside the lethal radius.
-	if String(ws["kind"]) == "bomb" and is_instance_valid(designated_node):
+	# The laser spot beats the radar contact for anything aimed at the ground,
+	# not only for bombs. A Maverick launched while you were lasing a target
+	# ignored the spot entirely and took whatever the radar happened to hold —
+	# which, if that was nothing, meant it left the rail unguided and hit the
+	# dirt while the screen still said LOCK.
+	var ground_weapon: bool = String(ws["kind"]) == "bomb" \
+		or String(ws["kind"]) == "cruise" \
+		or bool(ws.get("air_to_ground", false))
+	if ground_weapon and is_instance_valid(designated_node):
 		aim_node = designated_node
-	elif String(ws["kind"]) == "bomb" and designated != Vector3.INF:
+	elif ground_weapon and designated != Vector3.INF:
 		var spot := DesignatedSpot.new()
-		spot.global_position = designated
+		# Parented before positioned, for the same reason as the submarine's
+		# aim point: setting a global position on an orphan raises and leaves
+		# the mark sitting at the world origin.
 		get_tree().current_scene.add_child(spot)
+		spot.global_position = designated
 		aim_node = spot
+	# A guided weapon with nothing to guide on does not leave the rail. It used
+	# to: a Harpoon or a Maverick released with no aim source flew where it was
+	# pointed and hit the ground, while the HUD had said LOCK the whole time.
+	# Either the shot works or the aeroplane says why it cannot.
+	var needs_aim: bool = String(ws["kind"]) == "cruise" \
+		or bool(ws.get("air_to_ground", false))
+	if needs_aim and not is_instance_valid(aim_node):
+		s["gone"] = false
+		node.visible = true
+		_refresh_mass()
+		_note("no lock — nothing for it to follow")
+		return "no lock — nothing for it to follow"
 	m.launch(w, xf, linear_velocity, self, aim_node)
 	get_tree().current_scene.add_child(m)
 	store_released.emit(m)
@@ -1149,6 +1173,8 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 func fire_gun(world: Node) -> bool:
 	if ammo <= 0 or gun_cd > 0.0 or not alive:
 		return false
+	if not spec.has("gun"):
+		return false
 	var g: Dictionary = spec["gun"]
 	gun_cd = 60.0 / float(g["rpm"]) * 4.0     # tracer every 4th round
 	ammo = maxi(ammo - 4, 0)
@@ -1160,6 +1186,75 @@ func fire_gun(world: Node) -> bool:
 	return true
 
 # --------------------------------------------------------------------------
+## Can the selected weapon actually get there from here?
+##
+## A lock is a promise, and for a bomb it is one the aeroplane cannot always
+## keep: a JDAM has no motor, so its reach is whatever height and speed you give
+## it. Showing LOCK on a target twelve kilometres away from two thousand feet
+## says a release will work when it cannot — toss it and it lands miles short,
+## which looks like the weapon failing rather than the shot being impossible.
+func weapon_reaches(w: String, tgt: Node3D) -> bool:
+	if not is_instance_valid(tgt):
+		return false
+	var ws := WeaponSpec.get_spec(w if w != "gun" else "aim9")
+	var rel: Vector3 = tgt.global_position - global_position
+	var flat := Vector2(rel.x, rel.z).length()
+	if String(ws["kind"]) != "bomb":
+		if rel.length() >= float(ws["range"]):
+			return false
+		# Inside the table's range is not the same as able to get there. A
+		# powered air-to-ground round is a short burn and a long coast, and at
+		# the range its entry advertises it arrives in the dirt well short --
+		# with LOCKED on the glass the whole way down. Fly it forward and see.
+		if bool(ws.get("air_to_ground", false)) or String(ws["kind"]) == "cruise":
+			# Flying the round forward is a few hundred steps of arithmetic and
+			# the lock asks this every frame, so the answer is held for a
+			# moment. Nothing about the geometry changes meaningfully in a
+			# third of a second at these ranges.
+			var key := "%s|%d" % [w, tgt.get_instance_id()]
+			var now := float(Time.get_ticks_msec()) * 0.001
+			var got: Variant = _reach_cache.get(key)
+			if got != null and now - float((got as Array)[0]) < 0.33:
+				return bool((got as Array)[1])
+			var v0: Vector3 = linear_velocity
+			if v0.length() < 40.0:
+				v0 = -global_transform.basis.z * 120.0
+			var ok := WeaponSpec.can_reach(w, global_position, v0, tgt.global_position)
+			_reach_cache[key] = [now, ok]
+			return ok
+		return true
+	# Ballistic reach: how far it travels while it falls, plus what the tail kit
+	# can add by gliding. Directly below is a miss too — it needs room to turn
+	# onto the line.
+	var drop: float = global_position.y - tgt.global_position.y
+	if drop < 60.0:
+		return false
+	var fall: float = sqrt(2.0 * drop / 9.81)
+	var reach: float = maxf(linear_velocity.length(), 60.0) * fall * 1.45
+	return flat < reach and flat > 150.0
+
+## Why the shot is not on, or "" when it is.
+func shot_blocked(w: String, tgt: Node3D) -> String:
+	var ws0 := WeaponSpec.get_spec(w if w != "gun" else "aim9")
+	var needs: bool = String(ws0["kind"]) == "cruise" \
+		or bool(ws0.get("air_to_ground", false))
+	if needs and not is_instance_valid(tgt) and not is_instance_valid(designated_node) \
+			and designated == Vector3.INF:
+		return "NO AIM"
+	if not is_instance_valid(tgt):
+		return "NO TGT"
+	if weapon_reaches(w, tgt):
+		return ""
+	var ws := WeaponSpec.get_spec(w if w != "gun" else "aim9")
+	if String(ws["kind"]) != "bomb":
+		return "RANGE"
+	var drop: float = global_position.y - tgt.global_position.y
+	if drop < 60.0:
+		return "TOO LOW"
+	var flat := Vector2(tgt.global_position.x - global_position.x,
+		tgt.global_position.z - global_position.z).length()
+	return "SHORT" if flat > 150.0 else "OVERHEAD"
+
 ## How far off boresight the aircraft's own radar can hold a contact.
 const RADAR_GIMBAL := 60.0
 
@@ -1190,12 +1285,31 @@ func _update_lock(delta: float) -> void:
 	# is doing. Holding a target off boresight is the entire purpose of putting
 	# the sensor on a gimbal.
 	var pod_holds: bool = is_instance_valid(designated_node) and designated_node == target
+	# A lock the weapon cannot honour is not a lock.
+	if not weapon_reaches(w, target):
+		lock_time = maxf(lock_time - delta * 2.0, 0.0)
+		locked = false
+		return
 	if (ang < fov and dist < rng) or pod_holds:
 		lock_time += delta
 		locked = lock_time > (0.6 if w == "gun" else ws["lock_time"])
 	else:
 		lock_time = maxf(lock_time - delta * 2.0, 0.0)
 		locked = false
+
+## The speed this airframe will actually fly off the ground at: a shade over
+## the stall, worked out from its own wing and weight rather than assumed. A
+## fixed number is a fighter's number — a hundred and forty-five knots is
+## nothing to an F-16 and more than a heavy bomber will see before the end of
+## the runway, which is why the B-2 rolled the full length and never rotated.
+func rotate_speed() -> float:
+	var w: float = mass * 9.81
+	var area: float = float(spec.get("wing_area", 40.0))
+	var cl_max: float = float(spec.get("cl_alpha", 4.5)) \
+		* float(spec.get("cl_max_aoa", deg_to_rad(20.0))) * 0.72
+	cl_max += float(spec.get("flap_cl", 0.0)) * 0.6
+	var v_stall: float = sqrt(2.0 * w / maxf(1.225 * area * maxf(cl_max, 0.4), 1.0))
+	return v_stall * 1.12
 
 func hit_radius() -> float:
 	return 8.0
@@ -1566,6 +1680,12 @@ class Flare extends Node3D:
 
 ## A piece of airframe on its way to the ground.
 class Debris extends Node3D:
+	var _has_smoke := false
+
+	func _exit_tree() -> void:
+		if _has_smoke:
+			Effects.release_smoke_slot()
+			_has_smoke = false
 	var visual: Node3D
 	var vel := Vector3.ZERO
 	var spin := Vector3.ZERO
@@ -1577,7 +1697,9 @@ class Debris extends Node3D:
 		if visual:
 			add_child(visual)
 			visual.transform = Transform3D.IDENTITY
-		if smoking:
+		# only if the world can afford another plume
+		if smoking and Effects.smoke_slot():
+			_has_smoke = true
 			var t := Effects.trail_particles(Color(0.32, 0.31, 0.30), 2.4, 24)
 			t.lifetime = 2.4
 			t.emitting = true
@@ -1601,6 +1723,12 @@ class Debris extends Node3D:
 
 ## Gunship shell: ballistic, explodes on impact.
 class Shell extends Node3D:
+	var _has_smoke := false
+
+	func _exit_tree() -> void:
+		if _has_smoke:
+			Effects.release_smoke_slot()
+			_has_smoke = false
 	var vel := Vector3.ZERO
 	var damage := 120.0
 	var blast := 8.0
@@ -1644,10 +1772,12 @@ class Shell extends Node3D:
 			flame.position = Vector3(0, 0, 1.5)
 			flame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			add_child(flame)
-			var trail := Effects.trail_particles(Color(0.78, 0.78, 0.80), 1.6, 40)
-			trail.lifetime = 2.6
-			trail.emitting = true
-			add_child(trail)
+			if Effects.smoke_slot():
+				_has_smoke = true
+				var trail := Effects.trail_particles(Color(0.78, 0.78, 0.80), 1.6, 40)
+				trail.lifetime = 2.6
+				trail.emitting = true
+				add_child(trail)
 		else:
 			var sm := SphereMesh.new()
 			sm.radius = 0.35

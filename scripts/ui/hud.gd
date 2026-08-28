@@ -57,14 +57,24 @@ func _box(r: Rect2, col := GREEN, width := 1.0) -> void:
 	draw_rect(r, col, false, width)
 
 func _draw() -> void:
+	# The key card belongs on every page. It was drawn at the end of the
+	# aeroplane one, and every other page returns before it gets there — so F2
+	# did nothing at all on a bridge, in a driver's seat or on foot, and the
+	# only place the keys appeared was the event log.
 	if ship != null and is_instance_valid(ship):
 		_draw_bridge()
+		if show_help:
+			_draw_help()
 		return
 	if tank != null and is_instance_valid(tank):
 		_draw_driver()
+		if show_help:
+			_draw_help()
 		return
 	if walker != null and is_instance_valid(walker):
 		_draw_on_foot()
+		if show_help:
+			_draw_help()
 		return
 	if jet == null or not is_instance_valid(jet) or cam == null:
 		return
@@ -104,9 +114,63 @@ func _draw() -> void:
 
 ## Driver and gunner readout.
 ## Bridge page: what the officer of the watch needs and nothing else.
+## Contacts painted onto the world from a hull's own camera. The aeroplane's
+## version reads `jet` and projects through the head-up display's camera and
+## clip circle, neither of which a ship has -- so from a bridge or a chase view
+## there was nothing on screen at all: no boxes, no labels, no way to tell a
+## friend from an enemy except by shape.
+func _draw_world_contacts(src: Node3D, eye: Camera3D) -> void:
+	if not is_instance_valid(src) or not is_instance_valid(eye):
+		return
+	var my_team: int = int(src.team) if ("team" in src) else -1
+	var held: Node = src.get("ai_target") if ("ai_target" in src) else null
+	var reach: float = maxf(Sim.radar_range(), 26000.0)
+	var vp := get_viewport_rect().size
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or n == src or not (n is Node3D):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if n.is_in_group("no_lock"):
+			continue
+		var p: Vector3 = (n as Node3D).global_position
+		var d: float = src.global_position.distance_to(p)
+		if d > reach or eye.is_position_behind(p):
+			continue
+		# aim at the waterline of a ship and the box sits in the sea; lift it
+		# to something like the middle of the thing
+		var lift := 6.0
+		if n.has_method("mast_height"):
+			lift = float(n.call("mast_height")) * 0.5
+		# A ridge is a ridge from a bridge too. The scope and the aeroplane both
+		# hide what they cannot see; without the same test here a hull in a
+		# fjord labelled contacts straight through the headland.
+		var from_eye: Vector3 = src.global_position + Vector3(0,
+			float(src.call("mast_height")) if src.has_method("mast_height") else 4.0, 0)
+		if d > 2000.0 and not Sim.line_of_sight(from_eye, p + Vector3(0, 4, 0), 250.0):
+			continue
+		var sp: Vector2 = eye.unproject_position(p + Vector3(0, lift, 0))
+		if sp.x < 6.0 or sp.y < 6.0 or sp.x > vp.x - 6.0 or sp.y > vp.y - 6.0:
+			continue
+		var hostile: bool = ("team" in n) and int(n.team) != my_team
+		var col := RED if hostile else Color(0.42, 0.78, 1.0)
+		if n == held:
+			col = AMBER
+		var r: float = clampf(2600.0 / maxf(d, 1.0), 7.0, 44.0)
+		_box(Rect2(sp - Vector2(r, r), Vector2(r, r) * 2.0), col, 1.5)
+		if n == held:
+			draw_arc(sp, r + 8.0, 0.0, TAU, 22, col, 1.6)
+		var nm := str(n.name)
+		if n.has_method("display_name"):
+			nm = String(n.call("display_name"))
+		_txt(sp + Vector2(r + 6, -2), nm.left(18), 13, col)
+		_txt(sp + Vector2(r + 6, 14), "%.1f km" % (d * 0.001), 12, col)
+
 func _draw_bridge() -> void:
 	var vp := get_viewport_rect().size
 	var g := GREEN
+	# what is out there, drawn on the sea itself
+	_draw_world_contacts(ship, ship.cam if is_instance_valid(ship.cam) else cam)
 	_txt(Vector2(26, vp.y - 176.0), ship.display_name().to_upper(), 17, g)
 	_txt(Vector2(26, vp.y - 150.0), "SPEED %.1f kts" % (ship.speed * 1.94384), 16, g)
 	_txt(Vector2(26, vp.y - 126.0), "ENGINES %+d%%" % int(ship.telegraph * 100.0), 16, g)
@@ -118,19 +182,34 @@ func _draw_bridge() -> void:
 		fmod(rad_to_deg(ship.heading) + 360.0, 360.0)), 16, g)
 	_txt(Vector2(26, vp.y - 54.0), "HULL %d" % int(maxf(ship.health, 0.0)), 16,
 		RED if ship.health < float(Ship.KINDS[ship.kind]["hp"]) * 0.35 else g)
-	if ship.has_gun():
-		_txt(Vector2(26, vp.y - 30.0), "%s %s" % [ship.weapon_label(),
-			"READY" if ship.gun_cd <= 0.0 else "LOADING %.1f" % ship.gun_cd], 16,
-			g if ship.gun_cd <= 0.0 else AMBER)
+	# The armament line, always — it used to be inside a `has_gun()` test, so a
+	# submarine, whose only weapon is its tubes, was told nothing at all about
+	# what it had selected or whether it could fire it. The readiness shown is
+	# the *selected* weapon's, not always the gun's.
+	var state: String = ship.weapon_state()
+	_txt(Vector2(26, vp.y - 30.0), "%s  %s" % [ship.weapon_label(), state], 16,
+		g if state == "READY" else AMBER)
+	# and what it is laid on, which is the whole point of having a sensor
+	if is_instance_valid(ship.ai_target):
+		var td: float = ship.global_position.distance_to(ship.ai_target.global_position)
+		_txt(Vector2(26, vp.y - 6.0), "LAID ON %s  %.1f km" % [
+			Sim.label_of(ship.ai_target).to_upper(), td * 0.001], 15, AMBER)
 	var c := vp * 0.5
 	draw_line(c - Vector2(22, 0), c - Vector2(6, 0), g, 1.6)
 	draw_line(c + Vector2(6, 0), c + Vector2(22, 0), g, 1.6)
 	draw_line(c - Vector2(0, 22), c - Vector2(0, 6), g, 1.6)
 	draw_line(c + Vector2(0, 6), c + Vector2(0, 22), g, 1.6)
+	# A warship has a mast full of antennas and every reason to want a scope.
+	# The panel was written against the aeroplane and read `jet` for everything,
+	# so a ship had none at all.
+	_scope_src = ship
+	_draw_radar_at(Vector2(vp.x - 200.0, vp.y - 190.0), 96.0)
+	_scope_src = null
 	_draw_log(vp)
 
 func _draw_driver() -> void:
 	var vp := get_viewport_rect().size
+	_draw_world_contacts(tank, cam)
 	var c := vp * 0.5
 	var g := Color(0.55, 1.0, 0.62)
 	draw_line(c - Vector2(30, 0), c - Vector2(8, 0), g, 1.5)
@@ -159,7 +238,27 @@ func _draw_driver() -> void:
 	_txt(Vector2(26, vp.y - 74.0), "%s %s" % [tank.weapon_label(), gun_state], 16, gun_col)
 	if tank.is_indirect():
 		var aim: Vector3 = tank.ground_aim()
-		if aim != Vector3.INF:
+		if tank.map_target != Vector3.INF:
+			aim = tank.map_target
+		if aim != Vector3.INF and tank.vclass() == "tel":
+			# A launcher is not a gun. Asking for a ballistic solution at its
+			# four hundred metre a second "muzzle velocity" fails at any real
+			# range, so a Fattah aimed forty kilometres away — a fifth of what
+			# the round can do — was reported out of range.
+			var mid: Dictionary = WeaponSpec.get_spec(
+				String(Tank.KINDS[tank.kind].get("missile", "kalibr")))
+			var rng2: float = tank.global_position.distance_to(aim)
+			var reach: float = float(mid.get("range", 100000.0))
+			var armed_up: bool = tank.rounds_left > 0 and rng2 <= reach
+			_txt(Vector2(26, vp.y - 196.0), "%s   %d ABOARD   MARK %.0f km of %.0f" % [
+				String(mid.get("short", "MSL")), tank.rounds_left,
+				rng2 * 0.001, reach * 0.001], 16,
+				Color(0.8, 0.95, 1.0) if armed_up else AMBER)
+			_txt(Vector2(26, vp.y - 172.0),
+				"READY TO LAUNCH" if armed_up else (
+					"NO ROUNDS" if tank.rounds_left <= 0 else "BEYOND THE ROUND'S REACH"),
+				16, GREEN if armed_up else RED)
+		elif aim != Vector3.INF:
 			var rng: float = tank.global_position.distance_to(aim)
 			var sol: Dictionary = tank.fire_solution(aim, float(Tank.KINDS[tank.kind]["muzzle"]))
 			if sol.is_empty():
@@ -304,6 +403,16 @@ func _draw_bomb_cue() -> void:
 		_txt(a + Vector2(r + 5, 5), label, 13, AMBER)
 		var d: float = jet.global_position.distance_to(aim)
 		_txt(a + Vector2(r + 5, 21), "%.1f km" % (d * 0.001), 13, AMBER)
+		# Whether the shot is actually on. A box and a range with nothing else
+		# beside them reads as "cleared to release", and for an unpowered bomb
+		# that is often a lie — it says the weapon failed when in truth the
+		# aeroplane was never in a position to take the shot.
+		var why := jet.shot_blocked(jet.current_weapon(), jet.target) \
+			if is_instance_valid(jet.target) else ""
+		if why != "":
+			_txt(a + Vector2(r + 5, 37), why, 13, RED)
+		elif jet.locked:
+			_txt(a + Vector2(r + 5, 37), "LOCK", 13, GREEN)
 	var fall := _ccip()
 	if fall != Vector3.INF and not cam.is_position_behind(fall):
 		var c := _project(fall)
@@ -400,7 +509,7 @@ func _draw_targets() -> void:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
-		var hostile: bool = ("team" in n) and n.team != jet.team
+		var hostile: bool = ("team" in n) and int(n.team) != jet.team
 		var p: Vector3 = n.global_position
 		if not _visible_pt(p):
 			continue
@@ -428,8 +537,16 @@ func _draw_targets() -> void:
 			_txt(s + Vector2(q + 6, -2), "%.1fkm" % (d * 0.001), 13, col)
 			_txt(s + Vector2(q + 6, 14), "%d kt" % int(_kt(n)), 12, col)
 			if jet.locked:
+				# The same question the release cue asks. This one said LOCK
+				# whenever the radar was holding something, whatever was on the
+				# rail: a Maverick that cannot reach ten kilometres showed LOCK
+				# on a target twenty away and went in the dirt.
+				var stop := jet.shot_blocked(jet.current_weapon(), n)
 				draw_arc(s, r + 16.0, 0, TAU, 24, col, 1.4)
-				_txt(s + Vector2(q + 6, 30), "LOCK", 13, col)
+				if stop == "":
+					_txt(s + Vector2(q + 6, 30), "LOCK", 13, col)
+				else:
+					_txt(s + Vector2(q + 6, 30), stop, 13, RED)
 			else:
 				draw_arc(s, r + 16.0, _t * 3.0, _t * 3.0 + PI, 12, col, 1.2)
 		else:
@@ -551,7 +668,14 @@ func _draw_status(vp: Vector2) -> void:
 	draw_line(Vector2(x - 4, y + h * (1.0 - 0.78)), Vector2(x + 20, y + h * (1.0 - 0.78)), AMBER, 1.0)
 	_txt(Vector2(x - 6, y + h + 16), "THR", 13, DIM)
 	_txt(Vector2(x - 6, y + h + 32), "%d%%" % int(t * 100.0), 14, GREEN)
-	_txt(Vector2(x - 2, y - 6), "AB" if t > 0.78 else "MIL", 13, AMBER if t > 0.78 else DIM)
+	# An aeroplane with no reheat has no "AB" band: past the military stop it is
+	# simply at maximum, and labelling it otherwise on an A-10 or a Hercules is
+	# telling the pilot about a gate that is not there.
+	var reheat: bool = jet != null and float(jet.spec.get("thrust_ab", 0.0)) \
+		> float(jet.spec.get("thrust_mil", 1.0)) * 1.04
+	var hot: bool = t > 0.78
+	var word := ("AB" if reheat else "MAX") if hot else "MIL"
+	_txt(Vector2(x - 2, y - 6), word, 13, AMBER if (hot and reheat) else DIM)
 	# fuel
 	var fx := x + 52.0
 	var fr: float = jet.fuel / maxf(jet.spec["fuel"], 1.0)
@@ -664,9 +788,15 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 	var b := jet.global_transform.basis
 	var hdg := atan2(-b.z.x, b.z.z)
 	var here := Vector2(jet.global_position.x, jet.global_position.z)
+	# Heading up: screen right is the starboard vector, screen up is ahead.
+	# With forward at (sin h, -cos h) and starboard at (cos h, sin h) that is a
+	# rotation by *minus* the heading. Both sine terms were the other way round,
+	# which rotates by plus the heading instead — so the picture came out turned
+	# by twice the heading and only agreed with the world pointing due north.
 	var to_screen := func(w: Vector2) -> Vector2:
 		var d := (w - here) / rng * r
-		return c + Vector2(d.x * cos(hdg) - d.y * sin(hdg), d.x * sin(hdg) + d.y * cos(hdg))
+		return c + Vector2(d.x * cos(hdg) + d.y * sin(hdg),
+			-d.x * sin(hdg) + d.y * cos(hdg))
 	# runway
 	var rw_a: Vector2 = to_screen.call(Vector2(0, -Sim.RUNWAY_LEN * 0.5))
 	var rw_b: Vector2 = to_screen.call(Vector2(0, Sim.RUNWAY_LEN * 0.5))
@@ -702,6 +832,29 @@ func _draw_sensor_stub(c: Vector2, r: float) -> void:
 ## trace rather than vanishing the instant it goes behind something.
 var _held := {}
 
+## Whose radar this is. The scope was written against the aeroplane and read
+## `jet` for everything, so a ship — which has a mast full of antennas and every
+## reason to want one — had no scope at all.
+var _scope_src: Node3D = null
+
+func _scope_origin() -> Vector3:
+	return _scope_src.global_position if is_instance_valid(_scope_src) \
+		else (jet.global_position if is_instance_valid(jet) else Vector3.ZERO)
+
+func _scope_basis() -> Basis:
+	return _scope_src.global_transform.basis if is_instance_valid(_scope_src) \
+		else (jet.global_transform.basis if is_instance_valid(jet) else Basis())
+
+func _scope_team() -> int:
+	if is_instance_valid(_scope_src) and "team" in _scope_src:
+		return int(_scope_src.team)
+	return int(jet.team) if is_instance_valid(jet) else 0
+
+func _scope_target() -> Node:
+	if is_instance_valid(_scope_src):
+		return _scope_src.ai_target if "ai_target" in _scope_src else null
+	return jet.target if is_instance_valid(jet) else null
+
 func _draw_radar_at(c: Vector2, r: float) -> void:
 	for k in _held.keys():
 		if not is_instance_valid(k) or _t - float(_held[k]) > 10.0:
@@ -711,30 +864,35 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 	draw_line(c - Vector2(0, r), c + Vector2(0, r), Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
 	draw_line(c - Vector2(r, 0), c + Vector2(r, 0), Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
 	_txt(c + Vector2(-r, r + 16), "RWR  %d km   [ ] panels   - = range" % int(Sim.radar_range() * 0.001), 12, DIM)
-	var b := jet.global_transform.basis
+	var b := _scope_basis()
+	var origin := _scope_origin()
+	var my_team := _scope_team()
+	var my_target := _scope_target()
 	var fwd := -b.z
 	var hdg := atan2(fwd.x, -fwd.z)
 	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or n == jet:
+		if not is_instance_valid(n) or n == _scope_src or n == jet:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
-		var rel: Vector3 = n.global_position - jet.global_position
+		if n.is_in_group("no_lock"):
+			continue
+		var rel: Vector3 = n.global_position - origin
 		var d := rel.length()
 		if d > Sim.radar_range():
 			continue
 		var bearing := atan2(rel.x, -rel.z) - hdg
 		var rr := r * clampf(d / Sim.radar_range(), 0.0, 1.0)
 		var p := c + Vector2(sin(bearing), -cos(bearing)) * rr
-		var hostile: bool = ("team" in n) and n.team != jet.team
+		var hostile: bool = ("team" in n) and int(n.team) != my_team
 		var col := RED if hostile else Color(0.4, 0.8, 1.0)
 		# Terrain masking, on the scope as well as on the lock. A contact behind
 		# a ridge is not a return; painting it solid and then refusing to lock
 		# it is worse than not painting it, because the pilot can see it and
 		# cannot understand why the radar will not take it.
 		var masked := d > 2000.0 and not Sim.line_of_sight(
-			jet.global_position + Vector3(0, 4, 0),
-			(n as Node3D).global_position + Vector3(0, 4, 0))
+			origin + Vector3(0, 4, 0),
+			(n as Node3D).global_position + Vector3(0, 4, 0), 250.0)
 		if masked:
 			# a faded memory trace where it was last seen, and nothing more
 			if _held.has(n) and _t - float(_held[n]) < 8.0:
@@ -747,19 +905,39 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 			draw_rect(Rect2(p - Vector2(3, 3), Vector2(6, 6)), col, false, 1.4)
 		else:
 			draw_circle(p, 3.5, col)
-		if n == jet.target:
+		if n == my_target:
 			draw_arc(p, 7.0, 0, TAU, 12, AMBER, 1.4)
-	# missiles inbound
-	for m in get_tree().get_nodes_in_group("missiles"):
-		if not is_instance_valid(m) or m.target != jet:
-			continue
-		var rel2: Vector3 = m.global_position - jet.global_position
-		var bearing2 := atan2(rel2.x, -rel2.z) - hdg
-		var p2 := c + Vector2(sin(bearing2), -cos(bearing2)) \
-			* (r * clampf(rel2.length() / Sim.radar_range(), 0, 1))
-		var blink := fmod(_t, 0.3) < 0.15
-		if blink:
-			draw_circle(p2, 5.0, RED)
+	# Rounds in the air. Yours flash blue, anything tracking you flashes red.
+	#
+	# The old test was `m.target != _scope_src and m.target != jet`, and in an
+	# aeroplane `_scope_src` is null — so any round with no target at all
+	# compared null to null, failed the test and was painted as an inbound
+	# threat. Your own bombs, and any missile that had lost its lock, blinked
+	# red on the scope as though they were coming for you.
+	var me: Node = _scope_src if is_instance_valid(_scope_src) else jet
+	var blink := fmod(_t, 0.3) < 0.15
+	if blink:
+		for m in get_tree().get_nodes_in_group("missiles"):
+			if not is_instance_valid(m):
+				continue
+			var mine: bool = is_instance_valid(m.shooter) and m.shooter == me
+			var friendly: bool = (not mine) and ("team" in m) and int(m.team) == my_team
+			var at_me: bool = is_instance_valid(m.target) and m.target == me
+			if not (mine or friendly or at_me):
+				continue
+			var rel2: Vector3 = m.global_position - origin
+			if rel2.length() > Sim.radar_range():
+				continue
+			var bearing2 := atan2(rel2.x, -rel2.z) - hdg
+			var p2 := c + Vector2(sin(bearing2), -cos(bearing2)) \
+				* (r * clampf(rel2.length() / Sim.radar_range(), 0, 1))
+			if at_me and not mine:
+				draw_circle(p2, 5.0, RED)
+			elif mine:
+				draw_circle(p2, 4.5, Color(0.35, 0.72, 1.0))
+			else:
+				# somebody else on your side has one in the air
+				draw_circle(p2, 3.0, Color(0.30, 0.60, 0.95, 0.75))
 
 # ---------------------------------------------------------------- landing aid
 func _draw_landing(vp: Vector2) -> void:
@@ -797,7 +975,7 @@ func _draw_warnings(vp: Vector2, c: Vector2) -> void:
 	var y := c.y - 150.0
 	if not jet.alive:
 		_txt(Vector2(0, c.y - 40), "AIRCRAFT DESTROYED", 34, RED, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
-		_txt(Vector2(0, c.y + 6), "press R to launch a fresh jet", 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+		_txt(Vector2(0, c.y + 6), "ESC for the menu", 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		return
 	if jet.missile_warn > 0.0 and blink:
 		_txt(Vector2(0, y), "MISSILE  —  BREAK AND FLARE", 26, RED, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
@@ -887,6 +1065,88 @@ func _draw_mode(vp: Vector2) -> void:
 			HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 
 func _draw_help() -> void:
+	# what the keys do depends on what you are sitting in
+	if ship != null and is_instance_valid(ship):
+		_help_body(_ship_keys())
+		return
+	if tank != null and is_instance_valid(tank):
+		_help_body(_tank_keys())
+		return
+	if walker != null and is_instance_valid(walker):
+		_help_body(_foot_keys())
+		return
+	_help_body(_air_keys())
+
+func _ship_keys() -> Array:
+	var conn := [
+		["A / D", "wheel: port / starboard"],
+		["W / S", "telegraph: ahead / astern"],
+		["P", "view: conning tower / close / chase / wide"],
+		["N", "night vision"],
+		["M", "tactical map"],
+		["U", "hand over the conn"],
+	]
+	if ship.can_dive():
+		conn.append(["PGDN / PGUP", "dive / surface"])
+	var arms := [
+		["1 - 2", "select weapon by number"],
+		["\\", "cycle weapon"],
+		["T", "cycle target"],
+		["SPACE", "fire the selected weapon"],
+		["O", "sensor page"],
+		["I", "sensor channel"],
+		["L", "laser"],
+		["CTRL + T", "track what the sight is on"],
+	]
+	if ship.can_launch():
+		arms.append(["RMB on the map", "lay the strategic aiming point"])
+	return [["THE CONN", conn], ["WEAPONS", arms], ["GENERAL", _general_keys()]]
+
+func _tank_keys() -> Array:
+	return [
+		["DRIVING", [
+			["W / S", "throttle ahead / astern"],
+			["A / D", "steer"],
+			["P", "view"],
+			["N", "night vision"],
+			["M", "tactical map"],
+			["U", "dismount"],
+		]],
+		["THE GUN", [
+			["mouse", "lay the turret"],
+			["1 - 3", "select weapon"],
+			["\\", "cycle weapon"],
+			["SPACE", "fire"],
+			["O", "commander\'s sight"],
+			["RMB on the map", "lay a fire mission"],
+		]],
+		["GENERAL", _general_keys()],
+	]
+
+func _foot_keys() -> Array:
+	return [
+		["ON FOOT", [
+			["WASD", "walk"],
+			["SHIFT", "run"],
+			["CTRL", "crouch"],
+			["SPACE", "jump"],
+			["V", "fire"],
+			["P", "view"],
+			["N", "night vision"],
+			["U", "board what you are standing at"],
+		]],
+		["GENERAL", _general_keys()],
+	]
+
+func _general_keys() -> Array:
+	return [
+		["F2", "this card"],
+		["F3", "admin"],
+		["/", "chat"],
+		["ESC", "menu"],
+	]
+
+func _air_keys() -> Array:
 	var groups := [
 		["FLYING", [
 			["W / S", "pitch down / up"],
@@ -899,6 +1159,7 @@ func _draw_help() -> void:
 		]],
 		["RUNWAY", [
 			["G", "landing gear up / down"],
+			["J", "gunner station (gunships)"],
 			["F", "flaps"],
 			["X", "wheel brakes / airbrake"],
 		]],
@@ -907,6 +1168,8 @@ func _draw_help() -> void:
 			["\\", "cycle weapon"],
 			["B", "open + close weapon bay"],
 			["T", "cycle target"],
+			["C", "flares"],
+			["B", "chaff"],
 			["LMB / SPACE", "fire selected weapon"],
 			["V", "gun burst"],
 			["N", "flares"],
@@ -928,7 +1191,8 @@ func _draw_help() -> void:
 			["ALT + mouse", "look around instead of flying"],
 		]],
 		["VIEW", [
-			["C", "cockpit / chase / orbit"],
+			["P", "cockpit / chase / orbit"],
+			["N", "night vision"],
 			["ALT + mouse", "look around"],
 			["Y", "weapon camera"],
 			["M", "map"],
@@ -937,6 +1201,10 @@ func _draw_help() -> void:
 			["ESC", "menu   ( F2 hides this )"],
 		]],
 	]
+	return groups
+
+## The card itself. Split out so every page can draw its own list through it.
+func _help_body(groups: Array) -> void:
 	var x := 26.0
 	var y := 118.0
 	var panel_h := 0.0

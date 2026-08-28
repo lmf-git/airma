@@ -107,11 +107,24 @@ void fragment() {
 		outc = mix(vec3(0.01, 0.05, 0.02), vec3(0.55, 1.0, 0.60), g);
 		outc += vec3(0.0, 0.35, 0.10) * pow(g, 6.0);   // blooming highlights
 	} else {
-		// Thermal. The ramp has to span the full range before it is inverted:
-		// with a 1.3 gain on top the bright end saturated, most of the picture
-		// sat near the midpoint, and black hot came out barely different from
-		// white hot -- measured at +0.59 correlation when it should be near -1.
+		// Thermal, and it has to be a guess at *temperature* rather than a
+		// greyscale of the daylight picture. Ramping raw luminance made the sky
+		// and the clouds the hottest things on screen — hotter than an engine
+		// plume, three times the aeroplane — so white hot looked like a
+		// photograph and black hot looked like its negative. Inverting it was
+		// arithmetically perfect and told you nothing.
+		//
+		// Without a temperature buffer the scene still says a good deal: blue
+		// dominance is sky and water and both are cold, bright and desaturated
+		// is cloud, and red dominance at brightness is something burning.
+		float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+		float sky = smoothstep(0.03, 0.22, c.b - c.r);
+		float cloudy = smoothstep(0.72, 0.95, l) * (1.0 - smoothstep(0.02, 0.20, sat));
+		float cold = clamp(sky + cloudy, 0.0, 1.0);
+		float hot = smoothstep(0.12, 0.45, c.r - c.b) * smoothstep(0.30, 0.75, l);
 		float t = clamp(pow(l, 0.75), 0.0, 1.0);
+		t = mix(t, 0.05, cold);
+		t = max(t, hot);
 		if (channel == 3) { t = 1.0 - t; }
 		outc = vec3(t);
 	}
@@ -150,7 +163,7 @@ func toggle() -> void:
 	# Coming back to the page keeps whatever the pod was holding. Resetting to
 	# SLEW on every activation threw away a point track the moment you looked
 	# away from the sensor page, which is the one thing a track is for.
-	if active and jet and mode == SLEW and not is_instance_valid(tracked):
+	if active and carrier() != null and mode == SLEW and not is_instance_valid(tracked):
 		yaw = 0.0
 		pitch = -0.35
 	if not active:
@@ -168,33 +181,77 @@ func zoom(dir: int) -> void:
 	zoom_step = clampi(zoom_step + dir, 0, ZOOMS.size() - 1)
 
 ## CTRL+T: point track what is under the crosshair, otherwise ground stabilise.
+## Whatever the sensor is bolted to. A crewed ship sets `host` and leaves `jet`
+## as whatever it was — usually null once the player has left the aeroplane —
+## so every one of these guards failed and a ship's sensor could not track
+## anything at all, point or area.
+func carrier() -> Node3D:
+	if host != null and is_instance_valid(host):
+		return host
+	return jet if is_instance_valid(jet) else null
+
+## Hand a contact or a place to whatever is holding the sensor. An aeroplane
+## keeps it as its radar target; a ship keeps it as the thing its tubes and its
+## battery are laid on.
+func _hand_over(t: Node3D) -> void:
+	var c := carrier()
+	if c == null:
+		return
+	if c is Ship:
+		(c as Ship).ai_target = t
+	elif c is Tank:
+		# A tank already has a fire mission slot -- the one the map view writes
+		# to. Lasing from the commander's sight lays the piece on the spot,
+		# which is the whole point of having the sight on an artillery vehicle.
+		var tk := c as Tank
+		var w: Vector3 = t.global_position
+		tk.map_target = Vector3(w.x, Sim.height_at(w.x, w.z), w.z)
+	elif is_instance_valid(jet):
+		jet.target = t
+
 func designate() -> void:
-	if not active or jet == null:
+	if not active or carrier() == null:
 		return
 	var origin := _head_origin()
 	var dir := _aim_dir()
 	var best: Node3D = null
 	var best_ang := deg_to_rad(2.6)
+	var me := carrier()
+	# Whose side the thing is on decides whether it can be taken at all, before
+	# how close to the crosshair it is. There was no team test here: the sight
+	# took whatever sat nearest the middle, so a friendly between you and what
+	# you were aiming at simply won, and the track jumped to your own side.
+	var my_team: int = int(me.team) if ("team" in me) else -1
+	var friend_ang := deg_to_rad(2.6)
+	var friend: Node3D = null
 	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or n == jet:
+		if not is_instance_valid(n) or n == me:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if n.is_in_group("no_lock"):
 			continue
 		var to: Vector3 = n.global_position - origin
 		if to.length() > 26000.0:
 			continue
 		var a := dir.angle_to(to)
+		var ours: bool = ("team" in n) and int(n.team) == my_team
+		if ours:
+			# remembered, but only used if there is nothing hostile in the cone
+			if a < friend_ang:
+				friend_ang = a
+				friend = n as Node3D
+			continue
 		if a < best_ang:
 			best_ang = a
 			best = n
+	if best == null and friend != null:
+		best = friend
 	if best:
 		tracked = best
-		if jet != null and is_instance_valid(jet):
-			jet.target = best
 		mode = POINT
-		if jet.has_method("set"):
-			jet.target = best
-		Sim.report("pod tracking %s" % best.name, Sim.Ev.GOOD)
+		_hand_over(best)
+		Sim.report("pod tracking %s" % Sim.label_of(best), Sim.Ev.GOOD)
 	else:
 		var hit := _ground_hit(origin, dir)
 		if hit != Vector3.INF:
@@ -207,10 +264,9 @@ func designate() -> void:
 				_marker.name = "Designated point"
 				get_tree().current_scene.add_child(_marker)
 			_marker.global_position = hit
-			if jet:
-				jet.target = _marker
-			Sim.report("pod area track designated  %.0f m" % jet.global_position.distance_to(hit),
-				Sim.Ev.INFO)
+			_hand_over(_marker)
+			Sim.report("pod area track designated  %.0f m"
+				% origin.distance_to(hit), Sim.Ev.INFO)
 
 ## Laser designator: paints the aim point and hands it to the weapons as a
 ## target, so a bomb or a missile will guide onto whatever the pod is holding.
@@ -282,7 +338,12 @@ func break_lock() -> void:
 
 ## March the analytic height field to find where the pod is looking.
 func _ground_hit(origin: Vector3, dir: Vector3) -> Vector3:
-	if dir.y > -0.02:
+	# Only a ray aimed frankly at the sky is refused. Requiring it to point
+	# *down* is an aeroplane's assumption: from a boat the sight sits a few
+	# metres above the water and the coast you are looking at is above you, so
+	# every mark on land was thrown out before the march even started and a
+	# submarine could not take a patch of ground at all.
+	if dir.y > 0.30:
 		return Vector3.INF
 	var t := 20.0
 	var prev := origin
@@ -325,8 +386,13 @@ func _head_origin() -> Vector3:
 	# On a ship the head is at the masthead, not wherever the parked aeroplane
 	# happens to be sitting on the ramp.
 	if host != null and is_instance_valid(host):
+		# Whatever the host says its sight sits at. A tank's is two and a half
+		# metres; assuming a ship's masthead put an armoured vehicle's sensor
+		# eighteen metres above its own turret.
 		var lift := 18.0
-		if host.has_method("mast_height"):
+		if host.has_method("sight_height"):
+			lift = float(host.call("sight_height"))
+		elif host.has_method("mast_height"):
 			lift = float(host.call("mast_height"))
 		return _mount_xf(host).origin + Vector3(0, lift, 0)
 	var z := -1.8
@@ -354,13 +420,16 @@ func _aim_dir() -> Vector3:
 		return (_mount_xf(tracked).origin - _head_origin()).normalized()
 	if mode == AREA:
 		return (area_point - _head_origin()).normalized()
-	var b := _mount_xf(jet).basis
-	if host != null and is_instance_valid(host):
-		b = _mount_xf(host).basis
+	# Off whatever is carrying it. Reading the aeroplane first and only then
+	# checking for a ship dereferenced a null every frame on a crewed hull.
+	var c := carrier()
+	if c == null:
+		return Vector3.FORWARD
+	var b := _mount_xf(c).basis
 	return (b * (Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) * Vector3(0, 0, -1))).normalized()
 
 func _process(delta: float) -> void:
-	if not active or jet == null or not is_instance_valid(jet):
+	if not active or carrier() == null:
 		# The beam lives in the world, not on the page. Without this it kept
 		# whatever state it had when the pod was closed -- visible from the
 		# cockpit and the chase camera, still pointing at a spot the aeroplane
@@ -375,14 +444,16 @@ func _process(delta: float) -> void:
 	var dir := _aim_dir()
 	_cam.fov = lerpf(_cam.fov, ZOOMS[zoom_step], clampf(delta * 8.0, 0.0, 1.0))
 	_cam.global_position = origin
-	var up := Vector3.UP if absf(dir.y) < 0.985 else _mount_xf(jet).basis.y
+	var holder: Node3D = carrier()
+	var up := Vector3.UP if absf(dir.y) < 0.985 or holder == null \
+		else _mount_xf(holder).basis.y
 	_cam.look_at(origin + dir * 1000.0, up)
 	if diag:
 		# Against the aeroplane as it is *drawn*, always — not against whatever
 		# transform the head happens to use. Measuring the head against its own
 		# source is self-referential and reads zero however wrong it is.
-		var seen: Vector3 = jet.get_global_transform_interpolated().origin \
-			if jet.is_inside_tree() else jet.global_position
+		var mount := carrier()
+		var seen: Vector3 = _mount_xf(mount).origin if mount != null else origin
 		var rel: Vector3 = origin - seen
 		if _diag_prev != Vector3.INF:
 			var d := (rel - _diag_prev).length()
@@ -392,11 +463,20 @@ func _process(delta: float) -> void:
 		_diag_prev = rel
 	_update_laser()
 	# hand the aim point to the aeroplane so a guided bomb can follow it
-	if jet != null and is_instance_valid(jet):
-		var lit: bool = active and lasing
+	# Hand the spot to whoever is holding the sensor. On a ship there is no
+	# `designated` to write to — the mark goes to the hull as the thing its
+	# tubes and battery are laid on, which is what a ship does with a laser.
+	var lit: bool = active and lasing
+	var who: Node3D = carrier()
+	if jet != null and is_instance_valid(jet) and who == jet:
 		jet.designated = aim_point() if lit else Vector3.INF
 		jet.designated_node = tracked if (lit and mode == POINT
 			and is_instance_valid(tracked)) else null
+	elif who != null and who != jet and lit:
+		if mode == POINT and is_instance_valid(tracked):
+			_hand_over(tracked)
+		elif _marker != null and is_instance_valid(_marker):
+			_hand_over(_marker)
 	if _tex != null and _tex.material != null:
 		(_tex.material as ShaderMaterial).set_shader_parameter("grain_t", _t * 37.0)
 	queue_redraw()
@@ -410,7 +490,11 @@ func aim_point() -> Vector3:
 	return hit if hit != Vector3.INF else Vector3.INF
 
 func _draw() -> void:
-	if not active or jet == null:
+	# Whatever is carrying the sensor. This asked for an aeroplane, and on a
+	# boat there is not one — so the whole page returned here and drew nothing
+	# at all: no crosshair, no track box, no laser, no controls. Every fix
+	# further down this function was unreachable from a bridge.
+	if not active or carrier() == null:
 		return
 	var g := Color(0.55, 1.0, 0.62)
 	var frame: Vector2 = size if fullscreen else SIZE
@@ -431,15 +515,42 @@ func _draw() -> void:
 	if lasing:
 		draw_string(_font, Vector2(10, 62), "LASER ON", HORIZONTAL_ALIGNMENT_LEFT, -1, 14,
 			Color(1.0, 0.35, 0.28))
-	if jet and fullscreen:
-		var w: String = jet.weapon_label(jet.current_weapon())
-		var n: int = jet.weapon_count(jet.current_weapon())
-		draw_string(_font, Vector2(frame.x * 0.5 - 90, frame.y - 54),
-			"%s   %s" % [w, "belt" if n < 0 else str(n)], HORIZONTAL_ALIGNMENT_LEFT, -1, 17,
-			Color(1.0, 0.85, 0.4))
-		draw_string(_font, Vector2(frame.x * 0.5 - 200, frame.y - 30),
-			"1-4 weapon   SPACE fire   CTRL+T track   L laser   N channel   wheel zoom   ALT+RMB close",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
+	# Whatever is carrying the sensor, not only an aeroplane. On a hull this
+	# read nothing at all — no weapon, no count, no selector — because it went
+	# straight to `jet`, and on a boat there is no jet.
+	var holder: Node3D = carrier()
+	if fullscreen and is_instance_valid(holder):
+		var w := ""
+		var count := ""
+		if holder == jet and jet != null:
+			w = jet.weapon_label(jet.current_weapon())
+			var n: int = jet.weapon_count(jet.current_weapon())
+			count = "belt" if n < 0 else str(n)
+		elif holder.has_method("weapon_label"):
+			w = String(holder.call("weapon_label"))
+			if holder.has_method("weapon_state"):
+				count = String(holder.call("weapon_state"))
+		if w != "":
+			draw_string(_font, Vector2(frame.x * 0.5 - 90, frame.y - 54),
+				"%s   %s" % [w, count], HORIZONTAL_ALIGNMENT_LEFT, -1, 17,
+				Color(1.0, 0.85, 0.4))
+		if holder == jet:
+			draw_string(_font, Vector2(frame.x * 0.5 - 200, frame.y - 30),
+				"1-4 weapon   SPACE fire   CTRL+T track   L laser   N channel   wheel zoom   ALT+RMB close",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
+		elif holder.has_method("weapons"):
+			# The hull's own selector, spelled out with what is chosen marked.
+			# A boat has no cockpit to read the selection off, and this page was
+			# the only thing on screen while it was up.
+			var list: PackedStringArray = holder.call("weapons")
+			var sel := int(holder.get("sel_weapon"))
+			var row := PackedStringArray()
+			for wi in list.size():
+				row.append("%d %s%s" % [wi + 1, String(list[wi]).to_upper(),
+					" <" if wi == sel else ""])
+			draw_string(_font, Vector2(frame.x * 0.5 - 200, frame.y - 30),
+				"%s    SPACE fire   CTRL+T track   L laser   O close" % "   ".join(row),
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
 	draw_string(_font, Vector2(10, frame.y - 26), "FOV %.1f" % _cam.fov,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 14, g)
 	var p := aim_point()
@@ -461,22 +572,26 @@ func _draw() -> void:
 ## own camera, so contacts are projected through that rather than the cockpit
 ## one -- the two are looking in quite different directions.
 func _draw_contacts(frame: Vector2) -> void:
-	if _cam == null or jet == null:
+	# Whoever is holding the sensor, not just an aeroplane. Guarding on `jet`
+	# meant a crewed hull -- ship or tank -- drew no contacts at all.
+	var me: Node3D = carrier()
+	if _cam == null or me == null:
 		return
+	var my_team: int = int(me.team) if ("team" in me) else -1
 	var reach: float = maxf(Sim.radar_range(), 26000.0)
 	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or n == jet or not (n is Node3D):
+		if not is_instance_valid(n) or n == me or not (n is Node3D):
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
 		var wp: Vector3 = (n as Node3D).global_position
-		var d: float = jet.global_position.distance_to(wp)
+		var d: float = me.global_position.distance_to(wp)
 		if d > reach or _cam.is_position_behind(wp):
 			continue
 		var sp: Vector2 = _cam.unproject_position(wp)
 		if sp.x < 4.0 or sp.y < 4.0 or sp.x > frame.x - 4.0 or sp.y > frame.y - 4.0:
 			continue
-		var hostile: bool = ("team" in n) and n.team != jet.team
+		var hostile: bool = ("team" in n) and int(n.team) != my_team
 		var col := Color(1.0, 0.45, 0.35) if hostile else Color(0.55, 0.85, 1.0)
 		var r: float = clampf(2600.0 / maxf(d, 1.0), 7.0, 46.0)
 		if n == tracked:
@@ -491,7 +606,11 @@ func _draw_contacts(frame: Vector2) -> void:
 
 ## The designated mark and, for a bomb, where an unguided release would fall.
 func _draw_bomb_mark(frame: Vector2) -> void:
-	if _cam == null or jet == null or not is_instance_valid(jet):
+	# The cross on the aim point belongs to whatever is holding the sensor. This
+	# bailed out on a null `jet`, and on a boat there is no jet — so pressing O
+	# from a submarine gave you a picture with no aiming mark and no indication
+	# of what the sight was on at all.
+	if _cam == null or carrier() == null:
 		return
 	var p := aim_point()
 	if p != Vector3.INF and not _cam.is_position_behind(p):
@@ -505,7 +624,10 @@ func _draw_bomb_mark(frame: Vector2) -> void:
 			draw_line(sp + Vector2(-r, 0), sp + Vector2(0, -r), col, 2.0)
 			draw_string(_font, sp + Vector2(r + 5, 4),
 				"LASER" if lasing else "MARK", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, col)
-	# the ballistic fall of an unguided release, so the run-in can be judged
+	# The ballistic fall of an unguided release, so the run-in can be judged.
+	# Only an aeroplane drops anything unguided; a hull's tubes are done here.
+	if not is_instance_valid(jet) or carrier() != jet:
+		return
 	var w: String = jet.current_weapon()
 	if w == "gun" or String(WeaponSpec.get_spec(w)["kind"]) != "bomb":
 		return

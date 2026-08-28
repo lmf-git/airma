@@ -14,7 +14,11 @@ const CELLS := 16                     # cells per chunk edge, every ring
 ## same distance: 15 x 2^7 is the same 1920 m cell the old outer ring used.
 const BASE_CELL := 15.0
 const OUT := 4                        # chunks from the middle to the edge of a ring
-const LEVELS := 8                     # each level doubles the cell size
+## Each level doubles the cell size and reaches four chunks out, so every level
+## added doubles the world's radius for a fixed forty-eight chunks — the rings
+## are the whole point of the scheme. Eight levels reached 92 km; twelve reach
+## almost fifteen hundred, for about two hundred more chunks.
+const LEVELS := 12
 
 ## Every ring doubles the cell size and reaches OUT chunks out, so the hole in
 ## the middle of a ring is exactly two of that ring's chunks and the finer ring
@@ -39,7 +43,10 @@ var stats := {"chunks": 0, "tris": 0, "seam": 0.0}
 
 const GROUND_SHADER := """
 shader_type spatial;
-render_mode diffuse_burley, specular_schlick_ggx;
+// Drawn from underneath as well. Terrain faces up, so with back faces culled
+// every triangle of the seabed is a back face when you are below it: from a
+// submarine you looked straight through the ground at the sky.
+render_mode diffuse_burley, specular_schlick_ggx, cull_disabled;
 
 // How far out the fine grain is worth drawing. Beyond this the ground goes back
 // to flat biome colour, which is all you can resolve anyway and costs nothing.
@@ -79,6 +86,11 @@ void vertex() {
 }
 
 void fragment() {
+	// underside: the stored normal points up, so light it with the normal
+	// turned round rather than as though the sun were shining up through it
+	if (!FRONT_FACING) {
+		NORMAL = -NORMAL;
+	}
 	// the biome colour is authored in sRGB and baked per vertex
 	vec3 base = pow(max(COLOR.rgb, vec3(0.0)), vec3(2.2));
 	float d = length(wpos - CAMERA_POSITION_WORLD);
@@ -309,7 +321,18 @@ func _stitch(h: PackedFloat32Array, n: int, x0: float, z0: float,
 ## A vertical curtain around the chunk edge so a coarser neighbour cannot show
 ## daylight through the seam.
 func _skirt(st: SurfaceTool, x0: float, z0: float, cell: float, h: PackedFloat32Array, n: int) -> void:
-	var drop := cell * 3.0
+	# Clamped, and hard. This was `cell * 3`, which on the outermost ring is a
+	# cell size of 1920 m and therefore a **five and a half kilometre** curtain
+	# hanging under every chunk — visible from anywhere at or below sea level,
+	# which is exactly where a submarine is. The skirt only has to cover the
+	# crack where two rings meet, and the boundary stitching already pulls that
+	# to a fraction of a millimetre, so a few metres is ample.
+	# Measured, not guessed. The stitching leaves a seam of 0.000061 m, so the
+	# curtain only ever had to be a hair deep; at `cell * 0.35` it hung twelve
+	# metres under every chunk edge and nine on average, and under water that
+	# curtain is the only thing down there to look at. Sixty centimetres is
+	# still four orders of magnitude more than the crack it covers.
+	var drop: float = clampf(cell * 0.004, 0.15, 0.6)
 	for i in CELLS:
 		var edges := [
 			[Vector3(x0 + i * cell, h[i], z0), Vector3(x0 + (i + 1) * cell, h[i + 1], z0)],
@@ -366,3 +389,47 @@ func _water() -> void:
 	mi.position = Vector3(0, Sim.WATER_LEVEL, 0)
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
+
+## The height of the ground as it is actually *drawn* at a point, which is not
+## the same as the analytic height the field returns. Each chunk is a grid of
+## flat triangles, and on the outer rings a cell is nearly two kilometres
+## across — so the surface you can see can sit tens of metres away from
+## `Sim.height_at`. Anything placed on the ground has to be placed on this one,
+## or it stands above the drawn surface with daylight under it. From above that
+## reads as a slight sink; from below, looking up at the underside, it reads as
+## a wood floating in mid-air.
+static func surface_height(x: float, z: float) -> float:
+	var tbl := ring_table()
+	var cell: float = BASE_CELL
+	var reach: float = maxf(absf(x), absf(z))
+	for lvl in tbl:
+		cell = float(lvl["cell"])
+		if reach <= float(lvl["coverage"]):
+			break
+	# corners of the cell this point falls in
+	var x0: float = floor(x / cell) * cell
+	var z0: float = floor(z / cell) * cell
+	var tx: float = (x - x0) / cell
+	var tz: float = (z - z0) / cell
+	var h00 := Sim.height_at(x0, z0)
+	var h10 := Sim.height_at(x0 + cell, z0)
+	var h11 := Sim.height_at(x0 + cell, z0 + cell)
+	var h01 := Sim.height_at(x0, z0 + cell)
+	# the chunk splits each cell as (a,b,c) then (a,c,d): a=(0,0) b=(1,0)
+	# c=(1,1) d=(0,1), so the diagonal runs from (0,0) to (1,1)
+	if tz <= tx:
+		return h00 + (h10 - h00) * tx + (h11 - h10) * tz
+	return h00 + (h11 - h01) * tx + (h01 - h00) * tz
+
+## The cell size the ground is drawn at here. Anything that needs the mesh to
+## be able to *represent* a feature has to know how big a triangle is: a two
+## kilometre runway cannot be flattened into a grid whose cells are four
+## kilometres across, however carefully the height field is levelled.
+static func cell_at(x: float, z: float) -> float:
+	var reach: float = maxf(absf(x), absf(z))
+	var cell: float = BASE_CELL
+	for lvl in ring_table():
+		cell = float(lvl["cell"])
+		if reach <= float(lvl["coverage"]):
+			break
+	return cell

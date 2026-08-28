@@ -47,7 +47,8 @@ const KINDS := {
 		"free": 1.6, "hp": 1400.0, "speed": 12.0, "sub": true,
 		"paint": Color(0.14, 0.15, 0.16), "deck": Color(0.12, 0.13, 0.14),
 		"super": [],
-		"mast": 0.0, "guns": 0, "vls": 12, "class": "sub",
+		# a mast to see with: at periscope depth it is just clear of the water
+		"mast": 9.0, "guns": 0, "vls": 12, "class": "sub",
 	},
 	"cargo": {
 		"name": "Container ship", "len": 210.0, "beam": 30.0, "draught": 12.0,
@@ -91,7 +92,131 @@ var _wake: GPUParticles3D
 
 ## Ships that nobody is conning fight for themselves.
 var ai := true
+## Something left the boat. The weapon camera rides whatever comes out of this;
+## only `Aircraft` had it, so a round out of a ship's tubes -- or a submarine's
+## -- had nothing to follow and the camera stayed on the hull.
+signal store_released(node)
+
 var ai_target: Node3D = null
+
+## Boats that can dive keep an ordered depth and answer it on their planes.
+const MAX_DEPTH := 90.0
+var depth_order := 0.0
+var depth := 0.0
+var _aground := false
+## Where the strategic round has been sent, laid on the map.
+var strategic_aim := Vector3.INF
+
+## Where the view sits, cycled from the conn with C. A boom of zero is the
+## first person one: stood at the masthead — the top of the sail on a boat that
+## dives — looking where the sight is looking. There was no such view at all,
+## so a submarine could only ever be watched from outside.
+const VIEW_BOOM := [0.0, 26.0, 62.0, 140.0]
+const VIEW_LIFT := [1.0, 1.0, 1.35, 2.1]
+const VIEW_NAME := ["view: conning tower", "view: close", "view: chase",
+	"view: wide"]
+var view_mode := 1
+
+## Put her back the way she began. The fleet outlives a mission, but the damage
+## done to it should not: restarting used to hand you a sea you had already won,
+## with every hull you sank still on the bottom.
+func refit() -> void:
+	var kd: Dictionary = KINDS[kind]
+	health = float(kd["hp"])
+	alive = true
+	flood = 0.0
+	crew = 1.0
+	_sinking = -1.0
+	_broken = false
+	cells_left = int(kd.get("vls", 0))
+	missiles_left = 2
+	_launch_cd = 0.0
+	gun_cd = 0.0
+	vls_cd = 0.0
+	depth = 0.0
+	depth_order = 0.0
+	_aground = false
+	ai_target = null
+	strategic_aim = Vector3.INF
+	visible = true
+	global_position.y = Sim.WATER_LEVEL
+	rotation = Vector3(0.0, heading, 0.0)
+
+# --------------------------------------------------------------- close in
+## The last ditch. A warship that has run out of time for a missile still has a
+## gun that puts a wall of metal in front of whatever is arriving — and a hull
+## with tubes but nothing close in simply watched leakers come aboard.
+const CIWS_RANGE := 2600.0
+const CIWS_MUZZLE := 1100.0
+var _ciws_cd := 0.0
+## Switched off by the harnesses that are measuring something else — a warship
+## shooting down the round under test is the mount working, not the weapon
+## failing, and the two are easy to confuse in a log.
+var ciws_enabled := true
+var ciws_bursts := 0
+
+func has_ciws() -> bool:
+	return String(KINDS[kind].get("class", "")) == "warship"
+
+func _close_in(delta: float) -> void:
+	_ciws_cd = maxf(_ciws_cd - delta, 0.0)
+	# A hull with her AI switched off and nobody aboard is inert — which is what
+	# the harnesses want when they are measuring something else.
+	if not has_ciws() or not alive or _ciws_cd > 0.0 or not ciws_enabled:
+		return
+	var gun_at: Vector3 = global_position + Vector3(0, mast_height() * 0.55, 0)
+	var best: Node3D = null
+	var bd := CIWS_RANGE
+	for m in get_tree().get_nodes_in_group("interceptable"):
+		if not is_instance_valid(m) or not (m is Node3D):
+			continue
+		if ("team" in m) and int(m.team) == team:
+			continue
+		if m.has_method("is_alive") and not m.is_alive():
+			continue
+		var d: float = gun_at.distance_to((m as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = m as Node3D
+	if best == null:
+		return
+	_ciws_cd = 0.16
+	ciws_bursts += 1
+	# lead it: the round is doing several hundred metres a second and so is
+	# what it is being shot at
+	var tv := Vector3.ZERO
+	if best.has_method("get_velocity"):
+		tv = best.call("get_velocity")
+	var tof: float = bd / CIWS_MUZZLE
+	var aim: Vector3 = best.global_position + tv * tof
+	var dir: Vector3 = (aim - gun_at).normalized()
+	for i in 3:
+		var spread := Vector3(randf_range(-0.010, 0.010), randf_range(-0.010, 0.010),
+			randf_range(-0.010, 0.010))
+		Effects.tracer(get_tree().current_scene, gun_at,
+			(dir + spread).normalized() * CIWS_MUZZLE, self, 40.0, team)
+	# and whether the burst told. Closer is better, and a round crossing fast
+	# is harder than one coming straight down the throat.
+	var hit_chance: float = clampf(1.0 - bd / CIWS_RANGE, 0.0, 1.0)
+	hit_chance *= hit_chance * 0.55
+	if randf() < hit_chance and best.has_method("take_hit"):
+		best.call("take_hit", 999.0, self)
+		Sim.report("%s: close in mount splashed an inbound" % display_name(),
+			Sim.Ev.GOOD)
+
+## How many cells never go to anything but an inbound round: a quarter of the
+## magazine, and at least four while there are any.
+func _reserve_cells() -> int:
+	return mini(maxi(int(float(tubes()) * 0.25), 4), maxi(tubes() - 1, 0))
+
+func can_dive() -> bool:
+	return bool(KINDS[kind]["sub"])
+
+## Where the sensor sits. On a boat that dives it is a mast, and it goes under
+## with her: at periscope depth it is just clear of the water, and deeper than
+## that there is nothing above the surface to see with.
+func periscope_up() -> bool:
+	return not can_dive() or depth < mast_height() - 1.0
 var _ai_scan := 0.0
 var _ai_vls_cd := 0.0
 var _ai_helm := 0.0
@@ -126,7 +251,9 @@ func setup(k := "destroyer", t := 1) -> void:
 	_build(kd)
 	add_to_group("hittable")
 	add_to_group("ships")
-	if int(kd["guns"]) > 0:
+	# A submarine has no gun and was therefore not boardable at all, which made
+	# a boat with twelve cruise missiles in it something you could only watch.
+	if int(kd["guns"]) > 0 or int(kd.get("vls", 0)) > 0:
 		add_to_group("boardable")
 	cam = Camera3D.new()
 	cam.far = 48000.0
@@ -269,10 +396,21 @@ func has_vls() -> bool:
 	return tubes() > 0 and cells_left > 0
 
 ## Main battery, then the tubes if the ship has any.
+## What this hull can actually fire. A submarine was being offered a main
+## battery it does not carry, so weapon one selected a gun that could never go
+## off and the tubes were on weapon two.
 func weapons() -> PackedStringArray:
-	var w := PackedStringArray(["main"])
+	var w := PackedStringArray()
+	if has_gun():
+		w.append("main")
 	if tubes() > 0:
 		w.append("vls")
+	# A boat carrying the strategic round can select it like anything else,
+	# rather than it living only on a separate key nothing points at.
+	if can_dive() and missiles_left > 0:
+		w.append("strategic")
+	if w.is_empty():
+		w.append("main")
 	return w
 
 func current_weapon() -> String:
@@ -299,6 +437,11 @@ func fire_vls(at_node: Node3D = null) -> bool:
 			Sim.net.request_ship_fire(fleet_idx, 1, aim_yaw, aim_pitch)
 		return true
 	var tgt: Node3D = at_node
+	# What the sensor is holding, if anything. Firing the tubes from the conn
+	# used to ignore the designation entirely and shoot at whatever happened to
+	# be nearest, which makes a targeting sensor decorative.
+	if tgt == null and is_instance_valid(ai_target):
+		tgt = ai_target
 	if tgt == null:
 		var best := 1e9
 		for n in get_tree().get_nodes_in_group("hittable"):
@@ -315,6 +458,15 @@ func fire_vls(at_node: Node3D = null) -> bool:
 	if tgt == null:
 		Sim.report("no contact for the tubes", Sim.Ev.BAD)
 		return false
+	# Keep something back for self defence. Firing the magazine dry at shipping
+	# and aircraft left the hull with nothing at all when a round was actually
+	# inbound, which is the one thing the tubes are certainly needed for.
+	var defensive: bool = tgt.is_in_group("interceptable")
+	if not defensive and cells_left <= _reserve_cells():
+		Sim.report("%s: tubes held for air defence" % display_name(), Sim.Ev.INFO)
+		return false
+	if defensive:
+		Sim.claim_engagement(tgt)
 	cells_left -= 1
 	vls_cd = 1.6
 	var from: Vector3 = global_transform * (_vls_muzzle + Vector3(0, 2.5, 0))
@@ -332,8 +484,19 @@ func fire_vls(at_node: Node3D = null) -> bool:
 	var dir := Vector3(sin(brg) * cos(el), sin(el), -cos(brg) * cos(el)).normalized()
 	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 	var xf := Transform3D(Basis.looking_at(dir, up_ref), from)
-	m.launch("sm2", xf, dir * 60.0, self, tgt)
+	# A boat shoots at what it can reach from under the sea: cruise missiles at
+	# shipping and shore targets, not fleet air defence.
+	var round_id := "sm2"
+	var interceptor: bool = tgt.is_in_group("interceptable")
+	if interceptor:
+		round_id = "sm2"            # shooting down a round is air defence work
+	elif bool(KINDS[kind]["sub"]):
+		round_id = "agm84"
+	elif not (tgt is Aircraft):
+		round_id = "agm84"          # a surface engagement wants an anti-ship round
+	m.launch(round_id, xf, dir * 60.0, self, tgt)
 	get_tree().current_scene.add_child(m)
+	store_released.emit(m)
 	Sim.report("cell away — %d remaining" % cells_left, Sim.Ev.GOOD)
 	return true
 
@@ -341,7 +504,31 @@ func has_gun() -> bool:
 	return int(KINDS[kind]["guns"]) > 0
 
 func weapon_label() -> String:
-	return "MAIN BATTERY" if current_weapon() == "main" else "VLS  %d CELLS" % cells_left
+	match current_weapon():
+		"main":
+			return "MAIN BATTERY"
+		"strategic":
+			return "STRATEGIC  %d ABOARD" % missiles_left
+		_:
+			return "VLS  %d CELLS" % cells_left
+
+## Is the selected weapon ready, and if not, why not.
+func weapon_state() -> String:
+	match current_weapon():
+		"strategic":
+			if missiles_left <= 0:
+				return "MAGAZINE EMPTY"
+			if _launch_cd > 0.0:
+				return "LOADING %.1f" % _launch_cd
+			if strategic_aim == Vector3.INF:
+				return "NO AIMING POINT"
+			return "READY"
+		"vls":
+			if cells_left <= 0:
+				return "TUBES EMPTY"
+			return "LOADING %.1f" % vls_cd if vls_cd > 0.0 else "READY"
+		_:
+			return "LOADING %.1f" % gun_cd if gun_cd > 0.0 else "READY"
 
 func _unhandled_input(e: InputEvent) -> void:
 	if not occupied or not alive:
@@ -361,28 +548,65 @@ func _conn(delta: float) -> void:
 	telegraph = clampf(telegraph + t * delta * 0.35, -0.25, 1.0)
 	if Sim.tapped(&"interact"):
 		dismount_requested.emit()
+	if Sim.tapped(&"camera"):
+		view_mode = (view_mode + 1) % VIEW_BOOM.size()
+		Sim.report(VIEW_NAME[view_mode], Sim.Ev.INFO)
+	if Sim.tapped(&"cycle_target"):
+		cycle_target()
 	if Sim.tapped(&"cycle_weapon"):
 		cycle_weapon()
 	for wi in weapons().size():
 		if Sim.tapped(StringName("weapon_%d" % (wi + 1))):
 			set_weapon(wi)
+	# Planes. A boat that can dive had no way to do it: she sat on the surface
+	# whatever was happening.
+	if can_dive():
+		if Sim.held(&"dive"):
+			depth_order = clampf(depth_order + delta * 6.0, 0.0, MAX_DEPTH)
+		if Sim.held(&"surface"):
+			depth_order = clampf(depth_order - delta * 6.0, 0.0, MAX_DEPTH)
 	if Sim.held(&"fire") and not Sim.ui_modal:
-		if current_weapon() == "vls":
-			if Sim.tapped(&"fire"):
-				fire_vls()
-		elif has_gun():
-			fire_gun()
+		match current_weapon():
+			"vls":
+				if Sim.tapped(&"fire"):
+					fire_vls()
+			"strategic":
+				if Sim.tapped(&"fire"):
+					var mark: Vector3 = strategic_aim
+					if mark == Vector3.INF:
+						Sim.report("no aiming point — set one on the map", Sim.Ev.BAD)
+					else:
+						launch_strategic(mark)
+			_:
+				if has_gun():
+					fire_gun()
 	# a mast-head view, looking where the guns are laid
 	var eye: Vector3 = global_position + Vector3(0, float(KINDS[kind]["free"]) + 14.0, 0)
 	var back := Vector3(-sin(aim_yaw), 0, cos(aim_yaw))
 	# the boom drops as the battery goes up, so a high angle shot is not taken
 	# through the back of your own superstructure
 	var lift: float = 6.0 + 26.0 * clampf(aim_pitch / deg_to_rad(70.0), 0.0, 1.0)
-	cam.global_position = eye + back * (26.0 - 8.0 * clampf(aim_pitch, 0.0, 1.2)) \
-		+ Vector3(0, lift, 0)
-	var look := eye + Vector3(sin(aim_yaw) * cos(aim_pitch), sin(aim_pitch),
-		-cos(aim_yaw) * cos(aim_pitch)) * 400.0
-	cam.look_at(look, Vector3.UP)
+	# How far back the view sits. There was one fixed boom and no way to change
+	# it: on a submarine, which is a hundred and ten metres of hull with nothing
+	# standing above it, that put the camera in the middle of the boat with the
+	# bow and stern both out of frame.
+	# Not while a round is being ridden: the weapon camera has the screen, and
+	# putting the view back on the masthead every physics frame is what stopped
+	# a launch out of the tubes from ever being followed.
+	if not cam.current:
+		return
+	var boom: float = VIEW_BOOM[view_mode % VIEW_BOOM.size()]
+	var facing := Vector3(sin(aim_yaw) * cos(aim_pitch), sin(aim_pitch),
+		-cos(aim_yaw) * cos(aim_pitch))
+	if boom <= 0.01:
+		# stood at the top of the sail, looking out
+		cam.global_position = global_position + Vector3(0, mast_height(), 0) \
+			+ facing * 1.2
+		cam.look_at(cam.global_position + facing * 400.0, Vector3.UP)
+		return
+	cam.global_position = eye + back * (boom - 8.0 * clampf(aim_pitch, 0.0, 1.2)) \
+		+ Vector3(0, lift * VIEW_LIFT[view_mode % VIEW_LIFT.size()], 0)
+	cam.look_at(eye + facing * 400.0, Vector3.UP)
 
 # ------------------------------------------------------------------ AI conn
 ## A ship nobody is standing on fights herself: she looks for a contact, opens
@@ -395,10 +619,15 @@ func _captain(delta: float) -> void:
 	if _ai_scan <= 0.0:
 		_ai_scan = 1.5
 		ai_target = _pick_contact()
-		var air := _pick_air()
-		if air != null and has_vls() and _ai_vls_cd <= 0.0 and vls_cd <= 0.0:
+		# Area air defence: a round already in the air at one of ours is a more
+		# urgent thing than the aeroplane that launched it. A warship with
+		# tubes covers the friendly aircraft around her, not just herself.
+		var shoot: Node3D = _pick_threat()
+		if shoot == null:
+			shoot = _pick_air()
+		if shoot != null and has_vls() and _ai_vls_cd <= 0.0 and vls_cd <= 0.0:
 			_ai_vls_cd = randf_range(3.5, 7.0)
-			fire_vls(air)
+			fire_vls(shoot)
 	var kd: Dictionary = KINDS[kind]
 	var want_speed: float = float(kd["speed"]) * 0.45
 	var want_brg := heading
@@ -438,6 +667,43 @@ func _steer(brg: float, spd: float, delta: float) -> void:
 	telegraph = clampf(spd / maxf(float(KINDS[kind]["speed"]), 1.0), -0.25, 1.0)
 
 ## The nearest hostile that floats, or a coastal structure worth shelling.
+## Step the radar onto the next hostile. A hull had no way to pick a target at
+## all: `ai_target` was only ever written by the AI captain, and the captain
+## bails out on any hull without a gun -- so a crewed submarine could never
+## hold anything, and T, which does this on an aeroplane, was not wired to a
+## ship in the first place.
+func cycle_target() -> void:
+	var cand: Array = []
+	var reach: float = maxf(Sim.radar_range(), 26000.0)
+	var eye: Vector3 = global_position + Vector3(0, maxf(mast_height(), 4.0), 0)
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or n == self or not (n is Node3D):
+			continue
+		if n.is_in_group("no_lock"):
+			continue
+		if not ("team" in n) or int(n.team) == team:
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		var np: Vector3 = (n as Node3D).global_position
+		if eye.distance_to(np) > reach:
+			continue
+		if eye.distance_to(np) > 2000.0 \
+				and not Sim.line_of_sight(eye, np + Vector3(0, 4, 0), 250.0):
+			continue
+		cand.append(n)
+	if cand.is_empty():
+		ai_target = null
+		Sim.report("no contacts", Sim.Ev.BAD)
+		return
+	# a fixed order, so pressing it repeatedly walks the list instead of
+	# bouncing between whichever two happen to be nearest the bow
+	cand.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
+	var i := cand.find(ai_target)
+	ai_target = cand[(i + 1) % cand.size()]
+	Sim.report("target %s  %.1f km" % [Sim.label_of(ai_target),
+		global_position.distance_to(ai_target.global_position) * 0.001], Sim.Ev.GOOD)
+
 func _pick_contact() -> Node3D:
 	if not has_gun():
 		return null
@@ -479,6 +745,47 @@ func _pick_contact() -> Node3D:
 	return best
 
 ## The nearest hostile aeroplane inside the missile envelope.
+## A hostile round in the air, tracking one of ours. Nearest time-to-impact
+## first: the one about to arrive matters more than the one still climbing out.
+func _pick_threat() -> Node3D:
+	if not has_vls():
+		return null
+	var best: Node3D = null
+	var soonest := 1e9
+	for m in get_tree().get_nodes_in_group("interceptable"):
+		if not is_instance_valid(m) or not (m is Node3D):
+			continue
+		if ("team" in m) and int(m.team) == team:
+			continue
+		if m.has_method("is_alive") and not m.is_alive():
+			continue
+		var aimed: Variant = m.get("target")
+		if aimed == null or not is_instance_valid(aimed):
+			continue
+		# only what is coming at our side
+		if not ("team" in aimed) or int(aimed.team) != team:
+			continue
+		var mp: Vector3 = (m as Node3D).global_position
+		if global_position.distance_to(mp) > 34000.0:
+			continue
+		if not Sim.line_of_sight(global_position + Vector3(0, mast_height(), 0), mp):
+			continue
+		var closing: float = 400.0
+		if m.has_method("get_velocity"):
+			closing = maxf((m.call("get_velocity") as Vector3).length(), 60.0)
+		var tti: float = mp.distance_to((aimed as Node3D).global_position) / closing
+		# no point shooting at something that arrives before we could get there
+		if tti < 4.0:
+			continue
+		# and no point being the fourth ship to shoot at the same round while
+		# everything else comes through untouched
+		if Sim.engage_count(m) >= 2:
+			continue
+		if tti < soonest:
+			soonest = tti
+			best = m as Node3D
+	return best
+
 func _pick_air() -> Node3D:
 	var best: Node3D = null
 	var bd := 38000.0
@@ -633,6 +940,29 @@ func show_shot(yaw: float, pitch: float) -> void:
 func hit_radius() -> float:
 	return float(KINDS[kind]["beam"]) * 0.7
 
+## How far a point is from the hull itself, rather than from a sphere drawn
+## round the middle of it. One radius cannot describe a hundred and fifty metre
+## ship: taken off the beam it under-reads by half the length of the vessel at
+## the bow, so a round that arrived on the forecastle was scored as a twenty
+## metre miss and did the minimum its warhead allowed. Zero means inside.
+func surface_gap(p: Vector3) -> float:
+	var k: Dictionary = KINDS[kind]
+	var l: Vector3 = global_transform.affine_inverse() * p
+	# the hull sits from the keel up to the freeboard, not evenly about the
+	# waterline the origin is on
+	var draught: float = float(k["draught"])
+	var free: float = float(k["free"])
+	l.y -= (free - draught) * 0.5
+	var half := Vector3(float(k["beam"]) * 0.5, (free + draught) * 0.5,
+		float(k["len"]) * 0.5)
+	var d := Vector3(absf(l.x) - half.x, absf(l.y) - half.y, absf(l.z) - half.z)
+	var outside := Vector3(maxf(d.x, 0.0), maxf(d.y, 0.0), maxf(d.z, 0.0))
+	return outside.length() + minf(maxf(d.x, maxf(d.y, d.z)), 0.0)
+
+## Way through the water, as a vector, so a weapon can lead the ship.
+func get_velocity() -> Vector3:
+	return -global_transform.basis.z * speed
+
 func is_alive() -> bool:
 	return alive
 
@@ -667,6 +997,7 @@ func _physics_process(delta: float) -> void:
 	gun_cd = maxf(gun_cd - delta, 0.0)
 	vls_cd = maxf(vls_cd - delta, 0.0)
 	_damage_control(delta)
+	_close_in(delta)
 	if occupied:
 		_conn(delta)
 	elif ai and String(KINDS[kind]["class"]) != "civil":
@@ -682,13 +1013,42 @@ func _physics_process(delta: float) -> void:
 	if is_instance_valid(_gun):
 		_gun.rotation.y = wrapf(-aim_yaw - rotation.y, -PI, PI)
 		_gun.rotation.x = -aim_pitch
-	# steam ahead, with a slow scend so a ship at sea is not a static prop
-	global_position += Vector3(sin(heading), 0.0, -cos(heading)) * speed * delta
+	# Steam ahead — but not through a hill. Nothing ever compared the keel with
+	# the ground under it, so a hull sailed straight through headlands and a
+	# submarine through the seabed.
+	var draught: float = float(KINDS[kind]["draught"])
+	var keel: float = Sim.WATER_LEVEL - depth - draught
+	var step: Vector3 = Vector3(sin(heading), 0.0, -cos(heading)) * speed * delta
+	var ahead: Vector3 = global_position + step * 2.0 + step.normalized() * 40.0 \
+		if speed > 0.1 else global_position
+	if Sim.height_at(ahead.x, ahead.z) < keel - 1.0:
+		global_position += step
+	else:
+		# aground: the way comes off her and she backs out the way she came
+		speed = maxf(speed - delta * 6.0, 0.0)
+		telegraph = minf(telegraph, 0.0)
+		if not _aground:
+			_aground = true
+			if occupied:
+				Sim.report("%s: shoal water — all stop" % display_name(), Sim.Ev.BAD)
+		heading = wrapf(heading + delta * 0.5, -PI, PI)
+	if Sim.height_at(global_position.x, global_position.z) < keel - 4.0:
+		_aground = false
 	# The origin rides ON the waterline; the hull is lofted from keel to deck
 	# around it. Sinking the origin to half draught put the whole ship under the
 	# sea as far as anything else was concerned, so a weapon aimed at it
 	# detonated on the surface above and never touched it.
-	global_position.y = Sim.WATER_LEVEL + sin(_t * 0.35) * 0.35
+	# Depth. She answers her planes slowly, and she can never go deeper than the
+	# water under her allows.
+	if can_dive():
+		var bed: float = Sim.height_at(global_position.x, global_position.z)
+		var room: float = maxf(Sim.WATER_LEVEL - (bed + draught + 2.0), 0.0)
+		depth = move_toward(depth, minf(depth_order, room), delta * 2.2)
+	else:
+		depth = 0.0
+	# the scend fades out as she goes under: there is no swell at depth
+	var scend: float = sin(_t * 0.35) * 0.35 * (1.0 - clampf(depth / 12.0, 0.0, 1.0))
+	global_position.y = Sim.WATER_LEVEL - depth + scend
 	rotation = Vector3(sin(_t * 0.31) * 0.012, heading,
 		sin(_t * 0.24) * 0.02 + list_ang * list_side)
 	# turn back at the edge of the world rather than steaming off it
@@ -750,6 +1110,10 @@ func launch_strategic(at: Vector3) -> bool:
 		return false
 	missiles_left -= 1
 	_launch_cd = 25.0
+	# The magazine going empty takes the round off the selector, so the index
+	# must not be left pointing past the end of the list.
+	if missiles_left <= 0:
+		sel_weapon = clampi(sel_weapon, 0, maxi(weapons().size() - 1, 0))
 	var m := Missile.new()
 	# Clear of the water. The boat rides with its deck at the surface and the
 	# hull below it, so a tube exit six metres up is still under the sea as far
@@ -766,10 +1130,15 @@ func launch_strategic(at: Vector3) -> bool:
 	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 	var xf := Transform3D(Basis.looking_at(dir, up_ref), from)
 	var mark := _Aimpoint.new()
-	mark.global_position = at
+	# Into the tree first. `global_position` on a node with no parent has
+	# nothing to be global *to*: it raises, and the aim point stayed at the
+	# world origin — so the round guided six kilometres wide of where it was
+	# sent and the warning about it was the only clue.
 	get_tree().current_scene.add_child(mark)
+	mark.global_position = at
 	m.launch("slbm", xf, dir * 80.0, self, mark)
 	get_tree().current_scene.add_child(m)
+	store_released.emit(m)
 	Sim.report("%s: strategic launch, %d remaining" % [display_name(), missiles_left],
 		Sim.Ev.BAD)
 	return true

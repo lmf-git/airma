@@ -36,6 +36,33 @@ static func tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, centre: Vec
 	st.set_normal(n)
 	st.add_vertex(c)
 
+## Add one triangle whose outward normal you already know. Deciding the facing
+## by distance from a reference point is only ever as good as that point: on a
+## concave planform -- a wing with a root extension, a cranked fin -- the
+## centroid can sit outside the outline and panels come out inside out, which
+## is a hole you look straight through.
+static func tri_n(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3) -> void:
+	var raw := (b - a).cross(c - a)
+	if raw.length_squared() < 1e-12:
+		return
+	var nn := n.normalized()
+	if raw.dot(nn) > 0.0:
+		# Godot front faces wind clockwise seen from outside, the reverse of the
+		# right-handed order implied by the outward normal
+		var t := b
+		b = c
+		c = t
+	st.set_normal(nn)
+	st.add_vertex(a)
+	st.set_normal(nn)
+	st.add_vertex(b)
+	st.set_normal(nn)
+	st.add_vertex(c)
+
+static func quad_n(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, n: Vector3) -> void:
+	tri_n(st, a, b, c, n)
+	tri_n(st, a, c, d, n)
+
 static func quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, centre: Vector3) -> void:
 	tri(st, a, b, c, centre)
 	tri(st, a, c, d, centre)
@@ -58,15 +85,41 @@ static func ring(hw: float, hh: float, cy: float, z: float, power: float, count:
 		pts.append(Vector3(x, y + cy, z))
 	return pts
 
+static func centroid(loop: PackedVector3Array) -> Vector3:
+	var c := Vector3.ZERO
+	for p in loop:
+		c += p
+	return c / maxf(float(loop.size()), 1.0)
+
 ## Skin a stack of equal-sized rings into a hull.
-static func loft(st: SurfaceTool, rings: Array, centre: Vector3, cap_front := true, cap_back := true) -> void:
+## `inward` skins a tube you are meant to look *into* -- the well behind an
+## intake lip -- where the visible side is the one facing the axis.
+static func loft(st: SurfaceTool, rings: Array, centre: Vector3, cap_front := true,
+		cap_back := true, inward := false) -> void:
 	for s in range(rings.size() - 1):
 		var a: PackedVector3Array = rings[s]
 		var b: PackedVector3Array = rings[s + 1]
+		# Which way a face points is decided by comparing its normal with the
+		# line out from a reference point. One centre for the whole hull leaves
+		# a face on anything long and thin -- a nacelle, an intake duct, a
+		# nozzle -- almost perpendicular to that line, so the sign came down to
+		# rounding and the odd panel ended up wound inside out: from some angles
+		# you looked straight through the skin. The local section axis puts
+		# every side face cleanly outward instead.
+		var axis: Vector3 = (centroid(a) + centroid(b)) * 0.5
 		var n := a.size()
 		for i in n:
 			var j := (i + 1) % n
-			quad(st, a[i], a[j], b[j], b[i], centre)
+			var qn := (a[j] - a[i]).cross(b[i] - a[i])
+			if qn.length_squared() < 1e-12:
+				continue
+			qn = qn.normalized()
+			var out_dir: Vector3 = (a[i] + a[j] + b[i] + b[j]) * 0.25 - axis
+			if qn.dot(out_dir) < 0.0:
+				qn = -qn
+			if inward:
+				qn = -qn
+			quad_n(st, a[i], a[j], b[j], b[i], qn)
 	if cap_front and rings.size() > 0:
 		face(st, rings[0], centre)
 	if cap_back and rings.size() > 1:
@@ -79,25 +132,37 @@ static func prism(st: SurfaceTool, poly: PackedVector2Array, u: Vector3, v: Vect
 	var n := poly.size()
 	var top := PackedVector3Array()
 	var bot := PackedVector3Array()
-	var mid := Vector3.ZERO
 	for i in n:
 		var p := origin + u * poly[i].x + v * poly[i].y
 		top.append(p + ext * thick[i])
 		bot.append(p - ext * thick[i])
-		mid += p
-	mid /= float(n)
+	# Which way the outline is wound, so an edge normal can be turned out of the
+	# shape rather than away from a centroid that may not even be inside it.
+	var area := 0.0
 	for i in n:
 		var j := (i + 1) % n
-		quad(st, top[i], top[j], bot[j], bot[i], mid)
+		area += poly[i].x * poly[j].y - poly[j].x * poly[i].y
+	var turn := 1.0 if area >= 0.0 else -1.0
+	for i in n:
+		var j := (i + 1) % n
+		var d := poly[j] - poly[i]
+		var e := Vector2(d.y, -d.x) * turn
+		if e.length_squared() < 1e-12:
+			continue
+		e = e.normalized()
+		quad_n(st, top[i], top[j], bot[j], bot[i], (u * e.x + v * e.y).normalized())
+	# and the two flat sides face along the thickness, by construction
+	var up := ext.normalized()
 	var idx := Geometry2D.triangulate_polygon(poly)
 	if idx.is_empty():
-		face(st, top, mid)
-		face(st, bot, mid)
+		for i in range(1, n - 1):
+			tri_n(st, top[0], top[i], top[i + 1], up)
+			tri_n(st, bot[0], bot[i], bot[i + 1], -up)
 	else:
 		var k := 0
 		while k < idx.size():
-			tri(st, top[idx[k]], top[idx[k + 1]], top[idx[k + 2]], mid)
-			tri(st, bot[idx[k]], bot[idx[k + 1]], bot[idx[k + 2]], mid)
+			tri_n(st, top[idx[k]], top[idx[k + 1]], top[idx[k + 2]], up)
+			tri_n(st, bot[idx[k]], bot[idx[k + 1]], bot[idx[k + 2]], -up)
 			k += 3
 
 static func box(st: SurfaceTool, size: Vector3, at: Vector3) -> void:

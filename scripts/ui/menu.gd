@@ -234,7 +234,7 @@ func _ready() -> void:
 	var help := Label.new()
 	help.text = "W/S pitch  ·  A/D roll  ·  Q/E rudder  ·  SHIFT/CTRL throttle  ·  G gear  ·  F flaps  ·  X brakes\n" \
 		+ "B bay doors  ·  1-4 pick weapon  ·  TAB cycle  ·  T target  ·  SPACE fire  ·  V gun  ·  N flares\n" \
-		+ "C camera (cockpit / chase / orbit)  ·  M mouse stick  ·  H fly-by-wire  ·  R restart  ·  ESC menu"
+		+ "P camera (cockpit / chase / orbit)  ·  N night vision  ·  M mouse stick  ·  H fly-by-wire  ·  ESC menu"
 	help.add_theme_font_size_override("font_size", 13)
 	help.add_theme_color_override("font_color", Color(0.55, 0.62, 0.7))
 	root.add_child(help)
@@ -262,10 +262,13 @@ func _select_faction(f: String) -> void:
 		_select(jet_id)
 
 ## Ships the player can crew: anything with a main mount.
+## Ships the player can crew: anything with a main mount or launch tubes. Only
+## the gun counted before, which left the submarine off the list entirely.
 func _crewable_ships() -> Array:
 	var out: Array = []
 	for k in Ship.KINDS:
-		if int(Ship.KINDS[k]["guns"]) > 0:
+		var kd: Dictionary = Ship.KINDS[k]
+		if int(kd["guns"]) > 0 or int(kd.get("vls", 0)) > 0:
 			out.append(k)
 	return out
 

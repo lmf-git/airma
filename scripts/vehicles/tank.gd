@@ -40,6 +40,27 @@ const KINDS := {
 	"bm30": {"name": "BM-30 Smerch", "class": "mlrs", "hull": Color(0.24, 0.28, 0.20),
 			 "hp": 150.0, "power": 440_000.0, "top": 14.0, "gun": 470.0,
 			 "muzzle": 450.0, "reload": 30.0, "blast": 21.0, "salvo": 12, "ripple": 0.6},
+	# Transporter erector launchers. These do not shoot: they raise a canister
+	# and send a missile, and the missile does the rest. Everything that makes
+	# them worth having is in the round, so the vehicle is a chassis and a
+	# reload time.
+	"tel_kalibr": {"name": "Kalibr TEL", "class": "tel", "hull": Color(0.26, 0.29, 0.24),
+			 "hp": 130.0, "power": 400_000.0, "top": 16.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 34.0, "blast": 10.0,
+			 "missile": "kalibr", "rounds": 4},
+	"tel_zircon": {"name": "Zircon TEL", "class": "tel", "hull": Color(0.24, 0.26, 0.28),
+			 "hp": 130.0, "power": 400_000.0, "top": 16.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 40.0, "blast": 10.0,
+			 "missile": "zircon", "rounds": 2},
+	"tel_fattah": {"name": "Fattah TEL", "class": "tel", "hull": Color(0.34, 0.36, 0.28),
+			 "hp": 130.0, "power": 380_000.0, "top": 15.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 46.0, "blast": 10.0,
+			 "missile": "fattah", "rounds": 2},
+	"tel_oreshnik": {"name": "Oreshnik TEL", "class": "tel",
+			 "hull": Color(0.28, 0.28, 0.26),
+			 "hp": 150.0, "power": 460_000.0, "top": 13.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 90.0, "blast": 10.0,
+			 "missile": "oreshnik", "rounds": 1},
 }
 
 var kind := "m1a2"
@@ -63,7 +84,16 @@ var _fire: GPUParticles3D
 var _wreck_smoke: GPUParticles3D
 var _mantlet: Node3D
 var _muzzle: Node3D
-var _road_wheels: Array = []      # {node, side, index, rest_y, spin}
+## Something left the vehicle. The weapon camera rides whatever comes out of
+## this; only aircraft and ships had it, so a launcher's round had nothing to
+## follow and the view stayed on the lorry.
+signal store_released(node)
+
+var _road_wheels: Array = []
+## Where a launcher's canisters sit, so a round leaves from inside one.
+var _tube_lanes: Array = []
+var _tube_len := 3.0
+var _tube_rise := 0.9      # {node, side, index, rest_y, spin}
 var _wheel_spin := 0.0
 var rounds_left := 1              # rounds on the rails, refilled on resupply
 var bounds := AABB()              # local model extents, for hull_distance()
@@ -93,7 +123,8 @@ func setup(t := 0, k := "m1a2") -> void:
 	kind = k if KINDS.has(k) else "m1a2"
 	var kd: Dictionary = KINDS[kind]
 	health = float(kd["hp"])
-	rounds_left = int(kd.get("salvo", 1))
+	# a launcher carries canisters, not a salvo of rockets
+	rounds_left = int(kd.get("rounds", kd.get("salvo", 1)))
 	mass = 62000.0
 	inertia = Vector3(120000.0, 140000.0, 60000.0)
 	can_sleep = false
@@ -106,7 +137,11 @@ func setup(t := 0, k := "m1a2") -> void:
 	collision_mask = 0
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(3.7, 2.0, 7.9)
+	# A launcher is nearly twice the length of a tank and sits higher on its
+	# wheels; giving it a tank's box had it resting on a hull that was not
+	# where its body is.
+	box.size = Vector3(3.7, 2.0, 7.9) if vclass() != "tel" \
+		else Vector3(3.2, 2.6, 13.4)
 	shape.shape = box
 	add_child(shape)
 	_build()
@@ -127,6 +162,9 @@ func _build() -> void:
 	var dark := MeshKit.mat(Color(0.11, 0.11, 0.12), 0.85, 0.2)
 
 	var st := MeshKit.begin()
+	if vclass() == "tel":
+		_build_tel_chassis(st, body, dark)
+		return
 	# lower hull, glacis and side skirts
 	MeshKit.box(st, Vector3(3.5, 0.85, 7.3), Vector3(0, 0.10, 0))
 	var glacis := PackedVector2Array([Vector2(-1.75, -3.65), Vector2(1.75, -3.65),
@@ -167,7 +205,8 @@ func _build() -> void:
 			w.rotation_degrees = Vector3(0, 0, 90)
 			w.position = Vector3(sx * TRACK_HALF, -0.18, z)
 			add_child(w)
-			_road_wheels.append({"node": w, "side": sx, "z": z, "rest_y": -0.18, "comp": 0.0})
+			_road_wheels.append({"node": w, "side": sx, "lat": sx * TRACK_HALF, "z": z,
+				"rest_y": -0.18, "comp": 0.0})
 
 	# turret and gun
 	_turret = Node3D.new()
@@ -291,15 +330,24 @@ func _unhandled_input(e: InputEvent) -> void:
 	if not occupied or not alive:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var mm := e as InputEventMouseMotion
-		aim_yaw -= mm.relative.x * 0.0026
-		if is_indirect():
-			# pushing away walks the fall of shot out, pulling back brings it in
-			arty_range = clampf(arty_range - mm.relative.y * 18.0, 300.0, 32000.0)
-			map_target = Vector3.INF
-		else:
-			aim_pitch = clampf(aim_pitch - mm.relative.y * 0.0022,
-				deg_to_rad(-9.0), deg_to_rad(20.0))
+		aim_mouse((e as InputEventMouseMotion).relative)
+
+## Lay the piece with the mouse. Split out of the input handler so the guard
+## below can be exercised without a captured pointer.
+func aim_mouse(rel: Vector2) -> void:
+	# With the commander's sight up the mouse slews the sight, not the turret.
+	# Left unguarded, looking around the sight walked the fall of shot out and
+	# threw away the fire mission the sight had just handed over.
+	if sight_active:
+		return
+	aim_yaw -= rel.x * 0.0026
+	if is_indirect():
+		# pushing away walks the fall of shot out, pulling back brings it in
+		arty_range = clampf(arty_range - rel.y * 18.0, 300.0, 32000.0)
+		map_target = Vector3.INF
+	else:
+		aim_pitch = clampf(aim_pitch - rel.y * 0.0022,
+			deg_to_rad(-9.0), deg_to_rad(20.0))
 
 func _drive_input(delta: float) -> void:
 	in_throttle = Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up")
@@ -350,7 +398,11 @@ func _drive_input(delta: float) -> void:
 		fire_coax(get_tree().current_scene)
 	if Sim.tapped(&"interact"):
 		dismount_requested.emit()
-	# camera
+	# camera — unless the weapon camera has the screen, in which case putting
+	# the view back on the vehicle every physics frame is what stopped a round
+	# out of the tubes from ever being followed. Same fault the ships had.
+	if not cam.current:
+		return
 	if gunner:
 		var sight: Vector3 = _mantlet.global_transform * Vector3(0.55, 0.55, -0.4)
 		cam.global_position = sight
@@ -431,9 +483,14 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 
 	var contacts := 0
 	var k: float = mass * 9.81 * 2.6 / REST
-	var c: float = 1.05 * sqrt(k * mass / float(WHEELS_PER_SIDE * 2))
+	# Damped for the wheels this vehicle actually has, and probed where they
+	# actually are. Both were hard-wired to the tracked layout, so a launcher on
+	# six axles a side was sprung for a tank's running gear and its wheels were
+	# tested a foot outboard of themselves — which is what had it bouncing.
+	var c: float = 1.05 * sqrt(k * mass / maxf(float(_road_wheels.size()), 1.0))
 	for w in _road_wheels:
-		var lp := Vector3(float(w["side"]) * TRACK_HALF, float(w["rest_y"]), float(w["z"]))
+		var lat: float = float(w.get("lat", float(w["side"]) * TRACK_HALF))
+		var lp := Vector3(lat, float(w["rest_y"]), float(w["z"]))
 		var wp: Vector3 = xf * lp
 		var ground := Sim.height_at(wp.x, wp.z)
 		var comp: float = (ground + WHEEL_R) - wp.y
@@ -478,6 +535,80 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	state.apply_torque(-Vector3(0, state.angular_velocity.y, 0) * mass * 2.4)
 
 # --------------------------------------------------------------------------
+## A launcher is a lorry, not a tank. It was being given the tracked hull, the
+## glacis, the side skirts and the road wheels of an armoured vehicle, so a
+## TEL came out looking exactly like everything else on the field with a
+## canister balanced on top of it.
+func _build_tel_chassis(st: SurfaceTool, body: Material, dark: Material) -> void:
+	# a long flat load bed on a chassis
+	MeshKit.box(st, Vector3(3.1, 0.42, 11.6), Vector3(0, 0.95, 0.6))
+	MeshKit.box(st, Vector3(2.7, 0.34, 10.4), Vector3(0, 1.28, 0.6))
+	# the cab, forward and separate, with glass in it
+	MeshKit.box(st, Vector3(2.85, 1.55, 3.0), Vector3(0, 1.62, -4.6))
+	MeshKit.box(st, Vector3(2.55, 0.62, 0.12), Vector3(0, 2.15, -6.05))
+	# outriggers, which is what holds it down when it launches
+	for sx in [-1.0, 1.0]:
+		MeshKit.box(st, Vector3(0.9, 0.22, 0.6), Vector3(sx * 1.75, 0.72, 3.9))
+		MeshKit.box(st, Vector3(0.9, 0.22, 0.6), Vector3(sx * 1.75, 0.72, -2.2))
+	add_child(MeshKit.mi(MeshKit.finish(st, body), "Chassis"))
+	# eight wheels a side on a proper wheelbase, not a track run
+	var axles := [-5.1, -3.9, -0.6, 0.7, 2.0, 3.3]
+	for sx2 in [-1.0, 1.0]:
+		for i in axles.size():
+			var z: float = float(axles[i])
+			var w := MeshInstance3D.new()
+			var cyl := CylinderMesh.new()
+			cyl.top_radius = 0.72
+			cyl.bottom_radius = 0.72
+			cyl.height = 0.46
+			cyl.radial_segments = 12
+			w.mesh = cyl
+			w.material_override = MeshKit.mat(Color(0.09, 0.09, 0.10), 0.95, 0.0)
+			w.rotation_degrees = Vector3(0, 0, 90)
+			w.position = Vector3(sx2 * 1.42, 0.42, z)
+			add_child(w)
+			_road_wheels.append({"node": w, "side": sx2, "lat": sx2 * 1.42, "z": z,
+				"rest_y": 0.42, "comp": 0.0})
+	# the erector and its canisters live on the turret node, as with everything
+	# else, so laying and elevating work unchanged
+	_turret = Node3D.new()
+	_turret.name = "Turret"
+	_turret.position = Vector3(0, 1.55, 1.1)
+	add_child(_turret)
+	var tu := MeshKit.begin()
+	MeshKit.box(tu, Vector3(2.2, 0.36, 2.0), Vector3(0, 0.10, 0))
+	add_child_turret_mesh(tu, dark)
+
+func add_child_turret_mesh(tu: SurfaceTool, dark: Material) -> void:
+	_turret.add_child(MeshKit.mi(MeshKit.finish(tu, dark), "Deck"))
+	_mantlet = Node3D.new()
+	_mantlet.name = "Mantlet"
+	_mantlet.position = Vector3(0, 0.45, 0.0)
+	_turret.add_child(_mantlet)
+	var gst := MeshKit.begin()
+	# One canister or two, and how big, follows the round it carries. Every
+	# launcher was given the same twin tubes, so an Oreshnik — fourteen and a
+	# half metres of it — rode in the same pair of pipes as a Kalibr.
+	var mid: Dictionary = WeaponSpec.get_spec(
+		String(KINDS[kind].get("missile", "kalibr")))
+	var bore: float = maxf(float(mid.get("dia", 0.5)) * 0.62, 0.30)
+	var tube: float = maxf(float(mid.get("length", 6.0)) * 0.5, 2.4)
+	var twin: bool = float(mid.get("dia", 0.5)) < 0.7
+	MeshKit.box(gst, Vector3(bore * 4.2, 0.30, tube * 1.9), Vector3(0, 0.10, 0.4))
+	var lanes: Array = [-bore * 1.15, bore * 1.15] if twin else [0.0]
+	for cx in lanes:
+		MeshKit.cone(gst, bore, bore, -tube, tube * 0.94, Vector3(cx, bore + 0.3, 0), 12)
+		MeshKit.cone(gst, bore * 1.11, bore * 1.11, -tube - 0.1, -tube + 0.2,
+			Vector3(cx, bore + 0.3, 0), 12)
+	MeshKit.box(gst, Vector3(bore * 4.6, 0.5, 0.5), Vector3(0, 0.30, tube * 0.82))
+	_tube_lanes = lanes
+	_tube_len = tube
+	_tube_rise = bore + 0.3
+	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst, dark), "Gun"))
+	_muzzle = Node3D.new()
+	_muzzle.position = Vector3(0, _tube_rise, -_tube_len)
+	_mantlet.add_child(_muzzle)
+
 func vclass() -> String:
 	return String(KINDS[kind].get("class", "mbt"))
 
@@ -591,6 +722,10 @@ func fire_main(world: Node) -> bool:
 	var kd: Dictionary = KINDS[kind]
 	if _gun_cd > 0.0 or not alive:
 		return false
+	if vclass() == "tel":
+		if rounds_left <= 0:
+			return false
+		return _fire_tel(world, kd)
 	if is_indirect():
 		# Wait until the launcher is actually laid. The solution is worked out
 		# the instant you designate, but the traverse takes 0.9 rad/s and the
@@ -621,6 +756,74 @@ func fire_main(world: Node) -> bool:
 		float(kd["gun"]), float(kd["blast"]), 3.4)
 	apply_central_impulse(_muzzle.global_transform.basis.z * 34000.0)
 	return true
+
+## How far the piece still is from the bearing and elevation it needs, in
+## radians: the worst of the two axes. Zero means it is laid and may fire.
+## Send one. A TEL does not need to be laid the way a gun does — the round is
+## guided and will turn onto the bearing itself — so all this has to do is get
+## it off the rail cleanly and pointed up.
+func _fire_tel(world: Node, kd: Dictionary) -> bool:
+	var mark: Vector3 = map_target
+	if mark == Vector3.INF:
+		mark = ground_aim()
+	if mark == Vector3.INF and is_instance_valid(_ai_target):
+		mark = _ai_target.global_position
+	if mark == Vector3.INF:
+		Sim.report("%s: no aiming point" % display_name(), Sim.Ev.BAD)
+		return false
+	# the round's reach, not a shell's
+	var spec := WeaponSpec.get_spec(String(kd.get("missile", "kalibr")))
+	var rng := global_position.distance_to(mark)
+	if rng > float(spec.get("range", 100000.0)):
+		Sim.report("%s: mark is %.0f km away, the round reaches %.0f" % [
+			display_name(), rng * 0.001,
+			float(spec.get("range", 100000.0)) * 0.001], Sim.Ev.BAD)
+		return false
+	_gun_cd = float(kd["reload"])
+	rounds_left -= 1
+	var id: String = String(kd.get("missile", "kalibr"))
+	# Out of the tube it is actually sitting in, along the tube's own axis.
+	# Spawning it in the air on a computed bearing meant the round never
+	# appeared to leave the vehicle — it simply existed, already flying.
+	var from: Vector3 = global_position + Vector3(0, 3.0, 0)
+	var dir := Vector3.UP
+	if is_instance_valid(_muzzle):
+		from = _muzzle.global_position
+		dir = -_muzzle.global_transform.basis.z
+	var flat := Vector2(mark.x - from.x, mark.z - from.z)
+	var brg := atan2(flat.x, -flat.y)
+	# steeply up, leaning onto the bearing: a canister launch, not a gun
+	var el := deg_to_rad(72.0)
+	var want := Vector3(sin(brg) * cos(el), sin(el), -cos(brg) * cos(el)).normalized()
+	# mostly along the tube, leaning onto the bearing as it clears
+	dir = dir.lerp(want, 0.45).normalized()
+	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
+	var m := Missile.new()
+	var aim := _TelMark.new()
+	aim.team = 1 if team == 0 else 0
+	world.add_child(aim)
+	aim.global_position = mark
+	m.launch(id, Transform3D(Basis.looking_at(dir, up_ref), from), dir * 22.0,
+		self, aim)
+	m.team = team
+	world.add_child(m)
+	store_released.emit(m)
+	Sim.report("%s: %s away — %d left" % [display_name(),
+		String(WeaponSpec.get_spec(id)["short"]), rounds_left], Sim.Ev.BAD)
+	return true
+
+## A place for the round to guide onto. A patch of ground is not a contact, so
+## it is deliberately not lockable and not a radar return.
+class _TelMark extends Node3D:
+	var team := 1
+	func _ready() -> void:
+		add_to_group("no_lock")
+	func hit_radius() -> float:
+		return 6.0
+	func is_alive() -> bool:
+		return true
+	func take_hit(_a: float, _f: Node = null) -> void:
+		pass
 
 ## How far the piece still is from the bearing and elevation it needs, in
 ## radians: the worst of the two axes. Zero means it is laid and may fire.
@@ -833,6 +1036,14 @@ func _all_meshes(n: Node) -> Array:
 			out.append(c)
 		out.append_array(_all_meshes(c))
 	return out
+
+## Set by the world while the commander's sight page is up on this vehicle.
+var sight_active := false
+
+## Where the commander's sight sits. The sensor mounts here rather than at the
+## eighteen metres a ship's masthead assumes.
+func sight_height() -> float:
+	return 2.65
 
 func crew_position() -> Vector3:
 	return global_transform * Vector3(-0.55, 2.35, 1.0)

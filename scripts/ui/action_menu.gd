@@ -47,6 +47,8 @@ func _build_vehicle() -> Array:
 		out.append({"id": "dismount", "label": "Hand over the conn", "note": "U"})
 		return out
 	var tk := vehicle as Tank
+	if tk != null:
+		out.append({"id": "sensor", "label": "Commander's sight", "note": "O"})
 	if tk == null:
 		return out
 	out.append({"id": "weapon", "label": "Weapon", "note": tk.weapon_label()})
@@ -104,6 +106,11 @@ func _build() -> Array:
 
 func _unhandled_input(e: InputEvent) -> void:
 	if not visible:
+		return
+	# Nothing to steer through when the menu is shut, and it is shut whenever
+	# the list came out empty — which is when `% items.size()` was a modulo by
+	# zero. The panel goes on receiving unhandled input either way.
+	if not visible or items.is_empty():
 		return
 	if e is InputEventKey and e.pressed and not e.echo:
 		var k := (e as InputEventKey).physical_keycode
