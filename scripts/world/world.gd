@@ -606,6 +606,16 @@ func _process(delta: float) -> void:
 		_cam_was_tank = false
 		if is_instance_valid(tank) and is_instance_valid(tank.cam):
 			tank.cam.current = true
+	# The ground follows the eye. Rebuilds are metered so crossing a ring
+	# boundary at five hundred knots does not stall the frame: a chunk is 289
+	# height samples and a mesh, and a boundary crossing can want dozens.
+	if is_instance_valid(terrain):
+		var eye3 := get_viewport().get_camera_3d()
+		if eye3 != null:
+			terrain.recentre(eye3.global_position)
+		# a bigger bite: the old chunks stay up until their replacements are in,
+		# so the cost of falling behind is memory, not holes in the ground
+		terrain.flush_pending(6)
 	_update_underwater(delta)
 	_update_flash(delta)
 	if _nvg != null and _nvg.visible:
@@ -2110,6 +2120,22 @@ func _process(delta: float) -> void:
 			print("[sea] %s: %5.1f%% land, %5.1f%% water, %4.1f%% of samples on a coast" % [
 				String(b[0]), 100.0 * float(land) / tot, 100.0 * float(wet) / tot,
 				100.0 * float(coast) / tot])
+		# relief across the middle of the map, where the trench used to be
+		var bands2 := [["on the field axis", 0.0], ["6 km out", 6000.0],
+			["20 km out", 20000.0], ["60 km out", 60000.0]]
+		for b2 in bands2:
+			var off: float = float(b2[1])
+			var lo2 := 1e9
+			var hi2 := -1e9
+			var total2 := 0.0
+			for k2 in 400:
+				var zz: float = -300000.0 + float(k2) * 1500.0
+				var hh: float = Sim.height_at(off, zz)
+				lo2 = minf(lo2, hh)
+				hi2 = maxf(hi2, hh)
+				total2 += hh
+			print("[sea] relief %s: %.0f m to %.0f m, mean %.0f m" % [
+				String(b2[0]), lo2, hi2, total2 / 400.0])
 		# and what grows on the land, north to south
 		var strips := [["far north", -560000.0, -360000.0],
 			["north", -360000.0, -140000.0], ["middle", -140000.0, 140000.0],
@@ -2252,6 +2278,39 @@ func _process(delta: float) -> void:
 				sub.cycle_weapon()
 				wseq.append(sub.current_weapon())
 			print("[boat] weapon cycling: %s" % " -> ".join(wseq))
+			# torpedoes: who has them, and does one run and hit
+			var foe: Ship = null
+			for sh3 in get_tree().get_nodes_in_group("ships"):
+				var v3 := sh3 as Ship
+				if v3 != null and v3.team != sub.team and v3.alive:
+					foe = v3
+					break
+			var hp0: float = foe.health if foe != null else 0.0
+			var fired := false
+			if foe != null:
+				sub.global_position = Vector3(foe.global_position.x,
+					Sim.WATER_LEVEL, foe.global_position.z + 2600.0)
+				sub.ai_target = foe
+				sub._torp_cd = 0.0
+				fired = sub.fire_torpedo(foe)
+			print("[boat] torpedoes: %d aboard, launch=%s, target %s at %.1f km" % [
+				sub.torps_left, str(fired),
+				Sim.label_of(foe) if foe != null else "none",
+				sub.global_position.distance_to(foe.global_position) * 0.001
+				if foe != null else 0.0])
+			var swam := 0.0
+			var deepest := 0.0
+			for _f4 in 60 * 150:
+				for mm3 in get_tree().get_nodes_in_group("missiles"):
+					if is_instance_valid(mm3) and String(mm3.wid) == "torpedo":
+						var mp3: Vector3 = (mm3 as Node3D).global_position
+						swam = maxf(swam, mp3.distance_to(sub.global_position))
+						deepest = minf(deepest, mp3.y - Sim.WATER_LEVEL)
+				sub._physics_process(1.0 / 60.0)
+				if foe != null and not foe.alive:
+					break
+			print("[boat] the fish ran %.0f m, %.1f m under the surface at deepest; hull %.0f -> %.0f" % [
+				swam, deepest, hp0, foe.health if foe != null else 0.0])
 			var views := PackedStringArray()
 			for _v in 4:
 				views.append("%.0f m" % Ship.VIEW_BOOM[sub.view_mode % Ship.VIEW_BOOM.size()])
@@ -2827,6 +2886,14 @@ func _process(delta: float) -> void:
 	# same point on the boundary.
 	if _lod_test:
 		_lod_test = false
+		# Move the clipmap first. Correct at the origin proves only that the old
+		# static layout still works; the question is whether the seams hold once
+		# the rings have slid to a new centre.
+		var moved := Vector3(41300.0, 0.0, -27700.0)
+		terrain.recentre(moved, true)
+		await get_tree().process_frame
+		print("[lod] clipmap moved to %s, %d chunks live" % [
+			str(Vector2(moved.x, moved.z).round()), int(terrain.stats["chunks"])])
 		var chunks: Array = []
 		for c in terrain.get_children():
 			var mi := c as MeshInstance3D
@@ -2849,6 +2916,7 @@ func _process(delta: float) -> void:
 		var worst_at := Vector2.ZERO
 		var worst_ring := 0
 		var worst_who: Array = []
+		var named := 0
 		for li in tbl.size() - 1:
 			var cov: float = float((tbl[li] as Dictionary)["coverage"])
 			for side in 4:
@@ -2862,6 +2930,9 @@ func _process(delta: float) -> void:
 						p = Vector2(-cov, u)
 					elif side == 3:
 						p = Vector2(cov, u)
+					# the boundary sits around the ring's own snapped centre now
+					p += terrain._ring_origin(moved,
+						float((tbl[li] as Dictionary)["cell"]) * float(Terrain.CELLS))
 					var hs: Array = []
 					var who: Array = []
 					for ch in chunks:
@@ -2878,6 +2949,15 @@ func _process(delta: float) -> void:
 							who.append("%s=%.1f" % [str((ch["mi"] as MeshInstance3D).name), y])
 					if hs.size() < 2:
 						lonely += 1
+						if lonely <= 3:
+							# where it sits in the ring's own frame, so a corner
+							# artefact can be told from a real hole
+							var ro := terrain._ring_origin(moved,
+								float((tbl[li] as Dictionary)["cell"])
+								* float(Terrain.CELLS))
+							var loc := p - ro
+							print("[lod]   lonely at %s: ring %d, local %s of +-%.0f, %d chunk(s)" % [
+								str(p.round()), li, str(loc.round()), cov, hs.size()])
 						continue
 					var lo := 1e9
 					var hi := -1e9
@@ -2892,6 +2972,10 @@ func _process(delta: float) -> void:
 						worst_at = p
 						worst_ring = li
 						worst_who = who.duplicate()
+					if gap > 0.5 and named < 3:
+						named += 1
+						print("[lod]   %.2f m apart at %s: %s" % [gap, str(p.round()),
+							", ".join(PackedStringArray(who))])
 			print("[lod] ring %d -> %d (cell %.0f m -> %.0f m): worst so far %.4f m" % [
 				li, li + 1, float((tbl[li] as Dictionary)["cell"]),
 				float((tbl[li + 1] as Dictionary)["cell"]), worst])
@@ -5653,14 +5737,28 @@ func _tri_height(tris: Array, p: Vector2) -> float:
 		var b: Vector3 = t[1]
 		var c: Vector3 = t[2]
 		var det: float = t[3]
+		# Scaled to the size of the numbers involved. A fixed 1e-6 is finer than
+		# float precision out at forty kilometres, so a sample landing exactly
+		# on the edge two chunks share fell numerically outside one of them —
+		# and 114 boundary points were reported as covered by a single chunk
+		# when both were there all along.
+		# Two centimetres of ground, expressed in barycentric terms. The mesh
+		# vertices come back as 32-bit floats, so out at forty kilometres they
+		# are only good to about four millimetres and a sample landing on the
+		# edge two chunks share can fall numerically outside both. A fixed
+		# barycentric epsilon is far too tight on a small cell and far too loose
+		# on a 15 km one — scaling it by the triangle's own size is what makes
+		# it mean the same thing everywhere. det is twice the plan area, so its
+		# root is the cell.
+		var eps: float = 0.02 / maxf(sqrt(absf(det)), 1.0)
 		var w0: float = ((b.z - c.z) * (p.x - c.x) + (c.x - b.x) * (p.y - c.z)) / det
-		if w0 < -1e-6 or w0 > 1.0 + 1e-6:
+		if w0 < -eps or w0 > 1.0 + eps:
 			continue
 		var w1: float = ((c.z - a.z) * (p.x - c.x) + (a.x - c.x) * (p.y - c.z)) / det
-		if w1 < -1e-6 or w1 > 1.0 + 1e-6:
+		if w1 < -eps or w1 > 1.0 + eps:
 			continue
 		var w2: float = 1.0 - w0 - w1
-		if w2 < -1e-6:
+		if w2 < -eps:
 			continue
 		return a.y * w0 + b.y * w1 + c.y * w2
 	return INF

@@ -94,6 +94,9 @@ float fbm(vec3 p) {
 	return v;
 }
 
+uniform vec2 slab_centre = vec2(0.0);
+uniform float slab_half = 6000.0;
+
 void fog() {
 	vec3 p = WORLD_POSITION;
 	if (p.y < base_alt || p.y > top_alt) {
@@ -107,7 +110,14 @@ void fog() {
 		float shape = fbm(q) + 0.10 * fbm(q * 2.6);
 		float profile = smoothstep(0.0, 0.18, h) * (1.0 - smoothstep(0.55, 1.0, h));
 		float d = max(shape * profile - (1.0 - coverage), 0.0);
-		DENSITY = d * density_mul * 0.55;
+		// Fade out toward the edge of the slab. The volume is a box that
+		// follows you, so without this the cloud simply switched on at its
+		// boundary — you flew along watching it assemble itself around you a
+		// few kilometres out. Tapered, it thins into the raymarched sky behind
+		// it and there is no edge to see.
+		vec2 off = (WORLD_POSITION.xz - slab_centre) / max(slab_half, 1.0);
+		float edge = 1.0 - smoothstep(0.62, 0.99, length(off));
+		DENSITY = d * density_mul * 0.55 * edge;
 		ALBEDO = cloud_albedo;
 		EMISSION = cloud_albedo * emit;
 	}
@@ -454,6 +464,7 @@ void sky() {
 func apply(id: String, env: Environment, sun: DirectionalLight3D,
 		fill: DirectionalLight3D, psm: ShaderMaterial) -> void:
 	current = id if PRESETS.has(id) else "scattered"
+	_env_ref = env
 	var p: Dictionary = PRESETS[current]
 	env.fog_light_color = p["fog_col"]
 	env.fog_depth_begin = p["fog"]
@@ -479,6 +490,7 @@ var _fill_node: DirectionalLight3D
 var _psm: ShaderMaterial
 
 var _fog: FogVolume
+var _env_ref: Environment = null
 var _fog_mat: ShaderMaterial
 
 ## The volumetric slab, made once and then carried along with the camera. It is
@@ -502,7 +514,10 @@ func _ensure_fog(env: Environment) -> void:
 	_fog = FogVolume.new()
 	_fog.name = "CloudVolume"
 	_fog.shape = RenderingServer.FOG_VOLUME_SHAPE_BOX
-	_fog.size = Vector3(12000.0, 6000.0, 12000.0)
+	# Big enough that its edge is past anything you can pick out. At twelve
+	# kilometres the boundary sat inside visual range and the cloud built
+	# itself around you as you flew.
+	_fog.size = Vector3(34000.0, 6000.0, 34000.0)
 	_fog.material = _fog_mat
 	add_child(_fog)
 
@@ -522,6 +537,16 @@ func follow(eye: Vector3) -> void:
 		var p: Dictionary = PRESETS[current]
 		var mid: float = (float(p["base_alt"]) + float(p["top_alt"])) * 0.5
 		_fog.global_position = Vector3(eye.x, mid, eye.z)
+		if _fog_mat != null:
+			# Faded against the froxel grid's own reach, not the box. The
+			# volumetric buffer only renders a few kilometres however big the
+			# volume is, so that reach — not the boundary of the slab — is
+			# where cloud stops being drawn and where the edge was showing.
+			var reach: float = 6000.0
+			if _env_ref != null and is_instance_valid(_env_ref):
+				reach = maxf(_env_ref.volumetric_fog_length, 1000.0)
+			_fog_mat.set_shader_parameter("slab_centre", Vector2(eye.x, eye.z))
+			_fog_mat.set_shader_parameter("slab_half", reach)
 
 func _process(delta: float) -> void:
 	if _sun_node == null or not is_instance_valid(_sun_node):

@@ -104,6 +104,9 @@ const MAX_DEPTH := 90.0
 var depth_order := 0.0
 var depth := 0.0
 var _aground := false
+## Tubes below the waterline.
+var torps_left := 0
+var _torp_cd := 0.0
 ## Where the strategic round has been sent, laid on the map.
 var strategic_aim := Vector3.INF
 
@@ -129,6 +132,8 @@ func refit() -> void:
 	_sinking = -1.0
 	_broken = false
 	cells_left = int(kd.get("vls", 0))
+	torps_left = 8 if String(kd.get("class", "")) == "sub" else (
+		4 if String(kd.get("class", "")) == "warship" else 0)
 	missiles_left = 2
 	_launch_cd = 0.0
 	gun_cd = 0.0
@@ -209,6 +214,46 @@ func _close_in(delta: float) -> void:
 func _reserve_cells() -> int:
 	return mini(maxi(int(float(tubes()) * 0.25), 4), maxi(tubes() - 1, 0))
 
+## Who carries them: anything that dives, and any warship big enough for the
+## tubes. A patrol boat and a merchantman do not.
+func has_torpedoes() -> bool:
+	var cls := String(KINDS[kind].get("class", ""))
+	return cls == "sub" or cls == "warship"
+
+## Send one, running at its set depth for the target's keel.
+func fire_torpedo(at_node: Node3D = null) -> bool:
+	if not has_torpedoes() or torps_left <= 0 or _torp_cd > 0.0 or not alive:
+		return false
+	var tgt: Node3D = at_node
+	if tgt == null and is_instance_valid(ai_target):
+		tgt = ai_target
+	if tgt == null:
+		Sim.report("no contact for the tubes", Sim.Ev.BAD)
+		return false
+	# only at something afloat: a torpedo cannot climb out of the water
+	if not (tgt is Ship):
+		Sim.report("%s: torpedoes are for shipping" % display_name(), Sim.Ev.BAD)
+		return false
+	torps_left -= 1
+	_torp_cd = 12.0
+	var from: Vector3 = global_transform * Vector3(0.0, -2.0,
+		-float(KINDS[kind]["len"]) * 0.42)
+	from.y = minf(from.y, Sim.WATER_LEVEL - 3.0)
+	var rel: Vector3 = tgt.global_position - from
+	var dir := Vector3(rel.x, 0.0, rel.z).normalized()
+	if dir.length_squared() < 0.1:
+		dir = -global_transform.basis.z
+	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
+	var m := Missile.new()
+	m.launch("torpedo", Transform3D(Basis.looking_at(dir, up_ref), from),
+		dir * 12.0, self, tgt)
+	m.team = team
+	get_tree().current_scene.add_child(m)
+	store_released.emit(m)
+	Sim.report("%s: torpedo away — %d left" % [display_name(), torps_left],
+		Sim.Ev.GOOD)
+	return true
+
 func can_dive() -> bool:
 	return bool(KINDS[kind]["sub"])
 
@@ -243,6 +288,8 @@ func setup(k := "destroyer", t := 1) -> void:
 	var kd: Dictionary = KINDS[kind]
 	health = float(kd["hp"])
 	cells_left = int(kd.get("vls", 0))
+	torps_left = 8 if String(kd.get("class", "")) == "sub" else (
+		4 if String(kd.get("class", "")) == "warship" else 0)
 	speed = float(kd["speed"])
 	# Godot will not take a name it considers invalid and quietly substitutes a
 	# generated one, which is how a destroyer ended up on the radar as
@@ -409,6 +456,11 @@ func weapons() -> PackedStringArray:
 	# rather than it living only on a separate key nothing points at.
 	if can_dive() and missiles_left > 0:
 		w.append("strategic")
+	# Tubes below the waterline. A submarine's whole reason for being, and a
+	# destroyer carries them too — there was no underwater weapon in the game
+	# at all, so a boat could only ever be fought from above.
+	if has_torpedoes() and torps_left > 0:
+		w.append("torpedo")
 	if w.is_empty():
 		w.append("main")
 	return w
@@ -507,6 +559,8 @@ func weapon_label() -> String:
 	match current_weapon():
 		"main":
 			return "MAIN BATTERY"
+		"torpedo":
+			return "TORPEDOES  %d IN THE TUBES" % torps_left
 		"strategic":
 			return "STRATEGIC  %d ABOARD" % missiles_left
 		_:
@@ -523,6 +577,10 @@ func weapon_state() -> String:
 			if strategic_aim == Vector3.INF:
 				return "NO AIMING POINT"
 			return "READY"
+		"torpedo":
+			if torps_left <= 0:
+				return "TUBES EMPTY"
+			return "LOADING %.1f" % _torp_cd if _torp_cd > 0.0 else "READY"
 		"vls":
 			if cells_left <= 0:
 				return "TUBES EMPTY"
@@ -570,6 +628,9 @@ func _conn(delta: float) -> void:
 			"vls":
 				if Sim.tapped(&"fire"):
 					fire_vls()
+			"torpedo":
+				if Sim.tapped(&"fire"):
+					fire_torpedo()
 			"strategic":
 				if Sim.tapped(&"fire"):
 					var mark: Vector3 = strategic_aim
@@ -994,6 +1055,7 @@ func _physics_process(delta: float) -> void:
 	if not alive:
 		return
 	_launch_cd = maxf(_launch_cd - delta, 0.0)
+	_torp_cd = maxf(_torp_cd - delta, 0.0)
 	gun_cd = maxf(gun_cd - delta, 0.0)
 	vls_cd = maxf(vls_cd - delta, 0.0)
 	_damage_control(delta)

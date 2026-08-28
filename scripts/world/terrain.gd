@@ -24,7 +24,18 @@ const LEVELS := 12
 ## the middle of a ring is exactly two of that ring's chunks and the finer ring
 ## inside fills it precisely. Getting this wrong leaves coarse chunks lying over
 ## fine ones, which is what tore holes in the mountains.
+## Built once. This allocated twelve dictionaries every time it was asked, and
+## `cell_at` asks on every height query, once per airfield — about nineteen
+## million allocations to bake the map, which took twelve seconds.
+static var _rings: Array = []
+
 static func ring_table() -> Array:
+	if not _rings.is_empty():
+		return _rings
+	_rings = _build_rings()
+	return _rings
+
+static func _build_rings() -> Array:
 	var out: Array = []
 	var cell := BASE_CELL
 	var inner := 0.0
@@ -236,34 +247,163 @@ func _stamp_capsule(buf: PackedByteArray, n: int, tpm: float, a: Vector2,
 			var idx := (j * n + i) * 2 + channel
 			buf[idx] = maxi(buf[idx], int(clampf(v, 0.0, 1.0) * 255.0))
 
+## Live chunks, keyed by level and grid position. The rings used to be laid out
+## once around the world origin, which is the airfield — so the ground was
+## detailed there and coarse everywhere else, however far you flew. They follow
+## the viewer now.
+var _live: Dictionary = {}
+var _centre := Vector3(1e12, 0.0, 1e12)
+var _pending: Array = []
+var _retire: Dictionary = {}
+
 func build() -> void:
 	_mat = _ground_material()
-
-	for r in ring_table():
-		_ring(r["inner"], r["n"], r["cell"], r["shadow"])
+	recentre(Vector3.ZERO, true)
 	_water()
 
-## Lay chunks over the square annulus for one level.
-func _ring(inner: float, n: int, cell: float, shadow: bool) -> void:
-	var span := cell * float(CELLS)
-	for cz in range(-n, n):
-		for cx in range(-n, n):
-			var x0 := float(cx) * span
-			var z0 := float(cz) * span
-			# the hole is an exact whole number of chunks, so this never
-			# leaves a partial chunk overlapping the finer ring
-			if inner > 0.0 and absf(x0) < inner and absf(z0) < inner:
-				continue
-			_chunk(x0, z0, cell, shadow, span * float(n))
+## Where each ring's grid sits for a given eye position. Snapped to *twice* its
+## own cell size, which is the whole trick: ring L+1's span is two of ring L's,
+## so snapping both to the coarser grid makes their chunk boundaries land on
+## each other by construction. Snap each ring to its own span instead and the
+## holes drift apart into overlaps and cracks.
+func _ring_origin(eye: Vector3, span: float) -> Vector2:
+	var q := span * 2.0
+	return Vector2(round(eye.x / q) * q, round(eye.z / q) * q)
 
-func _chunk(x0: float, z0: float, cell: float, shadow: bool, coverage: float) -> void:
+## The set of chunks that should exist for this eye position.
+func _wanted(eye: Vector3) -> Dictionary:
+	var out: Dictionary = {}
+	var tbl := ring_table()
+	var inner_lo := Vector2.ZERO
+	var inner_hi := Vector2.ZERO
+	var have_inner := false
+	for lvl in tbl.size():
+		var r: Dictionary = tbl[lvl]
+		var cell: float = float(r["cell"])
+		var span: float = cell * float(CELLS)
+		var n: int = int(r["n"])
+		var o := _ring_origin(eye, span)
+		var lo := Vector2(o.x - float(n) * span, o.y - float(n) * span)
+		var hi := Vector2(o.x + float(n) * span, o.y + float(n) * span)
+		for cz in range(-n, n):
+			for cx in range(-n, n):
+				var x0: float = o.x + float(cx) * span
+				var z0: float = o.y + float(cz) * span
+				# Skip anything the finer ring already covers. Measured against
+				# that ring's *actual* extent, not a constant taken from the
+				# world origin — which is what stopped any of this moving.
+				if have_inner and x0 >= inner_lo.x and x0 + span <= inner_hi.x \
+						and z0 >= inner_lo.y and z0 + span <= inner_hi.y:
+					continue
+				# The key carries which edges face the coarser ring outside
+				# this one. A chunk keeps its grid index when the clipmap
+				# moves, so without this it was kept as-is — with the edge
+				# stitching it was built with, for a ring centred somewhere
+				# else. Interior chunks still survive a move untouched; only
+				# the ones whose boundary status changed get rebuilt.
+				var eg := 0
+				if absf(x0 - lo.x) < cell * 0.01:
+					eg |= 1
+				if absf(x0 + span - hi.x) < cell * 0.01:
+					eg |= 2
+				if absf(z0 - lo.y) < cell * 0.01:
+					eg |= 4
+				if absf(z0 + span - hi.y) < cell * 0.01:
+					eg |= 8
+				out["%d:%d:%d:%d" % [lvl, int(round(x0 / span)),
+					int(round(z0 / span)), eg]] = \
+					[x0, z0, cell, bool(r["shadow"]), span * float(n), o]
+		inner_lo = lo
+		inner_hi = hi
+		have_inner = true
+	return out
+
+## Move the clipmap. Cheap when nothing has changed: the wanted set is compared
+## against what is live and only the difference is touched.
+func recentre(eye: Vector3, immediate := false) -> void:
+	# Nothing to do until the eye has moved far enough to change a ring's
+	# snapped origin, which is most frames. Recomputing the wanted set every
+	# frame would cost more than the rebuilds it saves.
+	if not immediate and _centre.distance_squared_to(eye) < 90000.0:
+		return
+	var want := _wanted(eye)
+	# Retired, not freed. Rebuilds are metered at a few a frame, so dropping a
+	# chunk the instant it falls out of the wanted set left a hole in the ground
+	# for however many frames it took to get to its replacement — terrain
+	# visibly reloading in front of you. The old one stays up until the new one
+	# is standing.
+	var drop: Array = []
+	for k in _live:
+		if not want.has(k):
+			drop.append(k)
+	for k in drop:
+		var n: Node = _live[k]
+		if is_instance_valid(n):
+			_retire[_base_key(k)] = n
+		_live.erase(k)
+	# keep anything already queued that is still wanted
+	var keep: Array = []
+	for job in _pending:
+		if want.has(job[0]) and not _live.has(job[0]):
+			keep.append(job)
+	_pending = keep
+	var queued: Dictionary = {}
+	for job2 in _pending:
+		queued[job2[0]] = true
+	for k in want:
+		if queued.has(k):
+			continue
+		if not _live.has(k):
+			_pending.append([k, want[k]])
+	_centre = eye
+	if immediate:
+		flush_pending()
+
+## Build queued chunks. Called with a budget from the world so a long flight
+## does not stall on a ring boundary; called without one at load.
+func flush_pending(budget := -1) -> int:
+	var made := 0
+	while not _pending.is_empty() and (budget < 0 or made < budget):
+		var job: Array = _pending.pop_front()
+		var a: Array = job[1]
+		var mi := _chunk(a[0], a[1], a[2], a[3], a[4], a[5])
+		if mi != null:
+			_live[job[0]] = mi
+			# the one it replaces can go now, and not before
+			var b := _base_key(job[0])
+			if _retire.has(b):
+				var old_n: Node = _retire[b]
+				if is_instance_valid(old_n):
+					old_n.queue_free()
+				_retire.erase(b)
+		made += 1
+	if _pending.is_empty() and not _retire.is_empty():
+		# whatever is left really has gone off the map
+		for b2 in _retire:
+			var n2: Node = _retire[b2]
+			if is_instance_valid(n2):
+				n2.queue_free()
+		_retire.clear()
+	return made
+
+## A chunk's identity without its edge state, so a rebuild triggered only by a
+## change of neighbours can be matched to the chunk it supersedes.
+func _base_key(k: String) -> String:
+	var bits := k.split(":")
+	return "%s:%s:%s" % [bits[0], bits[1], bits[2]] if bits.size() >= 3 else k
+
+func pending_count() -> int:
+	return _pending.size()
+
+func _chunk(x0: float, z0: float, cell: float, shadow: bool, coverage: float,
+		ring_o := Vector2.ZERO) -> MeshInstance3D:
 	var n := CELLS + 1
 	var h := PackedFloat32Array()
 	h.resize(n * n)
 	for j in n:
 		for i in n:
 			h[j * n + i] = Sim.height_at(x0 + i * cell, z0 + j * cell)
-	_stitch(h, n, x0, z0, cell, coverage)
+	_stitch(h, n, x0, z0, cell, coverage, ring_o)
 	var st := MeshKit.begin()
 	for j in CELLS:
 		for i in CELLS:
@@ -274,20 +414,35 @@ func _chunk(x0: float, z0: float, cell: float, shadow: bool, coverage: float) ->
 			_face(st, a, b, c)
 			_face(st, a, c, d)
 	_skirt(st, x0, z0, cell, h, n)
-	var mi := MeshKit.mi(MeshKit.finish(st, _mat), "C%d_%d" % [int(x0), int(z0)])
+	var mi := MeshKit.mi(MeshKit.finish(st, _mat), # the level too: rings share snapped origins now, so two of them can want
+	# the same x0 and z0 and Godot quietly renames the second one
+	"C%d_%d_%d" % [int(cell), int(x0), int(z0)])
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadow \
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
 	var resid := 0.0
-	if absf(z0 + coverage) < cell * 0.01:
+	if absf(z0 - (ring_o.y - coverage)) < cell * 0.01:
 		for i in range(1, n - 1, 2):
 			resid = maxf(resid, absf(h[i] - (h[i - 1] + h[i + 1]) * 0.5))
-	if absf(x0 + coverage) < cell * 0.01:
+	if absf(x0 - (ring_o.x - coverage)) < cell * 0.01:
 		for j in range(1, n - 1, 2):
 			resid = maxf(resid, absf(h[j * n] - (h[(j - 1) * n] + h[(j + 1) * n]) * 0.5))
 	stats["seam"] = maxf(float(stats.get("seam", 0.0)), resid)
-	stats["chunks"] += 1
+	stats["chunks"] = _live.size() + 1
 	stats["tris"] += CELLS * CELLS * 2
+	return mi
+
+## The height the coarser ring draws at a point on the shared edge: its two
+## nearest vertices on that edge, linearly interpolated, which is what its
+## triangles do between them.
+func _coarse_at(x: float, z: float, big: float, along_x: bool) -> float:
+	if along_x:
+		var lo: float = floor(x / big) * big
+		var f: float = (x - lo) / big
+		return lerpf(Sim.height_at(lo, z), Sim.height_at(lo + big, z), f)
+	var lo2: float = floor(z / big) * big
+	var f2: float = (z - lo2) / big
+	return lerpf(Sim.height_at(x, lo2), Sim.height_at(x, lo2 + big), f2)
 
 ## Stitch the edges that face a coarser ring.
 ##
@@ -300,23 +455,37 @@ func _chunk(x0: float, z0: float, cell: float, shadow: bool, coverage: float) ->
 ## neighbours makes the two edges the same line, and the gap becomes zero by
 ## construction rather than by being covered up.
 func _stitch(h: PackedFloat32Array, n: int, x0: float, z0: float,
-		cell: float, coverage: float) -> void:
+		cell: float, coverage: float, ring_o := Vector2.ZERO) -> void:
 	var span := cell * float(CELLS)
 	var eps := cell * 0.01
+	# Which edges face the coarser ring outside this one. These used to be
+	# measured from the world origin, because that is where the rings were
+	# nailed down; now the ring has a centre of its own and they are measured
+	# from that.
+	var wx := ring_o.x - coverage
+	var ex := ring_o.x + coverage
+	var wz := ring_o.y - coverage
+	var ez := ring_o.y + coverage
+	# Resampled on the coarse grid, not averaged between neighbours. Averaging
+	# assumes the fine chunk's even vertices land exactly on the coarse ring's
+	# vertices — true when both rings were nailed to the world origin, and no
+	# longer true now each ring snaps to its own centre. Reading the height the
+	# coarse ring would read makes the edge conform whatever the offsets are.
+	var big := cell * 2.0
 	# west and east columns
-	if absf(x0 + coverage) < eps:
-		for j in range(1, n - 1, 2):
-			h[j * n] = (h[(j - 1) * n] + h[(j + 1) * n]) * 0.5
-	if absf(x0 + span - coverage) < eps:
-		for j in range(1, n - 1, 2):
-			h[j * n + n - 1] = (h[(j - 1) * n + n - 1] + h[(j + 1) * n + n - 1]) * 0.5
+	if absf(x0 - wx) < eps:
+		for j in range(1, n - 1):
+			h[j * n] = _coarse_at(x0, z0 + float(j) * cell, big, false)
+	if absf(x0 + span - ex) < eps:
+		for j in range(1, n - 1):
+			h[j * n + n - 1] = _coarse_at(x0 + span, z0 + float(j) * cell, big, false)
 	# north and south rows
-	if absf(z0 + coverage) < eps:
-		for i in range(1, n - 1, 2):
-			h[i] = (h[i - 1] + h[i + 1]) * 0.5
-	if absf(z0 + span - coverage) < eps:
-		for i in range(1, n - 1, 2):
-			h[(n - 1) * n + i] = (h[(n - 1) * n + i - 1] + h[(n - 1) * n + i + 1]) * 0.5
+	if absf(z0 - wz) < eps:
+		for i in range(1, n - 1):
+			h[i] = _coarse_at(x0 + float(i) * cell, z0, big, true)
+	if absf(z0 + span - ez) < eps:
+		for i in range(1, n - 1):
+			h[(n - 1) * n + i] = _coarse_at(x0 + float(i) * cell, z0 + span, big, true)
 
 ## A vertical curtain around the chunk edge so a coarser neighbour cannot show
 ## daylight through the seam.
@@ -426,10 +595,15 @@ static func surface_height(x: float, z: float) -> float:
 ## kilometre runway cannot be flattened into a grid whose cells are four
 ## kilometres across, however carefully the height field is levelled.
 static func cell_at(x: float, z: float) -> float:
+	# Straight from the ring geometry rather than by walking a table: each ring
+	# doubles the cell and reaches OUT chunks, so which one covers a point is
+	# arithmetic.
 	var reach: float = maxf(absf(x), absf(z))
 	var cell: float = BASE_CELL
-	for lvl in ring_table():
-		cell = float(lvl["cell"])
-		if reach <= float(lvl["coverage"]):
-			break
+	var cover: float = BASE_CELL * float(CELLS) * float(OUT)
+	for i in LEVELS - 1:
+		if reach <= cover:
+			return cell
+		cell *= 2.0
+		cover *= 2.0
 	return cell

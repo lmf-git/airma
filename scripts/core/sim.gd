@@ -186,11 +186,25 @@ func height_at(x: float, z: float) -> float:
 	h += noise_det.get_noise_2d(x, z) * 6.0 * clampf(m * 4.0, 0.15, 1.0)
 	h -= 90.0
 	# The airfield sits in a north-south valley so both runway approaches and the
-	# departure end stay clear of rising ground.
-	var axis := clampf((absf(x) - 1000.0) / 3400.0, 0.0, 1.0)
-	var cap := 55.0 + axis * axis * 2500.0
-	if h > cap:
-		h = cap + (h - cap) * 0.12
+	# departure end stay clear of rising ground — but only near the airfield.
+	# There was no limit along z at all, so the cap applied at every point in
+	# the world and cut a four kilometre trench from one end of the map to the
+	# other: a groove running the whole length of it, and the reason the middle
+	# of the map had no high ground in it.
+	var along: float = 1.0 - smoothstep(5000.0, 24000.0, absf(z))
+	if along > 0.0:
+		var axis := clampf((absf(x) - 1000.0) / 3400.0, 0.0, 1.0)
+		var cap := 55.0 + axis * axis * 2500.0
+		if h > cap:
+			h = lerpf(h, cap + (h - cap) * 0.12, along)
+	# Canyons. Where a second channel field runs across high ground it cuts
+	# hard and narrow rather than opening into a valley, which is what makes a
+	# gorge worth flying down.
+	var cy: float = absf(noise_river.get_noise_2d(z * 1.9 + 31000.0, x * 1.9 - 17000.0))
+	var gorge: float = 1.0 - smoothstep(0.0, 0.020, cy)
+	if gorge > 0.0 and h > 420.0:
+		var bite: float = clampf((h - 420.0) / 700.0, 0.0, 1.0)
+		h -= 340.0 * gorge * gorge * bite
 	# The land runs out to the east: a coastal shelf dropping into open ocean.
 	# Held to the home region — beyond that the continents below decide, or the
 	# whole eastern half of a six hundred kilometre world is one flat sea.

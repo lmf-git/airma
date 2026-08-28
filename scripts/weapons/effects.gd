@@ -223,7 +223,10 @@ class _NukeBall extends Node3D:
 		var ssh := Shader.new()
 		ssh.code = """
 shader_type spatial;
-render_mode cull_disabled, diffuse_burley, depth_draw_opaque;
+// Back faces off. With them on you saw the inside of the column through the
+// outside of it, which is why it read as a transparent shell rather than a
+// solid mass of smoke.
+render_mode cull_back, diffuse_burley, depth_draw_opaque;
 uniform vec3 tint : source_color = vec3(0.09, 0.085, 0.08);
 uniform float opacity : hint_range(0.0, 1.0) = 0.9;
 uniform float t = 0.0;
@@ -259,7 +262,11 @@ void fragment() {
 	float n = vnoise(q) * 0.55 + vnoise(q * 2.3) * 0.30 + vnoise(q * 5.1) * 0.15;
 	// soft edges: the silhouette thins out instead of ending at a hard rim
 	float rim = 1.0 - abs(dot(normalize(NORMAL), normalize(VIEW)));
-	float a = opacity * smoothstep(0.06, 0.62, n) * (1.0 - pow(rim, 1.5) * 0.85);
+	// Thick through the body, thinning only at the very edge of the silhouette.
+	// The old falloff took 85% of the alpha off across most of the face, so
+	// even the middle of the cloud was half see-through.
+	float a = opacity * mix(0.55, 1.0, smoothstep(0.02, 0.45, n))
+		* (1.0 - pow(rim, 3.5) * 0.70);
 	// the billows are lighter where they catch the light and dirtier in the
 	// folds, which is most of what makes a cloud read as a cloud
 	ALBEDO = tint * (0.72 + 0.75 * n);

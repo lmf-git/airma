@@ -189,6 +189,23 @@ static func _db() -> Dictionary:
 		"flare_bait": 0.0,
 		"desc": "One of ten. Small, and there are a lot of them.",
 	},
+	"torpedo": {
+		# It swims. Slow, short ranged and quiet, and it goes off under the
+		# keel where a hull has no armour — which is why a destroyer carries
+		# them for submarines and a submarine carries them for everything.
+		"name": "Mk-48 torpedo", "short": "TRP", "kind": "cruise",
+		"mass": 1680.0, "length": 5.80, "dia": 0.533, "fin": 0.60,
+		"boost": 9.0, "burn": 300.0, "max_g": 6.0, "drag": 0.00240,
+		"ref_speed": 28.0,
+		"life": 320.0, "range": 38000.0, "seeker_fov": 100.0, "lock_time": 1.0,
+		"arm_time": 3.0, "fuse": 14.0, "damage": 1500.0, "lethal": 26.0,
+		# it runs at depth, not at cruise altitude
+		"cruise_alt": -9.0, "pop": 400.0,
+		"colour": Color(0.20, 0.22, 0.24), "band": Color(0.65, 0.58, 0.15),
+		"eject": 0.0, "trail": Color(0.86, 0.90, 0.94),
+		"flare_bait": 0.0, "chaff_bait": 0.0,
+		"desc": "Wake homing torpedo. Slow, but a hull cannot outrun it far.",
+	},
 	"slbm": {
 		"name": "Trident submarine-launched missile", "short": "SLB", "kind": "radar",
 		"mass": 5900.0, "length": 13.4, "dia": 2.11, "fin": 0.90,
