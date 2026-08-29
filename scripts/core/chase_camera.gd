@@ -19,6 +19,10 @@ var pod_slew := false
 var diag := false
 var clamped_frames := 0
 var weapon_cam: Node3D = null    # ride a round in flight
+## How far across to the round the view has come, and what the draw distance
+## was before it went out there.
+var _wcam_blend := 1.0
+var _wcam_far_was := 0.0
 var _wcam_prev: Node3D = null
 var _wcam_hold := 0.0
 var _wcam_off := Vector3.ZERO
@@ -82,6 +86,9 @@ func _process(delta: float) -> void:
 			# watching and it happens on the frame the node goes away
 			weapon_cam = null
 			_wcam_hold = 1.6
+			if _wcam_far_was > 0.0:
+				far = _wcam_far_was
+				_wcam_far_was = 0.0
 		else:
 			# The interpolated pose, not the raw one. A round is moved once per
 			# physics tick; its mesh is then interpolated to the render frame,
@@ -109,8 +116,24 @@ func _process(delta: float) -> void:
 			# floor snaps as the ground comes up under it.
 			var off := want - wp
 			if _wcam_prev != weapon_cam:
-				_wcam_off = off
-				_wcam_look = wdir
+				# Come across to the round rather than cutting to it. Snapping
+				# the pose the instant a store is released throws the view
+				# sideways and spins it round to the new heading in one frame,
+				# which reads as the camera being knocked rather than as
+				# following the shot away.
+				_wcam_off = global_position - wp
+				_wcam_look = (-global_transform.basis.z).normalized()
+				_wcam_blend = 0.0
+				# A hypersonic is twenty kilometres up and a hundred down range
+				# within the minute; the aeroplane's horizon is not enough to
+				# see where it is going.
+				_wcam_far_was = far
+				far = 240000.0
+			if _wcam_blend < 1.0:
+				_wcam_blend = minf(_wcam_blend + delta * 3.0, 1.0)
+				var e: float = _wcam_blend * _wcam_blend * (3.0 - 2.0 * _wcam_blend)
+				_wcam_off = _wcam_off.lerp(off, e)
+				_wcam_look = _wcam_look.slerp(wdir, e).normalized()
 			else:
 				var k: float = clampf(delta * 7.0, 0.0, 1.0)
 				_wcam_off = _wcam_off.lerp(off, k)

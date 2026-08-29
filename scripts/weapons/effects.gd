@@ -676,12 +676,16 @@ class Boom extends Node3D:
 		sm.material = _mat
 		_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_mi)
-		if smoke:
-			_light = OmniLight3D.new()
-			_light.light_color = tint
-			_light.light_energy = 12.0
-			_light.omni_range = radius * 8.0
-			add_child(_light)
+		# Every burst lights the ground, not just the ones that also make smoke.
+		# Rocket artillery and missile warheads asked for no smoke and therefore
+		# got no light either, so at night a salvo arriving was a few grey
+		# puffs: the one time of day an explosion should be the brightest thing
+		# for miles.
+		_light = OmniLight3D.new()
+		_light.light_color = tint
+		_light.light_energy = 14.0 + radius * 2.6
+		_light.omni_range = maxf(radius * 11.0, 90.0)
+		add_child(_light)
 
 	func _process(delta: float) -> void:
 		life += delta
@@ -689,6 +693,9 @@ class Boom extends Node3D:
 		if t >= 1.0:
 			queue_free()
 			return
+		# and it fades with the fireball rather than switching off with it
+		if is_instance_valid(_light):
+			_light.light_energy = (14.0 + radius * 2.6) * maxf(1.0 - t * t, 0.0)
 		_mi.scale = Vector3.ONE * radius * (0.25 + 1.4 * t)
 		_mat.albedo_color = tint * (1.0 - t) + Color(0, 0, 0, 0)
 		_mat.albedo_color.a = 1.0 - t

@@ -52,7 +52,10 @@ const KINDS := {
 	},
 	"cargo": {
 		"name": "Container ship", "len": 210.0, "beam": 30.0, "draught": 12.0,
-		"free": 14.0, "hp": 1800.0, "speed": 10.5, "sub": false,
+		# A merchant hull is plate, not armour. At 1800 it was nearly as hard to
+		# sink as a destroyer and survived a 1,500 kg warhead with room to
+		# spare, which is not what happens to a container ship.
+		"free": 14.0, "hp": 420.0, "speed": 10.5, "sub": false,
 		"paint": Color(0.42, 0.28, 0.22), "deck": Color(0.34, 0.32, 0.28),
 		"super": [[0.34, 0.30, 26.0, 20.0]],
 		"mast": 12.0, "guns": 0, "class": "civil",

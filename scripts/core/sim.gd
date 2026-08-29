@@ -410,20 +410,52 @@ var ROADS: Array = [
 ## Lay the trunk network between the airfield and wherever the towns ended up,
 ## each leg routed round the worst of the ground rather than driven straight
 ## over it. `link` is a list of index pairs into `points`.
+## The whole thing in one blocking go, for anything that is not the loading
+## screen -- the harnesses, mostly.
 func build_roads(points: Array, links: Array) -> void:
+	# Collected apart and only published at the end: routing calls height_at,
+	# and a half filled network is a road with no surveyed height to read.
+	begin_roads(points, links)
+	finish_roads()
+
+## Send every link out to be searched. None of this touches the scene tree, so
+## they all go at once -- and, more to the point, the caller can keep drawing
+## while they run. Routing is the longest single thing in world generation, and
+## doing it one leg at a time on the main thread is what made the window stop
+## answering: the machine decides a program that has not drawn for a minute has
+## hung, and offers to kill it.
+func begin_roads(points: Array, links: Array) -> void:
 	ROADS = []
 	_road_lines = []
 	_road_prof = []
 	_corr = []
 	_corr_grid = {}
 	road_bridges = []
-	# Collected apart and only published at the end: routing calls height_at,
-	# and a half filled network is a road with no surveyed height to read.
-	var lines: Array = []
+	_rt_jobs = []
 	for pair in links:
-		var a: Vector2 = points[pair[0]]
-		var b: Vector2 = points[pair[1]]
-		var segs := route(a, b)
+		_rt_jobs.append([points[pair[0]], points[pair[1]]])
+	_rt_out = []
+	_rt_out.resize(_rt_jobs.size())
+	_rt_gid = -1
+	if not _rt_jobs.is_empty():
+		_rt_gid = WorkerThreadPool.add_group_task(_route_job, _rt_jobs.size(),
+			-1, true, "road routing")
+
+## Are the searches done? Asked once a frame by the loading screen.
+func roads_routed() -> bool:
+	return _rt_gid == -1 or WorkerThreadPool.is_group_task_completed(_rt_gid)
+
+func routes_left() -> int:
+	return _rt_jobs.size()
+
+## Collect the routes and survey them into a built network.
+func finish_roads() -> void:
+	if _rt_gid != -1:
+		WorkerThreadPool.wait_for_group_task_completion(_rt_gid)
+		_rt_gid = -1
+	var lines: Array = []
+	for ji in _rt_jobs.size():
+		var segs: Array = _rt_out[ji] if _rt_out[ji] != null else []
 		var line := PackedVector2Array()
 		for i in segs.size():
 			ROADS.append(segs[i])
@@ -432,6 +464,8 @@ func build_roads(points: Array, links: Array) -> void:
 			line.append(segs[i][1])
 		if line.size() > 1:
 			lines.append(line)
+	_rt_jobs = []
+	_rt_out = []
 	_road_lines = lines
 	_survey_roads()
 
@@ -489,6 +523,34 @@ func _hold_open_ground() -> void:
 				continue
 			y[i] = clampf(y[i], g[i] - ROAD_CUT_MAX, g[i] + ROAD_FILL_MAX)
 		_road_prof[li] = y
+
+## Smooth the open-ground profile inside the band it is allowed to sit in.
+##
+## The last thing done to a profile is a clamp, and a clamp can put a step in
+## it: two neighbouring stations pinned to very different ground leave the
+## design surface climbing thirty-four metres over a forty-five metre leg, which
+## is a wall across the carriageway rather than a gradient. This eases each
+## station toward its neighbours without ever letting it outside the cutting and
+## embankment band, so the profile comes out as smooth as those limits allow --
+## and where they allow nothing better, that is a place the classifier should
+## have made a structure of.
+func _settle_open(passes: int) -> void:
+	for _p in passes:
+		for li in _road_prof.size():
+			if li >= _natural.size():
+				continue
+			var y: PackedFloat32Array = _road_prof[li]
+			var g: PackedFloat32Array = _natural[li]
+			var n: int = mini(y.size(), g.size())
+			if n < 3:
+				continue
+			var was := y.duplicate()
+			for i in range(1, n - 1):
+				if _in_structure(li, i):
+					continue
+				var want: float = (was[i - 1] + was[i + 1]) * 0.5
+				y[i] = clampf(want, g[i] - ROAD_CUT_MAX, g[i] + ROAD_FILL_MAX)
+			_road_prof[li] = y
 
 func _survey_roads() -> void:
 	_in_survey = true
@@ -573,6 +635,7 @@ func _survey_roads() -> void:
 			_road_prof[li3] = _rule_grade(dense[li3], _road_prof[li3], 1, false)
 	_classify_structures()
 	_hold_open_ground()
+	_settle_open(24)
 	_index_corridor()
 	# The painted network has to follow the earthworks, or the carriageway is
 	# stained across ground that was never levelled for it.
@@ -929,111 +992,272 @@ func road_surface(x: float, z: float) -> Vector3:
 		gsum / wsum)
 
 ## A road between two places that goes round the hills instead of over them.
-## Straight legs are cheap and look it: a trunk road driven at a constant
-## bearing across this terrain climbs a ridge, drops into a valley and climbs
-## the next one. This lays intermediate waypoints and then relaxes each one
-## sideways toward whatever nearby ground is lower, which is what a road
-## surveyor does — the result follows the contours without any pathfinding.
+##
+## This used to seed a straight line and slide each waypoint sideways along that
+## line's normal, keeping whatever was cheapest. Greedy, local, one degree of
+## freedom, and no way back: it could bow round a spur but it could not
+## switchback, double back, or take a dogleg through a pass that lay behind it.
+## Terrain it could not get round had to be solved with a tunnel instead, which
+## is why a third of the network ended up bored through hills.
+##
+## This is a real search: A* over a coarse grid, with the edge cost being what a
+## road actually costs -- length, climb, the square of the gradient, a heavy
+## penalty past what a trunk road is built to, water, and the airfield keep-out.
+## The result is then pulled straight, because a grid path arrives full of
+## forty-five degree staircases that no surveyor would set out.
+const RT_CELL := 400.0           # search grid
+const RT_MARGIN := 9000.0        # how far outside the straight line it may look
+const RT_MAX_NODES := 60000      # a hard stop, so a hopeless leg cannot hang
+
+var _rt_jobs: Array = []
+var _rt_out: Array = []
+var _rt_gid := -1
+
+## Runs on a worker. Reads the height field and the airfield keep-out, and
+## writes only its own slot.
+func _route_job(i: int) -> void:
+	var j: Array = _rt_jobs[i]
+	_rt_out[i] = route(j[0], j[1])
+
+## A cell as one integer. Offset, not multiplied and added: `ci * N + cj` cannot
+## be taken apart again once `cj` is negative -- half the map -- and unwinding
+## the path through that arithmetic produced coordinates thousands of kilometres
+## from anywhere, which the corridor indexer then tried to build a grid over.
+const RT_BIAS := 1048576
+
+func _rt_key(ci: int, cj: int) -> int:
+	return (ci + RT_BIAS) * (RT_BIAS * 2) + (cj + RT_BIAS)
+
+## Ground height at a cell, remembered for the length of one route. The cache is
+## handed in rather than kept on the object, so several routes can be worked out
+## at the same time on different threads.
+func _rt_height(ci: int, cj: int, cache: Dictionary) -> float:
+	var k := _rt_key(ci, cj)
+	if cache.has(k):
+		return float(cache[k])
+	var h := height_at(float(ci) * RT_CELL, float(cj) * RT_CELL)
+	cache[k] = h
+	return h
+
+## What one step of road costs, in the same terms the surveyor thinks in.
+func _rt_step(ci: int, cj: int, ni: int, nj: int, run: float,
+		cache: Dictionary) -> float:
+	var ha := _rt_height(ci, cj, cache)
+	var hb := _rt_height(ni, nj, cache)
+	var climb: float = absf(hb - ha)
+	var grade: float = climb / run
+	var cost: float = run * 0.55 + climb * 1.6 + grade * grade * run * 260.0
+	var over: float = maxf(grade - ROAD_GRADE, 0.0)
+	cost += over * over * run * 9000.0
+	var wx := float(ni) * RT_CELL
+	var wz := float(nj) * RT_CELL
+	# Water is crossable -- that is what a bridge is for -- but it is the last
+	# resort, not a shortcut across a bay.
+	if hb < WATER_LEVEL + 6.0:
+		cost += run * 260.0
+	if not clear_of_airfield(wx, wz):
+		cost += run * 400.0
+	if on_runway(wx, wz):
+		cost += run * 4000.0
+	return cost
+
 func route(a: Vector2, b: Vector2) -> Array:
-	var span := a.distance_to(b)
-	# Always at least two legs, so every road gets relaxed. A short link left
-	# as one straight segment has no waypoints to move and takes whatever
-	# gradient lies between its ends: that is where the 53% pitches came from.
-	# More waypoints and a much harder search than this used to do. The old
-	# three passes over six offsets along one fixed normal was enough when the
-	# corridor could carve whatever it liked to smooth the result out; now that
-	# the earthworks are limited, the route itself has to be the answer, and a
-	# road with a waypoint every four hundred metres can actually follow a
-	# contour round a spur instead of driving at it. Routing is baked, so this
-	# is paid once.
-	var n: int = clampi(int(span / 420.0), 3, 30)
-	var dir := (b - a).normalized()
-	var nrm := Vector2(-dir.y, dir.x)
-	var pts: Array = [a]
-	for i in range(1, n):
-		pts.append(a.lerp(b, float(i) / float(n)))
-	pts.append(b)
-	var reach: float = minf(span * 0.17, 1700.0)
-	for _pass in 8:
-		for i in range(1, pts.size() - 1):
-			var p: Vector2 = pts[i]
-			var best: Vector2 = p
-			var best_cost := _road_cost(pts[i - 1], p, pts[i + 1])
-			# across the route and along it: a waypoint that can only slide
-			# sideways cannot shorten a climb by moving down the line of it
-			for k in [-1.0, -0.72, -0.45, -0.22, 0.22, 0.45, 0.72, 1.0]:
-				var q: Vector2 = p + nrm * (reach * k)
-				if height_at(q.x, q.y) < WATER_LEVEL + 6.0:
-					continue
-				if not clear_of_airfield(q.x, q.y):
-					continue
-				var cost := _road_cost(pts[i - 1], q, pts[i + 1])
-				if cost < best_cost:
-					best_cost = cost
-					best = q
-			pts[i] = best
-		reach *= 0.62
+	var pts := _search(a, b, {})
+	if pts.size() < 2:
+		pts = PackedVector2Array([a, b])
+	pts = _pull_straight(pts)
 	var out: Array = []
 	for i in range(pts.size() - 1):
 		out.append([pts[i], pts[i + 1]])
 	return out
 
-## What a waypoint costs: the climb either side of it, plus a mild penalty for
-## the detour, so a road will go a long way round a mountain and not one metre
-## round a molehill.
-func _road_cost(prev: Vector2, p: Vector2, next: Vector2) -> float:
-	var cost := 0.0
-	# Water is not ground. Routing only ever counted the climb, so a leg that
-	# happened to run down a river or across an inlet was cheap — and the road
-	# was then painted straight over the water.
-	for pair0 in [[prev, p], [p, next]]:
-		var f0: Vector2 = pair0[0]
-		var t0: Vector2 = pair0[1]
-		var wet := 0
-		var probes: int = clampi(int(f0.distance_to(t0) / 160.0), 2, 24)
-		for i in probes + 1:
-			var q: Vector2 = f0.lerp(t0, float(i) / float(probes))
-			if height_at(q.x, q.y) < WATER_LEVEL + 3.0:
-				wet += 1
-		cost += float(wet) / float(probes + 1) * 90000.0
-	for pair in [[prev, p], [p, next]]:
-		var f: Vector2 = pair[0]
-		var t: Vector2 = pair[1]
-		var d := f.distance_to(t)
-		var steps: int = clampi(int(d / 120.0), 2, 24)
-		var last := height_at(f.x, f.y)
-		var run: float = d / float(steps)
-		for i in range(1, steps + 1):
-			var q: Vector2 = f.lerp(t, float(i) / float(steps))
-			var h := height_at(q.x, q.y)
-			var rise := absf(h - last)
-			cost += rise * 1.6                # every metre of climb is work
-			# and a steep pinch is worse than the same climb spread out: without
-			# this the router happily trades a long gentle grade for a short
-			# wall, because the total height gained is the same. Squared, so a
-			# few percent costs nothing and half a gradient costs everything.
-			var grade := rise / maxf(run, 1.0)
-			cost += grade * grade * run * 260.0
-			# and anything past what a trunk road is built to is not a gradient
-			# to be traded off against distance, it is a route that does not
-			# work: priced accordingly.
-			var over: float = maxf(grade - ROAD_GRADE, 0.0)
-			cost += over * over * run * 9000.0
-			# and a trunk road does not run across an active airfield. Without
-			# this the network cut straight through the approach and the apron
-			# on its way between the field and the towns: 362 sample points in
-			# a keep-out it had no reason to enter.
-			if not clear_of_airfield(q.x, q.y):
-				cost += run * 400.0
-			if on_runway(q.x, q.y):
-				cost += run * 4000.0
-			last = h
-		# Every metre of tarmac, and enough of a price on it that the router
-		# takes a road round a hill and not round three counties. Costed too
-		# cheaply against the gradient terms the roads wandered all over the
-		# country to save a couple of percent of climb.
-		cost += d * 0.55
+## A* from a to b over the grid. Returns the cell centres it went through.
+func _search(a: Vector2, b: Vector2, cache: Dictionary) -> PackedVector2Array:
+	var ai := int(round(a.x / RT_CELL))
+	var aj := int(round(a.y / RT_CELL))
+	var bi := int(round(b.x / RT_CELL))
+	var bj := int(round(b.y / RT_CELL))
+	if ai == bi and aj == bj:
+		return PackedVector2Array([a, b])
+	# the box it may search in: the two ends plus room to go round something
+	var m := int(ceil(RT_MARGIN / RT_CELL))
+	var lo_i: int = mini(ai, bi) - m
+	var hi_i: int = maxi(ai, bi) + m
+	var lo_j: int = mini(aj, bj) - m
+	var hi_j: int = maxi(aj, bj) + m
+	var start := _rt_key(ai, aj)
+	var goal := _rt_key(bi, bj)
+	var came: Dictionary = {}
+	# what each key actually is, so the path never has to be decoded back
+	var cells: Dictionary = {start: Vector2i(ai, aj), goal: Vector2i(bi, bj)}
+	var g: Dictionary = {start: 0.0}
+	# A binary heap, not a scan. Taking the cheapest node by looking at every
+	# node on the frontier is quadratic in the size of the frontier, and on a
+	# thirty kilometre leg that frontier runs to tens of thousands: the search
+	# never finished.
+	var open_i := PackedInt32Array([ai])
+	var open_j := PackedInt32Array([aj])
+	var open_f := PackedFloat32Array([0.0])
+	var closed: Dictionary = {}
+	var expanded := 0
+	while open_f.size() > 0 and expanded < RT_MAX_NODES:
+		var ci: int = open_i[0]
+		var cj: int = open_j[0]
+		var ck := _rt_key(ci, cj)
+		var last := open_f.size() - 1
+		open_i[0] = open_i[last]
+		open_j[0] = open_j[last]
+		open_f[0] = open_f[last]
+		open_i.resize(last)
+		open_j.resize(last)
+		open_f.resize(last)
+		# sift the replacement back down
+		var pos := 0
+		while true:
+			var l := pos * 2 + 1
+			var r := l + 1
+			var sm := pos
+			if l < open_f.size() and open_f[l] < open_f[sm]:
+				sm = l
+			if r < open_f.size() and open_f[r] < open_f[sm]:
+				sm = r
+			if sm == pos:
+				break
+			var ti := open_i[pos]
+			var tj := open_j[pos]
+			var tf := open_f[pos]
+			open_i[pos] = open_i[sm]
+			open_j[pos] = open_j[sm]
+			open_f[pos] = open_f[sm]
+			open_i[sm] = ti
+			open_j[sm] = tj
+			open_f[sm] = tf
+			pos = sm
+		if closed.has(ck):
+			continue
+		closed[ck] = true
+		expanded += 1
+		if ck == goal:
+			break
+		for d in RT_NEIGHBOURS:
+			var ni: int = ci + int(d[0])
+			var nj: int = cj + int(d[1])
+			if ni < lo_i or ni > hi_i or nj < lo_j or nj > hi_j:
+				continue
+			var nk := _rt_key(ni, nj)
+			if closed.has(nk):
+				continue
+			var run: float = float(d[2]) * RT_CELL
+			var ng: float = float(g[ck]) + _rt_step(ci, cj, ni, nj, run, cache)
+			if g.has(nk) and float(g[nk]) <= ng:
+				continue
+			g[nk] = ng
+			came[nk] = ck
+			cells[nk] = Vector2i(ni, nj)
+			var hx: float = float(bi - ni) * RT_CELL
+			var hz: float = float(bj - nj) * RT_CELL
+			open_i.append(ni)
+			open_j.append(nj)
+			open_f.append(ng + sqrt(hx * hx + hz * hz) * 0.55)
+			# and sift it up into place
+			var up := open_f.size() - 1
+			while up > 0:
+				var par: int = int(floor(float(up - 1) * 0.5))
+				if open_f[par] <= open_f[up]:
+					break
+				var si := open_i[up]
+				var sj := open_j[up]
+				var sf := open_f[up]
+				open_i[up] = open_i[par]
+				open_j[up] = open_j[par]
+				open_f[up] = open_f[par]
+				open_i[par] = si
+				open_j[par] = sj
+				open_f[par] = sf
+				up = par
+	if not came.has(goal) and start != goal:
+		return PackedVector2Array()
+	# unwind
+	var rev: Array = []
+	var cur := goal
+	var guard := 0
+	while cur != start and came.has(cur) and guard < 200000:
+		rev.append(cur)
+		cur = came[cur]
+		guard += 1
+	rev.append(start)
+	rev.reverse()
+	var out := PackedVector2Array([a])
+	for k in rev:
+		var cell: Vector2i = cells[k]
+		var p := Vector2(float(cell.x) * RT_CELL, float(cell.y) * RT_CELL)
+		if p.distance_to(out[out.size() - 1]) > RT_CELL * 0.5:
+			out.append(p)
+	out.append(b)
+	return out
+
+const RT_NEIGHBOURS := [
+	[1, 0, 1.0], [-1, 0, 1.0], [0, 1, 1.0], [0, -1, 1.0],
+	[1, 1, 1.41421], [1, -1, 1.41421], [-1, 1, 1.41421], [-1, -1, 1.41421],
+	[2, 1, 2.23607], [2, -1, 2.23607], [-2, 1, 2.23607], [-2, -1, 2.23607],
+	[1, 2, 2.23607], [-1, 2, 2.23607], [1, -2, 2.23607], [-1, -2, 2.23607],
+]
+
+## Pull the staircase out of a grid path.
+##
+## A* on a grid can only leave a cell in sixteen directions, so its output is a
+## zigzag even across ground that wants a straight road. This drops any waypoint
+## that the two either side of it can be joined through no more expensively.
+func _pull_straight(pts: PackedVector2Array) -> PackedVector2Array:
+	var cur := pts
+	for _pass in 4:
+		if cur.size() < 3:
+			break
+		var out := PackedVector2Array([cur[0]])
+		var i := 1
+		while i < cur.size() - 1:
+			var a: Vector2 = out[out.size() - 1]
+			var b: Vector2 = cur[i]
+			var c: Vector2 = cur[i + 1]
+			var bent: float = _leg_cost(a, b) + _leg_cost(b, c)
+			var direct: float = _leg_cost(a, c)
+			if direct <= bent * 1.02:
+				i += 1                      # b earns nothing: leave it out
+				continue
+			out.append(b)
+			i += 1
+		out.append(cur[cur.size() - 1])
+		if out.size() == cur.size():
+			break
+		cur = out
+	return cur
+
+## What a straight leg between two points would cost, sampled along it.
+func _leg_cost(a: Vector2, b: Vector2) -> float:
+	var d := a.distance_to(b)
+	if d < 1.0:
+		return 0.0
+	var steps: int = clampi(int(d / 120.0), 2, 40)
+	var cost: float = d * 0.55
+	var last := height_at(a.x, a.y)
+	var run: float = d / float(steps)
+	for i in range(1, steps + 1):
+		var q: Vector2 = a.lerp(b, float(i) / float(steps))
+		var h := height_at(q.x, q.y)
+		var climb: float = absf(h - last)
+		var grade: float = climb / run
+		cost += climb * 1.6 + grade * grade * run * 260.0
+		var over: float = maxf(grade - ROAD_GRADE, 0.0)
+		cost += over * over * run * 9000.0
+		if h < WATER_LEVEL + 6.0:
+			cost += run * 260.0
+		if not clear_of_airfield(q.x, q.y):
+			cost += run * 400.0
+		if on_runway(q.x, q.y):
+			cost += run * 4000.0
+		last = h
 	return cost
+
 
 var _segments: Array = []          # every road and street, filled by Scenery
 var decks: Array = []              # landable platforms: {origin, basis, half, y}
@@ -1390,7 +1614,12 @@ const BIOME_COLOURS := [
 var _bw := PackedFloat32Array([0, 0, 0, 0, 0, 0, 0])
 
 ## Fills the shared weight buffer and returns it. Do not hold on to the result.
-func biome_weights(x: float, z: float, y: float, slope: float) -> PackedFloat32Array:
+## `cl` overrides the two climate lookups with values from somewhere else --
+## the baked texture the ground shader reads. Only the harness passes it, and it
+## is what lets the fidelity of that texture be measured against this, the
+## arithmetic both sides share, rather than against a second copy of it.
+func biome_weights(x: float, z: float, y: float, slope: float,
+		cl: Vector2 = Vector2(-1.0, -1.0)) -> PackedFloat32Array:
 	# Latitude first, weather second. Without a band running with the map there
 	# is no reason for the far north to be colder than the middle, so climate
 	# was noise alone and the world had no geography to it — the same patchwork
@@ -1400,10 +1629,13 @@ func biome_weights(x: float, z: float, y: float, slope: float) -> PackedFloat32A
 	var band: float = 1.0 - lat * 1.25
 	# the dry belts sit either side of the hot middle, the way they do on Earth
 	var belt: float = clampf(1.0 - absf(lat - 0.32) * 3.0, 0.0, 1.0)
-	var temp: float = clampf(band * 0.70
-		+ (noise_temp.get_noise_2d(x, z) + 1.0) * 0.5 * 0.42
+	var nt: float = cl.x if cl.x >= 0.0 \
+		else (noise_temp.get_noise_2d(x, z) + 1.0) * 0.5
+	var nm: float = cl.y if cl.y >= 0.0 \
+		else (noise_moist.get_noise_2d(x, z) + 1.0) * 0.5
+	var temp: float = clampf(band * 0.70 + nt * 0.42
 		- clampf((y - 300.0) / 2200.0, 0.0, 1.0) * 0.85, 0.0, 1.0)
-	var moist: float = clampf((noise_moist.get_noise_2d(x, z) + 1.0) * 0.5
+	var moist: float = clampf(nm
 		+ clampf(1.0 - absf(y - WATER_LEVEL) / 900.0, 0.0, 1.0) * 0.25
 		- belt * 0.66, 0.0, 1.0)
 	var steep: float = clampf((0.90 - slope) / 0.34, 0.0, 1.0)
@@ -1439,8 +1671,9 @@ func biome_weights(x: float, z: float, y: float, slope: float) -> PackedFloat32A
 		_bw[i] /= total
 	return _bw
 
-func biome_colour(x: float, z: float, y: float, slope: float) -> Color:
-	var w := biome_weights(x, z, y, slope)
+func biome_colour(x: float, z: float, y: float, slope: float,
+		cl: Vector2 = Vector2(-1.0, -1.0)) -> Color:
+	var w := biome_weights(x, z, y, slope, cl)
 	var r := 0.0
 	var g := 0.0
 	var b := 0.0

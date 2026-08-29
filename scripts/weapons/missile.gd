@@ -33,6 +33,19 @@ const VLS_PITCH := 0.66          # about 38 degrees, the arc it settles onto
 const VLS_BOOST := 140.0
 const VLS_BOOST_FOR := 2.4
 var _vls := false
+## Which way this particular round's timing error throws it, fixed when it
+## leaves the rail.
+var _aim_bias := Vector3.ZERO
+## The angle this round was thrown at.
+var _pitch := VLS_PITCH
+## How much further than the target the airless arc has to reach before the
+## motor is cut, to pay for the air it actually flies through.
+## Most of a ballistic arc is thin air, so the airless range formula is not far
+## wrong for it -- unlike a round that spends its whole flight low down, which
+## is what the larger figure this was briefly set to was tuned for.
+const BALLISTIC_DRAG_ALLOW := 1.35
+## Motor cut, and it does not come back.
+var _burnt := false
 var motor := 0.0
 var dead := false
 var _start_xf := Transform3D.IDENTITY
@@ -57,6 +70,86 @@ func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: 
 	# `in` on a null shooter raises, and the raise aborts the rest of launch()
 	team = (from.team if "team" in from else 0) if is_instance_valid(from) else 0
 	_eject = ws["eject"]
+	_aim_bias = Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0),
+		randf_range(-1.0, 1.0)).normalized()
+	# The angle to throw it at, worked out from how far it has to go.
+	#
+	# A ballistic weapon is aimed by its launch angle, and there are two angles
+	# that reach any given range: a flat one and a steep one. Fired at a target
+	# far inside its reach -- which a two thousand kilometre missile always is,
+	# on a map twelve hundred across -- the flat solution is nearly horizontal
+	# and useless, and the steep one is nearly vertical, which is exactly what
+	# an over-ranged ballistic missile does. Fixed at 38 degrees it simply flew
+	# past everything.
+	_pitch = VLS_PITCH
+	if String(ws.get("kind", "")) == "cruise" and is_instance_valid(tgt):
+		# A cruise round climbs to its cruising height and levels off; it does
+		# not get thrown up at thirty-eight degrees. Pitched over like a
+		# ballistic shot, a 26 g sustainer pushing along that nose out-climbs
+		# anything the guidance can pull back at Mach 7 -- it went through a six
+		# kilometre cruise height, reached twenty, and never recovered.
+		var run: float = maxf(Vector2(tgt.global_position.x - xf.origin.x,
+			tgt.global_position.z - xf.origin.z).length(), 1000.0)
+		# Over more than half the run, not a quarter of it. A round at Mach 7
+		# with fifteen g turns about four degrees a second, so a nineteen degree
+		# climb takes six seconds to level out of and gains three and a half
+		# kilometres doing it -- it sailed through a six kilometre cruise height
+		# and levelled at fifteen. A shallower climb has less to undo.
+		# The cruising height a shot this long is worth. A weapon's entry gives
+		# the height it cruises at when it has the range to use one, and for a
+		# Zircon that is six kilometres -- which is right over sixty and absurd
+		# over twenty-five. At twenty-five it reached 6.3 km still climbing,
+		# arrived over the ship at 7.3 km with the dive not yet started, and
+		# came down twenty-seven kilometres the other side of it. The climb has
+		# to be worth the descent that pays for it: a round cannot spend more
+		# height than it can shed in the distance it has left.
+		# How tightly this round can turn at all. A Zircon holds Mach 8 and is
+		# rated at fifteen g, and v squared over a is a turn radius of fifty
+		# kilometres -- so it cannot dive, level and strike inside a box a
+		# fraction of that across. Every number below comes out of it.
+		var v: float = maxf(float(ws.get("ref_speed", 300.0)), 60.0)
+		_turn_r = v * v / maxf(float(ws.get("max_g", 10.0)) * 9.81, 1.0)
+		# The height a descent can shed over a given ground distance, when it
+		# has to rotate into the dive and out of it again at that radius: about
+		# D squared over four R. Inverted, this is the cruising height the run
+		# can pay for -- roughly half of it is spent climbing, the rest coming
+		# down. Six kilometres needs thirty-four to get rid of; asked to do it
+		# in sixteen, the round arrived over the ship still five kilometres up
+		# and scored a proximity hit instead of striking it.
+		var descent: float = run * 0.55
+		_deck = minf(float(ws.get("cruise_alt", 60.0)),
+			descent * descent / (4.0 * _turn_r))
+		_pitch = clampf(atan(_deck / (run * 0.55)),
+			deg_to_rad(4.0), deg_to_rad(30.0))
+	elif bool(ws.get("loft", false)) and is_instance_valid(tgt):
+		var far_flat: float = Vector2(tgt.global_position.x - xf.origin.x,
+			tgt.global_position.z - xf.origin.z).length()
+		var vbo: float = maxf(float(ws.get("ref_speed", 1000.0)) * 0.85, 100.0)
+		var s2: float = clampf(far_flat * 9.81 * BALLISTIC_DRAG_ALLOW
+			/ (vbo * vbo), 0.0, 1.0)
+		# The steep solution. Two angles reach any given range, and a ballistic
+		# missile flies the high one -- that is what makes it ballistic. The
+		# weapons that want the flat, fast, depressed profile are the hypersonic
+		# anti-ship rounds, and those are cruise missiles: they hold a speed and
+		# follow the ground, and they never come through here.
+		_pitch = clampf((PI - asin(s2)) * 0.5, deg_to_rad(34.0), deg_to_rad(60.0))
+
+## The cruising height this particular shot chose, which depends on how far it
+## has to go. Zero until a cruise round with a target works it out at launch.
+var _deck := 0.0
+## Its turn radius at cruising speed, which is what decides both that height and
+## how early the descent has to begin.
+var _turn_r := 0.0
+
+## How high to hold over the highest ground ahead on the run in. This is a
+## clearance, so it is measured in tens of metres -- it was a fraction of the
+## cruise height, which for a sea skimmer cruising at twenty-four metres came
+## to eight and was fine, and for a hypersonic round cruising at kilometres
+## came to two thousand: a floor two kilometres up, held until nine hundred
+## metres from the target, which at Mach 8 is a third of a second to lose it in.
+## Not hitting the ridge and choosing a cruising height are different jobs.
+func _crest(deck: float) -> float:
+	return minf(deck * 0.35, 150.0)
 
 func _ready() -> void:
 	top_level = true
@@ -133,8 +226,8 @@ func _physics_process(delta: float) -> void:
 		flat.y = 0.0
 		if flat.length_squared() > 1.0:
 			var t: float = clampf((age - 0.30) / VLS_OVER, 0.0, 1.0)
-			var lofted: Vector3 = (flat.normalized() * cos(VLS_PITCH)
-				+ Vector3.UP * sin(VLS_PITCH)).normalized()
+			var lofted: Vector3 = (flat.normalized() * cos(_pitch)
+				+ Vector3.UP * sin(_pitch)).normalized()
 			var want: Vector3 = Vector3.UP.slerp(lofted, t * t * (3.0 - 2.0 * t))
 			var sp: float = maxf(vel.length(), 1.0)
 			vel = vel.lerp(want * sp, clampf(delta * 2.6, 0.0, 1.0))
@@ -159,7 +252,49 @@ func _physics_process(delta: float) -> void:
 			if _flame:
 				_flame.visible = ws["burn"] > 0.0
 		armed = age > ws["arm_time"]
-		boosting = age - 0.28 < ws["burn"]
+		boosting = age - 0.28 < ws["burn"] and not _burnt
+		# Burnout, for anything that flies an arc.
+		#
+		# A ballistic weapon is aimed by *when it stops burning*, not by steering
+		# all the way in. Left under power it simply kept accelerating along its
+		# launch vector -- Mach 16 and forty kilometres up, having gone straight
+		# over the target -- and at that speed with seven g of authority its turn
+		# radius is four hundred and sixty kilometres, so nothing could bring it
+		# back down. It cuts the motor the moment the arc it is already on
+		# reaches the target, and falls on it.
+		if boosting and bool(ws.get("loft", false)) and is_instance_valid(target):
+			var tp: Vector3 = target.global_position
+			var flat: float = Vector2(tp.x - global_position.x,
+				tp.z - global_position.z).length()
+			var vnow: float = vel.length()
+			if vnow > 50.0:
+				var sn: float = clampf(vel.y / vnow, -1.0, 1.0)
+				var cs: float = sqrt(maxf(1.0 - sn * sn, 0.0))
+				# v^2 sin(2a) / g, the range of the arc it is on right now --
+				# in a vacuum. This round flies through air, and the difference
+				# is not small: cutting the motor the moment the airless arc
+				# reached the target put a Zircon into the ground thirty-four
+				# kilometres short. The allowance is what the drag costs it.
+				var reach: float = vnow * vnow * maxf(2.0 * sn * cs, 0.02) / 9.81
+				if sn > 0.05 and reach >= flat * BALLISTIC_DRAG_ALLOW:
+					# and it stays out. `boosting` is worked out afresh every
+					# frame from the age against the burn time, so cutting it
+					# locally lasted exactly one frame: the motor relit and the
+					# round accelerated away from a target it had already closed
+					# to three kilometres, ending up sixty out and still going.
+					_burnt = true
+					boosting = false
+					motor = 0.0
+					if _flame:
+						_flame.visible = false
+		# A cruise missile throttles. Ours ran its sustainer flat out for the
+		# whole flight, so it had thrust to spare at every moment and climbed
+		# two and a half times its own cruising height before the guidance could
+		# argue it down. Holding the design speed is what the motor is for.
+		if boosting and String(ws.get("kind", "")) == "cruise" \
+				and vel.length() > float(ws.get("ref_speed", 1.0e9)):
+			boosting = false
+			motor = 0.0
 		var dir := -global_transform.basis.z
 		if _vls and age < VLS_BOOST_FOR:
 			vel += dir * VLS_BOOST * delta
@@ -197,7 +332,32 @@ func _physics_process(delta: float) -> void:
 	if armed and not _split and ws.has("mirv"):
 		var bed: float = maxf(Sim.height_at(global_position.x, global_position.z),
 			Sim.WATER_LEVEL)
-		if global_position.y - bed < float(ws.get("mirv_at", 1000.0)):
+		# On the way down, not on the way up. The test was height above the
+		# ground alone, which is satisfied the moment the round leaves the
+		# ground -- so a bus lofted from a launcher opened at three kilometres
+		# while still climbing, and scattered its load over its own launch site.
+		# ...and over the target, not merely low enough. Height alone opened the
+		# bus at twelve kilometres with eighteen still to run: the load is
+		# unpowered once it is off, so it carried its share of the bus's speed
+		# for as long as it took to fall and came down two and a half
+		# kilometres short. What decides the release is whether the bus is on
+		# the target *ballistically* -- how far the load will travel before it
+		# is down, against how far there is left to go.
+		var open_now: bool = vel.y < 0.0 \
+			and global_position.y - bed < float(ws.get("mirv_at", 1000.0))
+		if open_now and is_instance_valid(target):
+			var drop: float = maxf(global_position.y - bed, 1.0)
+			var vy: float = absf(vel.y)
+			# h = vy t + g t squared over two, solved for t
+			var tfall: float = (vy + sqrt(vy * vy + 2.0 * 9.81 * drop)) / 9.81
+			var reach: float = Vector2(vel.x, vel.z).length() * tfall
+			var plan: float = Vector2(
+				target.global_position.x - global_position.x,
+				target.global_position.z - global_position.z).length()
+			# still long of it: hold, and let both numbers come down together
+			if plan > reach * 1.05:
+				open_now = false
+		if open_now:
 			_open_up()
 			return
 	if _fuse_check(from, to):
@@ -431,6 +591,31 @@ func _guide(delta: float) -> void:
 		# in overshot by seven kilometres.
 		var taper: float = clampf((flat_d - 3000.0) / 7000.0, 0.0, 1.0)
 		tpos.y += clampf(flat_d * 0.35, 0.0, 20000.0) * taper
+	# Fuse and guidance timing, expressed as a miss distance.
+	#
+	# A hit is a decision taken in the last few milliseconds of a closing pass.
+	# Against an aeroplane closing at 250 m/s a few milliseconds is a couple of
+	# metres and the round hits; against something arriving at Mach eight the
+	# same few milliseconds is thirty metres and it does not. Without this an
+	# SM-2 -- forty-four g and a twenty-two metre fuse -- intercepted anything
+	# put in front of it, including ballistic re-entry vehicles, which made
+	# every long range weapon in the game pointless.
+	#
+	# A fixed bias per round rather than a die roll at the end, so a miss looks
+	# like one: the round goes past. Rolling for it on impact makes a weapon
+	# fly through its target.
+	# ...and only against something that is trying not to be hit.
+	#
+	# The hard case is a fuse decision on a manoeuvring air target crossing at
+	# closing speed; that is what this is for, and what made interceptors far
+	# too good. Applied to everything it also threw a Mach 8 anti-ship round
+	# twenty-four metres wide of a stationary ship -- further than its own fuse
+	# radius -- so the weapon missed by construction. A ship or a vehicle is a
+	# big, slow, cooperative target and the round does not miss it on timing.
+	var evasive: bool = target is Aircraft or target is Missile
+	if evasive:
+		var closing_now: float = (tvel - vel).length()
+		tpos += _aim_bias * (float(ws.get("guide_jitter", 0.009)) * closing_now)
 	var los := tpos - global_position
 	var dist := los.length()
 	if dist < _min_d:
@@ -455,7 +640,18 @@ func _guide(delta: float) -> void:
 	# gravity. It went into the deck twelve kilometres short, every time, with
 	# the mountain it was supposed to cross still ahead of it.
 	var is_cruise: bool = String(ws["kind"]) == "cruise"
-	var homes_on_a_thing: bool = (target is Aircraft or target is Tank) and not is_cruise
+	# A ballistic round is on inertial guidance from the moment it leaves the
+	# rail until it is coming down again: it flies an arc to a coordinate, and
+	# it neither needs to see the target on the way nor can it. Left in, this
+	# dropped a Khorramshahr locked to a vehicle 1.5 seconds after launch --
+	# the target is 68 degrees off a nose pitched up at 60, against a 36 degree
+	# seeker -- and with the lock gone it thrust straight on at 300 m/s squared
+	# for the whole 140 second burn and passed sixteen hundred kilometres up.
+	# The ship case worked only because a hull is not a Tank and never entered
+	# this test at all.
+	var ballistic: bool = bool(ws.get("loft", false))
+	var homes_on_a_thing: bool = (target is Aircraft or target is Tank) \
+		and not is_cruise and not ballistic
 	_mask_check -= delta
 	if _mask_check <= 0.0:
 		_mask_check = 0.25
@@ -508,8 +704,17 @@ func _guide(delta: float) -> void:
 		# only comes up at the very end. Steering straight at a ship from
 		# altitude would be a much easier thing to shoot down and would waste
 		# the whole point of a weapon with two minutes of fuel.
+		# Where the descent has to start, which is set by how much height there
+		# is to lose and how slowly this round can change direction, not by a
+		# constant. The entry's own figure is a floor: a sea skimmer's pop-up is
+		# a tactic and stays what it says.
 		var pop: float = float(ws.get("pop", 2600.0))
-		var deck: float = float(ws.get("cruise_alt", 30.0))
+		if _turn_r > 0.0 and _deck > 0.0:
+			pop = maxf(pop, 2.0 * sqrt(_deck * _turn_r))
+		# what this shot settled on at launch, not what the entry says in the
+		# abstract -- see `_deck`
+		var deck: float = _deck if _deck > 0.0 \
+			else float(ws.get("cruise_alt", 30.0))
 		# Lead the ship. Steering at where it is now leaves the round chasing a
 		# moving deck: at four hundred metres a second over the last two and a
 		# half kilometres a corvette travels most of its own length, and the
@@ -553,11 +758,48 @@ func _guide(delta: float) -> void:
 		if dist > pop:
 			look = minf(sense, maxf(dist - pop, 300.0))
 		var clear := -1e9
-		var probes := 9
+		# The steepest climb anything ahead demands, not just the highest thing
+		# ahead.
+		#
+		# Taking the maximum ground over the whole horizon and then aiming at
+		# the far end of that horizon is what put this round into hillsides: a
+		# ridge a kilometre ahead, seen correctly, was answered by aiming at
+		# ridge height two and a half kilometres away -- a four degree climb
+		# that reaches the right altitude a kilometre and a half *past* the
+		# ridge. What matters is height over distance to each thing in the way,
+		# and the worst of those is the one to fly.
+		var need := -1e9
+		# Sampled every 150 m or so, not every 360. Ten probes over three and a
+		# half kilometres steps straight over any ridge narrower than the gap
+		# between them, and the round then meets ground it never saw coming with
+		# no distance left to climb.
+		var probes: int = clampi(int(sense / 150.0), 12, 40)
 		for k in probes + 1:
-			var q: Vector3 = global_position + step * (sense * float(k) / float(probes))
-			clear = maxf(clear, maxf(Sim.height_at(q.x, q.z), Sim.WATER_LEVEL))
+			var reach_k: float = sense * float(k) / float(probes)
+			var q: Vector3 = global_position + step * reach_k
+			var gh: float = maxf(Sim.height_at(q.x, q.z), Sim.WATER_LEVEL)
+			clear = maxf(clear, gh)
+			if reach_k > 1.0:
+				# Against a safety margin, not against the cruising height.
+				# These are two different jobs: not hitting the ground, and
+				# settling at a chosen altitude. Using the cruise height here
+				# meant a round that cruises at six kilometres demanded to be
+				# six kilometres above a hilltop five hundred metres ahead --
+				# a gradient of one and a half -- and climbed to fourteen.
+				need = maxf(need, (gh + minf(deck, 150.0)
+					- global_position.y) / reach_k)
 		var aim := lead
+		# Where it stops holding its terrain clearance and commits at the
+		# target. Nine hundred metres is a second and a half for a Kalibr and a
+		# third of a second for a Zircon, and no round sheds a hundred and fifty
+		# metres of clearance in a third of a second: both of these crossed
+		# directly over the ship, a hundred and twenty metres up, which is the
+		# floor they were still flying. The distance has to be the one this
+		# round needs to get down from that height -- rotating into the descent
+		# and out of it again, at whatever radius it turns at.
+		var commit: float = 900.0
+		if _turn_r > 0.0:
+			commit = maxf(commit, 2.0 * sqrt(_crest(deck) * _turn_r))
 		if dist > pop:
 			var ahead: Vector3 = global_position + step * look
 			# Let down at a sensible angle. The waypoint is eighteen hundred
@@ -583,17 +825,25 @@ func _guide(delta: float) -> void:
 			# The constant is what stops the fraction asymptoting: without it
 			# the descent halves for ever and a sea skimmer never gets down,
 			# which left one cruising in at six hundred metres.
-			var glide: float = minf(look * 0.36, above * 0.45 + 18.0)
+			# Never negative. Below the cruise floor `above` goes negative and
+			# took the glide with it, so `position - glide` aimed *above* the
+			# round by however far it was down -- a climb command that grew the
+			# further behind it got. It overshot a six kilometre cruise height
+			# by fourteen and ended up in space.
+			var glide: float = maxf(minf(look * 0.36, above * 0.45 + 18.0), 0.0)
 			var want_y: float = maxf(floor_y, global_position.y - glide)
+			# and never shallower than the nearest thing in the way demands
+			if need > 0.0:
+				want_y = maxf(want_y, global_position.y + need * look)
 			aim = Vector3(ahead.x, want_y, ahead.z)
-		elif dist > 900.0 and aim.y < clear + deck * 0.35:
+		elif dist > commit and aim.y < clear + _crest(deck):
 			# Even on the run in: a target in the next valley is still behind a
 			# ridge, and diving at it from here means diving into the ridge.
 			# Inside the last kilometre it commits: a target sitting on the
 			# high ground *is* the highest thing ahead, and holding a floor
 			# above it flew the round over its head by a hundred and fifty
 			# metres.
-			aim = Vector3(aim.x, clear + deck * 0.35, aim.z)
+			aim = Vector3(aim.x, clear + _crest(deck), aim.z)
 		var cv := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
 		var cw := (aim - global_position).normalized()
 		accel = (cw - cv) * maxf(vel.length(), 80.0) * 2.0 + Vector3.UP * 9.81
@@ -677,12 +927,24 @@ func _coast_to_mark(_delta: float) -> void:
 	# Bombs and cruise weapons both aim at a place. A cruise missile whose ship
 	# is sunk by somebody else on the way in should still arrive; it used to
 	# carry straight on and hit the sea.
+	# Every kind, not just those two. A ballistic round got no guidance at all
+	# here and simply kept thrusting along its nose -- and a Khorramshahr's nose
+	# is pointed up, with three hundred metres a second squared behind it for
+	# a hundred and forty seconds. Losing the lock on a vehicle sent it to
+	# sixteen hundred kilometres and it never came back down. A round sent to a
+	# coordinate does not need to see anything to arrive: that is what an
+	# inertial mark is for, and `_last_aim` has held one all along.
 	var k := String(ws["kind"])
-	if (k != "bomb" and k != "cruise") or _last_aim == Vector3.INF:
+	if _last_aim == Vector3.INF:
 		return
 	var v_dir := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
 	var want_dir := (_last_aim - global_position).normalized()
-	var accel := (want_dir - v_dir) * maxf(vel.length(), 90.0) * 2.6
+	# A bomb and a cruise round steer hard onto the line. A ballistic round
+	# trims the arc it is already flying, the same authority its own guidance
+	# uses -- hauling one onto the line of sight at 2.6 would have it fighting
+	# its own trajectory the whole way down.
+	var gain: float = 2.6 if (k == "bomb" or k == "cruise") else 1.1
+	var accel := (want_dir - v_dir) * maxf(vel.length(), 90.0) * gain
 	var g_max: float = ws["max_g"] * 9.81
 	if accel.length() > g_max:
 		accel = accel.normalized() * g_max
@@ -718,6 +980,29 @@ func _open_up() -> void:
 	if right.length_squared() < 0.1:
 		right = Vector3.RIGHT
 	var up := right.cross(fwd).normalized()
+	# One aim point per warhead.
+	#
+	# Every child was launched at the bus's own target, so a dozen of them flew
+	# the same intercept onto the same coordinate: they arrived as a column
+	# rather than a footprint, and anything standing fifty metres to the side of
+	# the mark was untouched by all twelve. Each one takes a hostile of its own
+	# where there are enough of them, and a distinct patch of the footprint
+	# where there are not.
+	var marks: Array = []
+	var centre: Vector3 = target.global_position if is_instance_valid(target) \
+		else global_position
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or n.is_in_group("no_lock") or not (n is Node3D):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if ("team" in n) and int(n.team) == team:
+			continue
+		if (n as Node3D).global_position.distance_to(centre) < spread * 1.6:
+			marks.append(n)
+	marks.sort_custom(func(x: Node3D, y: Node3D) -> bool:
+		return x.global_position.distance_to(centre) \
+			< y.global_position.distance_to(centre))
 	for i in count:
 		var a := TAU * float(i) / float(count) + randf() * 0.3
 		var rad: float = lerpf(0.35, 1.0, randf())
@@ -726,7 +1011,21 @@ func _open_up() -> void:
 		var dir: Vector3 = (vel + kick).normalized()
 		var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 		var xf := Transform3D(Basis.looking_at(dir, up_ref), global_position)
-		m.launch(child, xf, vel + kick, shooter, target)
+		# its own warhead, its own target
+		var mine: Node = target
+		if i < marks.size():
+			mine = marks[i]
+		elif not marks.is_empty():
+			mine = marks[i % marks.size()]
+		else:
+			# nothing to pick from: spread them over the footprint instead
+			var off := Vector3(cos(a), 0.0, sin(a)) * spread * rad
+			var pt := _Submark.new()
+			pt.team = 1 if team == 0 else 0
+			get_tree().current_scene.add_child(pt)
+			pt.global_position = centre + off
+			mine = pt
+		m.launch(child, xf, vel + kick, shooter, mine)
 		m.team = team
 		get_tree().current_scene.add_child(m)
 		_kids.append(m)
@@ -744,6 +1043,19 @@ func _open_up() -> void:
 	queue_free()
 
 
+
+## A patch of ground for one warhead of a cluster, when there is nothing there
+## worth naming. Deliberately not lockable and not a radar return.
+class _Submark extends Node3D:
+	var team := 1
+	func _ready() -> void:
+		add_to_group("no_lock")
+	func hit_radius() -> float:
+		return 4.0
+	func is_alive() -> bool:
+		return true
+	func take_hit(_a: float, _f: Node = null) -> void:
+		pass
 
 func _hit(what: Node, miss := 0.0) -> void:
 	# A detonation out at the edge of the envelope only peppers the target. Two

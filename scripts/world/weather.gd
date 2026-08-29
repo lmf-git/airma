@@ -500,7 +500,13 @@ var _fog_mat: ShaderMaterial
 func _ensure_fog(env: Environment) -> void:
 	env.volumetric_fog_enabled = true
 	env.volumetric_fog_density = 0.0          # the volume supplies all of it
-	env.volumetric_fog_length = 6000.0
+	# Six kilometres was the whole reason the cloud "did not appear until you
+	# were close": the froxel grid is where the volumetric cloud exists at all,
+	# so beyond its length there simply was none, and the slab assembled itself
+	# around you as you flew into it. The grid is a fixed number of slices, so
+	# stretching it trades depth resolution for reach -- which is the right
+	# trade for cloud, whose detail is in its shape rather than along the view.
+	env.volumetric_fog_length = 22000.0
 	env.volumetric_fog_detail_spread = 2.4
 	env.volumetric_fog_gi_inject = 0.0
 	env.volumetric_fog_temporal_reprojection_enabled = true
@@ -517,7 +523,10 @@ func _ensure_fog(env: Environment) -> void:
 	# Big enough that its edge is past anything you can pick out. At twelve
 	# kilometres the boundary sat inside visual range and the cloud built
 	# itself around you as you flew.
-	_fog.size = Vector3(34000.0, 6000.0, 34000.0)
+	# and the slab has to be at least as wide as the grid now reaches, or the
+	# taper at its edge comes in before the grid runs out and puts the boundary
+	# back
+	_fog.size = Vector3(52000.0, 6000.0, 52000.0)
 	_fog.material = _fog_mat
 	add_child(_fog)
 

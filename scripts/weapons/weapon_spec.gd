@@ -109,26 +109,27 @@ static func _db() -> Dictionary:
 		"desc": "Long ranged land attack cruise missile. Runs in on the deck.",
 	},
 	"zircon": {
-		"name": "3M22 Zircon", "short": "ZRC", "kind": "radar",
+		"name": "3M22 Zircon", "short": "ZRC", "kind": "cruise",
 		"folding": true, "mass": 2400.0, "length": 8.40, "dia": 0.60, "fin": 0.80,
-		"boost": 210.0, "burn": 90.0, "max_g": 15.0, "drag": 0.00009,
-		"ref_speed": 1900.0,
+		# Mach 8, which is what a Zircon is. At 1900 it was Mach 5.5 and did
+		# not deserve the name.
+		"boost": 260.0, "burn": 100.0, "max_g": 15.0, "drag": 0.00009,
+		"cruise_alt": 6000.0, "pop": 16000.0, "ref_speed": 2700.0,
 		"life": 220.0, "range": 96000.0, "seeker_fov": 45.0, "lock_time": 1.2,
 		"arm_time": 3.0, "fuse": 22.0, "damage": 1500.0, "lethal": 44.0,
-		"loft": true,
 		"colour": Color(0.30, 0.31, 0.33), "band": Color(0.62, 0.18, 0.14),
 		"eject": 3.0, "trail": Color(0.95, 0.86, 0.72),
 		"flare_bait": 0.0, "chaff_bait": 0.05,
 		"desc": "Anti-ship hypersonic. Very fast, very hard to defeat.",
 	},
 	"fattah": {
-		"name": "Fattah-1", "short": "FTH", "kind": "radar",
+		"name": "Fattah-1", "short": "FTH", "kind": "cruise",
 		"folding": true, "mass": 3200.0, "length": 12.0, "dia": 0.86, "fin": 1.05,
-		"boost": 240.0, "burn": 70.0, "max_g": 12.0, "drag": 0.00010,
-		"ref_speed": 1700.0,
+		# Mach 10. Fattah is claimed at 13 to 15; this is the sober end of it.
+		"boost": 300.0, "burn": 90.0, "max_g": 12.0, "drag": 0.00010,
+		"cruise_alt": 8000.0, "pop": 18000.0, "ref_speed": 3400.0,
 		"life": 240.0, "range": 120000.0, "seeker_fov": 40.0, "lock_time": 1.4,
 		"arm_time": 4.0, "fuse": 22.0, "damage": 1300.0, "lethal": 40.0,
-		"loft": true,
 		"colour": Color(0.52, 0.50, 0.44), "band": Color(0.20, 0.42, 0.24),
 		"eject": 3.0, "trail": Color(0.92, 0.88, 0.80),
 		"flare_bait": 0.0, "chaff_bait": 0.05,
@@ -148,6 +149,48 @@ static func _db() -> Dictionary:
 		"eject": 0.0, "trail": Color(0.96, 0.92, 0.86),
 		"flare_bait": 0.0, "chaff_bait": 0.0,
 		"desc": "Intermediate range hypersonic. Splits into six on the way down.",
+	},
+	"khorram": {
+		# Khorramshahr. Nineteen and a half tonnes, thirteen metres, a metre and
+		# a half across, liquid fuelled, and it carries most of two tonnes of
+		# warhead two thousand kilometres. In this world that is further than
+		# there is world to cross, so the reach is set to the map rather than to
+		# the missile -- everything else is the real article.
+		#
+		# Mach 8 to 16 is the re-entry speed of a ballistic shot, not something
+		# a motor holds: it comes from the arc. A long burn and almost no drag
+		# is what produces it here, the same way the arithmetic produces it in
+		# life.
+		"name": "Khorramshahr-4", "short": "KHR", "kind": "radar",
+		"folding": true, "mass": 19500.0, "length": 13.0, "dia": 1.50, "fin": 1.05,
+		"boost": 300.0, "burn": 140.0, "max_g": 7.0, "drag": 0.00006,
+		"ref_speed": 3000.0,
+		"life": 420.0, "range": 520000.0, "seeker_fov": 36.0, "lock_time": 1.8,
+		"arm_time": 6.0, "fuse": 30.0, "damage": 1100.0, "lethal": 72.0,
+		"loft": true,
+		# A separating warhead section that opens high and wide.
+		"mirv": 8, "mirv_at": 12000.0, "mirv_spread": 1400.0,
+		"mirv_child": "khrhead",
+		# Too fast for a fuse to be sure of: this is what makes it worth having.
+		"guide_jitter": 0.012,
+		"colour": Color(0.72, 0.70, 0.62), "band": Color(0.20, 0.42, 0.24),
+		"eject": 0.0, "trail": Color(0.97, 0.93, 0.86),
+		"flare_bait": 0.0, "chaff_bait": 0.0,
+		"desc": "Iranian medium range ballistic missile. Opens into eight above the target.",
+	},
+	"khrhead": {
+		# one of the eight. Unpowered, and going far too fast to need it.
+		"name": "Khorramshahr submunition", "short": "KRV", "kind": "radar",
+		"mass": 190.0, "length": 1.70, "dia": 0.40, "fin": 0.28,
+		"boost": 0.0, "burn": 0.0, "max_g": 7.0, "drag": 0.00012,
+		"ref_speed": 2400.0,
+		"life": 90.0, "range": 40000.0, "seeker_fov": 60.0, "lock_time": 0.0,
+		"arm_time": 1.0, "fuse": 18.0, "damage": 620.0, "lethal": 58.0,
+		"guide_jitter": 0.011,
+		"colour": Color(0.66, 0.64, 0.58), "band": Color(0.20, 0.42, 0.24),
+		"eject": 0.0, "trail": Color(0.98, 0.92, 0.82),
+		"flare_bait": 0.0, "chaff_bait": 0.0,
+		"desc": "A submunition off a Khorramshahr. Nothing steers it but itself.",
 	},
 	"orehead": {
 		# one of the six. No motor: it is already going faster than anything

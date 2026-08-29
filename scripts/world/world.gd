@@ -209,6 +209,7 @@ var _dc_said := 0
 var _trig_test := false
 var _trig_t := 0.0
 var _seam_test := false
+var _biome_test := false
 var _obstacle_test := false
 var _carrier_test := false
 var _tel_rig := ""
@@ -216,6 +217,10 @@ var _river_test := false
 var _warlords_test := false
 var _churn_test := false
 var _gun_test := false
+var _tfr_test := false
+var _tfr_range := 0.0
+var _tfr_veh := false
+var _tfr_kind := "tel_kalibr"
 var _laser_test := false
 var _laser_t := 0.0
 var _hud_test := false
@@ -367,6 +372,11 @@ var _loading: LoadingScreen = null
 var _boot_verbose := false
 ## Middles of the settlement clusters, one of which the ground mask sits on.
 var _mask_spots: Array = []
+## Where the eye was last frame and how fast it is going, so the ground can be
+## fetched ahead of whatever the view is riding.
+var _eye_prev := Vector3.INF
+var _eye_vel := Vector3.ZERO
+var roster_view: RosterView
 
 func _ready() -> void:
 	# A lambda captures by value, so a closure that tries to carry the clock
@@ -408,7 +418,15 @@ func _ready() -> void:
 	scenery.name = "Scenery"
 	add_child(scenery)
 	await _paint("Laying out the road network", 0.02)
+	# Dispatched, then waited on a frame at a time. Searching forty trunk routes
+	# is the longest single thing in world generation, and doing it in one
+	# blocking call is what stopped the window answering while the map was
+	# built -- long enough for the machine to decide the game had hung.
 	scenery.plan()                     # road network before the ground is painted
+	while scenery.plan_busy():
+		await _paint("Laying out the road network", 0.02,
+			"searching %d routes over the hills" % Sim.routes_left())
+	scenery.plan_finish()
 	_mark.call("road network")
 	_site_opfor_field()
 	_mark.call("siting airfields")
@@ -515,6 +533,10 @@ func _ready() -> void:
 	await _paint("Drawing the map", 0.88)
 	map.bake()
 	_mark.call("map")
+	roster_view = RosterView.new()
+	roster_view.net = net
+	roster_view.world = self
+	ui.add_child(roster_view)
 	admin = AdminMenu.new()
 	admin.chose.connect(_do_admin)
 	ui.add_child(admin)
@@ -741,7 +763,33 @@ func _process(delta: float) -> void:
 	if is_instance_valid(terrain):
 		var eye3 := get_viewport().get_camera_3d()
 		if eye3 != null:
-			terrain.recentre(eye3.global_position)
+			# Look where you are going, not where you are. Ground ahead of a
+			# fast aeroplane arrives at the moment it is needed and has to be
+			# built right then; biasing the centre a couple of seconds forward
+			# has it queued and standing before you get there. The bias is
+			# capped so a hypersonic does not drag the detail off the map
+			# altogether, and it is along the track, so the ground behind
+			# coarsens -- which is where you are not looking.
+			# From how the *eye* is actually moving, not from the aeroplane.
+			# Riding a weapon camera the view is on a round doing Mach 7 while
+			# the aeroplane sits on the ramp, so the ground was being fetched
+			# for somewhere the camera left seconds ago and chunks arrived long
+			# after they were needed.
+			var here := eye3.global_position
+			var dt: float = maxf(delta, 0.0001)
+			if _eye_prev != Vector3.INF:
+				var v := (here - _eye_prev) / dt
+				# smoothed, or a camera cut reads as an enormous velocity
+				if v.length() < 4000.0:
+					_eye_vel = _eye_vel.lerp(v, clampf(dt * 3.0, 0.0, 1.0))
+				else:
+					_eye_vel = Vector3.ZERO
+			_eye_prev = here
+			var lead := _eye_vel * 2.0
+			var far_enough: float = lead.length()
+			if far_enough > 1600.0:
+				lead *= 1600.0 / far_enough
+			terrain.recentre(eye3.global_position + lead)
 		# A bigger bite than it looks: the batch is built on the worker pool and
 		# collected on a later frame, so this costs the main thread a dispatch
 		# and whatever meshes came back, not the generation. The old chunks stay
@@ -769,7 +817,11 @@ func _process(delta: float) -> void:
 	if _nvg != null and _nvg.visible:
 		_nvg_t += delta
 		_nvg_mat.set_shader_parameter("t", _nvg_t)
-	if running and not Sim.ui_modal and Sim.tapped(&"night_vision"):
+	# ...unless the sensor page has the key. N steps the pod's channel, and
+	# swallowing it here meant the channel could never be changed from inside
+	# the very page it belongs to.
+	if running and not Sim.ui_modal and not (is_instance_valid(pod) and pod.active) \
+			and Sim.tapped(&"night_vision"):
 		toggle_nvg()
 	Sim.ui_modal = (is_instance_valid(map) and map.visible) \
 		or (is_instance_valid(actions) and actions.visible) \
@@ -3125,10 +3177,30 @@ func _process(delta: float) -> void:
 			start_gap = Vector2(shot.global_position.x - mark.x,
 				shot.global_position.z - mark.z).length()
 			var lived := 0
-			for f3 in 3600:                    # thirty seconds
+			for f3 in 12000:                   # a hundred seconds: a ballistic
+				# shot across the valley is a minute in the air, and cutting
+				# the measurement off at thirty called every one of them a miss
 				await get_tree().physics_frame
 				if not is_instance_valid(shot):
-					break
+					# A bus that has opened is gone on purpose. Follow whichever
+					# of its load is nearest the mark instead of calling the
+					# shot lost.
+					# only this bus's own load, not whatever else the mission
+					# happens to have in the air
+					var kid := String(WeaponSpec.get_spec(
+						String(t.KINDS[tk]["missile"])).get("mirv_child", ""))
+					var heir: Missile = null
+					var hd := 1e18
+					for m3 in get_tree().get_nodes_in_group("missiles"):
+						if not is_instance_valid(m3) or String(m3.wid) != kid:
+							continue
+						var md: float = (m3 as Node3D).global_position.distance_to(mark)
+						if md < hd:
+							hd = md
+							heir = m3
+					if heir == null:
+						break
+					shot = heir
 				lived = f3
 				var gap: float = Vector2(shot.global_position.x - mark.x,
 					shot.global_position.z - mark.z).length()
@@ -3140,7 +3212,7 @@ func _process(delta: float) -> void:
 						str(is_instance_valid(shot.target))])
 			print("[tel]   round lasted %.1f s" % (float(lived) / 120.0))
 			closed = best_gap < start_gap * 0.8
-			print("[tel] mark %.1f km off at launch; closest approach in 30 s was %.1f km" % [
+			print("[tel] mark %.1f km off at launch; closest approach was %.1f km" % [
 				start_gap * 0.001, best_gap * 0.001])
 		else:
 			print("[tel] no round in the air to follow")
@@ -3286,7 +3358,23 @@ func _process(delta: float) -> void:
 			float(st2["cp_rate"]), gained])
 		print("[wl] banner reports %d held, objective '%s'" % [
 			int(st2["held"]), str(st2["objective"])])
-		var ok: bool = zs.size() >= 14 and dupes == 0 and matched == towns \
+		# Nothing may be standing inside anything else.
+		var vs: Array = []
+		for v2 in get_tree().get_nodes_in_group("vehicles"):
+			if is_instance_valid(v2):
+				vs.append((v2 as Node3D).global_position)
+		var stacked := 0
+		var closest := 1e9
+		for i6 in vs.size():
+			for j6 in range(i6 + 1, vs.size()):
+				var gap: float = Vector2(vs[i6].x - vs[j6].x,
+					vs[i6].z - vs[j6].z).length()
+				closest = minf(closest, gap)
+				if gap < 9.0:
+					stacked += 1
+		print("[wl] %d vehicles on the map, closest pair %.1f m apart, %d overlapping" % [
+			vs.size(), closest if vs.size() > 1 else 0.0, stacked])
+		var ok: bool = stacked == 0 and zs.size() >= 14 and dupes == 0 and matched == towns \
 			and built <= 2 and per < 1.5 and float(st2["cp_rate"]) > 0.0 \
 			and gained > 0 and str(st2["objective"]) != ""
 		print("[wl] RESULT: %s" % ("ok" if ok else "FAILED"))
@@ -3332,23 +3420,223 @@ func _process(delta: float) -> void:
 		print("[gun] RESULT: %s" % ("ok" if ok else "FAILED"))
 		get_tree().quit()
 		return
+	# Does a cruise round actually follow the ground, or does it fly into the
+	# first hill it meets? Asked on its own, with nothing else shooting: in a
+	# live mission the round was being destroyed in flight by friendly air
+	# defence, which looks identical from the outside and is not the same fault.
+	if _tfr_test:
+		_tfr_test = false
+		var boat: Ship = null
+		for sh in get_tree().get_nodes_in_group("ships"):
+			if is_instance_valid(sh):
+				boat = sh
+				break
+		var mark: Vector3 = boat.global_position if is_instance_valid(boat) \
+			else Vector3(24000.0, 0.0, 1200.0)
+		# Against a vehicle instead of a ship. A cluster round scatters
+		# submunitions over an area, and whether that works against something
+		# ten metres long sitting on the ground is a different question from
+		# whether it works against a hundred and fifty metres of hull at sea.
+		var foe: Node3D = boat
+		if _tfr_veh:
+			# On land. The ship the mark comes from is at sea, so putting a tank
+			# four hundred metres from it put it in the water, where it sank --
+			# and a round whose target vanishes is a different test from a round
+			# shooting at a vehicle.
+			var spot := Vector2(mark.x, mark.z)
+			for ring in 60:
+				var probe := Vector2(mark.x - float(ring) * 600.0, mark.z)
+				if Sim.height_at(probe.x, probe.y) > Sim.WATER_LEVEL + 8.0:
+					spot = probe
+					break
+			var gy: float = Sim.height_at(spot.x, spot.y)
+			var quarry := _spawn_tank(Vector3(spot.x, gy, spot.y),
+				0.0, 1, "t72")
+			quarry.ai = false
+			foe = quarry
+			mark = quarry.global_position
+		var from := Vector3(-34000.0, 0.0, 6000.0)
+		# A shot can be short as well as long, and the two are not the same
+		# problem: over sixty kilometres a round has time to climb, cruise and
+		# let down, and over twenty-five it has to do all three at once.
+		if _tfr_range > 0.0:
+			var away := Vector3(from.x - mark.x, 0.0, from.z - mark.z).normalized()
+			from = mark + away * _tfr_range
+			from.y = 0.0
+		var t := _spawn_tank(from, 0.0, 0, _tfr_kind)
+		t.ai = false
+		await get_tree().physics_frame
+		t.map_lock = foe
+		t.map_target = mark
+		var hp0: float = foe.health if is_instance_valid(foe) else 0.0
+		print("[cruise] %s at %s, target %s, %.1f km apart" % [_tfr_kind,
+			str(Vector2(from.x, from.z).round()), str(Vector2(mark.x, mark.z).round()),
+			Vector2(mark.x - from.x, mark.z - from.z).length() * 0.001])
+		var waited := 0
+		while t._erect < 0.97 and waited < 1200:
+			await get_tree().physics_frame
+			waited += 1
+		t._gun_cd = 0.0
+		print("[cruise] launch: %s" % str(t.fire_main(self)))
+		var shot: Missile = null
+		var near := 1e18
+		var want_id := String(Tank.KINDS[_tfr_kind]["missile"])
+		for m in get_tree().get_nodes_in_group("missiles"):
+			if is_instance_valid(m) and String(m.wid) == want_id:
+				var d: float = (m as Node3D).global_position.distance_to(t.global_position)
+				if d < near:
+					near = d
+					shot = m
+		if shot == null:
+			print("[cruise] nothing left the rail")
+			print("[cruise] RESULT: FAILED")
+			get_tree().quit()
+			return
+		var worst_clear := 1e18
+		var worst_at := Vector3.ZERO
+		var lived := 0
+		var closed := 1e18
+		var closed3 := 1e18
+		var high_at := 0.0
+		# Six minutes. A subsonic cruise missile holds Mach 0.8, so sixty
+		# kilometres is four minutes in the air -- cutting the clock at two
+		# called a round that was tracking perfectly a failure.
+		for f in 43200:
+			await get_tree().physics_frame
+			if not is_instance_valid(shot):
+				# A cluster round stops existing halfway down on purpose: the
+				# bus opens and eight submunitions carry on without it. Follow
+				# whichever of them is nearest the target, or the test scores
+				# the load's release point as the miss distance -- eighteen
+				# kilometres short and twelve up, for a weapon that was doing
+				# exactly what it is supposed to.
+				var heir: Missile = null
+				var heir_d := 1e18
+				var aim_at: Vector3 = foe.global_position \
+					if is_instance_valid(foe) else mark
+				for m2 in get_tree().get_nodes_in_group("missiles"):
+					if not is_instance_valid(m2):
+						continue
+					var dd2: float = (m2 as Node3D).global_position.distance_to(aim_at)
+					if dd2 < heir_d:
+						heir_d = dd2
+						heir = m2
+				if heir == null:
+					break
+				shot = heir
+			lived = f
+			var p: Vector3 = shot.global_position
+			var g: float = maxf(Sim.height_at(p.x, p.z), Sim.WATER_LEVEL)
+			var clear: float = p.y - g
+			if clear < worst_clear:
+				worst_clear = clear
+				worst_at = p
+			# against where the ship *is*, not where it was when we fired
+			var now_at: Vector3 = foe.global_position if is_instance_valid(foe) \
+				else mark
+			closed = minf(closed, Vector2(p.x - now_at.x, p.z - now_at.z).length())
+			# In three dimensions. Measured in plan a round that crossed the
+			# ship five hundred metres overhead read as a ten metre miss, and
+			# a profile that never got down was scored as tracking perfectly.
+			var sep: float = p.distance_to(now_at)
+			if sep < closed3:
+				closed3 = sep
+				high_at = p.y - now_at.y
+			if f % 1200 == 0:
+				print("[cruise]   t=%5.1f s  alt %6.0f  ground %6.0f  clear %5.0f  %5.1f km to run  vy %6.0f  spd %5.0f  at %s" % [
+					float(f) / 120.0, p.y, g, clear, closed * 0.001,
+					shot.vel.y, shot.vel.length(),
+					(String(shot.target.name) if is_instance_valid(shot.target) else "NOTHING")])
+		print("[cruise] flew %.1f s, closest to the mark %.2f km in plan, %.0f m in all" % [
+			float(lived) / 120.0, closed * 0.001, closed3])
+		print("[cruise] at that point it was %.0f m above the target" % high_at)
+		print("[cruise] least ground clearance %.1f m at %s" % [
+			worst_clear, str(worst_at.round())])
+		var hurt: float = hp0 - (foe.health if is_instance_valid(foe) else 0.0)
+		print("[cruise] the target took %.0f damage of %.0f (%s)" % [hurt, hp0,
+			"hit" if hurt > 0.0 else "MISS"])
+		# Damage alone is not proof: there is a battle going on and the ship
+		# takes hits from other people. The round has to have arrived.
+		# A hit is arriving *at* the target, not over the top of it.
+		print("[cruise] RESULT: %s" % ("ok" if closed3 < 120.0 and hurt > 0.0
+			else "FAILED"))
+		get_tree().quit()
+		return
 	if _churn_test:
 		_churn_test = false
 		# instrument properly: hook the build counter
 		terrain.debug_count = true
+		# Arrive first, and only then start counting. The first update of a run
+		# builds the whole world at once, and none of that is a hand-over from
+		# anything -- there was nothing there before it. Counting it as one
+		# buried the transitions that actually pop under six hundred that
+		# cannot.
+		terrain.recentre(Vector3(0.0, 900.0, -4000.0), true)
+		terrain.flush_pending()
 		terrain.debug_builds = {}
+		terrain.debug_pop = []
 		var flown := 0.0
 		var speed := 240.0
+		# Stepped the way the game actually steps it -- every frame, not twice a
+		# second. How complete a chunk's blend is when it appears depends on how
+		# promptly the hand-over is noticed, so a coarse harness step hides
+		# exactly the fault being looked for.
 		var t2 := 0.0
 		while t2 < 90.0:
 			terrain.recentre(Vector3(speed * t2, 900.0, -4000.0))
 			terrain.flush_pending()
-			t2 += 0.5
+			t2 += 1.0 / 60.0
 		flown = speed * 90.0
 		var straight: Dictionary = terrain.debug_builds.duplicate()
 		var s_total := 0
 		for k2 in straight:
 			s_total += int(straight[k2])
+		# What the blend is actually worth in flight, as opposed to at the ideal
+		# threshold: a chunk that appears late arrives part-blended and pops.
+		var pops: Array = terrain.debug_pop.duplicate()
+		# and what asking the tree costs, since it is asked every thirty metres
+		var wt0 := Time.get_ticks_usec()
+		for wq in 20:
+			terrain._wanted(Vector3(41000.0 + float(wq), 900.0, -27000.0))
+		print("[churn] one look at the whole tree: %.2f ms" % [
+			float(Time.get_ticks_usec() - wt0) / 20000.0])
+		# A chunk appearing at blend 1 is a hand-over *down*: it arrives shaped
+		# like the level above -- the thing it is replacing -- and cannot be
+		# seen. One appearing at blend 0 is a hand-over *up*: the coarser level
+		# taking back over from children that were themselves fully morphed to
+		# its unmorphed shape, which also cannot be seen. Both ends are seamless
+		# by construction, and an earlier version of this counted every merge as
+		# a pop for that reason. What would actually show is an arrival in the
+		# middle, matching neither what it replaced nor what it settles to.
+		var p_sum := 0.0
+		var p_bad := 0
+		var by_d: Dictionary = {}
+		for pv in pops:
+			var bl: float = float((pv as Array)[0])
+			var dp: int = int((pv as Array)[1])
+			var miss: float = minf(bl, 1.0 - bl)
+			p_sum += miss
+			if miss > 0.12:
+				p_bad += 1
+				by_d[dp] = int(by_d.get(dp, 0)) + 1
+		var dks: Array = by_d.keys()
+		dks.sort()
+		var row := ""
+		for dk in dks:
+			row += "d%d:%d  " % [int(dk), int(by_d[dk])]
+		if row != "":
+			print("[churn] arrived mid-blend, by depth: %s" % row)
+		var shown := 0
+		for pv2 in pops:
+			var e2: Array = pv2
+			var m2b: float = minf(float(e2[0]), 1.0 - float(e2[0]))
+			if m2b > 0.3 and shown < 5:
+				shown += 1
+				print("[churn]   d%d blend %.2f at %.0f m (hands over at %.0f m), chunk at %.0f,%.0f" % [
+					int(e2[1]), float(e2[0]), float(e2[2]), float(e2[3]),
+					float(e2[4]), float(e2[5])])
+		print("[churn] hand-over mismatch: mean %.4f, %d of %d arrived mid-blend" % [
+			p_sum / maxf(float(pops.size()), 1.0), p_bad, pops.size()])
 		print("[churn] straight run %.0f km: %d builds over %d nodes (%.2f each)" % [
 			flown * 0.001, s_total, straight.size(),
 			float(s_total) / maxf(float(straight.size()), 1.0)])
@@ -3421,7 +3709,7 @@ func _process(delta: float) -> void:
 			var m2 := c2 as MeshInstance3D
 			if m2 == null or m2.mesh == null or not m2.visible:
 				continue
-			if String(m2.name) == "Water":
+			if String(m2.name) == "Water" or m2.is_queued_for_deletion():
 				continue
 			var ab: AABB = m2.mesh.get_aabb()
 			boxes.append([ab.position.x, ab.position.z, ab.size.x, ab.size.z,
@@ -3468,6 +3756,24 @@ func _process(delta: float) -> void:
 				wet_g += cc[vi].g
 				if cc[vi].g > cc[vi].r + 0.02:
 					wet_green += 1
+		# The morph needs three extra things in the mesh: the height offset, the
+		# coarse normal and the coarse colour. If any of them is missing the
+		# shader still runs and the ground still draws, so nothing complains --
+		# it simply stops blending, or blends toward nothing.
+		for c9 in terrain.get_children():
+			var m9 := c9 as MeshInstance3D
+			if m9 == null or m9.mesh == null or String(m9.name) == "Water":
+				continue
+			var fmt: int = m9.mesh.surface_get_format(0)
+			var a9: Array = m9.mesh.surface_get_arrays(0)
+			var nv: int = (a9[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+			print("[churn] mesh carries: uv2=%s tangent=%s custom0=%s (%d verts, custom %d bytes)" % [
+				str((fmt & Mesh.ARRAY_FORMAT_TEX_UV2) != 0),
+				str((fmt & Mesh.ARRAY_FORMAT_TANGENT) != 0),
+				str((fmt & Mesh.ARRAY_FORMAT_CUSTOM0) != 0), nv,
+				(a9[Mesh.ARRAY_CUSTOM0] as PackedByteArray).size()
+				if a9[Mesh.ARRAY_CUSTOM0] != null else -1])
+			break
 		print("[churn] seabed: %d vertices under water, mean r=%.3f g=%.3f, %d greener than red" % [
 			wet_v, wet_r / maxf(float(wet_v), 1.0), wet_g / maxf(float(wet_v), 1.0),
 			wet_green])
@@ -3511,7 +3817,7 @@ func _process(delta: float) -> void:
 			settled, per_node])
 		print("[churn] RESULT: %s" % ("ok" if settled <= 20 and per_node < 3.0
 			and visible_chunks == live_then and overlaps == 0
-			and hover == 0 else "FAILED"))
+			and hover == 0 and p_bad * 20 < pops.size() else "FAILED"))
 		get_tree().quit()
 		return
 	if _carrier_test:
@@ -3665,7 +3971,32 @@ func _process(delta: float) -> void:
 		# Somewhere off the origin, because correct at the origin proves only
 		# that the layout the airfield sits in works.
 		var moved := Vector3(41300.0, 0.0, -27700.0)
+		terrain.debug_count = true
 		terrain.recentre(moved, true)
+		print("[lod] neighbour lookups that disagree with a full descent: %d" %
+			terrain.debug_nb_bad)
+		# Does the live set actually tile the ground? Two leaves covering the
+		# same square metre is not a seam problem, it is a broken partition, and
+		# every seam number downstream of it is meaningless.
+		var boxes2: Array = []
+		for lk2 in terrain._live:
+			var bb := String(lk2).split(":")
+			var dd3 := int(bb[0])
+			var sp3: float = Terrain.span_at(dd3)
+			boxes2.append([float(int(bb[1])) * sp3, float(int(bb[2])) * sp3, sp3,
+				String(lk2)])
+		var ov := 0
+		for i5 in boxes2.size():
+			for j5 in range(i5 + 1, boxes2.size()):
+				var A: Array = boxes2[i5]
+				var B: Array = boxes2[j5]
+				var oxx: float = minf(A[0] + A[2], B[0] + B[2]) - maxf(A[0], B[0])
+				var ozz: float = minf(A[1] + A[2], B[1] + B[2]) - maxf(A[1], B[1])
+				if oxx > 1.0 and ozz > 1.0:
+					ov += 1
+					if ov <= 3:
+						print("[lod]   %s overlaps %s" % [A[3], B[3]])
+		print("[lod] overlapping leaves in the live set: %d" % ov)
 		await get_tree().process_frame
 		print("[lod] viewer at %s, %d leaves live" % [
 			str(Vector2(moved.x, moved.z).round()), int(terrain.stats["chunks"])])
@@ -4893,6 +5224,102 @@ func _process(delta: float) -> void:
 			print("[trigger] stores %d -> right click %d -> left click %d  (right fired=%s, left fired=%s)" % [
 				n0, n1, n2, str(n1 < n0), str(n2 < n1)])
 			get_tree().quit()
+	if _biome_test:
+		_biome_test = false
+		# The ground colour is now worked out per fragment from a baked climate
+		# texture rather than interpolated from the corners of a cell. The
+		# arithmetic is the same either side; what the texture changes is the
+		# two noise fields it reads, so what needs measuring is how far a linear
+		# fetch from it lands from the field it stands in for.
+		var img: Image = terrain.climate_img
+		if img == null:
+			print("[biome] no climate image -- headless bake did not run")
+			get_tree().quit()
+			return
+		var n := img.get_width()
+		var span: float = Sim.WORLD_HALF * 2.0
+		var wt := 0.0
+		var wm := 0.0
+		var st := 0.0
+		var sm := 0.0
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 4242
+		var samples := 20000
+		for i in samples:
+			var x: float = rng.randf_range(-Sim.WORLD_HALF, Sim.WORLD_HALF)
+			var z: float = rng.randf_range(-Sim.WORLD_HALF, Sim.WORLD_HALF)
+			# what the shader gets: a bilinear fetch at the same place
+			var u: float = (x + Sim.WORLD_HALF) / span * float(n) - 0.5
+			var v: float = (z + Sim.WORLD_HALF) / span * float(n) - 0.5
+			var i0: int = clampi(int(floor(u)), 0, n - 1)
+			var j0: int = clampi(int(floor(v)), 0, n - 1)
+			var i1: int = mini(i0 + 1, n - 1)
+			var j1: int = mini(j0 + 1, n - 1)
+			var fu: float = clampf(u - floor(u), 0.0, 1.0)
+			var fv: float = clampf(v - floor(v), 0.0, 1.0)
+			var c00 := img.get_pixel(i0, j0)
+			var c10 := img.get_pixel(i1, j0)
+			var c01 := img.get_pixel(i0, j1)
+			var c11 := img.get_pixel(i1, j1)
+			var tex_t: float = lerpf(lerpf(c00.r, c10.r, fu),
+				lerpf(c01.r, c11.r, fu), fv)
+			var tex_m: float = lerpf(lerpf(c00.g, c10.g, fu),
+				lerpf(c01.g, c11.g, fu), fv)
+			# and what the field actually is there
+			var ex_t: float = (Sim.noise_temp.get_noise_2d(x, z) + 1.0) * 0.5
+			var ex_m: float = (Sim.noise_moist.get_noise_2d(x, z) + 1.0) * 0.5
+			var dt: float = absf(tex_t - ex_t)
+			var dm: float = absf(tex_m - ex_m)
+			wt = maxf(wt, dt)
+			wm = maxf(wm, dm)
+			st += dt
+			sm += dm
+		print("[biome] climate %dx%d, %.0f m per texel, %d samples" % [
+			n, n, span / float(n), samples])
+		print("[biome] temperature  mean %.5f  worst %.5f" % [
+			st / float(samples), wt])
+		print("[biome] moisture     mean %.5f  worst %.5f" % [
+			sm / float(samples), wm])
+		# What is actually visible is the colour, not the weight: a large error
+		# in one weight is divided by the total of all seven, and a sand weight
+		# and a steppe weight are nearly the same colour anyway. Measured
+		# through Sim's own arithmetic, so this compares the texture against the
+		# field rather than against a second transcription of the rule.
+		var wc := 0.0
+		var sc := 0.0
+		rng.seed = 4242
+		for i in samples:
+			var x: float = rng.randf_range(-Sim.WORLD_HALF, Sim.WORLD_HALF)
+			var z: float = rng.randf_range(-Sim.WORLD_HALF, Sim.WORLD_HALF)
+			var y: float = Sim.height_at(x, z)
+			var up: float = rng.randf_range(0.55, 1.0)
+			var u2: float = (x + Sim.WORLD_HALF) / span * float(n) - 0.5
+			var v2: float = (z + Sim.WORLD_HALF) / span * float(n) - 0.5
+			var a0: int = clampi(int(floor(u2)), 0, n - 1)
+			var b0: int = clampi(int(floor(v2)), 0, n - 1)
+			var a1: int = mini(a0 + 1, n - 1)
+			var b1: int = mini(b0 + 1, n - 1)
+			var fa: float = clampf(u2 - floor(u2), 0.0, 1.0)
+			var fb: float = clampf(v2 - floor(v2), 0.0, 1.0)
+			var p00 := img.get_pixel(a0, b0)
+			var p10 := img.get_pixel(a1, b0)
+			var p01 := img.get_pixel(a0, b1)
+			var p11 := img.get_pixel(a1, b1)
+			var ct: float = lerpf(lerpf(p00.r, p10.r, fa),
+				lerpf(p01.r, p11.r, fa), fb)
+			var cm: float = lerpf(lerpf(p00.g, p10.g, fa),
+				lerpf(p01.g, p11.g, fa), fb)
+			var truth := Sim.biome_colour(x, z, y, up)
+			var shaded := Sim.biome_colour(x, z, y, up, Vector2(ct, cm))
+			var d: float = maxf(maxf(absf(truth.r - shaded.r),
+				absf(truth.g - shaded.g)), absf(truth.b - shaded.b))
+			wc = maxf(wc, d)
+			sc += d
+		print("[biome] ground colour  mean %.5f  worst %.5f  (of 1.0)" % [
+			sc / float(samples), wc])
+		var ok: bool = wc < 0.02
+		print("[biome] RESULT: %s" % ("ok" if ok else "FAILED"))
+		get_tree().quit()
 	if _seam_test:
 		_seam_test = false
 		# T junction cracks: where a leaf meets a coarser one, the fine chunk
@@ -6365,13 +6792,43 @@ func _audit_spawns() -> void:
 				str(na.global_position.round()), nb.get_class(), nb.name,
 				str(nb.global_position.round())])
 
+## Somewhere near here with nothing already standing on it.
+##
+## Vehicles are placed at fixed coordinates by several different bits of code --
+## the garage on the ramp, the sector garrisons, the threat spawner, whatever a
+## mission asks for -- and none of them knew what the others had done. Two that
+## picked the same patch of ground arrived inside each other and the suspension
+## flung them apart.
+func _free_spot(at: Vector3, clearance: float, ignore: Node = null) -> Vector3:
+	for ring in 9:
+		var r: float = float(ring) * clearance * 0.9
+		var tries: int = 1 if ring == 0 else 8
+		for k in tries:
+			var a: float = TAU * float(k) / float(tries) + float(ring) * 0.4
+			var q := Vector3(at.x + cos(a) * r, at.y, at.z + sin(a) * r)
+			var clear := true
+			for v in get_tree().get_nodes_in_group("vehicles"):
+				# not the one being placed: it joined the group on creation and
+				# is still sitting at the origin waiting to be put somewhere
+				if not is_instance_valid(v) or v == ignore:
+					continue
+				var p: Vector3 = (v as Node3D).global_position
+				if Vector2(p.x - q.x, p.z - q.z).length() < clearance:
+					clear = false
+					break
+			if clear:
+				return q
+	return at
+
 func _spawn_tank(at: Vector3, yaw: float, team: int, kind := "m1a2") -> Tank:
 	var t := Tank.new()
 	t.setup(team, kind)
 	t.name = "Tank"
 	add_child(t)
+	# A launcher is fourteen metres long, so the clearance is generous.
+	var spot := _free_spot(at, 16.0, t)
 	t.global_transform = Transform3D(Basis(Vector3.UP, yaw),
-		Vector3(at.x, Sim.height_at(at.x, at.z) + 1.1, at.z))
+		Vector3(spot.x, Sim.height_at(spot.x, spot.z) + 1.1, spot.z))
 	t.dismount_requested.connect(_leave_tank)
 	_reset_interp.call_deferred(t)
 	return t
@@ -6604,7 +7061,7 @@ var _tri_eye := Vector3.ZERO
 func _morph_at(v: Vector3, span: float) -> float:
 	var lo: float = 2.0 * span                    # Terrain.SPLIT_K * span
 	var hi: float = 2.0 * lo
-	var d: float = Vector2(v.x - _tri_eye.x, v.z - _tri_eye.z).length()
+	var d: float = v.distance_to(_tri_eye)
 	return clampf((d - lo) / maxf(hi - lo, 1.0), 0.0, 1.0)
 
 func _chunk_tris(mi: MeshInstance3D) -> Array:
@@ -6758,7 +7215,11 @@ shader_type canvas_item;
 render_mode unshaded;
 uniform sampler2D screen : hint_screen_texture, filter_linear_mipmap;
 uniform float t = 0.0;
-uniform float gain = 3.4;
+// A tube's whole job is that it shows you a moonlit hillside. At 3.4 the
+// amplifier could not lift a night scene off the floor -- the luminance of
+// unlit ground at night is a hundredth of full scale, which came out as a
+// hundredth of the way up the curve, and the answer was black.
+uniform float gain = 26.0;
 
 float h21(vec2 p) {
 	return fract(sin(dot(p, vec2(41.7, 289.1))) * 43758.5453);
@@ -6770,7 +7231,9 @@ void fragment() {
 	float l = dot(c, vec3(0.30, 0.59, 0.11));
 	// amplified, and it saturates: a tube cannot show you a bright sky and a
 	// dark hillside at once
-	float amp = 1.0 - exp(-l * gain);
+	// lifted before it is amplified, so the shadows come up rather than being
+	// crushed against nothing
+	float amp = 1.0 - exp(-pow(max(l, 0.0), 0.72) * gain);
 	// grain, which is the photons arriving one at a time
 	float g = h21(SCREEN_UV * vec2(1920.0, 1080.0) + vec2(t * 71.0, t * 37.0));
 	amp = clamp(amp + (g - 0.5) * 0.085, 0.0, 1.0);
@@ -7092,6 +7555,7 @@ func _enter_carrier() -> void:
 	if not carrier.dismount_requested.is_connected(_leave_carrier):
 		carrier.dismount_requested.connect(_leave_carrier)
 	carrier.mount(true)
+	hud.carrier = carrier
 	Sim.report("you have the conn — W/S engine order, A/D helm", Sim.Ev.INFO)
 	Sim.report("mouse looks out from the island, U to hand over", Sim.Ev.INFO)
 
@@ -7099,6 +7563,7 @@ func _leave_carrier() -> void:
 	if not is_instance_valid(carrier):
 		return
 	carrier.mount(false)
+	hud.carrier = null
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	# put the captain down on his own flight deck
 	_spawn_walker(carrier.global_position
@@ -8246,7 +8711,11 @@ func _shell_input(e: InputEvent) -> void:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if pod.active \
 				else Input.MOUSE_MODE_VISIBLE
 			Sim.report("sensor page %s" % ("up" if pod.active else "stowed"), Sim.Ev.INFO)
-		elif k == KEY_I and pod.active:
+		elif (k == KEY_I or k == KEY_N) and pod.active:
+			# N as well as I. N is the night vision key everywhere else, so
+			# reaching for it on the sensor page is the obvious thing to do --
+			# and with the goggles suppressed while the page is up it now has
+			# somewhere sensible to go.
 			pod.cycle_channel()
 			Sim.report("sensor: %s" % SensorPod.CHANNEL_NAMES[pod.channel], Sim.Ev.INFO)
 		elif k == KEY_T and pod.active and (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
@@ -8260,6 +8729,12 @@ func _shell_input(e: InputEvent) -> void:
 			hud.show_help = not hud.show_help
 		elif k == KEY_ESCAPE and running:
 			menu.visible = not menu.visible
+			# The session list comes up with the pause menu rather than instead
+			# of it. Put on its own key it simply took escape over, and there
+			# was then no way to reach the menu at all.
+			if is_instance_valid(roster_view):
+				roster_view.visible = menu.visible and net != null and net.active
+				roster_view.set_process(roster_view.visible)
 			menu.set_paused(true)
 			get_tree().paused = menu.visible
 			if audio:
@@ -8342,6 +8817,14 @@ func _parse_cmdline() -> void:
 			_gunner_test = true
 		elif a.begins_with("--fpslog"):
 			_fps_log = true
+		elif a == "--novsync":
+			# Frame rate is pinned to the refresh rate otherwise, which makes
+			# every measurement read "the same as every other" right up until
+			# the machine can no longer keep up -- so a change that costs
+			# a third of the frame budget is invisible until it costs all of it.
+			if not OS.has_feature("headless"):
+				DisplayServer.window_set_vsync_mode(
+					DisplayServer.VSYNC_DISABLED)
 		elif a == "--debugweapons":
 			Sim.debug_weapons = true
 		elif a == "--boomtest":
@@ -8404,6 +8887,15 @@ func _parse_cmdline() -> void:
 			_tel_rig = a.substr(9)
 		elif a == "--telrig":
 			_tel_rig = "tel_kalibr"
+		elif a.begins_with("--tfrtest="):
+			_tfr_test = true
+			_tfr_kind = a.substr(10)
+		elif a == "--tfrveh":
+			_tfr_veh = true
+		elif a.begins_with("--tfrrange="):
+			_tfr_range = float(a.substr(11)) * 1000.0
+		elif a == "--tfrtest":
+			_tfr_test = true
 		elif a == "--guntest":
 			_gun_test = true
 		elif a == "--churntest":
@@ -8497,6 +8989,8 @@ func _parse_cmdline() -> void:
 			_trig_test = true
 		elif a == "--seamtest":
 			_seam_test = true
+		elif a == "--biometest":
+			_biome_test = true
 		elif a == "--lasertest":
 			_laser_test = true
 		elif a.begins_with("--hudtest="):

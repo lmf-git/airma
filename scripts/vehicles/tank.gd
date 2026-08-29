@@ -62,6 +62,11 @@ const KINDS := {
 			 "hp": 130.0, "power": 380_000.0, "top": 15.0, "gun": 400.0,
 			 "muzzle": 400.0, "reload": 46.0, "blast": 10.0,
 			 "missile": "fattah", "rounds": 2},
+	"tel_khorram": {"name": "Khorramshahr TEL", "class": "tel",
+			 "hull": Color(0.30, 0.32, 0.26),
+			 "hp": 150.0, "power": 470_000.0, "top": 13.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 95.0, "blast": 10.0,
+			 "missile": "khorram", "rounds": 1},
 	"tel_oreshnik": {"name": "Oreshnik TEL", "class": "tel",
 			 "hull": Color(0.28, 0.28, 0.26),
 			 "hp": 150.0, "power": 460_000.0, "top": 13.0, "gun": 400.0,
@@ -251,7 +256,10 @@ func _build() -> void:
 
 	_mantlet = Node3D.new()
 	_mantlet.name = "Mantlet"
-	_mantlet.position = Vector3(0, 0.36, -1.55) if vclass() != "mlrs" else Vector3(0, 1.25, 1.0)
+	if vclass() == "mlrs":
+		_mantlet.position = Vector3(0, 1.25, 1.0)
+	else:
+		_mantlet.position = Vector3(0, 0.36, -1.55)
 	_turret.add_child(_mantlet)
 	var gst := MeshKit.begin()
 	match vclass():
@@ -640,7 +648,9 @@ func add_child_turret_mesh(tu: SurfaceTool, dark: Material) -> void:
 	_turret.add_child(MeshKit.mi(MeshKit.finish(tu, dark), "Deck"))
 	_mantlet = Node3D.new()
 	_mantlet.name = "Mantlet"
-	_mantlet.position = Vector3(0, 0.45, 0.0)
+	# At the back of the load bed, where a launcher's erector is actually
+	# hinged.
+	_mantlet.position = Vector3(0, 0.45, 4.0)
 	_turret.add_child(_mantlet)
 	var gst := MeshKit.begin()
 	# One canister or two, and how big, follows the round it carries. Every
@@ -651,19 +661,26 @@ func add_child_turret_mesh(tu: SurfaceTool, dark: Material) -> void:
 	var bore: float = maxf(float(mid.get("dia", 0.5)) * 0.62, 0.30)
 	var tube: float = maxf(float(mid.get("length", 6.0)) * 0.5, 2.4)
 	var twin: bool = float(mid.get("dia", 0.5)) < 0.7
-	MeshKit.box(gst, Vector3(bore * 4.2, 0.30, tube * 1.9), Vector3(0, 0.10, 0.4))
+	# The whole load sits *forward* of the hinge rather than straddling it. Built
+	# centred on the pivot, raising the canister swung its back half down
+	# through the chassis at the same rate as its nose went up -- the missiles
+	# rotated through the vehicle they were sitting on.
+	var back: float = -tube * 0.94
+	MeshKit.box(gst, Vector3(bore * 4.2, 0.30, tube * 1.9), Vector3(0, 0.10, 0.4 + back))
 	var lanes: Array = [-bore * 1.15, bore * 1.15] if twin else [0.0]
 	for cx in lanes:
-		MeshKit.cone(gst, bore, bore, -tube, tube * 0.94, Vector3(cx, bore + 0.3, 0), 12)
-		MeshKit.cone(gst, bore * 1.11, bore * 1.11, -tube - 0.1, -tube + 0.2,
+		MeshKit.cone(gst, bore, bore, -tube + back, tube * 0.94 + back,
 			Vector3(cx, bore + 0.3, 0), 12)
-	MeshKit.box(gst, Vector3(bore * 4.6, 0.5, 0.5), Vector3(0, 0.30, tube * 0.82))
+		MeshKit.cone(gst, bore * 1.11, bore * 1.11, -tube - 0.1 + back,
+			-tube + 0.2 + back, Vector3(cx, bore + 0.3, 0), 12)
+	MeshKit.box(gst, Vector3(bore * 4.6, 0.5, 0.5),
+		Vector3(0, 0.30, tube * 0.82 + back))
 	_tube_lanes = lanes
 	_tube_len = tube
 	_tube_rise = bore + 0.3
 	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst, dark), "Gun"))
 	_muzzle = Node3D.new()
-	_muzzle.position = Vector3(0, _tube_rise, -_tube_len)
+	_muzzle.position = Vector3(0, _tube_rise, -_tube_len - tube * 0.94)
 	_mantlet.add_child(_muzzle)
 
 func vclass() -> String:
@@ -821,6 +838,10 @@ func fire_main(world: Node) -> bool:
 const ERECT_ANGLE := deg_to_rad(86.0)
 const ERECT_RATE := 0.25
 var _erect := 0.0
+## A unit locked from the map, rather than a patch of ground. A hypersonic given
+## a coordinate arrives where the target *was*; given the target it arrives
+## where it is.
+var map_lock: Node = null
 
 ## Is there anything worth standing the canister up for? It goes back down when
 ## there is not, because a launcher sitting on the road with its tube in the air
@@ -839,6 +860,8 @@ func _erect_wanted() -> bool:
 ## it off the rail cleanly and pointed up.
 func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	var mark: Vector3 = map_target
+	if is_instance_valid(map_lock):
+		mark = (map_lock as Node3D).global_position
 	if mark == Vector3.INF:
 		mark = ground_aim()
 	if mark == Vector3.INF and is_instance_valid(_ai_target):
@@ -875,10 +898,14 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 		dir = -_muzzle.global_transform.basis.z
 	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 	var m := Missile.new()
-	var aim := _TelMark.new()
-	aim.team = 1 if team == 0 else 0
-	world.add_child(aim)
-	aim.global_position = mark
+	# Guide onto the unit itself when one was locked; onto a bare mark otherwise.
+	var aim: Node3D = map_lock as Node3D if is_instance_valid(map_lock) else null
+	if aim == null:
+		var mk := _TelMark.new()
+		mk.team = 1 if team == 0 else 0
+		world.add_child(mk)
+		mk.global_position = mark
+		aim = mk
 	m.launch(id, Transform3D(Basis.looking_at(dir, up_ref), from), dir * 22.0,
 		self, aim)
 	m.team = team
@@ -986,6 +1013,10 @@ func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 	Effects.muzzle_flash(world, _muzzle.global_position, vel.normalized(), flash)
 	Effects.dust(world, _muzzle.global_position, 4.5)
 	Sfx.play_at(world, "boom", _muzzle.global_position, -2.0, 0.7, 4000.0)
+	# The weapon camera can ride this too. Only launchers announced their rounds,
+	# so a rocket battery -- the one thing whose whole point is watching where
+	# the salvo lands -- was the one thing you could not follow.
+	store_released.emit(shell)
 
 func fire_coax(world: Node) -> bool:
 	if _coax_cd > 0.0 or not alive:

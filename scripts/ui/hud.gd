@@ -16,6 +16,7 @@ var _ccip_p := Vector3.INF
 var _ccip_t := 0
 var flight_page := true          # false from an outside camera: see world.gd
 var walker: Node = null
+var carrier: Carrier = null
 var mode = null
 var tank = null
 var ship = null
@@ -61,6 +62,11 @@ func _draw() -> void:
 	# aeroplane one, and every other page returns before it gets there — so F2
 	# did nothing at all on a bridge, in a driver's seat or on foot, and the
 	# only place the keys appeared was the event log.
+	if carrier != null and is_instance_valid(carrier):
+		_draw_conn()
+		if show_help:
+			_draw_help()
+		return
 	if ship != null and is_instance_valid(ship):
 		_draw_bridge()
 		if show_help:
@@ -119,6 +125,18 @@ func _draw() -> void:
 ## clip circle, neither of which a ship has -- so from a bridge or a chase view
 ## there was nothing on screen at all: no boxes, no labels, no way to tell a
 ## friend from an enemy except by shape.
+## The callsign of whoever is flying, driving or walking this thing, if it
+## belongs to a player at all.
+func _callsign_of(n: Node) -> String:
+	var net: NetLink = Sim.net
+	if net == null or not net.active:
+		return ""
+	for d in [net.ghosts, net.veh_ghosts, net.foot_ghosts]:
+		for pid in (d as Dictionary):
+			if (d as Dictionary)[pid] == n:
+				return net.name_of(int(pid))
+	return ""
+
 func _draw_world_contacts(src: Node3D, eye: Camera3D) -> void:
 	if not is_instance_valid(src) or not is_instance_valid(eye):
 		return
@@ -163,8 +181,34 @@ func _draw_world_contacts(src: Node3D, eye: Camera3D) -> void:
 		var nm := str(n.name)
 		if n.has_method("display_name"):
 			nm = String(n.call("display_name"))
+		# Another player is a person, not an airframe. Labelled by type, every
+		# remote in the session read as "F-16" and there was no way to tell who
+		# you were looking at or who you were about to shoot.
+		var who := _callsign_of(n)
+		if who != "":
+			nm = who
 		_txt(sp + Vector2(r + 6, -2), nm.left(18), 13, col)
 		_txt(sp + Vector2(r + 6, 14), "%.1f km" % (d * 0.001), 12, col)
+
+## The carrier's bridge. She is not a `Ship` and she has no armament at all, so
+## without a page of her own the HUD carried on drawing the aeroplane's -- gun,
+## stores, weapon select and all -- for a ship that cannot fire anything.
+func _draw_conn() -> void:
+	var vp := get_viewport_rect().size
+	var g := GREEN
+	_draw_world_contacts(carrier, carrier.cam if is_instance_valid(carrier.cam) else cam)
+	_txt(Vector2(26, vp.y - 176.0), "FLEET CARRIER", 17, g)
+	_txt(Vector2(26, vp.y - 150.0), "SPEED %.1f kts" % (carrier.speed * 1.94384), 16, g)
+	_txt(Vector2(26, vp.y - 126.0), "ENGINES %+d%%" % int(carrier.telegraph * 100.0), 16, g)
+	_txt(Vector2(26, vp.y - 102.0), "HELM %s" % (
+		"AMIDSHIPS" if absf(carrier.helm) < 0.08
+		else ("STARBOARD %d" % int(absf(carrier.helm) * 100.0) if carrier.helm > 0.0
+		else "PORT %d" % int(absf(carrier.helm) * 100.0))), 16, g)
+	_txt(Vector2(26, vp.y - 78.0), "HEADING %03d" % int(
+		wrapf(rad_to_deg(carrier.heading), 0.0, 360.0)), 16, g)
+	_txt(Vector2(26, vp.y - 54.0), "DECK CLEAR — U TO HAND OVER", 14,
+		Color(0.6, 0.75, 0.85))
+	_draw_log(vp)
 
 func _draw_bridge() -> void:
 	var vp := get_viewport_rect().size

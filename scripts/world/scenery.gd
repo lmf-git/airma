@@ -51,6 +51,7 @@ func _ready() -> void:
 
 ## Where each town actually ended up, after being moved onto workable ground.
 var sites: Array = []
+var _plan_cached := false
 
 func plan() -> void:
 	_streets.clear()
@@ -67,15 +68,26 @@ func plan() -> void:
 	# -- twenty-eight seconds of it.
 	var hit: bool = cached_sites is Array and cached_roads is Dictionary \
 		and (cached_sites as Array).size() >= TOWNS.size()
+	_plan_cached = hit
 	if hit:
 		sites = cached_sites
 		Sim.load_road_state(cached_roads)
 	else:
 		_site_towns()
+
+## Is the network still being searched? The caller keeps drawing while it is.
+func plan_busy() -> bool:
+	return not _plan_cached and not Sim.roads_routed()
+
+## Everything that has to wait for the routes: the streets hang off the trunk
+## network, so they cannot be laid until it exists.
+func plan_finish() -> void:
+	if not _plan_cached:
+		Sim.finish_roads()
 	for t in sites:
 		_plan_town_streets(t["c"], t["r"])
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
-	if not hit:
+	if not _plan_cached:
 		Sim.register_segments(_streets)
 		WorldBake.put("town_sites", sites)
 		WorldBake.put("roads", Sim.road_state())
@@ -233,48 +245,95 @@ func _site_towns() -> void:
 	nodes.append(Vector2(-5200.0, -13000.0))
 	var first_town := 2
 	var n_towns: int = sites.size()
-	# The home network: every town in the airfield's region hangs off the bypass
-	# and is rung to its neighbours. Only that region -- a settlement four
-	# hundred kilometres away joining a bypass beside this runway would be a
-	# single trunk road across an ocean.
-	var home: Array = []
-	for i in n_towns:
-		if int((sites[i] as Dictionary).get("region", 0)) == 0:
-			home.append(first_town + i)
-	for hi in home:
-		var tc: Vector2 = nodes[hi]
-		var gate: int = 0 if tc.distance_to(nodes[0]) < tc.distance_to(nodes[1]) else 1
-		links.append([gate, hi])
-	for i2 in home.size():
-		links.append([home[i2], home[(i2 + 1) % home.size()]])
-	var depot := first_town + n_towns
-	links.append([depot, home[0]])
-	links.append([depot + 1, home[mini(1, home.size() - 1)]])
-	links.append([depot + 2, home[0]])
-	# and every other cluster gets a network of its own, joined up among itself
-	# and to nothing else: they are different parts of the world.
-	var by_region: Dictionary = {}
-	for i3 in n_towns:
-		var rg: int = int((sites[i3] as Dictionary).get("region", 0))
-		if rg == 0:
+	links.append_array(_plan_network(nodes, first_town, n_towns))
+	Sim.begin_roads(nodes, _valid_links(links, nodes.size()))
+
+## Only the links that name two different places that exist.
+func _valid_links(links: Array, n: int) -> Array:
+	var out: Array = []
+	var seen: Dictionary = {}
+	for pair in links:
+		var a: int = int(pair[0])
+		var b: int = int(pair[1])
+		if a >= n or b >= n or a == b:
 			continue
+		var key: int = mini(a, b) * 100000 + maxi(a, b)
+		if seen.has(key):
+			continue
+		seen[key] = true
+		out.append([a, b])
+	return out
+
+## The trunk network: the shortest set of links that joins every place to every
+## other, plus a couple of extra hops so it reads as a network and not a tree.
+##
+## This was a full ring round the towns *and* a spoke from each of them to the
+## bypass, plus depot legs -- thirty-six routes for sixteen towns, most of them
+## running parallel to another one a kilometre away. Every one of those is
+## routed, surveyed, cut into the ground and drawn, so the redundancy cost real
+## time and real triangles as well as looking like a mess.
+func _plan_network(nodes: Array, first_town: int, n_towns: int) -> Array:
+	var out: Array = []
+	var by_region: Dictionary = {}
+	for i in n_towns:
+		var rg: int = int((sites[i] as Dictionary).get("region", 0))
 		if not by_region.has(rg):
 			by_region[rg] = []
-		(by_region[rg] as Array).append(first_town + i3)
+		(by_region[rg] as Array).append(first_town + i)
 	for rg2 in by_region:
-		var lot: Array = by_region[rg2]
-		if lot.size() < 2:
-			continue
-		for i4 in lot.size():
-			links.append([lot[i4], lot[(i4 + 1) % lot.size()]])
-		# a cross link, so a cluster reads as a network and not as a loop
-		if lot.size() >= 4:
-			links.append([lot[0], lot[2]])
-	var wanted: Array = []
-	for pair in links:
-		if pair[0] < nodes.size() and pair[1] < nodes.size() and pair[0] != pair[1]:
-			wanted.append(pair)
-	Sim.build_roads(nodes, wanted)
+		var group: Array = (by_region[rg2] as Array).duplicate()
+		if int(rg2) == 0:
+			# the home cluster hangs off the airfield bypass and its depot
+			group.append(0)
+			group.append(1)
+			for extra_node in range(first_town + n_towns, nodes.size()):
+				group.append(extra_node)
+			out.append([0, 1])
+		out.append_array(_spanning(nodes, group, 2 if group.size() > 5 else 1))
+	return out
+
+## Prim's algorithm over the given places, then the shortest few links that were
+## not needed to join them up, so there is more than one way round.
+func _spanning(nodes: Array, group: Array, loops: int) -> Array:
+	var out: Array = []
+	if group.size() < 2:
+		return out
+	var inside: Array = [group[0]]
+	var outside: Array = group.slice(1)
+	while not outside.is_empty():
+		var best_d := 1e18
+		var best_i := 0
+		var best_o := 0
+		for a in inside:
+			for oi in outside.size():
+				var d: float = (nodes[a] as Vector2).distance_squared_to(
+					nodes[outside[oi]] as Vector2)
+				if d < best_d:
+					best_d = d
+					best_i = a
+					best_o = oi
+		out.append([best_i, outside[best_o]])
+		inside.append(outside[best_o])
+		outside.remove_at(best_o)
+	# and a few short links that close a loop
+	var spare: Array = []
+	for i in group.size():
+		for j in range(i + 1, group.size()):
+			var pair := [group[i], group[j]]
+			var already := false
+			for e in out:
+				if (e[0] == pair[0] and e[1] == pair[1]) \
+						or (e[0] == pair[1] and e[1] == pair[0]):
+					already = true
+					break
+			if not already:
+				spare.append([(nodes[pair[0]] as Vector2).distance_squared_to(
+					nodes[pair[1]] as Vector2), pair])
+	spare.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+	for k in mini(loops, spare.size()):
+		out.append(spare[k][1])
+	return out
+
 
 func _plan_town_streets(centre: Vector2, radius: float) -> void:
 	var block := 128.0

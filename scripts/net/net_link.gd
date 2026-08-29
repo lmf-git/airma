@@ -14,6 +14,29 @@ var active := false
 var is_host := false
 var my_id := 1
 var roster := {}              # peer id -> {jet, name, team}
+
+## Callsigns, generated when you connect.
+##
+## Everyone was "P" and their peer number, which is a routing detail rather than
+## a name -- and on the host's own screen the host was "Host". With a roster
+## screen and labels over people's aeroplanes that had to be something you could
+## actually say over the radio.
+const CALL_A := ["VIPER", "REAPER", "BANDIT", "COBRA", "HAVOC", "SABRE",
+	"TALON", "RAZOR", "GHOST", "FALCON", "OUTLAW", "JACKAL", "MAVERICK",
+	"DAGGER", "HAMMER", "WIDOW", "RONIN", "TEMPEST", "GRIFFIN", "ROGUE"]
+
+static func callsign() -> String:
+	var r := RandomNumberGenerator.new()
+	r.randomize()
+	return "%s %d" % [CALL_A[r.randi() % CALL_A.size()], r.randi_range(1, 9)]
+
+## My own callsign, picked once and kept for the session.
+var my_name := ""
+
+func name_of(id: int) -> String:
+	if roster.has(id):
+		return String((roster[id] as Dictionary).get("name", "P%d" % id))
+	return "P%d" % id
 var ghosts := {}              # peer id -> Aircraft (remote)
 var foot_ghosts := {}         # peer id -> Pilot mesh for players on foot
 var veh_ghosts := {}          # peer id -> Tank driven by a remote player
@@ -72,12 +95,45 @@ func host(jet_id: String) -> bool:
 	active = true
 	is_host = true
 	my_id = 1
-	roster[1] = {"jet": jet_id, "name": "Host", "team": 0}
+	if my_name == "":
+		my_name = callsign()
+	roster[1] = {"jet": jet_id, "name": my_name, "team": 0}
 	status = "hosting on port %d" % port
 	Sim.report("Hosting. Others join at %s" % join_address(), Sim.Ev.GOOD)
 	_open_port()
 	roster_changed.emit()
 	return true
+
+## Everyone in the session and where they are: id, name, team, and a position if
+## there is anything of theirs in the world to point at. What the roster screen
+## and the map both read.
+func player_positions() -> Array:
+	var out: Array = []
+	for pid in roster:
+		var e: Dictionary = roster[pid]
+		var at := Vector3.INF
+		var kind := "air"
+		if int(pid) == my_id:
+			# whatever this player is actually sitting in
+			for mine in [world.get("player") if world != null else null,
+					world.get("tank") if world != null else null,
+					world.get("walker") if world != null else null,
+					world.get("ship") if world != null else null]:
+				if mine != null and is_instance_valid(mine):
+					at = (mine as Node3D).global_position
+					break
+		elif ghosts.has(pid) and is_instance_valid(ghosts[pid]):
+			at = (ghosts[pid] as Node3D).global_position
+		elif veh_ghosts.has(pid) and is_instance_valid(veh_ghosts[pid]):
+			at = (veh_ghosts[pid] as Node3D).global_position
+			kind = "ground"
+		elif foot_ghosts.has(pid) and is_instance_valid(foot_ghosts[pid]):
+			at = (foot_ghosts[pid] as Node3D).global_position
+			kind = "foot"
+		out.append({"id": int(pid), "name": String(e.get("name", "P%d" % pid)),
+			"team": int(e.get("team", 0)), "jet": String(e.get("jet", "")),
+			"at": at, "kind": kind, "me": int(pid) == my_id})
+	return out
 
 ## The address to read out to whoever is joining, with the port always on it.
 ##
@@ -281,7 +337,8 @@ func _on_peer_joined(id: int) -> void:
 	rpc_id(id, "net_mission", String(Sim.mission))
 	_publish_weather.call_deferred()      # and the sky they are joining
 	for pid in roster:
-		rpc_id(id, "net_announce", pid, roster[pid]["jet"], roster[pid]["team"])
+		rpc_id(id, "net_announce", pid, roster[pid]["jet"], roster[pid]["team"],
+			String(roster[pid].get("name", "P%d" % pid)))
 	# the AI roster was announced to whoever was connected at the time, so
 	# forget it and let the next publish describe the whole set again
 	_ai_seen.clear()
@@ -300,8 +357,10 @@ func _on_connected(jet_id: String) -> void:
 	Sim.report("Connected as player %d" % my_id, Sim.Ev.GOOD)
 	if verbose:
 		print("[net] announcing self %d to server" % my_id)
-	rpc("net_announce", my_id, jet_id, 0)
-	net_announce(my_id, jet_id, 0)
+	if my_name == "":
+		my_name = callsign()
+	rpc("net_announce", my_id, jet_id, 0, my_name)
+	net_announce(my_id, jet_id, 0, my_name)
 	set_fleet_ghosts(true)
 
 func _on_failed() -> void:
@@ -382,8 +441,9 @@ func net_objectives(labels: PackedStringArray, owners: PackedInt32Array,
 				a.apply_damage(1.0e6)
 
 @rpc("any_peer", "call_remote", "reliable")
-func net_announce(id: int, jet_id: String, team: int) -> void:
-	roster[id] = {"jet": jet_id, "name": "P%d" % id, "team": team}
+func net_announce(id: int, jet_id: String, team: int, nm := "") -> void:
+	roster[id] = {"jet": jet_id, "team": team,
+		"name": nm if nm != "" else "P%d" % id}
 	if verbose:
 		print("[net] announce id=%d jet=%s from=%d roster=%d" % [
 			id, jet_id, multiplayer.get_remote_sender_id(), roster.size()])
@@ -391,7 +451,7 @@ func net_announce(id: int, jet_id: String, team: int) -> void:
 		_make_ghost(id, jet_id, team)
 	if is_host and id != 1:
 		# relay to everyone else
-		rpc("net_announce", id, jet_id, team)
+		rpc("net_announce", id, jet_id, team, String(roster[id]["name"]))
 	roster_changed.emit()
 
 func _make_ghost(id: int, jet_id: String, team: int) -> void:
