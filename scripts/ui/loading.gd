@@ -83,6 +83,14 @@ func _draw() -> void:
 	if vs.x < 1.0 or vs.y < 1.0:
 		return
 	var hy: float = vs.y * 0.62
+	# Opaque, first, over the whole frame.
+	#
+	# Everything below is drawn as bands and polygons that each cover part of
+	# the screen, and the ridge lines only fill downward from wherever they
+	# happen to fall -- so where a ridge dipped below the horizon it left a
+	# strip with nothing painted in it, and the menu sitting behind this showed
+	# through the gap.
+	draw_rect(Rect2(Vector2.ZERO, vs), GROUND)
 	# --- sky ------------------------------------------------------------
 	# Banded rather than one flat fill: a gradient is most of the difference
 	# between a backdrop and a painted rectangle.

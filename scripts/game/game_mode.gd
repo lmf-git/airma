@@ -168,6 +168,7 @@ func _process(delta: float) -> void:
 		if is_instance_valid(z):
 			z.tick(delta, holders)
 	_garrison_near(holders)
+	_reinforce_ground(delta)
 	_earn(delta)
 	if mode == "conquest":
 		var mine := 0
@@ -204,6 +205,80 @@ func _garrison_near(holders: Array) -> void:
 			if (h[0] as Vector3).distance_to(z.global_position) < GARRISON_REACH:
 				z.ensure_garrison()
 				break
+
+## How many crewed ground units a side fields when nobody has taken the slot.
+const AI_GROUND_PER_SIDE := 6
+## The modes that are fought on the ground as well as in the air.
+const GROUND_MODES := ["conquest", "rush", "warlords", "tdm"]
+var _reinforce := 4.0
+
+## Keep both sides in armour, less whatever people are crewing themselves.
+##
+## The sectors had garrisons and nothing else: away from a flag the ground was
+## empty, so a battle for the map was fought by two aeroplanes over country
+## nobody was holding. Every slot a person takes is one the machine does not
+## fill, so a full server fields no AI at all and a single player gets a whole
+## opposing force.
+func _reinforce_ground(delta: float) -> void:
+	if not GROUND_MODES.has(mode):
+		return
+	_reinforce -= delta
+	if _reinforce > 0.0:
+		return
+	_reinforce = 9.0
+	for team in [0, 1]:
+		var want: int = AI_GROUND_PER_SIDE - _crewed_on(team)
+		var have := 0
+		for n in get_tree().get_nodes_in_group("hittable"):
+			if not is_instance_valid(n) or not (n is Tank):
+				continue
+			if n.has_method("is_alive") and not n.is_alive():
+				continue
+			if int(n.team) == team and ("ai" in n) and bool(n.ai):
+				have += 1
+		if have < want:
+			_send_up_armour(team)
+
+## Units on a side that a person is crewing. Anything that is not under AI
+## control is somebody's, whether that is the host or a player who has joined.
+func _crewed_on(team: int) -> int:
+	var n := 0
+	for x in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(x) or not ("team" in x) or int(x.team) != team:
+			continue
+		if x.has_method("is_alive") and not x.is_alive():
+			continue
+		if ("ai" in x) and not bool(x.ai):
+			n += 1
+	return n
+
+## One vehicle, put down at a sector the side holds -- or, with nothing held,
+## at the one nearest home.
+func _send_up_armour(team: int) -> void:
+	var at := Vector3.INF
+	var best := 1e18
+	for z in zones:
+		if not is_instance_valid(z):
+			continue
+		if z.owner_team == team:
+			at = z.global_position
+			break
+		var d: float = z.global_position.length_squared()
+		if d < best:
+			best = d
+			at = z.global_position
+	if at == Vector3.INF:
+		return
+	var a := randf() * TAU
+	var off := Vector3(cos(a), 0.0, sin(a)) * randf_range(240.0, 620.0)
+	var p := at + off
+	var t := Tank.new()
+	t.setup(team, "t90" if team != 0 else "m1a2")
+	t.ai = true
+	t.name = "armour %d" % (randi() % 100000)
+	get_parent().add_child(t)
+	t.global_transform = Transform3D(Basis(Vector3.UP, a),
+		Vector3(p.x, Sim.height_at(p.x, p.z) + 1.1, p.z))
 
 ## Command points accrue from the sectors you hold, not just from taking them.
 ## Without an income the number sat still between captures and told you nothing

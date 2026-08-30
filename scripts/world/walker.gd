@@ -17,6 +17,32 @@ const GRAV := 18.0
 const JUMP := 6.6
 const MAG := 30
 
+## What the man is carrying.
+##
+## One rifle with one magazine was the whole armoury: no sights to bring up, no
+## second weapon, and a reload that happened to you rather than one you called
+## for. Each entry is a weapon in its own right -- how fast it shoots, how far
+## it throws, how much it wanders, and what the world looks like down its
+## sights.
+const KIT := [
+	{"name": "rifle", "mag": 30, "cd": 0.105, "dmg": 18.0, "muzzle": 880.0,
+		"hip": 0.012, "ads": 0.0022, "fov": 42.0, "reload": 2.1, "kick": 0.020,
+		"sound": "rifle"},
+	{"name": "marksman", "mag": 10, "cd": 0.62, "dmg": 46.0, "muzzle": 1010.0,
+		"hip": 0.019, "ads": 0.0006, "fov": 14.0, "reload": 2.9, "kick": 0.055,
+		"sound": "rifle"},
+	{"name": "pistol", "mag": 15, "cd": 0.17, "dmg": 12.0, "muzzle": 480.0,
+		"hip": 0.021, "ads": 0.0045, "fov": 54.0, "reload": 1.5, "kick": 0.026,
+		"sound": "rifle"},
+]
+var kit_idx := 0
+## How far into the sights he is, 0 hip and 1 shouldered.
+var _ads := 0.0
+const BASE_FOV := 74.0
+
+func gun_spec() -> Dictionary:
+	return KIT[kit_idx % KIT.size()]
+
 signal died(where)
 
 var cam: Camera3D
@@ -188,7 +214,7 @@ func _physics_process(delta: float) -> void:
 		# A canopy is a terminal velocity, not a force to fight: whatever the
 		# seat threw you out with bleeds away and you settle to a steady sink.
 		vel.y = lerpf(vel.y, CHUTE_FALL, clampf(delta * 1.6, 0.0, 1.0))
-	if on_floor and not crouching and Sim.tapped(&"fire"):
+	if on_floor and not crouching and Sim.tapped(&"jump"):
 		vel.y = JUMP
 		on_floor = false
 	var was := global_position
@@ -237,7 +263,26 @@ func _physics_process(delta: float) -> void:
 	var moving := flat.length() > 0.4
 	_anim += delta * clampf(flat.length() / WALK, 0.0, 2.2)
 	rotation.y = yaw
-	var aiming: bool = Sim.held(&"gun") or Sim.held(&"fire")
+	# Weapons, sights, reload.
+	for wi in KIT.size():
+		if Sim.tapped(StringName("weapon_%d" % (wi + 1))) and wi != kit_idx:
+			kit_idx = wi
+			ammo = int(gun_spec()["mag"])
+			reloading = 0.0
+			_shot_cd = 0.35                     # bringing it up takes a moment
+			Sim.report(String(gun_spec()["name"]), Sim.Ev.INFO)
+	if Sim.tapped(&"reload") and reloading <= 0.0 \
+			and ammo < int(gun_spec()["mag"]):
+		reloading = float(gun_spec()["reload"])
+		Sfx.play_at(get_tree().current_scene, "servo", global_position, -12.0, 1.4)
+	# Down the sights while the button is held, and never while reloading or
+	# sprinting -- both of which take the weapon off the shoulder.
+	var want_ads: float = 1.0 if (Sim.held(&"ads") and on_floor
+		and reloading <= 0.0 and not (moving and running)) else 0.0
+	_ads = move_toward(_ads, want_ads, delta * 6.5)
+	if is_instance_valid(cam):
+		cam.fov = lerpf(BASE_FOV, float(gun_spec()["fov"]), _ads)
+	var aiming: bool = _ads > 0.25 or Sim.held(&"gun") or Sim.held(&"foot_fire")
 	if not on_floor:
 		body.pose_air(vel.y > 0.0)
 	elif crouching:
@@ -252,6 +297,15 @@ func _physics_process(delta: float) -> void:
 		body.pose_aim(pitch)
 	else:
 		body.aim_weapon(pitch * 0.35)
+	# Working the action: the weapon drops out of the aim and comes back up as
+	# the magazine goes home, which is the whole of the reload as far as anyone
+	# watching is concerned.
+	if is_instance_valid(weapon):
+		var span: float = maxf(float(gun_spec()["reload"]), 0.01)
+		var work: float = clampf(reloading / span, 0.0, 1.0)
+		var dip: float = sin(clampf(work, 0.0, 1.0) * PI)
+		weapon.position.y = -0.16 * dip
+		weapon.rotation.x = deg_to_rad(-34.0) * dip
 	_bob = lerpf(_bob, sin(_anim * 10.8) * (0.05 if (moving and running) else (0.03 if moving else 0.0)),
 		clampf(delta * 8.0, 0, 1))
 	# plant the feet: lift the body by however far the lowest foot has sunk, so
@@ -301,7 +355,7 @@ func _step_in_frame(delta: float) -> void:
 	vel.x = flat.x
 	vel.z = flat.z
 	vel.y -= GRAV * delta
-	if on_floor and Sim.tapped(&"fire"):
+	if on_floor and Sim.tapped(&"jump"):
 		vel.y = JUMP * 0.7
 		on_floor = false
 	position += vel * delta
@@ -361,31 +415,41 @@ func _shoot(delta: float) -> void:
 	if reloading > 0.0:
 		reloading -= delta
 		if reloading <= 0.0:
-			ammo = MAG
+			ammo = int(gun_spec()["mag"])
 		return
 	if _flash.visible and _shot_cd < 0.085:
 		_flash.visible = false
-	if not Sim.held(&"gun"):
+	# The left button, or the gun key for anyone who prefers it.
+	if not (Sim.held(&"foot_fire") or Sim.held(&"gun")):
 		return
+	var g: Dictionary = gun_spec()
 	if ammo <= 0:
-		reloading = 2.1
+		reloading = float(g["reload"])
 		Sfx.play_at(get_tree().current_scene, "servo", global_position, -12.0, 1.4)
 		return
 	if _shot_cd > 0.0:
 		return
-	_shot_cd = 0.105
+	_shot_cd = float(g["cd"])
 	ammo -= 1
 	var muzzle: Vector3 = _flash.global_position
 	var aim := -cam.global_transform.basis.z
-	var spread: float = 0.006 if crouching else (0.026 if vel.length() > 3.0 else 0.012)
+	# Down the sights it goes where it is pointed; from the hip it does not.
+	var spread: float = lerpf(float(g["hip"]), float(g["ads"]), _ads)
+	if crouching:
+		spread *= 0.55
+	if vel.length() > 3.0:
+		spread *= 2.1
 	aim = (aim + Vector3(randf_range(-spread, spread), randf_range(-spread, spread),
 		randf_range(-spread, spread))).normalized()
-	Effects.tracer(get_tree().current_scene, muzzle, aim * 880.0, self, 18.0, 0)
+	Effects.tracer(get_tree().current_scene, muzzle, aim * float(g["muzzle"]),
+		self, float(g["dmg"]), 0)
 	_flash.visible = true
 	Effects.muzzle_flash(get_tree().current_scene, muzzle, aim, 0.55)
 	_flash.scale = Vector3.ONE * randf_range(0.8, 1.3)
-	_recoil = minf(_recoil + 0.02, 0.10)
-	Sfx.play_at(get_tree().current_scene, "rifle", muzzle, -6.0, randf_range(0.94, 1.08), 420.0)
+	# steadier in the shoulder than at the hip
+	_recoil = minf(_recoil + float(g["kick"]) * (1.0 - 0.45 * _ads), 0.14)
+	Sfx.play_at(get_tree().current_scene, String(g["sound"]), muzzle, -6.0,
+		randf_range(0.94, 1.08), 420.0)
 
 func hit_radius() -> float:
 	return 0.9

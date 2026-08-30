@@ -361,7 +361,11 @@ func aim_mouse(rel: Vector2) -> void:
 	# threw away the fire mission the sight had just handed over.
 	if sight_active:
 		return
-	aim_yaw -= rel.x * 0.0026
+	# Plus. `aim_yaw` is a bearing -- the laid direction is sin(yaw) east of
+	# north -- so it grows to the right, while the mouse also reads positive to
+	# the right. Subtracting one from the other swung the turret the opposite
+	# way to the hand moving it.
+	aim_yaw += rel.x * 0.0026
 	if is_indirect():
 		# pushing away walks the fall of shot out, pulling back brings it in
 		arty_range = clampf(arty_range - rel.y * 18.0, 300.0, 32000.0)

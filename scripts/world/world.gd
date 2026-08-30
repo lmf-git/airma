@@ -402,6 +402,9 @@ func _ready() -> void:
 	# camera was live, the renderer is simply told not to draw a three
 	# dimensional scene while the screen is up. Nothing can get through that.
 	get_viewport().disable_3d = true
+	# Has to be set before any mesh is built, or there are no wireframe indices
+	# to draw when the sonar view asks for them.
+	RenderingServer.set_debug_generate_wireframes(true)
 	var boot_ui := CanvasLayer.new()
 	boot_ui.name = "BootUI"
 	boot_ui.layer = 100
@@ -597,18 +600,30 @@ func _ready() -> void:
 		settle += 1
 	await _paint("Ready", 1.0)
 	booting = false
-	if _loading != null:
-		_loading.finish()
-		var lp := _loading.get_parent()
-		_loading = null
-		if is_instance_valid(lp):
-			lp.queue_free()
-	# ...here, with the screen down and the menu about to be shown: the
-	# turntable model first, then the camera that frames it, and only then is
-	# the world allowed to be drawn at all.
+	# The world first, behind the screen that is still up: the turntable model,
+	# the camera that frames it, and the renderer allowed to draw a scene again.
 	_set_preview(menu.jet_id)
 	menu_cam.current = true
 	get_viewport().disable_3d = false
+	if _loading != null:
+		_loading.finish()
+		# Held for a moment on "Ready", then faded. Freed the instant the last
+		# phase finished, the screen was cut away mid-frame and the menu behind
+		# it appeared out of nowhere -- and with the world already being drawn
+		# behind it, whatever the screen did not cover showed through.
+		var lp := _loading.get_parent()
+		var held := 0.0
+		while held < 0.35:
+			held += get_process_delta_time()
+			await get_tree().process_frame
+		var fade := 0.0
+		while fade < 1.0:
+			fade += get_process_delta_time() / 0.45
+			_loading.modulate.a = clampf(1.0 - fade, 0.0, 1.0)
+			await get_tree().process_frame
+		_loading = null
+		if is_instance_valid(lp):
+			lp.queue_free()
 	_parse_cmdline()
 
 ## Show where the build has got to and give the engine a frame to draw it in.
@@ -850,6 +865,9 @@ func _process(delta: float) -> void:
 	if _nvg != null and _nvg.visible:
 		_nvg_t += delta
 		_nvg_mat.set_shader_parameter("t", _nvg_t)
+	if _sonar != null and _sonar.visible:
+		_nvg_t += delta
+		_sonar_mat.set_shader_parameter("t", _nvg_t)
 	# ...unless the sensor page has the key. N steps the pod's channel, and
 	# swallowing it here meant the channel could never be changed from inside
 	# the very page it belongs to.
@@ -7341,7 +7359,7 @@ uniform float t = 0.0;
 // amplifier could not lift a night scene off the floor -- the luminance of
 // unlit ground at night is a hundredth of full scale, which came out as a
 // hundredth of the way up the curve, and the answer was black.
-uniform float gain = 26.0;
+uniform float gain = 14.0;
 
 float h21(vec2 p) {
 	return fract(sin(dot(p, vec2(41.7, 289.1))) * 43758.5453);
@@ -7355,7 +7373,25 @@ void fragment() {
 	// dark hillside at once
 	// lifted before it is amplified, so the shadows come up rather than being
 	// crushed against nothing
-	float amp = 1.0 - exp(-pow(max(l, 0.0), 0.72) * gain);
+	// The exponent does far more work here than the gain does.
+	//
+	// Unlit ground at night sits around a hundredth of full scale, and at 0.72
+	// that came out of the curve at a fifth of the way up -- dark grey on a
+	// black field, which is why the country was not really there. The gain
+	// cannot fix it: multiplying a number that has already been crushed toward
+	// zero just moves the same crushed picture up a little. Lifting the curve
+	// instead pulls the bottom decade of the scene up into the middle of the
+	// range, which is exactly what an image intensifier does.
+	// A floor under the darkest part of the scene.
+	//
+	// Water is a smooth specular surface, so after dark it reflects nothing and
+	// is genuinely black -- and no amount of amplification turns black into a
+	// picture. A real tube never shows black either: it shows the noise floor
+	// of the tube itself, which is what tells you there is a surface there at
+	// all. Lifting the bottom of the scale gives the sea back its surface and
+	// leaves anything already lit exactly where it was.
+	float lit = max(l, 0.0016);
+	float amp = 1.0 - exp(-pow(lit, 0.45) * gain);
 	// grain, which is the photons arriving one at a time
 	float g = h21(SCREEN_UV * vec2(1920.0, 1080.0) + vec2(t * 71.0, t * 37.0));
 	amp = clamp(amp + (g - 0.5) * 0.085, 0.0, 1.0);
@@ -7376,12 +7412,86 @@ void fragment() {
 	_nvg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_nvg.visible = false
 	ui.add_child(_nvg)
+	_build_sonar(ui)
+
+## The sonar overlay. Green, noisy, swept, and it works from every seat rather
+## than only through the sensor page -- the boat is conned from the third
+## person view, so that is where it has to be usable.
+var _sonar: ColorRect = null
+var _sonar_mat: ShaderMaterial = null
+
+func _build_sonar(ui: CanvasLayer) -> void:
+	var sh := Shader.new()
+	sh.code = """
+shader_type canvas_item;
+render_mode unshaded;
+uniform sampler2D screen : hint_screen_texture, filter_linear;
+uniform float t = 0.0;
+
+float h21(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void fragment() {
+	vec3 c = texture(screen, SCREEN_UV).rgb;
+	float l = dot(c, vec3(0.30, 0.59, 0.11));
+	// Anything the wireframe drew is a return; the empty space between the
+	// lines is water, and water comes back as nothing.
+	float ret = clamp(pow(l, 0.75) * 1.6, 0.0, 1.0);
+	float n = h21(SCREEN_UV * vec2(430.0, 270.0) + vec2(t * 3.1, t)) - 0.5;
+	ret = clamp(ret + n * 0.22, 0.0, 1.0);
+	// the sweep, travelling down the picture
+	float ping = fract(t * 0.30);
+	ret = max(ret, smoothstep(0.05, 0.0, abs(SCREEN_UV.y - ping)) * 0.40);
+	vec3 outc = mix(vec3(0.008, 0.035, 0.045), vec3(0.30, 1.0, 0.82), ret);
+	outc += vec3(0.0, 0.28, 0.24) * pow(ret, 5.0);
+	// range rings struck from the boat, which is at the bottom of the picture
+	float rr = abs(fract(length((SCREEN_UV - vec2(0.5, 1.0))
+		* vec2(1.0, 1.6)) * 4.0) - 0.5);
+	outc += vec3(0.0, 0.14, 0.12) * smoothstep(0.47, 0.50, rr);
+	float scan = 0.93 + 0.07 * sin(SCREEN_UV.y * 900.0);
+	COLOR = vec4(outc * scan, 1.0);
+}
+"""
+	_sonar_mat = ShaderMaterial.new()
+	_sonar_mat.shader = sh
+	_sonar = ColorRect.new()
+	_sonar.name = "Sonar"
+	_sonar.material = _sonar_mat
+	_sonar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sonar.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_sonar.visible = false
+	ui.add_child(_sonar)
+
+## Unaided, image intensifier, sonar. One key rather than three: they are the
+## same decision -- what you are looking through -- and there is no key left.
+const VIEW_PLAIN := 0
+const VIEW_NVG := 1
+const VIEW_SONAR := 2
+var vision := VIEW_PLAIN
+
+## Sonar belongs to a boat that dives. A tank commander and a pilot have no set
+## to switch to, so the cycle is two long for them and three for a submariner.
+func _has_sonar() -> bool:
+	return is_instance_valid(ship) and ship.has_method("can_dive") \
+		and bool(ship.call("can_dive"))
 
 func toggle_nvg() -> void:
-	nvg_on = not nvg_on
+	vision = (vision + 1) % (3 if _has_sonar() else 2)
+	nvg_on = vision == VIEW_NVG
 	if _nvg:
 		_nvg.visible = nvg_on
-	Sim.report("night vision %s" % ("on" if nvg_on else "off"), Sim.Ev.INFO)
+	if _sonar:
+		_sonar.visible = vision == VIEW_SONAR
+	# Sonar is not a picture of anything: it is a return off a surface, and the
+	# surface is all it can tell you about. Drawing the scene as wireframe is
+	# the closest a rasteriser gets to that -- the shape of the bottom, the hull
+	# of a ship, and nothing in between.
+	var vp := get_viewport()
+	if vp != null:
+		vp.debug_draw = Viewport.DEBUG_DRAW_WIREFRAME if vision == VIEW_SONAR \
+			else Viewport.DEBUG_DRAW_DISABLED
+	Sim.report(["unaided", "night vision", "sonar"][vision], Sim.Ev.INFO)
 
 ## The flash. A warhead of that size whites out everything that can see it, and
 ## it whites out the *screen*, not a patch of sky — you cannot look away from it
@@ -8760,7 +8870,9 @@ func _shell_input(e: InputEvent) -> void:
 		# sensor camera. This guard belongs on the pod alone -- putting it at
 		# the top of the handler took the map, the radar ranges, the side
 		# panels and the action menu with it.
-		if mb.button_index == MOUSE_BUTTON_RIGHT and not is_instance_valid(tank):
+		# ...and not on foot, where the right button is the sights.
+		if mb.button_index == MOUSE_BUTTON_RIGHT and not is_instance_valid(tank) \
+				and not on_foot:
 			pod.toggle()
 			pod.set_fullscreen(pod.active)
 			if cam:
@@ -8836,6 +8948,9 @@ func _shell_input(e: InputEvent) -> void:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if pod.active \
 				else Input.MOUSE_MODE_VISIBLE
 			Sim.report("sensor page %s" % ("up" if pod.active else "stowed"), Sim.Ev.INFO)
+		elif k == KEY_L and running and not pod.active \
+				and is_instance_valid(player) and player.has_method("toggle_lights"):
+			player.toggle_lights()
 		elif (k == KEY_I or k == KEY_N) and pod.active:
 			# N as well as I. N is the night vision key everywhere else, so
 			# reaching for it on the sensor page is the obvious thing to do --

@@ -419,7 +419,7 @@ func finish_roads() -> void:
 			lines.append(line)
 	_rt_jobs = []
 	_rt_out = []
-	_road_lines = lines
+	_road_lines = _drop_orphans(lines)
 	var t_sv := Time.get_ticks_msec()
 	var verts := 0
 	for l2 in lines:
@@ -676,6 +676,69 @@ func _relax_tail(dense: Array, _tw: int, _tt: int) -> void:
 	if not _road_field.is_empty():
 		_build_road_field()
 	_in_survey = false
+
+## Throw away any road the network cannot actually be driven to.
+##
+## A leg the router could not solve leaves the legs either side of it joined to
+## each other and to nothing else: a pair of roads running between two mountain
+## villages with no way in and no way out. That is most likely exactly where it
+## happens, too -- the country a route fails to cross is the country the
+## independent towns sit in.
+##
+## Endpoints are shared exactly between legs that meet, so joining them up is a
+## matter of matching coordinates; what is kept is whatever ends up in the same
+## component as the airfield.
+func _drop_orphans(lines: Array) -> Array:
+	if lines.size() < 2:
+		return lines
+	var root: Array = []
+	root.resize(lines.size())
+	for i in lines.size():
+		root[i] = i
+	var find := func(a: int) -> int:
+		var r: int = a
+		while int(root[r]) != r:
+			r = int(root[r])
+		return r
+	# every endpoint, snapped, against the lines that share it
+	var at: Dictionary = {}
+	for li in lines.size():
+		var pl: PackedVector2Array = lines[li]
+		if pl.size() < 2:
+			continue
+		for p in [pl[0], pl[pl.size() - 1]]:
+			var key := "%d:%d" % [int(round(p.x / 60.0)), int(round(p.y / 60.0))]
+			if at.has(key):
+				var ra: int = find.call(li)
+				var rb: int = find.call(int(at[key]))
+				if ra != rb:
+					root[ra] = rb
+			else:
+				at[key] = li
+	# the component the airfield is in is the network; everything else is not
+	var home := -1
+	var best := 1e18
+	for li2 in lines.size():
+		var pl2: PackedVector2Array = lines[li2]
+		if pl2.size() < 2:
+			continue
+		var d: float = (pl2[0] as Vector2).length_squared()
+		if d < best:
+			best = d
+			home = li2
+	if home < 0:
+		return lines
+	var keep_root: int = find.call(home)
+	var out: Array = []
+	var dropped := 0
+	for li3 in lines.size():
+		if find.call(li3) == keep_root:
+			out.append(lines[li3])
+		else:
+			dropped += 1
+	if dropped > 0 and debug_roads:
+		print("[roads] dropped %d orphaned leg(s) of %d" % [dropped, lines.size()])
+	return out
 
 ## Lift the carriageway clear of the sea.
 ##
@@ -1688,6 +1751,17 @@ func _setup_input() -> void:
 	# weapon: it is the sensor page chord with ALT, and having it also launch
 	# meant reaching for the pod put a missile off the rail.
 	_add(&"fire",         [_key(KEY_SPACE), _mb(MOUSE_BUTTON_LEFT)])
+	# On foot the two have to come apart. `fire` carries both the space bar and
+	# the left button because that is what a cockpit wants, but a man on the
+	# ground jumps with one and shoots with the other -- bound together,
+	# clicking made him jump instead of firing.
+	_add(&"jump",         [_key(KEY_SPACE)])
+	_add(&"foot_fire",    [_mb(MOUSE_BUTTON_LEFT)])
+	# Sights and reload, on foot. The right button is the sensor page in a
+	# cockpit and R is a submarine's ballast -- neither of which a man on the
+	# ground has, so the keys are free where he is standing.
+	_add(&"ads",          [_mb(MOUSE_BUTTON_RIGHT)])
+	_add(&"reload",       [_key(KEY_R)])
 	# V is the dedicated cannon key. It is off the mouse: left click already
 	# pulls the trigger, and having both meant one click fired the gun and a
 	# missile at the same time.
@@ -1716,6 +1790,10 @@ func _setup_input() -> void:
 	_add(&"panel_left",   [_key(KEY_BRACKETLEFT)])
 	_add(&"panel_right",  [_key(KEY_BRACKETRIGHT)])
 	_add(&"laser",        [_key(KEY_L)])
+	# Lights share the laser's key. The laser is only meaningful with the sensor
+	# page up, and the lamp only matters when it is not, so the one key does
+	# whichever of the two makes sense where you are.
+	_add(&"lights",       [_key(KEY_L)])
 	# Not G: that is the landing gear, and on the gunship the two fought over
 	# the same key — you could not raise the gear without being thrown into the
 	# battery, or take the battery without cycling the gear.

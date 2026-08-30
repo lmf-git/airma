@@ -1627,7 +1627,14 @@ func _ribbon(a: Vector2, b: Vector2, half: float) -> Array:
 				# instead, a crossing was painted along the seabed and the road
 				# ran through the water.
 				var rs := Sim.road_surface(q.x, q.y)
-				if rs.y > 0.35:
+				# ...but only as far as the ground was actually raised to meet
+				# it. The corridor fills to a limit and then gives up, while the
+				# ribbon was drawn on the design surface whatever that limit
+				# did -- so where the design stood higher than the embankment
+				# the terrain got, the carriageway hung in the air over an
+				# untouched hillside, which reads as a strip of road attached to
+				# nothing.
+				if rs.y > 0.35 and rs.x - rs.z <= Sim.ROAD_FILL_MAX * 1.25:
 					y = maxf(y, rs.x)
 			row.append(Vector3(q.x, y + 0.16, q.y))
 		# lift the surface to the highest of the two kerbs so it never sinks in
@@ -1811,6 +1818,11 @@ func _fences() -> void:
 			var y2 := Sim.height_at(q2.x, q2.y)
 			_fence_panel(mesh_st, Vector3(q.x, y, q.y), Vector3(q2.x, y2, q2.y))
 	_scatter(post_mesh, xf, "FencePosts")
+	# and into the obstacle field on its own terms. The general rule throws out
+	# anything under two and a half metres, and a fence post is 2.4 -- so the
+	# perimeter was drawn but nothing could touch it, and aircraft flew through
+	# the wire as though it were not there.
+	Obstacles.add_batch(post_mesh, xf, 1.6)
 	add_child(MeshKit.mi(MeshKit.finish(mesh_st,
 		MeshKit.mat(Color(0.36, 0.37, 0.36), 0.95, 0.1)), "FenceMesh"))
 	_stats["fence_posts"] = xf.size()

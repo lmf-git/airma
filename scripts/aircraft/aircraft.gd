@@ -175,6 +175,7 @@ func setup(id: String) -> void:
 	_burners = _model.get("burners", [])
 	_rotors = _model.get("rotors", [])
 	_build_aero_fx()
+	_build_lights()
 
 	mass = spec["mass"]
 	inertia = spec["inertia"]
@@ -465,6 +466,10 @@ func _animate(delta: float) -> void:
 			fm.set_shader_parameter("heat", 0.25 + 0.75 * ab_t)
 			fm.set_shader_parameter("flicker", randf_range(-0.10, 0.10) * (0.3 + ab_t))
 		var s: float = 0.25 * core + 0.9 * ab_t
+		for bl in _burn_lights:
+			if is_instance_valid(bl):
+				# dim at military power, fierce in reheat
+				(bl as OmniLight3D).light_energy = 1.2 * core + 16.0 * ab_t
 		var flick := 1.0 + randf_range(-0.08, 0.08) * (1.0 if s > 0.01 else 0.0)
 		f.scale = Vector3(maxf(0.05, 0.35 + 0.65 * ab_t), maxf(0.05, 0.35 + 0.65 * ab_t),
 			maxf(0.001, s * flick))
@@ -472,6 +477,83 @@ func _animate(delta: float) -> void:
 
 # --------------------------------------------------------------------------
 ## Wingtip vortices, the transonic vapour cone and low-level speed streaks.
+## Navigation lights, the burner glow and a flood lamp.
+##
+## None of these existed: the aeroplane carried an emissive nozzle that lit
+## nothing, and after dark it was an unlit shape with no way to see the ground
+## under it. Real lights are always on -- they simply cannot be seen against
+## daylight -- so nothing here is switched by the clock except the lamp, which
+## is switched by the pilot.
+var _nav: Array = []
+var _burn_lights: Array = []
+var _flood: SpotLight3D = null
+var lights_on := false
+
+func _build_lights() -> void:
+	var half: float = maxf(float(spec.get("span", 10.0)) * 0.5, 2.0)
+	var back: float = maxf(float(spec.get("length", 14.0)) * 0.45, 3.0)
+	# port red, starboard green, tail white: the arrangement every aircraft has
+	for e in [[Vector3(-half, 0.0, 0.0), Color(1.0, 0.10, 0.08)],
+			[Vector3(half, 0.0, 0.0), Color(0.12, 1.0, 0.22)],
+			[Vector3(0.0, 0.6, back), Color(1.0, 1.0, 0.96)]]:
+		var l := OmniLight3D.new()
+		l.position = e[0]
+		l.light_color = e[1]
+		l.light_energy = 1.6
+		l.omni_range = 9.0
+		l.shadow_enabled = false
+		add_child(l)
+		_nav.append(l)
+		# and the lamp itself, so there is something to see as well as something
+		# to be lit by
+		var b := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.13
+		sm.height = 0.26
+		sm.radial_segments = 8
+		sm.rings = 4
+		b.mesh = sm
+		var bm := StandardMaterial3D.new()
+		bm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		bm.albedo_color = e[1]
+		bm.emission_enabled = true
+		bm.emission = e[1]
+		bm.emission_energy_multiplier = 3.0
+		sm.material = bm
+		b.position = e[0]
+		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(b)
+	# One light per nozzle, driven by the burner. An afterburner is the
+	# brightest thing for miles and it was casting nothing at all.
+	for n in _burners:
+		if not is_instance_valid(n):
+			continue
+		var bl := OmniLight3D.new()
+		bl.light_color = Color(1.0, 0.62, 0.30)
+		bl.light_energy = 0.0
+		bl.omni_range = 26.0
+		bl.shadow_enabled = false
+		(n as Node3D).add_child(bl)
+		_burn_lights.append(bl)
+	# The flood lamp: a landing light in the nose, off until it is asked for.
+	_flood = SpotLight3D.new()
+	_flood.position = Vector3(0.0, -0.5, -back * 0.7)
+	_flood.rotation = Vector3(deg_to_rad(-9.0), 0.0, 0.0)
+	_flood.light_color = Color(1.0, 0.97, 0.90)
+	_flood.light_energy = 0.0
+	_flood.spot_range = 420.0
+	_flood.spot_angle = 26.0
+	_flood.spot_attenuation = 0.8
+	_flood.shadow_enabled = false
+	add_child(_flood)
+
+## The lamp the pilot switches.
+func toggle_lights() -> void:
+	lights_on = not lights_on
+	if is_instance_valid(_flood):
+		_flood.light_energy = 14.0 if lights_on else 0.0
+	Sim.report("lights %s" % ("on" if lights_on else "off"), Sim.Ev.INFO)
+
 func _build_aero_fx() -> void:
 	for tip in _model.get("tips", []):
 		var p := Effects.vortex_particles(Color(1, 1, 1), 3.2, 40)

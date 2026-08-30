@@ -105,7 +105,18 @@ func _process(delta: float) -> void:
 			if wv.length() < 1.0:
 				wv = -wxf.basis.z
 			var wdir := wv.normalized()
-			var want := wp - wdir * 22.0 + Vector3(0, 5.0, 0)
+			# Off the centreline, not straight up the tailpipe.
+			#
+			# Directly astern the motor is between the camera and the round, so
+			# what you watch is the plume: a rocket a metre and a half long with
+			# a burning throat behind it reads as a glowing ball and nothing
+			# else, however far back the boom is set. Stood off to one side and
+			# a little above, the body is in profile with the flame behind it.
+			var side := wdir.cross(Vector3.UP)
+			if side.length() < 0.01:
+				side = Vector3.RIGHT
+			side = side.normalized()
+			var want := wp - wdir * 20.0 + side * 7.5 + Vector3(0, 5.5, 0)
 			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 3.0)
 			# Rigid on the round, eased on the boom. Lerping the world position
 			# toward a target doing six hundred metres a second leaves a steady

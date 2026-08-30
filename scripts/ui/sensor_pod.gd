@@ -77,7 +77,8 @@ const CH_TV := 0
 const CH_NIGHT := 1
 const CH_WHOT := 2
 const CH_BHOT := 3
-const CHANNEL_NAMES := ["TV", "NIGHT", "WHOT", "BHOT"]
+const CH_SONAR := 4
+const CHANNEL_NAMES := ["TV", "NIGHT", "WHOT", "BHOT", "SONAR"]
 var channel := CH_WHOT
 
 func _flir_material() -> ShaderMaterial:
@@ -85,7 +86,7 @@ func _flir_material() -> ShaderMaterial:
 	sh.code = """
 shader_type canvas_item;
 uniform float scan_strength : hint_range(0.0, 1.0) = 0.16;
-uniform int channel = 2;      // 0 TV, 1 night, 2 white hot, 3 black hot
+uniform int channel = 2;      // 0 TV, 1 night, 2 white hot, 3 black hot, 4 sonar
 uniform float grain_t = 0.0;
 
 float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -106,6 +107,32 @@ void fragment() {
 		g = clamp(g + n * 0.13, 0.0, 1.0);
 		outc = mix(vec3(0.01, 0.05, 0.02), vec3(0.55, 1.0, 0.60), g);
 		outc += vec3(0.0, 0.35, 0.10) * pow(g, 6.0);   // blooming highlights
+	} else if (channel == 4) {
+		// Active sonar. Not a photograph of anything: a sonar display shows how
+		// strongly a bearing came back, painted in the one colour these have
+		// always been, and it hears nothing at all above the waterline.
+		//
+		// Sky and open water return almost nothing, so both go dark. What is
+		// left is the solid stuff -- a hull, the bottom, a cliff -- and it
+		// arrives buried in noise, which is most of what makes a sonar picture
+		// look like a sonar picture rather than a green photograph.
+		float sat2 = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+		float water = smoothstep(0.02, 0.20, c.b - c.r);
+		float ret = clamp(pow(l, 0.9) * (1.0 - water) * (0.35 + 0.9 * sat2),
+			0.0, 1.0);
+		float n2 = h21(UV * vec2(430.0, 270.0)
+			+ vec2(grain_t * 3.1, grain_t)) - 0.5;
+		ret = clamp(ret + n2 * 0.30, 0.0, 1.0);
+		// the sweep: a band travelling down the screen, lighting what it passes
+		float ping = fract(grain_t * 0.30);
+		float band = smoothstep(0.055, 0.0, abs(UV.y - ping));
+		ret = max(ret, band * 0.45);
+		outc = mix(vec3(0.010, 0.040, 0.050), vec3(0.32, 1.0, 0.84), ret);
+		outc += vec3(0.0, 0.30, 0.26) * pow(ret, 5.0);
+		// range rings, struck from the boat at the bottom of the picture
+		float rr = abs(fract(length((UV - vec2(0.5, 1.0)) * vec2(1.0, 1.6))
+			* 4.0) - 0.5);
+		outc += vec3(0.0, 0.15, 0.13) * smoothstep(0.47, 0.50, rr);
 	} else {
 		// Thermal, and it has to be a guess at *temperature* rather than a
 		// greyscale of the daylight picture. Ramping raw luminance made the sky
@@ -137,9 +164,18 @@ void fragment() {
 	m.set_shader_parameter("channel", channel)
 	return m
 
+## Whether the thing carrying the pod has a sonar to show: a boat that dives.
+func _has_sonar() -> bool:
+	return is_instance_valid(host) and host.has_method("can_dive") \
+		and bool(host.call("can_dive"))
+
 ## Step through the sensor channels.
 func cycle_channel() -> void:
-	channel = (channel + 1) % 4
+	# Sonar is only offered to something that can use it. On an aeroplane it is
+	# a channel that shows nothing, and cycling past it every time is worse than
+	# not having it.
+	var top: int = CHANNEL_NAMES.size() if _has_sonar() else CH_SONAR
+	channel = (channel + 1) % top
 	if _tex != null and _tex.material != null:
 		(_tex.material as ShaderMaterial).set_shader_parameter("channel", channel)
 	queue_redraw()

@@ -261,7 +261,12 @@ func _draw_bridge() -> void:
 
 func _draw_driver() -> void:
 	var vp := get_viewport_rect().size
-	_draw_world_contacts(tank, cam)
+	# Through the camera that is actually rendering, the way the ship and the
+	# carrier already do it. A tank has its own camera, and projecting the
+	# contacts through the aeroplane's instead meant the markers were laid out
+	# by a viewpoint that was not the one on screen -- so the moment freelook
+	# swung the view they scattered.
+	_draw_world_contacts(tank, tank.cam if is_instance_valid(tank.cam) else cam)
 	var c := vp * 0.5
 	var g := Color(0.55, 1.0, 0.62)
 	draw_line(c - Vector2(30, 0), c - Vector2(8, 0), g, 1.5)
@@ -1229,6 +1234,9 @@ func _foot_keys() -> Array:
 			["CTRL", "crouch"],
 			["SPACE", "jump"],
 			["LMB", "fire"],
+			["RMB", "sights  ( zoom )"],
+			["1 - 3", "rifle / marksman / pistol"],
+			["R", "reload"],
 			["P", "view"],
 			["N", "night vision"],
 			["U", "board what you are standing at"],
@@ -1268,6 +1276,7 @@ func _air_keys() -> Array:
 			["T", "cycle target"],
 			["LMB / SPACE", "fire selected weapon"],
 			["K", "gun burst"],
+			["L", "landing / flood lamp"],
 			["C", "flares"],
 			["V", "chaff"],
 		]],

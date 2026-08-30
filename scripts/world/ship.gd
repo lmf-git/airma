@@ -598,7 +598,9 @@ func _unhandled_input(e: InputEvent) -> void:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var mm := e as InputEventMouseMotion
-		aim_yaw -= mm.relative.x * 0.0026
+		# Same bearing convention as the tank's turret, and it was inverted in
+		# the same way.
+		aim_yaw += mm.relative.x * 0.0026
 		aim_pitch = clampf(aim_pitch - mm.relative.y * 0.0020,
 			deg_to_rad(-8.0), deg_to_rad(70.0))
 

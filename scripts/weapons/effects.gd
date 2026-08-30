@@ -155,40 +155,11 @@ static func nuke(world: Node, pos: Vector3, lethal: float) -> void:
 	for i in 10:
 		var a := TAU * float(i) / 10.0
 		dust(world, pos + Vector3(cos(a), 0.0, sin(a)) * lethal * 0.35, lethal * 0.12)
-	# black smoke off the firestorm, feeding the column for a good while
-	var smoke := trail_particles(Color(0.50, 0.46, 0.42), lethal * 0.26, 120)
-	smoke.lifetime = 34.0
-	smoke.position = pos
-	smoke.emitting = true
-	var spm := smoke.process_material as ParticleProcessMaterial
-	if spm != null:
-		spm.direction = Vector3(0, 1, 0)
-		spm.spread = 22.0
-		spm.initial_velocity_min = lethal * 0.04
-		spm.initial_velocity_max = lethal * 0.11
-		# a wide spread of sizes, so they do not read as a row of identical beads
-		spm.scale_min = 0.55
-		spm.scale_max = 2.2
-		spm.angle_min = -180.0
-		spm.angle_max = 180.0
-		spm.angular_velocity_min = -12.0
-		spm.angular_velocity_max = 12.0
-		spm.gravity = Vector3(0, lethal * 0.012, 0)
-		spm.damping_min = 0.0
-		spm.damping_max = 0.4
-		# Lighter, and never fully opaque: ninety per cent alpha on a near
-		# black puff is a solid dark bead, and a hundred of them is a bag of
-		# marbles rather than a cloud.
-		var sg := Gradient.new()
-		sg.set_color(0, Color(0.85, 0.72, 0.58, 0.0))
-		sg.set_color(1, Color(0.42, 0.39, 0.36, 0.0))
-		sg.add_point(0.10, Color(0.72, 0.60, 0.48, 0.42))
-		sg.add_point(0.45, Color(0.56, 0.52, 0.48, 0.34))
-		sg.add_point(0.80, Color(0.46, 0.43, 0.40, 0.18))
-		var sgt := GradientTexture1D.new()
-		sgt.gradient = sg
-		spm.color_ramp = sgt
-	_one_shot(world, smoke, 4.0)
+	# No smoke particles. The column used to be fed by a hundred and twenty
+	# billboards climbing out of the fireball, which is what a mushroom cloud
+	# was made of before it became a volume -- and against a raymarched column
+	# they are just a swarm of dark quads crawling up through it, each one
+	# turning to face the camera. The volume is the smoke now.
 
 class _NukeBall extends Node3D:
 	## How long the column stands. A mushroom cloud is a landmark for minutes,

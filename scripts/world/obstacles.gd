@@ -41,7 +41,12 @@ static func _key(ci: int, cj: int) -> int:
 	return ci * 1048576 + cj
 
 ## Take a MultiMesh batch: one box per instance, sized from the source mesh.
-static func add_batch(mesh: Mesh, xforms: Array) -> void:
+## `min_h` lets a caller register something shorter than the general rule
+## allows. The rule exists so a scattering of bollards and signs does not fill
+## the obstacle field with things nothing could hit; a fence is different,
+## because it is a continuous line rather than a scattering, and an aeroplane
+## that runs into one has run into all of it.
+static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT) -> void:
 	if mesh == null or xforms.is_empty():
 		return
 	# The mesh's own size means nothing here: a town block is modelled as a unit
@@ -58,7 +63,7 @@ static func add_batch(mesh: Mesh, xforms: Array) -> void:
 		var hx: float = ab.size.x * 0.5 * sc.x
 		var hz: float = ab.size.z * 0.5 * sc.z
 		var hy: float = (ab.position.y + ab.size.y) * sc.y
-		if hy < MIN_HEIGHT:
+		if hy < min_h:
 			continue
 		var yaw: float = xf.basis.get_euler().y
 		var o := xf.origin
