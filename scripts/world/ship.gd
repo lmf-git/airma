@@ -117,10 +117,12 @@ var strategic_aim := Vector3.INF
 ## first person one: stood at the masthead — the top of the sail on a boat that
 ## dives — looking where the sight is looking. There was no such view at all,
 ## so a submarine could only ever be watched from outside.
-const VIEW_BOOM := [0.0, 26.0, 62.0, 140.0]
-const VIEW_LIFT := [1.0, 1.0, 1.35, 2.1]
+const VIEW_BOOM := [0.0, 26.0, 62.0, 140.0, 90.0]
+const VIEW_LIFT := [1.0, 1.0, 1.35, 2.1, 1.0]
 const VIEW_NAME := ["view: conning tower", "view: close", "view: chase",
-	"view: wide"]
+	"view: wide", "view: astern"]
+## The one view that follows the hull rather than the mount.
+const ASTERN_VIEW := 4
 var view_mode := 1
 
 ## Put her back the way she began. The fleet outlives a mission, but the damage
@@ -660,6 +662,15 @@ func _conn(delta: float) -> void:
 	if not cam.current:
 		return
 	var boom: float = VIEW_BOOM[view_mode % VIEW_BOOM.size()]
+	# Astern, along the hull. Every other view rides the mount, which is right
+	# for laying a battery and useless for conning a boat: to steer her you have
+	# to see which way she is actually pointing, not where her guns are.
+	if view_mode == ASTERN_VIEW:
+		var nose := Vector3(-sin(heading), 0.0, -cos(heading))
+		var top: float = maxf(float(KINDS[kind]["free"]) + 10.0, 12.0)
+		cam.global_position = global_position - nose * boom + Vector3(0, top, 0)
+		cam.look_at(global_position + nose * 60.0, Vector3.UP)
+		return
 	var facing := Vector3(sin(aim_yaw) * cos(aim_pitch), sin(aim_pitch),
 		-cos(aim_yaw) * cos(aim_pitch))
 	if boom <= 0.01:
@@ -726,7 +737,8 @@ func _captain(delta: float) -> void:
 ## Wheel and telegraph toward a course and a speed, at a ship's rates.
 func _steer(brg: float, spd: float, delta: float) -> void:
 	var err := wrapf(brg - heading, -PI, PI)
-	_ai_helm = move_toward(_ai_helm, clampf(err * 1.8, -1.0, 1.0), delta * 1.2)
+	# and the same way round for the AI, which steers in heading space
+	_ai_helm = move_toward(_ai_helm, clampf(-err * 1.8, -1.0, 1.0), delta * 1.2)
 	helm = _ai_helm
 	telegraph = clampf(spd / maxf(float(KINDS[kind]["speed"]), 1.0), -0.25, 1.0)
 
@@ -1069,7 +1081,10 @@ func _physics_process(delta: float) -> void:
 		_captain(delta)
 	if occupied or ai or remote_conn != 0:
 		# under helm and telegraph rather than steaming a fixed course
-		heading = wrapf(heading + helm * delta * 0.10, -PI, PI)
+		# Minus. `helm` is positive to starboard, and a positive rotation about
+		# Y turns a hull that faces -Z to port -- so putting the wheel over to
+		# starboard swung her to port, and every correction made it worse.
+		heading = wrapf(heading - helm * delta * 0.10, -PI, PI)
 		speed = move_toward(speed, telegraph * float(KINDS[kind]["speed"]), delta * 0.55)
 	# Whatever the telegraph says, the water she has taken on decides what she
 	# actually makes — and it applies to a hull under nobody's orders too, so a
@@ -1109,6 +1124,21 @@ func _physics_process(delta: float) -> void:
 		var bed: float = Sim.height_at(global_position.x, global_position.z)
 		var room: float = maxf(Sim.WATER_LEVEL - (bed + draught + 2.0), 0.0)
 		depth = move_toward(depth, minf(depth_order, room), delta * 2.2)
+		# Out of sight below periscope depth.
+		#
+		# A dived boat was still a radar contact and still something a seeker
+		# would steer at, so she was engaged through the water and hit while
+		# submerged. She stays in the hittable set -- a torpedo or a depth
+		# charge still has to be able to find her -- but nothing may lock her,
+		# which is what takes her off the plot and out of the seekers. Anything
+		# already sent at her bursts on the surface, which is what water does to
+		# a missile.
+		var hidden: bool = depth > 6.0
+		if hidden != is_in_group("no_lock"):
+			if hidden:
+				add_to_group("no_lock")
+			else:
+				remove_from_group("no_lock")
 	else:
 		depth = 0.0
 	# the scend fades out as she goes under: there is no swell at depth

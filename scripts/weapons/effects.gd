@@ -200,21 +200,77 @@ class _NukeBall extends Node3D:
 	var _ball: MeshInstance3D
 	var _vol: MeshInstance3D
 	var sun_node: Node3D = null
-	var _mat: StandardMaterial3D
+	var _fire: ShaderMaterial
 	var _smoke: ShaderMaterial
 
 	func _ready() -> void:
 		top_level = true
-		_mat = StandardMaterial3D.new()
-		_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		_mat.albedo_color = Color(1.0, 0.92, 0.70, 1.0)
+		# The fireball is light, not a painted ball.
+		#
+		# A sphere with one flat colour on it has a hard silhouette and reads as
+		# a solid object however it is blended -- no amount of tinting fixes
+		# that, because what gives a luminous ball its shape is that it is
+		# brightest through the middle, where you are looking through the most
+		# of it, and falls away at the limb. That falloff, a boiling surface and
+		# a temperature that cools from white through orange is the whole
+		# effect.
+		var fsh := Shader.new()
+		fsh.code = """
+shader_type spatial;
+render_mode unshaded, blend_add, cull_back, depth_draw_never;
+
+uniform float t = 0.0;
+// 1 the instant it goes off, 0 once it has cooled to nothing.
+uniform float heat = 1.0;
+varying vec3 lp;
+
+float h31(vec3 p) {
+	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float vnoise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(mix(h31(i), h31(i + vec3(1, 0, 0)), f.x),
+			mix(h31(i + vec3(0, 1, 0)), h31(i + vec3(1, 1, 0)), f.x), f.y),
+		mix(mix(h31(i + vec3(0, 0, 1)), h31(i + vec3(1, 0, 1)), f.x),
+			mix(h31(i + vec3(0, 1, 1)), h31(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+void vertex() {
+	lp = VERTEX;
+}
+
+void fragment() {
+	// Limb darkening. Facing the eye you look through the whole depth of the
+	// ball; at the edge you look through almost none of it, so the brightness
+	// falls away and the silhouette stops being a circle cut out of the sky.
+	float face = clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0);
+	float core = pow(face, 1.7);
+	// boiling: the surface turns over as it rises
+	float n = vnoise(lp * 3.1 + vec3(0.0, -t * 0.35, 0.0)) * 0.55
+		+ vnoise(lp * 7.4 + vec3(0.0, -t * 0.70, 0.0)) * 0.45;
+	float glow = core * (0.70 + 0.60 * n);
+	// and it cools: white hot, then yellow, then orange, then a dull red that
+	// the smoke swallows
+	vec3 white = vec3(1.00, 0.97, 0.90);
+	vec3 amber = vec3(1.00, 0.62, 0.22);
+	vec3 dull  = vec3(0.72, 0.14, 0.05);
+	vec3 col = mix(dull, mix(amber, white, clamp(heat * 1.7 - 0.7, 0.0, 1.0)),
+		clamp(heat * 1.4, 0.0, 1.0));
+	ALBEDO = col * (0.30 + 2.2 * heat);
+	ALPHA = clamp(glow * heat, 0.0, 1.0);
+}
+"""
+		_fire = ShaderMaterial.new()
+		_fire.shader = fsh
 		var sm := SphereMesh.new()
 		sm.radius = 1.0
 		sm.height = 2.0
-		sm.radial_segments = 16
-		sm.rings = 10
-		sm.material = _mat
+		sm.radial_segments = 24
+		sm.rings = 16
+		sm.material = _fire
 		_ball = MeshInstance3D.new()
 		_ball.mesh = sm
 		_ball.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -420,10 +476,12 @@ void fragment() {
 		if is_instance_valid(sun_node):
 			_smoke.set_shader_parameter("sun_dir",
 				-sun_node.global_transform.basis.z)
-		# The fireball glows white, cools through orange and goes out.
-		var heat: float = clampf(1.0 - _t / 5.0, 0.0, 1.0)
-		_mat.albedo_color = Color(1.0, 0.55 + 0.40 * heat, 0.28 + 0.45 * heat,
-			clampf(1.0 - grow * 0.9, 0.0, 1.0))
+		# Cooling. Gone in a few seconds rather than thirty: tied to the growth
+		# clock the fireball was still faintly visible once the column had
+		# fully formed, so the cloud had a lamp buried in it for its whole life.
+		var heat: float = clampf(1.0 - _t / 4.5, 0.0, 1.0)
+		_fire.set_shader_parameter("heat", heat * heat)
+		_fire.set_shader_parameter("t", _t)
 		# The column is smoke, and smoke off a firestorm is black. It was
 		# painted the same cooling orange as the fireball and faded to nothing
 		# with it, so there was never any smoke to see.

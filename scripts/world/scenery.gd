@@ -1261,25 +1261,12 @@ func _scatter_nature() -> void:
 					prng.randf_range(-SCAT_HALF * SCAT_CELL, SCAT_HALF * SCAT_CELL),
 					prng.randf_range(-SCAT_HALF * SCAT_CELL * 1.6,
 						SCAT_HALF * SCAT_CELL * 1.6))
-		if Sim.native != null:
-			_scat_h = Sim.native.grounds_at(_scat_pts, true)
-			_scat_slope = Sim.native.slopes_at(_scat_pts)
-			# and the surface as the mesh draws it, which is four more heights
-			# apiece and was the last thing the workers were crossing the
-			# boundary for
-			_scat_surf = Sim.native.surfaces_at(_scat_pts, Terrain.BASE_CELL)
-		else:
-			_scat_h = PackedFloat32Array()
-			_scat_slope = PackedFloat32Array()
-			_scat_h.resize(_scat_pts.size())
-			_scat_slope.resize(_scat_pts.size())
-			_scat_surf = PackedFloat32Array()
-			_scat_surf.resize(_scat_pts.size())
-			for i in _scat_pts.size():
-				var q: Vector2 = _scat_pts[i]
-				_scat_h[i] = Sim.height_at(q.x, q.y)
-				_scat_slope[i] = Sim.normal_at(q.x, q.y).y
-				_scat_surf[i] = Terrain.surface_height(q.x, q.y)
+		_scat_h = Sim.native.grounds_at(_scat_pts, true)
+		_scat_slope = Sim.native.slopes_at(_scat_pts)
+		# and the surface as the mesh draws it, which is four more heights
+		# apiece and was the last thing the workers were crossing the boundary
+		# for
+		_scat_surf = Sim.native.surfaces_at(_scat_pts, Terrain.BASE_CELL)
 		_scat_out = []
 		_scat_out.resize(SCAT_TASKS)
 		var gid := WorkerThreadPool.add_group_task(_scat_slice, SCAT_TASKS, -1, true,

@@ -1154,26 +1154,16 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	var n := CELLS + 1
 	var h := PackedFloat32Array()
 	h.resize(n * n)
-	# The whole grid in one call when the native field is there. A chunk is 289
-	# points and the game builds hundreds of them; asked for as a block they
-	# come back off every core at once, and what is left to do here is only the
-	# part that depends on what has been built on the land.
-	if Sim.native != null:
-		var raw: PackedFloat32Array = Sim.native.grounds(x0, z0, cell, n)
-		if raw.size() == n * n:
-			for j in n:
-				var zz: float = z0 + float(j) * cell
-				for i in n:
-					h[j * n + i] = Sim._deform_top(raw[j * n + i],
-						x0 + float(i) * cell, zz)
-		else:
-			for j in n:
-				for i in n:
-					h[j * n + i] = Sim.height_at(x0 + i * cell, z0 + j * cell)
-	else:
-		for j in n:
-			for i in n:
-				h[j * n + i] = Sim.height_at(x0 + i * cell, z0 + j * cell)
+	# The whole grid in one call. A chunk is 289 points and the game builds
+	# hundreds of them; asked for as a block they come back off every core at
+	# once, and what is left to do here is only the part that depends on what
+	# has been built on the land.
+	var raw: PackedFloat32Array = Sim.native.grounds(x0, z0, cell, n)
+	for j in n:
+		var zz: float = z0 + float(j) * cell
+		for i in n:
+			h[j * n + i] = Sim._deform_top(raw[j * n + i],
+				x0 + float(i) * cell, zz)
 	_stitch(h, n, x0, z0, cell, depth, nb)
 	# What the level above this one draws at each of our grid points. Even
 	# indices sit on the parent's grid, so they read the same height and their

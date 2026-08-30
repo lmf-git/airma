@@ -141,7 +141,15 @@ func _draw_world_contacts(src: Node3D, eye: Camera3D) -> void:
 	if not is_instance_valid(src) or not is_instance_valid(eye):
 		return
 	var my_team: int = int(src.team) if ("team" in src) else -1
-	var held: Node = src.get("ai_target") if ("ai_target" in src) else null
+	# Held loosely first, then checked, then typed. Whatever the aeroplane was
+	# tracking may have been destroyed since it picked it, and assigning a freed
+	# instance into a typed variable is itself the error -- so it cannot be
+	# caught after the assignment, only before it.
+	var held: Node = null
+	if "ai_target" in src:
+		var raw: Variant = src.get("ai_target")
+		if is_instance_valid(raw) and raw is Node:
+			held = raw
 	var reach: float = maxf(Sim.radar_range(), 26000.0)
 	var vp := get_viewport_rect().size
 	for n in get_tree().get_nodes_in_group("hittable"):
@@ -1177,7 +1185,7 @@ func _ship_keys() -> Array:
 		["U", "hand over the conn"],
 	]
 	if ship.can_dive():
-		conn.append(["PGDN / PGUP", "dive / surface"])
+		conn.append(["F / R", "dive / surface"])
 	var arms := [
 		["1 - 2", "select weapon by number"],
 		["\\", "cycle weapon"],
@@ -1220,7 +1228,7 @@ func _foot_keys() -> Array:
 			["SHIFT", "run"],
 			["CTRL", "crouch"],
 			["SPACE", "jump"],
-			["V", "fire"],
+			["LMB", "fire"],
 			["P", "view"],
 			["N", "night vision"],
 			["U", "board what you are standing at"],
@@ -1258,12 +1266,10 @@ func _air_keys() -> Array:
 			["\\", "cycle weapon"],
 			["B", "open + close weapon bay"],
 			["T", "cycle target"],
-			["C", "flares"],
-			["B", "chaff"],
 			["LMB / SPACE", "fire selected weapon"],
-			["V", "gun burst"],
-			["N", "flares"],
-			["B", "chaff"],
+			["K", "gun burst"],
+			["C", "flares"],
+			["V", "chaff"],
 		]],
 		["SENSORS", [
 			["RMB or O", "raise / stow the sensor page"],

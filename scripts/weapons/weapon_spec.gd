@@ -101,6 +101,9 @@ static func _db() -> Dictionary:
 		"folding": true, "mass": 1780.0, "length": 6.20, "dia": 0.533, "fin": 0.90,
 		"boost": 42.0, "burn": 280.0, "max_g": 11.0, "drag": 0.00028,
 		"ref_speed": 260.0,
+		# Subsonic on the way in, then the sprint stage: the real weapon runs
+		# the last stretch at close to Mach three.
+		"sprint_speed": 900.0, "sprint_at": 32000.0,
 		"life": 340.0, "range": 150000.0, "seeker_fov": 60.0, "lock_time": 1.4,
 		"arm_time": 2.0, "fuse": 18.0, "damage": 560.0, "lethal": 34.0,
 		"cruise_alt": 24.0, "pop": 2400.0,

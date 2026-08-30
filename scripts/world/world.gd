@@ -394,6 +394,14 @@ func _ready() -> void:
 		_t0[0] = now
 	# Up before anything else, on its own layer above the whole game, and given
 	# a frame to paint in before the first slow phase starts.
+	# No 3D at all until the world is built and the menu is up.
+	#
+	# The loading screen is an opaque Control on a layer above everything, and
+	# by every reading of the tree nothing behind it can show -- yet a vehicle
+	# kept appearing in the middle of it. Rather than keep hunting for which
+	# camera was live, the renderer is simply told not to draw a three
+	# dimensional scene while the screen is up. Nothing can get through that.
+	get_viewport().disable_3d = true
 	var boot_ui := CanvasLayer.new()
 	boot_ui.name = "BootUI"
 	boot_ui.layer = 100
@@ -490,7 +498,11 @@ func _ready() -> void:
 	add_child(menu_cam)
 	menu_cam.look_at(Vector3(0, 258, 0), Vector3.UP)
 	menu_cam.rotate_y(deg_to_rad(19.0))
-	menu_cam.current = true
+	# Not yet. This camera stands on the home airfield looking at the turntable,
+	# so anything the airbase parks near the origin -- a tug, a stand, a
+	# revetment -- sits in the middle of its view, and it was the current camera
+	# for the whole of world generation. Nothing should be rendering the world
+	# while the loading screen is up; it is made current when the menu is.
 
 	preview = Node3D.new()
 	preview.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
@@ -591,8 +603,12 @@ func _ready() -> void:
 		_loading = null
 		if is_instance_valid(lp):
 			lp.queue_free()
-	# ...here, with the screen down and the menu about to be shown.
+	# ...here, with the screen down and the menu about to be shown: the
+	# turntable model first, then the camera that frames it, and only then is
+	# the world allowed to be drawn at all.
 	_set_preview(menu.jet_id)
+	menu_cam.current = true
+	get_viewport().disable_3d = false
 	_parse_cmdline()
 
 ## Show where the build has got to and give the engine a frame to draw it in.
@@ -7264,8 +7280,8 @@ void fragment() {
 	vec3 c = texture(screen, clamp(uv, vec2(0.001), vec2(0.999))).rgb;
 	// green-blue absorbs last: red goes first, and it goes quickly
 	vec3 absorbed = vec3(0.28, 0.72, 0.86);
-	c *= mix(vec3(1.0), absorbed, submerged * (0.55 + 0.45 * murk));
-	c = mix(c, tint, submerged * (0.20 + 0.55 * murk));
+	c *= mix(vec3(1.0), absorbed, submerged * (0.70 + 0.30 * murk));
+	c = mix(c, tint, submerged * (0.42 + 0.55 * murk));
 	// it gets darker and closer in as you go down
 	float d = distance(SCREEN_UV, vec2(0.5));
 	c *= 1.0 - submerged * murk * 0.55 * smoothstep(0.15, 0.85, d);
@@ -7298,7 +7314,10 @@ func _update_underwater(delta: float) -> void:
 		return
 	_uw_t += delta
 	_uw_mat.set_shader_parameter("submerged", amount)
-	_uw_mat.set_shader_parameter("murk", clampf(under / 55.0, 0.0, 1.0))
+	# Fully murky by twelve metres down, not fifty-five. Water is not a window:
+	# a few metres of it swallows the horizon, and at the old rate you could
+	# still see the far side of a bay from the bottom of it.
+	_uw_mat.set_shader_parameter("murk", clampf(under / 12.0, 0.0, 1.0))
 	_uw_mat.set_shader_parameter("t", _uw_t)
 
 var _uw_t := 0.0

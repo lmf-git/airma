@@ -73,7 +73,7 @@ func _ready() -> void:
 	add_child(root)
 
 	var title := Label.new()
-	title.text = "AFTERBURNER"
+	title.text = "COMBINED ARMS"
 	title.add_theme_font_size_override("font_size", 44)
 	title.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
 	root.add_child(title)

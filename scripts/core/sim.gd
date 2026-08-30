@@ -29,7 +29,7 @@ var noise_lo := FastNoiseLite.new()
 var noise_hi := FastNoiseLite.new()
 var noise_det := FastNoiseLite.new()
 ## The native extension, when the build is there. It owns the height field:
-## see `_natural_field`.
+## see `height_at`.
 var native: Object = null
 
 var noise_temp := FastNoiseLite.new()
@@ -75,6 +75,15 @@ func _ready() -> void:
 	# then be answered by the native field later in the same run.
 	if ClassDB.class_exists("Terra"):
 		native = ClassDB.instantiate("Terra")
+	else:
+		# There is no GDScript path any more. The height field, the road
+		# router, the corridor and the survey all live in the extension, and
+		# keeping a second implementation of each in here meant two answers to
+		# the same question that could drift apart -- which, for a field the
+		# towns, roads and colliders are all sited against, tears the world in
+		# half. Better to fail here, loudly, than to run half a world.
+		push_error("flight_native is missing. Build it with: "
+			+ "cd native && GODOT4_BIN=<godot> cargo build --release")
 	_setup_noise()
 	_setup_input()
 
@@ -235,155 +244,14 @@ func field_local(fd: Dictionary, x: float, z: float) -> Vector2:
 ## landing gear and the crash test all sample this.
 ## The land at a point: the field, then everything built on it.
 func height_at(x: float, z: float) -> float:
-	return _deform_top(ground_at(x, z), x, z)
+	# The field, the towns' platforms and the made roads all come back from the
+	# extension; the handful of aerodromes and carrier decks are applied here.
+	return _deform_top(native.ground(x, z, not _in_survey), x, z)
 
-## The untouched field. Native when the extension is there, GDScript when it is
-## not -- and never a mix of the two in one session: the towns, the roads and
-## the colliders are all sited against this, so two answers to the same point
-## would tear the world in half.
-func _natural_field(x: float, z: float) -> float:
-	if native != null:
-		return native.natural_height(x, z)
-	return _natural_gd(x, z)
 
-func _natural_gd(x: float, z: float) -> float:
-	var m := (noise_lo.get_noise_2d(x, z) + 1.0) * 0.5
-	m = pow(m, 2.3)
-	var h := m * 2100.0
-	h += noise_hi.get_noise_2d(x, z) * 150.0 * m
-	h += noise_det.get_noise_2d(x, z) * 6.0 * clampf(m * 4.0, 0.15, 1.0)
-	h -= 90.0
-	# The airfield sits in a north-south valley so both runway approaches and the
-	# departure end stay clear of rising ground — but only near the airfield.
-	# There was no limit along z at all, so the cap applied at every point in
-	# the world and cut a four kilometre trench from one end of the map to the
-	# other: a groove running the whole length of it, and the reason the middle
-	# of the map had no high ground in it.
-	var along: float = 1.0 - smoothstep(5000.0, 24000.0, absf(z))
-	if along > 0.0:
-		var axis := clampf((absf(x) - 1000.0) / 3400.0, 0.0, 1.0)
-		var cap := 55.0 + axis * axis * 2500.0
-		if h > cap:
-			h = lerpf(h, cap + (h - cap) * 0.12, along)
-	# Canyons. Where a second channel field runs across high ground it cuts
-	# hard and narrow rather than opening into a valley, which is what makes a
-	# gorge worth flying down.
-	var cy: float = absf(noise_river.get_noise_2d(z * 1.9 + 31000.0, x * 1.9 - 17000.0))
-	var gorge: float = 1.0 - smoothstep(0.0, 0.020, cy)
-	if gorge > 0.0 and h > 420.0:
-		var bite: float = clampf((h - 420.0) / 700.0, 0.0, 1.0)
-		h -= 340.0 * gorge * gorge * bite
-	# The land runs out to the east: a coastal shelf dropping into open ocean.
-	# Held to the home region — beyond that the continents below decide, or the
-	# whole eastern half of a six hundred kilometre world is one flat sea.
-	var far: float = smoothstep(55000.0, 150000.0, Vector2(x, z).length())
-	var sea := smoothstep(COAST_X, COAST_X + 9000.0, x) * (1.0 - far)
-	if sea > 0.0:
-		h = lerpf(h, -240.0, sea)
-	# Continents. Near home the shape is fixed: the airfield, the towns and the
-	# roads are all sited on ground that has to stay where it is. Further out
-	# the large scale field takes over and puts oceans, inland seas and islands
-	# where it likes.
-	if far > 0.0:
-		var cont := noise_cont.get_noise_2d(x, z)
-		var landness: float = lerpf(1.0, smoothstep(-0.10, 0.16, cont), far)
-		if landness < 1.0:
-			# a shelf, then the deep: not a cliff straight to the bottom
-			var floor_y: float = lerpf(-1500.0, -160.0, smoothstep(0.0, 0.45, landness))
-			h = lerpf(floor_y, h, smoothstep(0.0, 0.62, landness))
-	# Rivers. The channel is where the field crosses zero, so it runs as a line
-	# rather than a patch. Two of them, from two fields, so the country has
-	# more than one river in it.
-	# The navigable bed reaches a long way out, because a river is measured
-	# from the coast it runs to and not from the airfield. Gating it with the
-	# same 55 km fade the coastal shelf uses cut every channel off 26 km inland,
-	# which is not a river system, it is an inlet.
-	var home: float = 1.0 - smoothstep(200000.0, 450000.0, Vector2(x, z).length())
-	# Sampled with x squashed, which is what points the rivers at the sea. The
-	# channel is the contour where the field crosses zero, and the contours of
-	# an isotropic field run in whatever direction they please -- so the map had
-	# rivers, and not one of them went anywhere. Compressing the x axis makes
-	# the field vary slowly east-west and quickly north-south, and its contours
-	# then run predominantly east-west, down the country and into the ocean.
-	h = _river(h, x, z, absf(noise_river.get_noise_2d(x * 0.28, z)), home)
-	h = _river(h, x, z, absf(noise_river2.get_noise_2d(
-		x * 0.34 + z * 0.10, z + x * 0.06)), home)
-	return h
 
-## Everything the world has put on top of the field: the settlements' levelled
-## platforms, the made roads, the aerodromes and the carrier decks. Split out
-## from the field itself so a whole grid of heights can be fetched at once and
-## then have this applied to it point by point.
-## Everything the world has put on top of the field. Split in two: the ground
-## proper -- the settlements' levelled platforms and the made roads, which are
-## many and are what a height query spends its time on -- and the handful of
-## aerodromes and carrier decks on top of that.
-func deform(h: float, x: float, z: float) -> float:
-	return _deform_top(_deform_ground(h, x, z), x, z)
 
-## The ground: pads and roads. Native when the extension is there, because this
-## is the part whose cost grows with the size of the road network -- a
-## continental trunk system made every height query in the game walk it.
-func ground_at(x: float, z: float) -> float:
-	if native != null:
-		return native.ground(x, z, not _in_survey)
-	return _deform_ground(_natural_gd(x, z), x, z)
 
-func _deform_ground(h: float, x: float, z: float) -> float:
-	# Settlements stand on ground that has been levelled for them. Towns are
-	# built where the land is workable, not draped over whatever gradient
-	# happens to run through the middle of them — a street grid laid across a
-	# hillside is a staircase, and the buildings climb it.
-	var pad_w := 0.0
-	for pad in _town_pads:
-		var pc: Vector2 = pad["c"]
-		var pr: float = pad["r"]
-		var d := Vector2(x - pc.x, z - pc.y).length()
-		if d < pr * 1.60:
-			var w: float = 1.0 - smoothstep(pr * 1.06, pr * 1.60, d)
-			h = lerpf(h, float(pad["y"]), w)
-			pad_w = maxf(pad_w, w)
-	# Made road: cut into the rise, filled across the dip, the spoil graded out
-	# to either side. Where the fill would be an absurd embankment the road is
-	# on a deck instead and the ground underneath is left alone.
-	if not _in_survey and not _corr.is_empty():
-		var rs := road_surface(x, z)
-		if rs.y > 0.0:
-			# Eased out rather than switched off. A hard cut off left an eight
-			# metre cliff down one side of the carriageway wherever the fill
-			# reached the limit, in the middle of the road.
-			var carry: float = 1.0 - smoothstep(ROAD_FILL_MAX,
-				ROAD_FILL_MAX * 2.2, rs.x - h)
-			# And the same limit the other way up. Fill was capped -- an
-			# embankment past a certain height becomes a bridge -- but the cut
-			# never was, so a road crossing a ridge dug itself in as deep as the
-			# surveyed profile wanted and left a slot through the hill with the
-			# carriageway at the bottom of it. Past this the corridor lets go
-			# and the road climbs over instead, which is what a road does.
-			carry *= 1.0 - smoothstep(ROAD_CUT_MAX, ROAD_CUT_MAX * 2.4, h - rs.x)
-			# and a town has already been levelled: a road through it runs on
-			# the made ground, not through a cutting of its own. Fighting the
-			# pad left a fourteen metre step under the buildings.
-			carry *= 1.0 - pad_w
-			# The carriageway itself is always levelled; only the grading out to
-			# either side of it eases off. A road traversing a hillside is a
-			# bench cut into the slope -- level across its width, with a little
-			# cut above and a little fill below -- and capping the earthworks
-			# without this left the surface simply lying on the hill at whatever
-			# angle the hill happened to be, which measured 17% across the
-			# carriageway and is not a road.
-			var core: float = clampf((rs.y - 0.82) / 0.18, 0.0, 1.0)
-			var w: float = maxf(rs.y * carry, core)
-			# And the bound holds here, at the point being asked about, not only
-			# at the survey stations. The profile is clamped to the ground every
-			# 110 m; a knoll standing between two of those stations sits above
-			# the straight line joining them and was cut clean through -- 152 m
-			# deep at worst, which is a gorge with a road at the bottom of it.
-			var target: float = clampf(rs.x, rs.z - ROAD_CUT_MAX,
-				rs.z + ROAD_FILL_MAX)
-			if w > 0.0:
-				h = lerpf(h, target, w)
-	return h
 
 ## The aerodromes and the decks. There are a handful of each, so they stay on
 ## this side of the boundary.
@@ -477,7 +345,6 @@ func begin_roads(points: Array, links: Array) -> void:
 	_road_lines = []
 	_road_prof = []
 	_corr = []
-	_corr_grid = {}
 	road_bridges = []
 	_rt_jobs = []
 	for pair in links:
@@ -487,16 +354,12 @@ func begin_roads(points: Array, links: Array) -> void:
 	_rt_gid = -1
 	if _rt_jobs.is_empty():
 		return
-	if native != null:
-		# Every leg in one call, searched on every core inside the extension.
-		# It goes out to a worker of its own so the loading screen keeps
-		# painting while it runs.
-		_push_world()
-		_rt_gid = WorkerThreadPool.add_group_task(_route_native, 1, -1, true,
-			"road routing")
-	else:
-		_rt_gid = WorkerThreadPool.add_group_task(_route_job, _rt_jobs.size(),
-			-1, true, "road routing")
+	# Every leg in one call, searched on every core inside the extension. It
+	# goes out to a worker of its own so the loading screen keeps painting
+	# while it runs.
+	_push_world()
+	_rt_gid = WorkerThreadPool.add_group_task(_route_native, 1, -1, true,
+		"road routing")
 
 ## What the router has to know about the world before it surveys anything: the
 ## platforms the towns have been levelled onto, and where the runways are.
@@ -763,40 +626,17 @@ func _survey_roads() -> void:
 		for li5 in dense.size():
 			dense[li5] = op.slice(starts[li5], starts[li5 + 1])
 			_road_prof[li5] = oy.slice(starts[li5], starts[li5 + 1])
-	else:
-		_relax_passes(dense)
 	if debug_roads:
 		print("[survey] relaxation %d ms" % (Time.get_ticks_msec() - _tw))
 	var _tt := Time.get_ticks_msec()
 	_road_lines = dense
 	_relax_tail(dense, _tw, _tt)
 
-## The GDScript relaxation, kept for when the extension is not there.
-func _relax_passes(dense: Array) -> void:
-	for pass_i in 24:
-		_weld_parallels(dense)
-		_tie_junctions(dense)
-		for li in dense.size():
-			# no easing inside the loop: the low pass filter pulled every tie
-			# straight back out again and the crossings never converged
-			# graded to what a structure allows, so the alignment can hold its
-			# gradient through a hill instead of being dragged over the top of
-			# it; what is left in the open is pulled back to the ground below
-			_road_prof[li] = _hold_to_ground(li,
-				_rule_grade(dense[li], _road_prof[li], 1, false),
-				TUNNEL_MAX, VIADUCT_MAX)
-		if debug_roads:
-			print("[survey] pass %d: worst neighbour disagreement %.2f m" % [
-				pass_i + 1, _worst_tie(dense)])
 
 func _relax_tail(dense: Array, _tw: int, _tt: int) -> void:
 	if debug_roads:
 		print("[survey] after tying: worst neighbour disagreement %.1f m" % _worst_tie(dense))
-	for li in dense.size():
-		var y: PackedFloat32Array = _road_prof[li]
-		for i in y.size():
-			y[i] = maxf(y[i], WATER_LEVEL + 2.5)
-		_road_prof[li] = y
+	_float_over_water()
 	# Classify, hold the open ground, then grade again and hold again. The last
 	# thing every relaxation pass did was clamp, so a station the clamp moved
 	# was never re-graded against its neighbours and the profile could step 70 m
@@ -806,10 +646,16 @@ func _relax_tail(dense: Array, _tw: int, _tt: int) -> void:
 		_hold_open_ground()
 		for li3 in _road_prof.size():
 			_road_prof[li3] = _rule_grade(dense[li3], _road_prof[li3], 1, false)
+		_float_over_water()
 	var _ts := Time.get_ticks_msec()
+	# Lifted before the last classification, so a crossing that is now standing
+	# above the water is seen as the bridge it has to be, and lifted again after
+	# the settling, which is the last thing that can pull it back down.
+	_float_over_water()
 	_classify_structures()
 	_hold_open_ground()
 	_settle_open(24)
+	_float_over_water()
 	var _tc := Time.get_ticks_msec()
 	_index_corridor()
 	if debug_roads:
@@ -830,6 +676,25 @@ func _relax_tail(dense: Array, _tw: int, _tt: int) -> void:
 	if not _road_field.is_empty():
 		_build_road_field()
 	_in_survey = false
+
+## Lift the carriageway clear of the sea.
+##
+## Applied once, before the settling, this was undone by everything that came
+## after it: the grade rule, the open ground hold and the relaxation all pull
+## the profile back towards the natural ground, and over water the natural
+## ground is the seabed. A crossing that had been raised above the surface was
+## dragged back under it, and the road ran along the bottom of the channel.
+func _float_over_water() -> void:
+	var deck: float = WATER_LEVEL + 2.5
+	for li in _road_prof.size():
+		var y: PackedFloat32Array = _road_prof[li]
+		var lifted := false
+		for i in y.size():
+			if y[i] < deck:
+				y[i] = deck
+				lifted = true
+		if lifted:
+			_road_prof[li] = y
 
 ## Hold the ruling gradient along one road. Cutting first and filling after
 ## leaves both limits satisfied: nothing rises faster than the gradient, and by
@@ -948,56 +813,8 @@ func _worst_tie(lines: Array) -> float:
 var _leg_idx: Array = []
 var _leg_idx_age := 99
 
-func _survey_index(lines: Array) -> Array:
-	_leg_idx_age += 1
-	if _leg_idx_age >= 4 or _leg_idx.is_empty():
-		_leg_idx = _leg_index(lines)
-		_leg_idx_age = 0
-	return _leg_idx
 
-func _weld_parallels(lines: Array) -> void:
-	const WELD := 34.0
-	var index := _survey_index(lines)
-	var moved: Array = []
-	for li in lines.size():
-		moved.append((lines[li] as PackedVector2Array).duplicate())
-	for li in lines.size():
-		var pl: PackedVector2Array = lines[li]
-		var mi: PackedVector2Array = moved[li]
-		for i in pl.size():
-			var pull := Vector2.ZERO
-			var wsum := 0.0
-			for near in _legs_near(index, li, i, pl[i], WELD):
-				var w: float = 1.0 - float(near[1]) / WELD
-				pull += (near[2] as Vector2) * w
-				wsum += w
-			if wsum > 0.0:
-				mi[i] = mi[i].lerp(pull / wsum, clampf(wsum * 0.35, 0.0, 0.5))
-		moved[li] = mi
-	for li in lines.size():
-		lines[li] = moved[li]
 
-## Pull the surveyed heights of neighbouring stretches together, hardest where
-## they are closest, so junctions, parallel runs and switchbacks come out level
-## with each other instead of a step apart.
-func _tie_junctions(lines: Array) -> void:
-	const TIE := 70.0
-	var index := _survey_index(lines)
-	for li in lines.size():
-		var pl: PackedVector2Array = lines[li]
-		var y: PackedFloat32Array = _road_prof[li]
-		var out := PackedFloat32Array(y)
-		for i in y.size():
-			var ysum := 0.0
-			var wsum := 0.0
-			for near in _legs_near(index, li, i, pl[i], TIE):
-				var w: float = 1.0 - float(near[1]) / TIE
-				w *= w
-				ysum += float(near[0]) * w
-				wsum += w
-			if wsum > 0.0:
-				out[i] = lerpf(y[i], ysum / wsum, clampf(wsum * 0.6, 0.0, 0.9))
-		_road_prof[li] = out
 
 ## Where the made height stands too far above the land to be an embankment, the
 ## road is carried instead. Recorded as spans so the scenery can put a deck and
@@ -1093,11 +910,9 @@ const CORR_CELL := 64.0
 ## height_at asks for this on every call, and walking eight hundred legs to
 ## answer it cost more than the rest of the height field put together.
 var _corr: Array = []            # [a, b, ya, yb]
-var _corr_grid: Dictionary = {}  # cell key -> PackedInt32Array of leg indices
 
 func _index_corridor() -> void:
 	_corr = []
-	_corr_grid = {}
 	for li in _road_lines.size():
 		var pl: PackedVector2Array = _road_lines[li]
 		var prof: PackedFloat32Array = _road_prof[li]
@@ -1115,41 +930,23 @@ func _index_corridor() -> void:
 				continue
 			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1],
 				nat[i], nat[i + 1]])
-	if native != null:
-		# Over the boundary once, stamped into its own grid there. The GDScript
-		# grid below is only built when there is no extension to hold it.
-		var flat := PackedFloat32Array()
-		for leg in _corr:
-			var la: Vector2 = leg[0]
-			var lb: Vector2 = leg[1]
-			flat.append(la.x)
-			flat.append(la.y)
-			flat.append(lb.x)
-			flat.append(lb.y)
-			flat.append(float(leg[2]))
-			flat.append(float(leg[3]))
-			flat.append(float(leg[4]))
-			flat.append(float(leg[5]))
-		native.set_corridor(flat)
-		return
-	var pad: float = ROAD_HALF + ROAD_SHOULDER
-	for idx in _corr.size():
-		var a: Vector2 = _corr[idx][0]
-		var b: Vector2 = _corr[idx][1]
-		var steps: int = maxi(1, int(a.distance_to(b) / (CORR_CELL * 0.5)))
-		for k in steps + 1:
-			var q: Vector2 = a.lerp(b, float(k) / float(steps))
-			var ci := int(floor((q.x - pad) / CORR_CELL))
-			var cj := int(floor((q.y - pad) / CORR_CELL))
-			for oi in 3:
-				for oj in 3:
-					var key: int = (ci + oi) * 65536 + (cj + oj)
-					if not _corr_grid.has(key):
-						_corr_grid[key] = PackedInt32Array()
-					var bucket: PackedInt32Array = _corr_grid[key]
-					if bucket.is_empty() or bucket[bucket.size() - 1] != idx:
-						bucket.append(idx)
-						_corr_grid[key] = bucket
+	_push_corridor()
+
+## Hand the corridor to the extension, which is where its index lives.
+func _push_corridor() -> void:
+	var flat := PackedFloat32Array()
+	for leg in _corr:
+		var la: Vector2 = leg[0]
+		var lb: Vector2 = leg[1]
+		flat.append(la.x)
+		flat.append(la.y)
+		flat.append(lb.x)
+		flat.append(lb.y)
+		flat.append(float(leg[2]))
+		flat.append(float(leg[3]))
+		flat.append(float(leg[4]))
+		flat.append(float(leg[5]))
+	native.set_corridor(flat)
 
 ## The land as it was before any road was built on it. The corridor is the only
 ## thing `_in_survey` switches off, which is exactly the difference between the
@@ -1169,43 +966,11 @@ func natural_height_at(x: float, z: float) -> float:
 ## shoulder. Zero weight means the land is left as it was.
 ## Returns (made height, how much of it applies, the ground it was cut from).
 func road_surface(x: float, z: float) -> Vector3:
-	# The corridor lives on whichever side is holding it. With the extension in
-	# play the grid below is never built, and this used to fall straight through
-	# to "no road here" for every point in the world -- which is what tells a
-	# road ribbon to lie on the ground instead of riding its embankment.
-	if native != null:
-		return native.road_surface_at(x, z)
+	# The corridor is stamped into a grid inside the extension, which is the
+	# only place it exists: `_corr` here is just the list handed over to it.
 	if _corr.is_empty() or _road_prof.size() != _road_lines.size():
 		return Vector3.ZERO
-	var reach: float = ROAD_HALF + ROAD_SHOULDER
-	var key: int = int(floor(x / CORR_CELL)) * 65536 + int(floor(z / CORR_CELL))
-	if not _corr_grid.has(key):
-		return Vector3.ZERO
-	var p := Vector2(x, z)
-	var best := 1e9
-	var ysum := 0.0
-	var gsum := 0.0
-	var wsum := 0.0
-	for idx in (_corr_grid[key] as PackedInt32Array):
-		var leg: Array = _corr[idx]
-		var a: Vector2 = leg[0]
-		var ab: Vector2 = (leg[1] as Vector2) - a
-		var t: float = clampf((p - a).dot(ab) / maxf(ab.length_squared(), 0.001), 0.0, 1.0)
-		var d: float = p.distance_to(a + ab * t)
-		if d < best:
-			best = d
-		if d < reach:
-			# Blended, not nearest wins. Where two routes ran eleven metres
-			# apart the carriageway snapped to one or the other and there was
-			# a five metre step down the middle of the road.
-			var k: float = 1.0 / (d * d + 1.5)
-			ysum += lerpf(float(leg[2]), float(leg[3]), t) * k
-			gsum += lerpf(float(leg[4]), float(leg[5]), t) * k
-			wsum += k
-	if best > reach or wsum <= 0.0:
-		return Vector3.ZERO
-	return Vector3(ysum / wsum, 1.0 - smoothstep(ROAD_HALF, reach, best),
-		gsum / wsum)
+	return native.road_surface_at(x, z)
 
 ## A road between two places that goes round the hills instead of over them.
 ##
@@ -1240,11 +1005,6 @@ var _rt_jobs: Array = []
 var _rt_out: Array = []
 var _rt_gid := -1
 
-## Runs on a worker. Reads the height field and the airfield keep-out, and
-## writes only its own slot.
-func _route_job(i: int) -> void:
-	var j: Array = _rt_jobs[i]
-	_rt_out[i] = route(j[0], j[1])
 
 ## A cell as one integer. Offset, not multiplied and added: `ci * N + cj` cannot
 ## be taken apart again once `cj` is negative -- half the map -- and unwinding
@@ -1255,192 +1015,9 @@ const RT_BIAS := 1048576
 func _rt_key(ci: int, cj: int) -> int:
 	return (ci + RT_BIAS) * (RT_BIAS * 2) + (cj + RT_BIAS)
 
-## Ground height at a cell, remembered for the length of one route. The cache is
-## handed in rather than kept on the object, so several routes can be worked out
-## at the same time on different threads.
-func _rt_height(ci: int, cj: int, cache: Dictionary, cell: float) -> float:
-	var k := _rt_key(ci, cj)
-	if cache.has(k):
-		return float(cache[k])
-	var h := height_at(float(ci) * cell, float(cj) * cell)
-	cache[k] = h
-	return h
 
-## What one step of road costs, in the same terms the surveyor thinks in.
-func _rt_step(ci: int, cj: int, ni: int, nj: int, run: float,
-		cache: Dictionary, cell: float) -> float:
-	var ha := _rt_height(ci, cj, cache, cell)
-	var hb := _rt_height(ni, nj, cache, cell)
-	var climb: float = absf(hb - ha)
-	var grade: float = climb / run
-	var cost: float = run * 0.55 + climb * 1.6 + grade * grade * run * 260.0
-	var over: float = maxf(grade - ROAD_GRADE, 0.0)
-	cost += over * over * run * 9000.0
-	var wx := float(ni) * cell
-	var wz := float(nj) * cell
-	# Water is crossable -- that is what a bridge is for -- but it is the last
-	# resort, not a shortcut across a bay.
-	if hb < WATER_LEVEL + 6.0:
-		cost += run * 260.0
-	if not clear_of_airfield(wx, wz):
-		cost += run * 400.0
-	if on_runway(wx, wz):
-		cost += run * 4000.0
-	return cost
 
-func route(a: Vector2, b: Vector2) -> Array:
-	# The grid has to suit the leg. At a flat 400 m a hundred kilometre link
-	# between two regions needs more cells than the whole node budget just to
-	# reach the far end, so it could never finish -- it spent sixty thousand
-	# expansions going nowhere, failed, and then did it again for the retry.
-	# A long road is not surveyed at the same resolution as a short one.
-	var span: float = a.distance_to(b)
-	var cell: float = clampf(span / 140.0, RT_CELL, 2600.0)
-	var pts := _search(a, b, {}, RT_MARGIN, RT_MAX_NODES, cell)
-	if pts.size() < 2:
-		# Try harder before giving up. A search fails because it ran out of
-		# room to look sideways or out of nodes to expand, and both are just
-		# budgets -- a wider box and a bigger allowance usually finds the pass
-		# it was one ridge short of.
-		pts = _search(a, b, {}, RT_MARGIN * 2.0, RT_MAX_NODES * 2, cell * 1.8)
-	if pts.size() < 2:
-		# and if there is genuinely no route, there is no road. Drawing the
-		# straight line instead put a trunk road through whatever the search
-		# had just spent sixty thousand nodes proving it could not cross --
-		# mountains and open water included.
-		return []
-	pts = _pull_straight(pts)
-	var out: Array = []
-	for i in range(pts.size() - 1):
-		out.append([pts[i], pts[i + 1]])
-	return out
 
-## A* from a to b over the grid. Returns the cell centres it went through.
-func _search(a: Vector2, b: Vector2, cache: Dictionary,
-		margin := RT_MARGIN, budget := RT_MAX_NODES,
-		cell := RT_CELL) -> PackedVector2Array:
-	var ai := int(round(a.x / cell))
-	var aj := int(round(a.y / cell))
-	var bi := int(round(b.x / cell))
-	var bj := int(round(b.y / cell))
-	if ai == bi and aj == bj:
-		return PackedVector2Array([a, b])
-	# the box it may search in: the two ends plus room to go round something
-	var m := int(ceil(margin / cell))
-	var lo_i: int = mini(ai, bi) - m
-	var hi_i: int = maxi(ai, bi) + m
-	var lo_j: int = mini(aj, bj) - m
-	var hi_j: int = maxi(aj, bj) + m
-	var start := _rt_key(ai, aj)
-	var goal := _rt_key(bi, bj)
-	var came: Dictionary = {}
-	# what each key actually is, so the path never has to be decoded back
-	var cells: Dictionary = {start: Vector2i(ai, aj), goal: Vector2i(bi, bj)}
-	var g: Dictionary = {start: 0.0}
-	# A binary heap, not a scan. Taking the cheapest node by looking at every
-	# node on the frontier is quadratic in the size of the frontier, and on a
-	# thirty kilometre leg that frontier runs to tens of thousands: the search
-	# never finished.
-	var open_i := PackedInt32Array([ai])
-	var open_j := PackedInt32Array([aj])
-	var open_f := PackedFloat32Array([0.0])
-	var closed: Dictionary = {}
-	var expanded := 0
-	while open_f.size() > 0 and expanded < budget:
-		var ci: int = open_i[0]
-		var cj: int = open_j[0]
-		var ck := _rt_key(ci, cj)
-		var last := open_f.size() - 1
-		open_i[0] = open_i[last]
-		open_j[0] = open_j[last]
-		open_f[0] = open_f[last]
-		open_i.resize(last)
-		open_j.resize(last)
-		open_f.resize(last)
-		# sift the replacement back down
-		var pos := 0
-		while true:
-			var l := pos * 2 + 1
-			var r := l + 1
-			var sm := pos
-			if l < open_f.size() and open_f[l] < open_f[sm]:
-				sm = l
-			if r < open_f.size() and open_f[r] < open_f[sm]:
-				sm = r
-			if sm == pos:
-				break
-			var ti := open_i[pos]
-			var tj := open_j[pos]
-			var tf := open_f[pos]
-			open_i[pos] = open_i[sm]
-			open_j[pos] = open_j[sm]
-			open_f[pos] = open_f[sm]
-			open_i[sm] = ti
-			open_j[sm] = tj
-			open_f[sm] = tf
-			pos = sm
-		if closed.has(ck):
-			continue
-		closed[ck] = true
-		expanded += 1
-		if ck == goal:
-			break
-		for d in RT_NEIGHBOURS:
-			var ni: int = ci + int(d[0])
-			var nj: int = cj + int(d[1])
-			if ni < lo_i or ni > hi_i or nj < lo_j or nj > hi_j:
-				continue
-			var nk := _rt_key(ni, nj)
-			if closed.has(nk):
-				continue
-			var run: float = float(d[2]) * cell
-			var ng: float = float(g[ck]) + _rt_step(ci, cj, ni, nj, run, cache, cell)
-			if g.has(nk) and float(g[nk]) <= ng:
-				continue
-			g[nk] = ng
-			came[nk] = ck
-			cells[nk] = Vector2i(ni, nj)
-			var hx: float = float(bi - ni) * cell
-			var hz: float = float(bj - nj) * cell
-			open_i.append(ni)
-			open_j.append(nj)
-			open_f.append(ng + sqrt(hx * hx + hz * hz) * RT_HEUR)
-			# and sift it up into place
-			var up := open_f.size() - 1
-			while up > 0:
-				var par: int = int(floor(float(up - 1) * 0.5))
-				if open_f[par] <= open_f[up]:
-					break
-				var si := open_i[up]
-				var sj := open_j[up]
-				var sf := open_f[up]
-				open_i[up] = open_i[par]
-				open_j[up] = open_j[par]
-				open_f[up] = open_f[par]
-				open_i[par] = si
-				open_j[par] = sj
-				open_f[par] = sf
-				up = par
-	if not came.has(goal) and start != goal:
-		return PackedVector2Array()
-	# unwind
-	var rev: Array = []
-	var cur := goal
-	var guard := 0
-	while cur != start and came.has(cur) and guard < 200000:
-		rev.append(cur)
-		cur = came[cur]
-		guard += 1
-	rev.append(start)
-	rev.reverse()
-	var out := PackedVector2Array([a])
-	for k in rev:
-		var at: Vector2i = cells[k]
-		var p := Vector2(float(at.x) * cell, float(at.y) * cell)
-		if p.distance_to(out[out.size() - 1]) > cell * 0.5:
-			out.append(p)
-	out.append(b)
-	return out
 
 const RT_NEIGHBOURS := [
 	[1, 0, 1.0], [-1, 0, 1.0], [0, 1, 1.0], [0, -1, 1.0],
@@ -1449,60 +1026,7 @@ const RT_NEIGHBOURS := [
 	[1, 2, 2.23607], [-1, 2, 2.23607], [1, -2, 2.23607], [-1, -2, 2.23607],
 ]
 
-## Pull the staircase out of a grid path.
-##
-## A* on a grid can only leave a cell in sixteen directions, so its output is a
-## zigzag even across ground that wants a straight road. This drops any waypoint
-## that the two either side of it can be joined through no more expensively.
-func _pull_straight(pts: PackedVector2Array) -> PackedVector2Array:
-	var cur := pts
-	for _pass in 4:
-		if cur.size() < 3:
-			break
-		var out := PackedVector2Array([cur[0]])
-		var i := 1
-		while i < cur.size() - 1:
-			var a: Vector2 = out[out.size() - 1]
-			var b: Vector2 = cur[i]
-			var c: Vector2 = cur[i + 1]
-			var bent: float = _leg_cost(a, b) + _leg_cost(b, c)
-			var direct: float = _leg_cost(a, c)
-			if direct <= bent * 1.02:
-				i += 1                      # b earns nothing: leave it out
-				continue
-			out.append(b)
-			i += 1
-		out.append(cur[cur.size() - 1])
-		if out.size() == cur.size():
-			break
-		cur = out
-	return cur
 
-## What a straight leg between two points would cost, sampled along it.
-func _leg_cost(a: Vector2, b: Vector2) -> float:
-	var d := a.distance_to(b)
-	if d < 1.0:
-		return 0.0
-	var steps: int = clampi(int(d / 120.0), 2, 40)
-	var cost: float = d * 0.55
-	var last := height_at(a.x, a.y)
-	var run: float = d / float(steps)
-	for i in range(1, steps + 1):
-		var q: Vector2 = a.lerp(b, float(i) / float(steps))
-		var h := height_at(q.x, q.y)
-		var climb: float = absf(h - last)
-		var grade: float = climb / run
-		cost += climb * 1.6 + grade * grade * run * 260.0
-		var over: float = maxf(grade - ROAD_GRADE, 0.0)
-		cost += over * over * run * 9000.0
-		if h < WATER_LEVEL + 6.0:
-			cost += run * 260.0
-		if not clear_of_airfield(q.x, q.y):
-			cost += run * 400.0
-		if on_runway(q.x, q.y):
-			cost += run * 4000.0
-		last = h
-	return cost
 
 
 var _segments: Array = []          # every road and street, filled by Scenery
@@ -1548,7 +1072,7 @@ var _town_pads: Array = []
 func road_state() -> Dictionary:
 	return {"pads": _town_pads, "roads": ROADS, "lines": _road_lines,
 		"prof": _road_prof, "bridges": road_bridges, "corr": _corr,
-		"grid": _corr_grid, "segs": _segments, "tunnels": road_tunnels,
+		"segs": _segments, "tunnels": road_tunnels,
 		"struct": _road_struct, "natural": _natural}
 
 func load_road_state(d: Dictionary) -> void:
@@ -1558,11 +1082,14 @@ func load_road_state(d: Dictionary) -> void:
 	_road_prof = d["prof"]
 	road_bridges = d["bridges"]
 	_corr = d["corr"]
-	_corr_grid = d["grid"]
 	_segments = d["segs"]
 	road_tunnels = d.get("tunnels", [])
 	_road_struct = d.get("struct", [])
 	_natural = d.get("natural", [])
+	# The corridor's grid is not baked -- it is stamped inside the extension,
+	# so a run that loads the network from disk has to hand the legs over just
+	# as a run that surveyed them does.
+	_push_corridor()
 	_index_segments()
 	# cached in its own right, so this is a read rather than a bake
 	_build_road_field()
@@ -1615,11 +1142,6 @@ func register_segments(segs: Array) -> void:
 ## go out to the worker pool, the segments are flattened into a float array so
 ## the inner loop is not unboxing Variants out of an array of arrays, and a
 ## bounding box reject skips the projection for segments that cannot win.
-const RF_STRIDE := 9             # ax az dx dz 1/len2 minx maxx minz maxz
-
-var _rf_segs := PackedFloat32Array()
-var _rf_rows: Array = []
-var _rf_count := 0
 
 func _build_road_field() -> void:
 	var t0 := Time.get_ticks_msec()
@@ -1630,8 +1152,8 @@ func _build_road_field() -> void:
 		return
 	# Only the roads that can possibly be the nearest one.
 	#
-	# The field covers eighteen kilometres around home; the network now runs to
-	# the far side of a twelve hundred kilometre map. Every one of those distant
+	# The field covers eighteen kilometres around home; the network runs to the
+	# far side of a twelve hundred kilometre map. Every one of those distant
 	# segments was being projected against every texel of a box it is four
 	# hundred kilometres outside of. The bounding-box reject skipped the
 	# arithmetic but not the loop, and at a hundred and thirty million of them
@@ -1647,88 +1169,23 @@ func _build_road_field() -> void:
 			if minf(a0.y, b0.y) > reach or maxf(a0.y, b0.y) < -reach:
 				continue
 			all.append(r)
-	_rf_segs = PackedFloat32Array()
-	_rf_segs.resize(all.size() * RF_STRIDE)
+	# Flat pairs for the extension, which brute-forces what is left of them
+	# across every core.
+	var flat := PackedFloat32Array()
+	flat.resize(all.size() * 4)
 	for i in all.size():
 		var a: Vector2 = all[i][0]
 		var b: Vector2 = all[i][1]
-		var d := b - a
-		var k := i * RF_STRIDE
-		_rf_segs[k] = a.x
-		_rf_segs[k + 1] = a.y
-		_rf_segs[k + 2] = d.x
-		_rf_segs[k + 3] = d.y
-		_rf_segs[k + 4] = 1.0 / maxf(d.length_squared(), 1e-9)
-		_rf_segs[k + 5] = minf(a.x, b.x)
-		_rf_segs[k + 6] = maxf(a.x, b.x)
-		_rf_segs[k + 7] = minf(a.y, b.y)
-		_rf_segs[k + 8] = maxf(a.y, b.y)
-	_rf_count = all.size()
-	if native != null:
-		# Flat pairs for the extension, which brute-forces what is left across
-		# every core.
-		var flat := PackedFloat32Array()
-		flat.resize(all.size() * 4)
-		for i3 in all.size():
-			var a3: Vector2 = all[i3][0]
-			var b3: Vector2 = all[i3][1]
-			flat[i3 * 4] = a3.x
-			flat[i3 * 4 + 1] = a3.y
-			flat[i3 * 4 + 2] = b3.x
-			flat[i3 * 4 + 3] = b3.y
-		_road_field = native.road_field(flat, RF_N, RF_HALF)
-		_rf_segs = PackedFloat32Array()
-		WorldBake.put("road_field", _road_field)
-		road_field_ms = Time.get_ticks_msec() - t0
-		return
-	_rf_rows = []
-	_rf_rows.resize(RF_N)
-	# One task per row, each writing only its own slot of a pre-sized array and
-	# reading only immutable input. Nothing here touches the scene tree, which
-	# is the line that matters for doing this off the main thread at all.
-	var gid := WorkerThreadPool.add_group_task(_rf_row, RF_N, -1, true,
-		"road distance field")
-	WorkerThreadPool.wait_for_group_task_completion(gid)
-	_road_field = PackedFloat32Array()
-	_road_field.resize(RF_N * RF_N)
-	for j in RF_N:
-		var row: PackedFloat32Array = _rf_rows[j]
-		for i2 in RF_N:
-			_road_field[j * RF_N + i2] = row[i2]
-	_rf_rows = []
-	_rf_segs = PackedFloat32Array()
+		flat[i * 4] = a.x
+		flat[i * 4 + 1] = a.y
+		flat[i * 4 + 2] = b.x
+		flat[i * 4 + 3] = b.y
+	_road_field = native.road_field(flat, RF_N, RF_HALF)
 	WorldBake.put("road_field", _road_field)
 	road_field_ms = Time.get_ticks_msec() - t0
 
 var road_field_ms := 0
 
-func _rf_row(j: int) -> void:
-	var step := RF_HALF * 2.0 / float(RF_N - 1)
-	var z := -RF_HALF + float(j) * step
-	var row := PackedFloat32Array()
-	row.resize(RF_N)
-	var m := _rf_count
-	for i in RF_N:
-		var x := -RF_HALF + float(i) * step
-		var best2 := 1e18
-		for s in m:
-			var k := s * RF_STRIDE
-			var ox: float = maxf(maxf(_rf_segs[k + 5] - x, x - _rf_segs[k + 6]), 0.0)
-			var oz: float = maxf(maxf(_rf_segs[k + 7] - z, z - _rf_segs[k + 8]), 0.0)
-			if ox * ox + oz * oz >= best2:
-				continue
-			var px: float = x - _rf_segs[k]
-			var pz: float = z - _rf_segs[k + 1]
-			var dx: float = _rf_segs[k + 2]
-			var dz: float = _rf_segs[k + 3]
-			var t: float = clampf((px * dx + pz * dz) * _rf_segs[k + 4], 0.0, 1.0)
-			var qx: float = px - dx * t
-			var qz: float = pz - dz * t
-			var d2: float = qx * qx + qz * qz
-			if d2 < best2:
-				best2 = d2
-		row[i] = sqrt(best2)
-	_rf_rows[j] = row
 
 const SEG_CELL := 256.0
 var _seg_grid: Dictionary = {}   # cell key -> Array of [a, b]
@@ -2234,7 +1691,8 @@ func _setup_input() -> void:
 	# V is the dedicated cannon key. It is off the mouse: left click already
 	# pulls the trigger, and having both meant one click fired the gun and a
 	# missile at the same time.
-	_add(&"gun",          [_key(KEY_V)])
+	# Moved off V, which the chaff now has. K is the only letter left free.
+	_add(&"gun",          [_key(KEY_K)])
 	_add(&"cycle_weapon", [_key(KEY_BACKSLASH)])
 	_add(&"action_menu",  [_key(KEY_TAB)])
 	_add(&"weapon_1",     [_key(KEY_1)])
@@ -2264,12 +1722,19 @@ func _setup_input() -> void:
 	_add(&"gunner_station", [_key(KEY_J)])
 	_add(&"radar_out",    [_key(KEY_EQUAL)])
 	_add(&"radar_in",     [_key(KEY_MINUS)])
-	_add(&"dive",         [_key(KEY_PAGEDOWN)])
-	_add(&"surface",      [_key(KEY_PAGEUP)])
+	# Depth, on the two keys directly above one another: R rises, F floods.
+	# Page Up and Page Down are nowhere near the hand that is already on the
+	# helm. A submarine reads none of the aircraft actions these share a key
+	# with -- it has no flaps and no gun -- and an aeroplane never dives or
+	# surfaces, so the pairs cannot both be live on the same vehicle.
+	_add(&"dive",         [_key(KEY_F)])
+	_add(&"surface",      [_key(KEY_R)])
 	_add(&"pause_menu",   [_key(KEY_ESCAPE)])
 	_add(&"assist",       [_key(KEY_H)])
+	# Countermeasures together under the left hand. Chaff was on B, which is
+	# also the bomb bay -- so every bundle of chaff opened the bay doors.
 	_add(&"flare",        [_key(KEY_C)])
-	_add(&"chaff",        [_key(KEY_B)])
+	_add(&"chaff",        [_key(KEY_V)])
 	_add(&"mouse_fly",    [_key(KEY_SEMICOLON)])
 	_add(&"map",          [_key(KEY_M), _key(KEY_F1)])
 	# Not backslash: `cycle_weapon` is already there, and `tapped` erases the

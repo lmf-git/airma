@@ -291,8 +291,23 @@ func _physics_process(delta: float) -> void:
 		# whole flight, so it had thrust to spare at every moment and climbed
 		# two and a half times its own cruising height before the guidance could
 		# argue it down. Holding the design speed is what the motor is for.
+		# ...up to the design speed, and then faster for the run in.
+		#
+		# A 3M-54 cruises subsonic and sprints at the end -- the last stretch is
+		# flown at close to Mach three, which is the whole point of the weapon:
+		# it is slow where nothing can see it and fast where something might
+		# shoot at it. Held to the cruise figure for the whole flight it took
+		# four minutes to cross sixty kilometres and arrived at the speed it set
+		# out at.
+		var hold: float = float(ws.get("ref_speed", 1.0e9))
+		var sprint: float = float(ws.get("sprint_speed", 0.0))
+		if sprint > hold and is_instance_valid(target):
+			var run_left: float = global_position.distance_to(
+				target.global_position)
+			if run_left < float(ws.get("sprint_at", 0.0)):
+				hold = sprint
 		if boosting and String(ws.get("kind", "")) == "cruise" \
-				and vel.length() > float(ws.get("ref_speed", 1.0e9)):
+				and vel.length() > hold:
 			boosting = false
 			motor = 0.0
 		var dir := -global_transform.basis.z

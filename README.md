@@ -1,4 +1,4 @@
-# Afterburner
+# Combined Arms
 
 A jet flight simulator built for **Godot 4.8**. Four flyable airframes, a
 rigid-body flight model with fly-by-wire, working internal weapons bays, and a
