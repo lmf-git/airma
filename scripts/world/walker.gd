@@ -40,6 +40,12 @@ var _shot_cd := 0.0
 var _recoil := 0.0
 var _fall_peak := 0.0
 var _flash: MeshInstance3D
+## Under canopy after an ejection. The pilot settles at a steady sink rate,
+## steers the drift, and arrives without breaking anything.
+var chute := false
+const CHUTE_FALL := -6.0
+const CHUTE_DRIFT := 7.0
+var _canopy: MeshInstance3D = null
 # When standing inside an aircraft the walker becomes a child of that hold and
 # all of its movement is solved in the hold's local frame. Riding the parent
 # transform is what keeps occupants stable no matter what the jet does.
@@ -76,6 +82,30 @@ func _ready() -> void:
 	add_child(cam)
 	add_to_group("hittable")
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+## Put the canopy up or cut it away. The mesh is made the first time it is
+## needed, so a pilot who never ejects never carries one.
+func set_chute(on: bool) -> void:
+	chute = on
+	if on and _canopy == null:
+		var dome := SphereMesh.new()
+		dome.radius = 3.2
+		dome.height = 3.2
+		dome.is_hemisphere = true
+		dome.radial_segments = 20
+		dome.rings = 8
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.86, 0.53, 0.20)
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat.roughness = 0.9
+		dome.material = mat
+		_canopy = MeshInstance3D.new()
+		_canopy.name = "Canopy"
+		_canopy.mesh = dome
+		_canopy.position = Vector3(0.0, 4.6, 0.0)
+		add_child(_canopy)
+	if _canopy != null:
+		_canopy.visible = on
 
 func activate() -> void:
 	cam.current = true
@@ -147,11 +177,17 @@ func _physics_process(delta: float) -> void:
 		wish = wish.normalized()
 	var running: bool = Sim.held(&"throttle_up") and not crouching
 	var speed: float = CROUCH if crouching else (RUN if running else WALK)
+	if chute:
+		speed = CHUTE_DRIFT          # under canopy you steer a drift, not a run
 	var flat := Vector3(vel.x, 0, vel.z)
 	flat = flat.lerp(wish * speed, clampf(delta * (13.0 if on_floor else 2.2), 0.0, 1.0))
 	vel.x = flat.x
 	vel.z = flat.z
 	vel.y -= GRAV * delta
+	if chute:
+		# A canopy is a terminal velocity, not a force to fight: whatever the
+		# seat threw you out with bleeds away and you settle to a steady sink.
+		vel.y = lerpf(vel.y, CHUTE_FALL, clampf(delta * 1.6, 0.0, 1.0))
 	if on_floor and not crouching and Sim.tapped(&"fire"):
 		vel.y = JUMP
 		on_floor = false
@@ -180,10 +216,13 @@ func _physics_process(delta: float) -> void:
 		Obstacles.top_at(global_position.x, global_position.z))
 	if global_position.y <= ground:
 		global_position.y = ground
-		if not on_floor and _fall_peak < -13.0:
+		if not on_floor and _fall_peak < -13.0 and not chute:
 			var hurt: float = (-_fall_peak - 13.0) * 7.5
 			take_hit(hurt)
 			Sfx.play_at(get_tree().current_scene, "thump", global_position, -10.0, 1.4)
+		if chute:
+			set_chute(false)
+			Sim.report("down safe — canopy cut", Sim.Ev.GOOD)
 		vel.y = 0.0
 		on_floor = true
 		_fall_peak = 0.0

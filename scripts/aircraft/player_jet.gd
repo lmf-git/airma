@@ -277,10 +277,10 @@ func say(t: String) -> void:
 	msg = t
 	msg_t = 3.2
 
-func explode() -> void:
+func explode(with_pilot := true) -> void:
 	if alive:
 		Sim.report("AIRCRAFT DESTROYED", Sim.Ev.BAD)
-	super.explode()
+	super.explode(with_pilot)
 
 
 # ---------------------------------------------------------------------------

@@ -1600,13 +1600,19 @@ func wreck_visuals() -> void:
 	embers.emitting = true
 	add_child(embers)
 
-func explode() -> void:
+## `with_pilot` throws a body clear as the aeroplane comes apart. An ejection
+## has already taken the pilot out under a canopy, and leaving this on gave two
+## of them: a ragdoll falling next to the man the player is now flying.
+func explode(with_pilot := true) -> void:
 	if not alive:
 		return
 	alive = false
 	wrecked = true
 	health = 0.0
 	wreck_visuals()
+	if not with_pilot:
+		died.emit(self)
+		return
 	var rd := Ragdoll.new()
 	rd.spawn_from(Transform3D(global_transform.basis, global_transform * cockpit_offset()),
 		linear_velocity * 0.35 + Vector3(0, 6.0, 0))

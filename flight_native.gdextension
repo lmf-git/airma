@@ -1,0 +1,12 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.2
+reloadable = false
+
+[libraries]
+macos.debug = "res://native/target/release/libflight_native.dylib"
+macos.release = "res://native/target/release/libflight_native.dylib"
+linux.debug.x86_64 = "res://native/target/release/libflight_native.so"
+linux.release.x86_64 = "res://native/target/release/libflight_native.so"
+windows.debug.x86_64 = "res://native/target/release/flight_native.dll"
+windows.release.x86_64 = "res://native/target/release/flight_native.dll"

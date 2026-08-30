@@ -357,6 +357,14 @@ func _physics_process(delta: float) -> void:
 			# still long of it: hold, and let both numbers come down together
 			if plan > reach * 1.05:
 				open_now = false
+			# ...but never all the way to the ground. A bus that is going to
+			# land short is long of its target for the whole descent, so this
+			# test alone held the load in right down to the deck and the round
+			# arrived as one unopened bus carrying nothing that could go off.
+			# Below a quarter of the release height it opens regardless: a
+			# spread that lands short still beats no spread at all.
+			if global_position.y - bed < float(ws.get("mirv_at", 1000.0)) * 0.25:
+				open_now = true
 		if open_now:
 			_open_up()
 			return

@@ -1154,9 +1154,26 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	var n := CELLS + 1
 	var h := PackedFloat32Array()
 	h.resize(n * n)
-	for j in n:
-		for i in n:
-			h[j * n + i] = Sim.height_at(x0 + i * cell, z0 + j * cell)
+	# The whole grid in one call when the native field is there. A chunk is 289
+	# points and the game builds hundreds of them; asked for as a block they
+	# come back off every core at once, and what is left to do here is only the
+	# part that depends on what has been built on the land.
+	if Sim.native != null:
+		var raw: PackedFloat32Array = Sim.native.grounds(x0, z0, cell, n)
+		if raw.size() == n * n:
+			for j in n:
+				var zz: float = z0 + float(j) * cell
+				for i in n:
+					h[j * n + i] = Sim._deform_top(raw[j * n + i],
+						x0 + float(i) * cell, zz)
+		else:
+			for j in n:
+				for i in n:
+					h[j * n + i] = Sim.height_at(x0 + i * cell, z0 + j * cell)
+	else:
+		for j in n:
+			for i in n:
+				h[j * n + i] = Sim.height_at(x0 + i * cell, z0 + j * cell)
 	_stitch(h, n, x0, z0, cell, depth, nb)
 	# What the level above this one draws at each of our grid points. Even
 	# indices sit on the parent's grid, so they read the same height and their
@@ -1189,6 +1206,54 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 			var at: int = t * n if e == 0 else (t * n + n - 1 if e == 1
 				else (t if e == 2 else (n - 1) * n + t))
 			hc[at] = h[at]
+	# Per vertex normals, taken from the height field rather than from the
+	# triangle. A face normal handed to all three of its corners is flat
+	# shading: every facet is lit uniformly, the shading changes in steps at
+	# each triangle edge, and the ground reads as faceted however fine the mesh
+	# gets. The gradient of the field at the vertex is the normal the surface
+	# actually has there, and neighbouring triangles then agree along the edge
+	# they share.
+	var vn := PackedVector3Array()
+	vn.resize(n * n)
+	# and the same for the surface the level above draws, which the morph
+	# blends towards -- sampled two of our cells apart, because two of ours is
+	# one of its
+	var cvn := PackedVector3Array()
+	cvn.resize(n * n)
+	var big := cell * 2.0
+	for j in n:
+		for i in n:
+			var px: float = x0 + float(i) * cell
+			var pz: float = z0 + float(j) * cell
+			var gx: float
+			var gz: float
+			var cx: float
+			var cz: float
+			if i == 0 or j == 0 or i == n - 1 or j == n - 1:
+				# Off the field, not off this chunk's grid. The grid stops at
+				# the border, so a one sided difference there gives a different
+				# answer from the one the chunk next door works out for the very
+				# same vertex -- and the ground picks up a shading seam along
+				# every chunk edge in the world. Both sides read the field.
+				gx = (Sim.height_at(px + cell, pz)
+					- Sim.height_at(px - cell, pz)) / (2.0 * cell)
+				gz = (Sim.height_at(px, pz + cell)
+					- Sim.height_at(px, pz - cell)) / (2.0 * cell)
+				cx = (Sim.height_at(px + big, pz)
+					- Sim.height_at(px - big, pz)) / (2.0 * big)
+				cz = (Sim.height_at(px, pz + big)
+					- Sim.height_at(px, pz - big)) / (2.0 * big)
+			else:
+				gx = (h[j * n + i + 1] - h[j * n + i - 1]) / (2.0 * cell)
+				gz = (h[(j + 1) * n + i] - h[(j - 1) * n + i]) / (2.0 * cell)
+				var l2: int = maxi(i - 2, 0)
+				var r2: int = mini(i + 2, n - 1)
+				var f2: int = maxi(j - 2, 0)
+				var b2: int = mini(j + 2, n - 1)
+				cx = (hc[j * n + r2] - hc[j * n + l2]) / (float(r2 - l2) * cell)
+				cz = (hc[b2 * n + i] - hc[f2 * n + i]) / (float(b2 - f2) * cell)
+			vn[j * n + i] = Vector3(-gx, 1.0, -gz).normalized()
+			cvn[j * n + i] = Vector3(-cx, 1.0, -cz).normalized()
 	var count := CELLS * CELLS * 6 + CELLS * 24
 	var verts := PackedVector3Array()
 	var nrms := PackedVector3Array()
@@ -1211,15 +1276,14 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 			var mb := hc[j * n + i + 1] - h[j * n + i + 1]
 			var mc := hc[(j + 1) * n + i + 1] - h[(j + 1) * n + i + 1]
 			var md := hc[(j + 1) * n + i] - h[(j + 1) * n + i]
-			# the same two triangles as the level above would draw them
-			var ca := Vector3(a.x, a.y + ma, a.z)
-			var cb := Vector3(b.x, b.y + mb, b.z)
-			var cc := Vector3(c.x, c.y + mc, c.z)
-			var cd := Vector3(d.x, d.y + md, d.z)
+			var q00: int = j * n + i
+			var q10: int = j * n + i + 1
+			var q11: int = (j + 1) * n + i + 1
+			var q01: int = (j + 1) * n + i
 			_face(verts, nrms, morph, cnrm, w, a, b, c, ma, mb, mc,
-				_face_normal(ca, cb, cc))
+				vn[q00], vn[q10], vn[q11], cvn[q00], cvn[q10], cvn[q11])
 			_face(verts, nrms, morph, cnrm, w, a, c, d, ma, mc, md,
-				_face_normal(ca, cc, cd))
+				vn[q00], vn[q11], vn[q01], cvn[q00], cvn[q11], cvn[q01])
 	_skirt(verts, nrms, morph, cnrm, w, x0, z0, cell, h, n)
 	# every vertex carries how wide its chunk is, which is the band it blends over
 	for mv in count:
@@ -1356,27 +1420,25 @@ func _skirt(verts: PackedVector3Array, nrms: PackedVector3Array,
 				cnrm[k * 4 + 3] = 1.0
 				w[0] = k + 1
 
-## A triangle's normal, always pointing up out of the ground.
-func _face_normal(a: Vector3, b: Vector3, c: Vector3) -> Vector3:
-	var nrm := (b - a).cross(c - a).normalized()
-	return -nrm if nrm.y < 0.0 else nrm
-
 func _face(verts: PackedVector3Array, nrms: PackedVector3Array,
 		morph: PackedVector2Array, cnrm: PackedFloat32Array, w: Array,
 		a: Vector3, b: Vector3, c: Vector3,
-		ma: float, mb: float, mc: float, coarse: Vector3) -> void:
-	var nrm := _face_normal(a, b, c)
+		ma: float, mb: float, mc: float,
+		na: Vector3, nb: Vector3, nc: Vector3,
+		ka: Vector3, kb: Vector3, kc: Vector3) -> void:
 	var vs := [a, b, c]
 	var ms := [ma, mb, mc]
+	var ns := [na, nb, nc]
+	var ks := [ka, kb, kc]
 	for i in 3:
 		var k: int = w[0]
-		var v: Vector3 = vs[i]
-		verts[k] = v
-		nrms[k] = nrm
+		verts[k] = vs[i]
+		nrms[k] = ns[i]
 		morph[k] = Vector2(ms[i], 0.0)
-		cnrm[k * 4] = coarse.x
-		cnrm[k * 4 + 1] = coarse.y
-		cnrm[k * 4 + 2] = coarse.z
+		var co: Vector3 = ks[i]
+		cnrm[k * 4] = co.x
+		cnrm[k * 4 + 1] = co.y
+		cnrm[k * 4 + 2] = co.z
 		cnrm[k * 4 + 3] = 1.0
 		w[0] = k + 1
 

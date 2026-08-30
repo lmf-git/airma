@@ -634,6 +634,12 @@ func _draw_left(vp: Vector2) -> void:
 	_box(Rect2(x - 4, y - 15, 92, 30), GREEN, 1.4)
 	_txt(Vector2(x + 84, y + 7), "%d" % int(kias), 20, GREEN, HORIZONTAL_ALIGNMENT_RIGHT, 84)
 	_txt(Vector2(x - 4, y - 24), "KIAS", 12, DIM)
+	# ...and what it is actually doing over the ground. The two are the same on
+	# the deck and nothing like each other high up: the air at ten kilometres is
+	# a third as dense, so the box reads a little over half the real speed, and
+	# the map then goes past at a rate the needle never claimed.
+	_txt(Vector2(x - 4, y - 40), "GS %d" % int(jet.linear_velocity.length() * 1.94384),
+		13, DIM)
 	_txt(Vector2(x - 4, y + 34), "M %.2f" % jet.mach, 15, GREEN)
 	_txt(Vector2(x - 4, y + 54), "G %+.1f" % jet.g_load, 15,
 		RED if absf(jet.g_load) > jet.spec["g_limit"] else GREEN)

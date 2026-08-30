@@ -73,7 +73,11 @@ func plan() -> void:
 		sites = cached_sites
 		Sim.load_road_state(cached_roads)
 	else:
+		var t_s := Time.get_ticks_msec()
 		_site_towns()
+		if Sim.debug_roads:
+			print("[plan] siting towns and dispatching routes: %d ms"
+				% (Time.get_ticks_msec() - t_s))
 
 ## Is the network still being searched? The caller keeps drawing while it is.
 func plan_busy() -> bool:
@@ -82,15 +86,29 @@ func plan_busy() -> bool:
 ## Everything that has to wait for the routes: the streets hang off the trunk
 ## network, so they cannot be laid until it exists.
 func plan_finish() -> void:
+	var t0 := Time.get_ticks_msec()
 	if not _plan_cached:
 		Sim.finish_roads()
+	var t1 := Time.get_ticks_msec()
 	for t in sites:
 		_plan_town_streets(t["c"], t["r"])
+	var t2 := Time.get_ticks_msec()
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
+	var t3 := t2
+	var t4 := t2
+	var t5 := t2
 	if not _plan_cached:
 		Sim.register_segments(_streets)
+		t3 = Time.get_ticks_msec()
 		WorldBake.put("town_sites", sites)
-		WorldBake.put("roads", Sim.road_state())
+		t4 = Time.get_ticks_msec()
+		var st := Sim.road_state()
+		t5 = Time.get_ticks_msec()
+		WorldBake.put("roads", st)
+	if Sim.debug_roads:
+		print("[plan] finish_roads %d | streets %d | register_segments %d | bake sites %d | road_state %d | bake roads %d ms" % [
+			t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4,
+			Time.get_ticks_msec() - t5])
 	_stats["streets"] = _streets.size()
 
 ## Put each town on the flattest ground within reach of where it was wanted,
@@ -108,6 +126,10 @@ func plan_finish() -> void:
 ## and far from each other.
 const REGIONS := 4
 const REGION_TOWNS := 4
+## Towns that belong to nobody, in the country between the factions.
+const FREE_NAMES := ["Marchgate", "Tolland", "Verge", "Sallow Cross",
+	"Kestrel", "Amberly", "Norwood Halt", "Fen Marsh", "Redlake", "Thorn"]
+
 const REGION_NAMES := [
 	["Calder", "Vasser Bay", "Ostmark", "Pell"],
 	["Sarn", "Hollowfield", "Ridgeway", "Anselm"],
@@ -129,6 +151,11 @@ static func _land_score(c: Vector2, r: float) -> float:
 			if h > Sim.WATER_LEVEL + 30.0 and h < 1500.0:
 				dry += 1.0
 	return dry / maxf(float(n), 1.0)
+
+## Which regions each run of independent towns joins, and the sites in it:
+## [region a, region b, [site index, ...]]. Region ids here are hub numbers --
+## 0 is home, and hub k is region k.
+var _free_chains: Array = []
 
 static func find_regions() -> Array:
 	var found: Array = []
@@ -196,7 +223,10 @@ func _site_towns() -> void:
 			"was": want, "rough": best_rough})
 		pads.append({"c": best, "r": r})
 	# and the clusters elsewhere on the map, each with its own towns
+	var t_fr := Time.get_ticks_msec()
 	var regions := find_regions()
+	if Sim.debug_roads:
+		print("[plan]   find_regions: %d ms" % (Time.get_ticks_msec() - t_fr))
 	for ri in regions.size():
 		var rc: Vector2 = regions[ri]
 		for ti in REGION_TOWNS:
@@ -222,7 +252,70 @@ func _site_towns() -> void:
 				"name": String(REGION_NAMES[ri % REGION_NAMES.size()][ti % 4]),
 				"region": ri + 1, "was": want2, "rough": rough2})
 			pads.append({"c": best2, "r": rad})
+	# Independent towns, in the country between the factions.
+	#
+	# Each sits on the line between two regional centres, so it is nobody's and
+	# anyone moving between two factions comes through it. It also gives the
+	# trunk network somewhere to stop: neighbouring regions are a hundred and
+	# thirty kilometres apart by construction, and a single leg that long is
+	# both a bad road and a search the router cannot finish.
+	var hubs: Array = [Vector2.ZERO]
+	for rc3 in regions:
+		hubs.append(rc3 as Vector2)
+	_free_chains = []
+	var tied: Array = [0]
+	var loose: Array = []
+	for hi in range(1, hubs.size()):
+		loose.append(hi)
+	var named := 0
+	while not loose.is_empty():
+		var bd := 1e18
+		var ba := 0
+		var bo := 0
+		for a2 in tied:
+			for oi in loose.size():
+				var d3: float = (hubs[int(a2)] as Vector2).distance_squared_to(
+					hubs[int(loose[oi])] as Vector2)
+				if d3 < bd:
+					bd = d3
+					ba = int(a2)
+					bo = oi
+		var hb: int = int(loose[bo])
+		tied.append(hb)
+		loose.remove_at(bo)
+		var pa: Vector2 = hubs[ba]
+		var pb: Vector2 = hubs[hb]
+		var chain: Array = []
+		for f in [0.34, 0.66]:
+			var want3: Vector2 = pa.lerp(pb, float(f))
+			var rad3 := 620.0
+			var best3 := want3
+			var rough3 := 1e9
+			for i3 in range(-3, 4):
+				for j3 in range(-3, 4):
+					var q3: Vector2 = want3 + Vector2(float(i3), float(j3)) * 1100.0
+					if Sim.height_at(q3.x, q3.y) < Sim.WATER_LEVEL + 30.0:
+						continue
+					var rg3: float = Sim.site_roughness(q3, rad3)
+					if rg3 < rough3:
+						rough3 = rg3
+						best3 = q3
+			if rough3 > 1e8:
+				continue                      # open water the whole way across
+			sites.append({"c": best3, "r": rad3, "density": 0.52,
+				"tallest": 21.0,
+				"name": String(FREE_NAMES[named % FREE_NAMES.size()]),
+				"region": -1, "faction": "free", "was": want3, "rough": rough3})
+			pads.append({"c": best3, "r": rad3})
+			chain.append(sites.size() - 1)
+			named += 1
+		if not chain.is_empty():
+			_free_chains.append([ba, hb, chain])
+	var t_rp := Time.get_ticks_msec()
 	Sim.register_town_pads(pads)
+	if Sim.debug_roads:
+		print("[plan]   register_town_pads (%d): %d ms" % [pads.size(),
+			Time.get_ticks_msec() - t_rp])
 	# The trunk network, laid to where the towns actually ended up.
 	#
 	# It hangs off a bypass running down the east side of the field rather than
@@ -246,7 +339,47 @@ func _site_towns() -> void:
 	var first_town := 2
 	var n_towns: int = sites.size()
 	links.append_array(_plan_network(nodes, first_town, n_towns))
+	# Thread the independents in: the nearest town of one region, along the
+	# chain, and into the nearest town of the other. This is the road between
+	# two factions, and it is built in forty kilometre legs the router can
+	# actually survey rather than one long jump.
+	for ch in _free_chains:
+		var ra: int = int(ch[0])
+		var rb: int = int(ch[1])
+		var run: Array = ch[2]
+		if run.is_empty():
+			continue
+		var head: int = first_town + int(run[0])
+		var tail: int = first_town + int(run[run.size() - 1])
+		var ta: int = _closest_in_region(nodes, first_town, n_towns, ra,
+			nodes[head] as Vector2)
+		var tb: int = _closest_in_region(nodes, first_town, n_towns, rb,
+			nodes[tail] as Vector2)
+		if ta >= 0:
+			links.append([ta, head])
+		if tb >= 0:
+			links.append([tb, tail])
+		for k in range(run.size() - 1):
+			links.append([first_town + int(run[k]), first_town + int(run[k + 1])])
 	Sim.begin_roads(nodes, _valid_links(links, nodes.size()))
+
+## The town of a given region nearest a point, as a node index. Region 0 is the
+## home cluster, which is also where the airfield gates are.
+func _closest_in_region(nodes: Array, first_town: int, n_towns: int,
+		region: int, near: Vector2) -> int:
+	var best := -1
+	var bd := 1e18
+	for i in n_towns:
+		if int((sites[i] as Dictionary).get("region", 0)) != region:
+			continue
+		var d: float = (nodes[first_town + i] as Vector2).distance_squared_to(near)
+		if d < bd:
+			bd = d
+			best = first_town + i
+	# the home cluster hangs off the bypass if it has no town of its own
+	if best < 0 and region == 0:
+		return 0
+	return best
 
 ## Only the links that name two different places that exist.
 func _valid_links(links: Array, n: int) -> Array:
@@ -277,6 +410,8 @@ func _plan_network(nodes: Array, first_town: int, n_towns: int) -> Array:
 	var by_region: Dictionary = {}
 	for i in n_towns:
 		var rg: int = int((sites[i] as Dictionary).get("region", 0))
+		if rg < 0:
+			continue                      # independents are chained separately
 		if not by_region.has(rg):
 			by_region[rg] = []
 		(by_region[rg] as Array).append(first_town + i)
@@ -290,6 +425,68 @@ func _plan_network(nodes: Array, first_town: int, n_towns: int) -> Array:
 				group.append(extra_node)
 			out.append([0, 1])
 		out.append_array(_spanning(nodes, group, 2 if group.size() > 5 else 1))
+	# Join the regions to one another. Each got a spanning tree of its own and
+	# nothing more: only region zero was ever tied to the airfield bypass and
+	# the depot, so every other region was an island -- its towns joined to each
+	# other, no road out of it, and its trunk legs simply stopping in open
+	# country. Linked here on the shortest hop between any two places in them,
+	# which is where a road between two regions would actually be built.
+	var regions: Array = by_region.keys()
+	if regions.size() > 1:
+		var joined: Array = [regions[0]]
+		var left: Array = regions.slice(1)
+		while not left.is_empty():
+			var best := 1e18
+			var best_from: Variant = null
+			var best_at := 0
+			for ra in joined:
+				for li in left.size():
+					for na in (by_region[ra] as Array):
+						for nb in (by_region[left[li]] as Array):
+							var d: float = (nodes[int(na)] as Vector2) \
+								.distance_squared_to(nodes[int(nb)] as Vector2)
+							if d < best:
+								best = d
+								best_from = ra
+								best_at = li
+			if best_from == null:
+				break
+			# Two roads between them, not one. A single link makes the whole of
+			# one faction's country hang off one bridge: cut it and half the map
+			# is unreachable, and it reads as a chain of places rather than as
+			# two road systems that meet.
+			# One direct link. The independent towns between the two already
+			# carry a road of their own, so this is the second way round
+			# rather than the only one -- and a second hundred-and-thirty
+			# kilometre leg costs as much to survey as the first.
+			out.append_array(_bridge_regions(nodes, by_region[best_from] as Array,
+				by_region[left[best_at]] as Array, 1))
+			joined.append(left[best_at])
+			left.remove_at(best_at)
+	return out
+
+## The `k` shortest hops between two groups of places, each using a different
+## town at either end -- so the second road is a separate route through
+## different country, not a twin running alongside the first.
+func _bridge_regions(nodes: Array, ga: Array, gb: Array, k: int) -> Array:
+	var pairs: Array = []
+	for na in ga:
+		for nb in gb:
+			pairs.append([(nodes[int(na)] as Vector2).distance_squared_to(
+				nodes[int(nb)] as Vector2), int(na), int(nb)])
+	pairs.sort_custom(func(x: Array, y: Array) -> bool:
+		return float(x[0]) < float(y[0]))
+	var out: Array = []
+	var used_a: Dictionary = {}
+	var used_b: Dictionary = {}
+	for pr in pairs:
+		if out.size() >= k:
+			break
+		if used_a.has(pr[1]) or used_b.has(pr[2]):
+			continue
+		used_a[pr[1]] = true
+		used_b[pr[2]] = true
+		out.append([int(pr[1]), int(pr[2])])
 	return out
 
 ## Prim's algorithm over the given places, then the shortest few links that were
@@ -398,7 +595,13 @@ func _town_detail() -> void:
 	for t in sites:
 		var c: Vector2 = t["c"]
 		var r: float = float(t["r"])
-		var faction: String = Sim.region_faction(c.x, c.y)
+		# An independent town carries its own allegiance -- which is none. The
+		# faction field is a function of position, and the whole point of these
+		# is that they sit in somebody else's part of the map without being
+		# theirs.
+		var faction: String = String(t.get("faction", ""))
+		if faction == "":
+			faction = Sim.region_faction(c.x, c.y)
 		var ground: float = Sim.height_at(c.x, c.y)
 		var biome: String = Sim.biome_kind(c.x, c.y, ground,
 			Sim.normal_at(c.x, c.y).y)
@@ -1018,6 +1221,11 @@ const SCAT_SPECIES := {
 ## drawing from the shared one, because a single sequence read by several
 ## threads is neither deterministic nor safe. The layout is different from the
 ## one the serial version produced; it is the same layout every run.
+var _scat_pts := PackedVector2Array()
+var _scat_h := PackedFloat32Array()
+var _scat_slope := PackedFloat32Array()
+var _scat_surf := PackedFloat32Array()
+
 const SCAT_TASKS := 24
 ## Per slice, so the total is a round 150,000 without an integer division that
 ## quietly loses the remainder.
@@ -1033,6 +1241,45 @@ func _scatter_nature() -> void:
 	if cached is Dictionary and not (cached as Dictionary).is_empty():
 		cells = cached
 	else:
+		# Every candidate position first, then the field for the whole lot in
+		# two calls.
+		#
+		# Asked for a point at a time this was five crossings of the extension
+		# boundary per tree -- the height, and four more for the slope -- from
+		# twenty-four workers at once, and they queue there: measured, a call
+		# that costs a quarter of a microsecond on its own cost six in the
+		# crowd, and scattering the world took eighty-six seconds. Batched, the
+		# workers touch nothing outside GDScript and the arithmetic runs across
+		# the cores inside the extension instead.
+		_scat_pts = PackedVector2Array()
+		_scat_pts.resize(SCAT_TASKS * SCAT_PER_TASK)
+		for t in SCAT_TASKS:
+			var prng := RandomNumberGenerator.new()
+			prng.seed = 20260821 + t * 7919
+			for i in SCAT_PER_TASK:
+				_scat_pts[t * SCAT_PER_TASK + i] = Vector2(
+					prng.randf_range(-SCAT_HALF * SCAT_CELL, SCAT_HALF * SCAT_CELL),
+					prng.randf_range(-SCAT_HALF * SCAT_CELL * 1.6,
+						SCAT_HALF * SCAT_CELL * 1.6))
+		if Sim.native != null:
+			_scat_h = Sim.native.grounds_at(_scat_pts, true)
+			_scat_slope = Sim.native.slopes_at(_scat_pts)
+			# and the surface as the mesh draws it, which is four more heights
+			# apiece and was the last thing the workers were crossing the
+			# boundary for
+			_scat_surf = Sim.native.surfaces_at(_scat_pts, Terrain.BASE_CELL)
+		else:
+			_scat_h = PackedFloat32Array()
+			_scat_slope = PackedFloat32Array()
+			_scat_h.resize(_scat_pts.size())
+			_scat_slope.resize(_scat_pts.size())
+			_scat_surf = PackedFloat32Array()
+			_scat_surf.resize(_scat_pts.size())
+			for i in _scat_pts.size():
+				var q: Vector2 = _scat_pts[i]
+				_scat_h[i] = Sim.height_at(q.x, q.y)
+				_scat_slope[i] = Sim.normal_at(q.x, q.y).y
+				_scat_surf[i] = Terrain.surface_height(q.x, q.y)
 		_scat_out = []
 		_scat_out.resize(SCAT_TASKS)
 		var gid := WorkerThreadPool.add_group_task(_scat_slice, SCAT_TASKS, -1, true,
@@ -1070,15 +1317,20 @@ func _scatter_nature() -> void:
 ## Runs on a worker. Reads the height, road and biome fields, which are all
 ## built by now and none of which it writes to.
 func _scat_slice(t: int) -> void:
+	# Positions and ground come in already worked out; this RNG only dresses
+	# what survives, so its stream no longer has to line up with the one that
+	# placed the candidates.
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 20260821 + t * 7919
+	rng.seed = 90210041 + t * 7919
+	var base: int = t * SCAT_PER_TASK
 	var out: Array = []
 	for i in SCAT_PER_TASK:
-		var x := rng.randf_range(-SCAT_HALF * SCAT_CELL, SCAT_HALF * SCAT_CELL)
-		var z := rng.randf_range(-SCAT_HALF * SCAT_CELL * 1.6, SCAT_HALF * SCAT_CELL * 1.6)
+		var p: Vector2 = _scat_pts[base + i]
+		var x := p.x
+		var z := p.y
 		if absf(x) < 330.0 and absf(z) < 2150.0:
 			continue                                        # keep the field clear
-		var y := Sim.height_at(x, z)
+		var y: float = _scat_h[base + i]
 		if y < Sim.WATER_LEVEL + 2.0 or y > 2400.0:
 			continue
 		# On the surface as it is drawn, not as the field computes it. The two
@@ -1086,10 +1338,10 @@ func _scat_slice(t: int) -> void:
 		# get coarse, and a tree standing on the analytic height then hangs in
 		# the air above the triangles -- which is what you see looking up at the
 		# underside of the ground.
-		y = Terrain.surface_height(x, z)
+		y = _scat_surf[base + i]
 		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
 			continue
-		var slope := Sim.normal_at(x, z).y
+		var slope: float = _scat_slope[base + i]
 		if slope < 0.55:
 			continue                                        # nothing clings to a cliff
 		var biome := Sim.biome_kind(x, z, y, slope)

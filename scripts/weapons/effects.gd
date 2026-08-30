@@ -146,6 +146,9 @@ static func nuke(world: Node, pos: Vector3, lethal: float) -> void:
 	var fb := _NukeBall.new()
 	fb.lethal = lethal
 	fb.flash = flash
+	# so the cap can have a lit top and a dark underside
+	if "_sun" in world:
+		fb.sun_node = world.get("_sun")
 	fb.position = pos
 	world.add_child(fb)
 	# the ground wave: a ring of dust running outward
@@ -195,8 +198,8 @@ class _NukeBall extends Node3D:
 	var flash: OmniLight3D = null
 	var _t := 0.0
 	var _ball: MeshInstance3D
-	var _stem: MeshInstance3D
-	var _cap: MeshInstance3D
+	var _vol: MeshInstance3D
+	var sun_node: Node3D = null
 	var _mat: StandardMaterial3D
 	var _smoke: ShaderMaterial
 
@@ -216,21 +219,34 @@ class _NukeBall extends Node3D:
 		_ball.mesh = sm
 		_ball.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_ball)
-		# The column and the cap are smoke. A solid mesh in a flat dark colour
-		# reads as exactly what it is -- a black cylinder -- so this breaks the
-		# surface up with noise and lets the silhouette go soft, which is what
-		# makes a cloud read as a volume rather than an object.
+		# The column and the cap are a volume, not a shape. A tapered cylinder
+		# with a sphere on top is a cone and a ball however the surface is
+		# painted -- the silhouette gives it away from every angle, and a
+		# mushroom cloud is the one thing in the game whose whole character is
+		# that it has no surface. This is a box with the cloud raymarched
+		# inside it: the density field is the mushroom, and what you see is how
+		# much of it the light got through.
 		var ssh := Shader.new()
 		ssh.code = """
 shader_type spatial;
-// Back faces off. With them on you saw the inside of the column through the
-// outside of it, which is why it read as a transparent shell rather than a
-// solid mass of smoke.
-render_mode cull_back, diffuse_burley, depth_draw_opaque;
-uniform vec3 tint : source_color = vec3(0.09, 0.085, 0.08);
+// Back faces, so the volume still draws when the camera is inside the box, and
+// no depth written because a cloud is not a surface to occlude against.
+render_mode unshaded, cull_front, blend_mix, depth_draw_never, depth_test_disabled;
+
+uniform vec3 tint : source_color = vec3(0.46, 0.42, 0.38);
+uniform vec3 lit : source_color = vec3(1.0, 0.94, 0.86);
+uniform vec3 sun_dir = vec3(0.4, 0.8, 0.35);
 uniform float opacity : hint_range(0.0, 1.0) = 0.9;
 uniform float t = 0.0;
-varying vec3 lp;
+// The shape, in fractions of the box: where the cap sits, how wide and how
+// thick it is, and how fat the column is.
+uniform float cap_y = 0.6;
+uniform float cap_r = 0.4;
+uniform float cap_h = 0.15;
+uniform float stem_r = 0.08;
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+
+varying vec3 wpos;
 
 float h31(vec3 p) {
 	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -240,65 +256,138 @@ float vnoise(vec3 p) {
 	vec3 i = floor(p);
 	vec3 f = fract(p);
 	f = f * f * (3.0 - 2.0 * f);
-	float n000 = h31(i);
-	float n100 = h31(i + vec3(1.0, 0.0, 0.0));
-	float n010 = h31(i + vec3(0.0, 1.0, 0.0));
-	float n110 = h31(i + vec3(1.0, 1.0, 0.0));
-	float n001 = h31(i + vec3(0.0, 0.0, 1.0));
-	float n101 = h31(i + vec3(1.0, 0.0, 1.0));
-	float n011 = h31(i + vec3(0.0, 1.0, 1.0));
-	float n111 = h31(i + vec3(1.0, 1.0, 1.0));
-	return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
-		mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+	return mix(mix(mix(h31(i), h31(i + vec3(1, 0, 0)), f.x),
+			mix(h31(i + vec3(0, 1, 0)), h31(i + vec3(1, 1, 0)), f.x), f.y),
+		mix(mix(h31(i + vec3(0, 0, 1)), h31(i + vec3(1, 0, 1)), f.x),
+			mix(h31(i + vec3(0, 1, 1)), h31(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+float fbm(vec3 p) {
+	float v = 0.0;
+	float a = 0.5;
+	for (int i = 0; i < 4; i++) {
+		v += a * vnoise(p);
+		p *= 2.07;
+		a *= 0.5;
+	}
+	return v;
+}
+
+// The cloud, in the box's own space: the unit cube, ground at y = -0.5.
+float density(vec3 p) {
+	float h = clamp(p.y + 0.5, 0.0, 1.0);
+	float r = length(p.xz);
+	// The column: narrow at the base, widening as it rises, and thinning out
+	// where it feeds into the cap.
+	float sr = stem_r * (0.55 + 0.9 * h);
+	float stem = smoothstep(sr, sr * 0.25, r)
+		* smoothstep(0.0, 0.10, h)
+		* smoothstep(cap_y + 0.05, cap_y - 0.28, h);
+	// The cap: a dome on top of the column, undercut underneath, with the rim
+	// rolled outward and down. That undercut is the whole difference between a
+	// mushroom and a tree.
+	float dy = (h - cap_y) / max(cap_h, 0.001);
+	float rr = r / max(cap_r, 0.001);
+	float dome = smoothstep(1.0, 0.40, length(vec2(rr, dy * 1.15)));
+	float roll = smoothstep(0.42, 0.0, abs(rr - 0.76))
+		* smoothstep(1.7, 0.2, abs(dy + 0.40));
+	float d = max(stem, max(dome, roll * 0.9));
+	if (d <= 0.002) {
+		return 0.0;
+	}
+	// Billows, turning over slowly as the thing stands there.
+	vec3 q = p * 5.5 + vec3(0.0, -t * 0.05, 0.0);
+	float n = fbm(q) * 0.72 + fbm(q * 2.7) * 0.28;
+	d *= smoothstep(0.30, 0.74, n * 0.6 + 0.42);
+	return clamp(d, 0.0, 1.0);
 }
 
 void vertex() {
-	lp = VERTEX;
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 }
 
 void fragment() {
-	// billowing: three octaves, drifting slowly upward
-	vec3 q = lp * 1.7 + vec3(0.0, -t * 0.06, 0.0);
-	float n = vnoise(q) * 0.55 + vnoise(q * 2.3) * 0.30 + vnoise(q * 5.1) * 0.15;
-	// soft edges: the silhouette thins out instead of ending at a hard rim
-	float rim = 1.0 - abs(dot(normalize(NORMAL), normalize(VIEW)));
-	// Thick through the body, thinning only at the very edge of the silhouette.
-	// The old falloff took 85% of the alpha off across most of the face, so
-	// even the middle of the cloud was half see-through.
-	float a = opacity * mix(0.55, 1.0, smoothstep(0.02, 0.45, n))
-		* (1.0 - pow(rim, 3.5) * 0.70);
-	// the billows are lighter where they catch the light and dirtier in the
-	// folds, which is most of what makes a cloud read as a cloud
-	ALBEDO = tint * (0.72 + 0.75 * n);
-	ALPHA = clamp(a, 0.0, 1.0);
-	ROUGHNESS = 1.0;
+	mat4 inv_model = inverse(MODEL_MATRIX);
+	vec3 wdir = normalize(wpos - CAMERA_POSITION_WORLD);
+	// Into the box's space. The direction is deliberately not renormalised:
+	// as the image of a unit world vector it keeps distances in world units,
+	// so one step here is one metre out there and the depth test below can be
+	// compared against it directly.
+	vec3 lo = (inv_model * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz;
+	vec3 ld = mat3(inv_model) * wdir;
+	// Guarded one component at a time. Building a vec3 out of the bvec3 that
+	// equal() returns is a GLSL conversion Godot's shader language does not
+	// take, and a sky shader that fails to compile reports nothing and simply
+	// draws none of this.
+	ld.x = abs(ld.x) < 1e-9 ? 1e-9 : ld.x;
+	ld.y = abs(ld.y) < 1e-9 ? 1e-9 : ld.y;
+	ld.z = abs(ld.z) < 1e-9 ? 1e-9 : ld.z;
+	vec3 ta = (vec3(-0.5) - lo) / ld;
+	vec3 tb = (vec3(0.5) - lo) / ld;
+	vec3 tmin = min(ta, tb);
+	vec3 tmax = max(ta, tb);
+	float t0 = max(max(tmin.x, tmin.y), max(tmin.z, 0.0));
+	float t1 = min(min(tmax.x, tmax.y), tmax.z);
+	if (t1 <= t0) {
+		discard;
+	}
+	// Stop at whatever is already drawn there, so a hillside in front of the
+	// column hides it instead of the column being painted over the hill.
+	float raw = texture(depth_tex, SCREEN_UV).r;
+	if (raw > 0.0) {
+		vec4 vw = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, raw, 1.0);
+		t1 = min(t1, length(vw.xyz / vw.w));
+	}
+	if (t1 <= t0) {
+		discard;
+	}
+	const int STEPS = 34;
+	float dt = (t1 - t0) / float(STEPS);
+	// An ordered offset, so the march's own steps do not show as shells.
+	float jit = fract(sin(dot(SCREEN_UV, vec2(41.7, 289.1))) * 43758.5453);
+	vec4 acc = vec4(0.0);
+	for (int i = 0; i < STEPS; i++) {
+		if (acc.a > 0.985) {
+			break;
+		}
+		vec3 sp = lo + ld * (t0 + (float(i) + jit) * dt);
+		float d = density(sp);
+		if (d <= 0.002) {
+			continue;
+		}
+		// How much sun reaches this lump, marched a few steps towards it. This
+		// is what gives the cap a lit top and a dark underside instead of one
+		// flat tone.
+		vec3 sl = normalize(mat3(inv_model) * normalize(sun_dir));
+		float shade = 1.0;
+		float ls = 0.05;
+		for (int j = 1; j <= 4; j++) {
+			shade *= exp(-density(sp + sl * ls * float(j)) * 2.6);
+			ls *= 1.6;
+		}
+		vec3 col = mix(tint, lit, clamp(shade, 0.0, 1.0) * 0.85);
+		float a = clamp(d * dt * 2.4, 0.0, 1.0) * opacity;
+		acc.rgb += col * a * (1.0 - acc.a);
+		acc.a += a * (1.0 - acc.a);
+	}
+	if (acc.a < 0.004) {
+		discard;
+	}
+	ALBEDO = acc.rgb / max(acc.a, 0.001);
+	ALPHA = clamp(acc.a, 0.0, 1.0);
 }
 """
 		_smoke = ShaderMaterial.new()
 		_smoke.shader = ssh
-		# tapered and many sided: a straight-walled fourteen sided pipe is the
-		# other half of why it looked like a cylinder
-		var cy := CylinderMesh.new()
-		cy.top_radius = 1.35
-		cy.bottom_radius = 0.55
-		cy.height = 2.0
-		cy.radial_segments = 26
-		cy.rings = 8
-		cy.material = _smoke
-		_stem = MeshInstance3D.new()
-		_stem.mesh = cy
-		_stem.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(_stem)
-		var capm := SphereMesh.new()
-		capm.radius = 1.0
-		capm.height = 2.0
-		capm.radial_segments = 18
-		capm.rings = 10
-		capm.material = _smoke
-		_cap = MeshInstance3D.new()
-		_cap.mesh = capm
-		_cap.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(_cap)
+		var bx := BoxMesh.new()
+		bx.size = Vector3.ONE
+		bx.material = _smoke
+		_vol = MeshInstance3D.new()
+		_vol.mesh = bx
+		_vol.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# it is a volume, so it must not be culled by its own flat box bounds
+		_vol.extra_cull_margin = 16384.0
+		add_child(_vol)
 
 	func _process(delta: float) -> void:
 		_t += delta
@@ -313,14 +402,24 @@ void fragment() {
 		var rise: float = lethal * 1.1 * pow(grow, 0.65)
 		_ball.scale = Vector3.ONE * br * (1.0 - 0.55 * grow)
 		_ball.position = Vector3(0, br * 0.6 + rise * 0.25, 0)
-		_stem.scale = Vector3(lethal * 0.10 * (1.0 + grow), maxf(rise, 1.0) * 0.5,
-			lethal * 0.10 * (1.0 + grow))
-		_stem.position = Vector3(0, rise * 0.5, 0)
-		# the cap keeps spreading long after it has stopped climbing
+		# The box the cloud is marched in, and where the shape sits inside it.
+		# The cap keeps spreading long after it has stopped climbing.
 		var spread: float = 0.42 * grow + 0.30 * life
-		_cap.scale = Vector3(lethal * spread, lethal * (0.20 * grow + 0.06 * life),
-			lethal * spread)
-		_cap.position = Vector3(0, rise, 0)
+		var cap_w: float = lethal * spread
+		var cap_th: float = lethal * (0.20 * grow + 0.06 * life)
+		var box_h: float = maxf(rise + cap_th * 2.4, lethal * 0.5)
+		var box_w: float = maxf(cap_w * 2.6, lethal * 0.6)
+		_vol.scale = Vector3(box_w, box_h, box_w)
+		_vol.position = Vector3(0, box_h * 0.5, 0)
+		_smoke.set_shader_parameter("cap_y", clampf(rise / box_h, 0.08, 0.94))
+		_smoke.set_shader_parameter("cap_r",
+			clampf(cap_w / (box_w * 0.5), 0.02, 0.95))
+		_smoke.set_shader_parameter("cap_h", clampf(cap_th / box_h, 0.02, 0.45))
+		_smoke.set_shader_parameter("stem_r",
+			clampf(lethal * 0.10 * (1.0 + grow) / (box_w * 0.5), 0.01, 0.40))
+		if is_instance_valid(sun_node):
+			_smoke.set_shader_parameter("sun_dir",
+				-sun_node.global_transform.basis.z)
 		# The fireball glows white, cools through orange and goes out.
 		var heat: float = clampf(1.0 - _t / 5.0, 0.0, 1.0)
 		_mat.albedo_color = Color(1.0, 0.55 + 0.40 * heat, 0.28 + 0.45 * heat,
@@ -335,7 +434,10 @@ void fragment() {
 		# 0.08 meant no amount of sun could make it read as anything but a hole
 		# cut in the sky.
 		_smoke.set_shader_parameter("tint", Vector3(
-			lerpf(1.0, 0.46, soot), lerpf(0.62, 0.42, soot), lerpf(0.30, 0.38, soot)))
+			lerpf(0.90, 0.20, soot), lerpf(0.52, 0.18, soot), lerpf(0.24, 0.16, soot)))
+		# what the sunlit side of it looks like, which is most of what you see
+		_smoke.set_shader_parameter("lit", Vector3(
+			lerpf(1.0, 0.78, soot), lerpf(0.80, 0.74, soot), lerpf(0.52, 0.68, soot)))
 		_smoke.set_shader_parameter("opacity",
 			clampf(minf(_t / 1.5, 1.0) * (1.0 - pow(life, 2.4)), 0.0, 0.94))
 		_smoke.set_shader_parameter("t", _t)

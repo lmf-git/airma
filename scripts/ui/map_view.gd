@@ -9,6 +9,9 @@ extends Control
 ## of ground in the middle of a great deal of nothing, which is exactly what one
 ## chunk looks like. It now covers the whole world, and at enough resolution
 ## that the extra ground is worth having.
+## The baked relief, fetched in one block before the rows are dispatched.
+var _relief := PackedFloat32Array()
+
 const RES := 512
 const HALF := 600000.0         # metres covered by the baked image, each way
 
@@ -57,6 +60,17 @@ func bake() -> void:
 	if cached is PackedByteArray and (cached as PackedByteArray).size() == RES * RES * 3:
 		buf = cached
 	else:
+		# The whole relief in one call before any row starts.
+		#
+		# Each pixel wants three heights -- itself and a step east and south for
+		# the hill shading -- and asking for them a point at a time from every
+		# row worker means half a million crossings of the extension boundary
+		# from eight threads that then queue at it. As a block it is one call,
+		# worked out across the cores inside.
+		var step0 := HALF * 2.0 / float(RES)
+		_relief = PackedFloat32Array()
+		if Sim.native != null:
+			_relief = Sim.native.grounds(-HALF, -HALF, step0, RES + 1)
 		_map_rows = []
 		_map_rows.resize(RES)
 		var gid := WorkerThreadPool.add_group_task(_bake_row, RES, -1, true,
@@ -88,9 +102,12 @@ func _bake_row(j: int) -> void:
 	var z := -HALF + float(j) * step
 	var row := PackedByteArray()
 	row.resize(RES * 3)
+	var n1: int = RES + 1
+	var ok: bool = _relief.size() == n1 * n1
 	for i in RES:
 		var x := -HALF + float(i) * step
-		var h := Sim.height_at(x, z)
+		var h: float = Sim._deform_top(_relief[j * n1 + i], x, z) if ok \
+			else Sim.height_at(x, z)
 		var c: Color
 		if h < Sim.WATER_LEVEL:
 			c = Color(0.06, 0.16, 0.26).lerp(Color(0.10, 0.24, 0.34),
@@ -98,8 +115,10 @@ func _bake_row(j: int) -> void:
 		else:
 			c = Sim.biome_colour(x, z, h, 1.0)
 			# hill shade from the local gradient, sun from the north west
-			var dx := Sim.height_at(x + step, z) - h
-			var dz := Sim.height_at(x, z + step) - h
+			var dx: float = (Sim._deform_top(_relief[j * n1 + i + 1], x + step, z)
+				if ok else Sim.height_at(x + step, z)) - h
+			var dz: float = (Sim._deform_top(_relief[(j + 1) * n1 + i], x, z + step)
+				if ok else Sim.height_at(x, z + step)) - h
 			var shade: float = clampf(0.72 + (-dx - dz) / (step * 0.55), 0.35, 1.5)
 			c = Color(c.r * shade, c.g * shade, c.b * shade)
 			if Sim.road_distance(x, z) < step * 0.8:

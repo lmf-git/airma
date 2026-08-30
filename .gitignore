@@ -2,3 +2,5 @@
 reference/
 .DS_Store
 RealisticTerrain
+# Rust build artefacts: the dylib is rebuilt from source, not tracked
+native/target/

@@ -139,6 +139,7 @@ var _road_test := false
 var _skirt_test := false
 var _lod_test := false
 var _ab_test := false
+var _accel_test := false
 var _land_test := false
 var _subview_test := false
 var _reach_test := false
@@ -555,7 +556,10 @@ func _ready() -> void:
 	menu.join_requested.connect(_join_game)
 	menu.resume_requested.connect(_resume)
 	ui.add_child(menu)
-	_set_preview(menu.jet_id)
+	# Not yet: this puts a vehicle on the hangar turntable, forty metres in
+	# front of the menu camera, and the menu camera is the one running while the
+	# world is still being built. Built here it stood there through the rest of
+	# the loading screen.
 	# Everything generated this run that will be the same the next one.
 	WorldBake.put_grown("node_err", Terrain._err)
 	WorldBake.finish()
@@ -569,6 +573,16 @@ func _ready() -> void:
 		print("[boot] scenery %s" % str(scenery._stats))
 		print("[boot] obstacles %s" % str(Obstacles.stats))
 		print("[boot] bake %s" % str(WorldBake.stats))
+	# Hold the screen until the ground is actually there. It used to come down
+	# the moment this coroutine returned, which is before the terrain queue has
+	# drained -- so the first thing on screen was a vehicle sitting on chunks
+	# that had not arrived, with the country building itself around it.
+	var settle := 0
+	while terrain.pending_count() > 0 and settle < 400:
+		terrain.flush_pending(48)
+		await _paint("Laying the ground", 0.97,
+			"%d chunks left" % terrain.pending_count())
+		settle += 1
 	await _paint("Ready", 1.0)
 	booting = false
 	if _loading != null:
@@ -577,6 +591,8 @@ func _ready() -> void:
 		_loading = null
 		if is_instance_valid(lp):
 			lp.queue_free()
+	# ...here, with the screen down and the menu about to be shown.
+	_set_preview(menu.jet_id)
 	_parse_cmdline()
 
 ## Show where the build has got to and give the engine a frame to draw it in.
@@ -617,8 +633,9 @@ func _environment() -> void:
 	env.fog_mode = Environment.FOG_MODE_DEPTH
 	env.fog_light_color = Color(0.68, 0.76, 0.86)
 	env.fog_density = 0.0
-	env.fog_depth_begin = 6500.0
-	env.fog_depth_end = 38000.0
+	# far enough out to be horizon haze rather than a wall a few kilometres off
+	env.fog_depth_begin = 24000.0
+	env.fog_depth_end = 140000.0
 	env.fog_depth_curve = 1.6
 	env.fog_sky_affect = 0.08
 	env.glow_enabled = true
@@ -3056,6 +3073,74 @@ func _process(delta: float) -> void:
 		return
 	# Which aeroplanes light up at the back. A turbofan with no reheat should
 	# have nothing glowing in its exhaust and no plume behind it.
+	if _accel_test:
+		_accel_test = false
+		# Full burner, level, from a standing start in the air: how long the
+		# aeroplane actually takes to get up to speed, and what it tops out at.
+		await get_tree().physics_frame
+		if not is_instance_valid(player):
+			print("[accel] no aeroplane")
+			get_tree().quit()
+			return
+		# An empty sky. This is a measurement of what the airframe can do, and
+		# the first three attempts were measuring how long it survives: a SAM
+		# killed it at twenty-eight seconds, and a dead aeroplane stops running
+		# its force model, so the frozen readouts looked exactly like a speed
+		# it could not pass.
+		for n in get_tree().get_nodes_in_group("hittable"):
+			if n != player and is_instance_valid(n):
+				n.queue_free()
+		for m2 in get_tree().get_nodes_in_group("missiles"):
+			if is_instance_valid(m2):
+				m2.queue_free()
+		await get_tree().physics_frame
+		player.global_position = Vector3(0.0, _dash_alt, 0.0)
+		player.linear_velocity = -player.global_transform.basis.z * 180.0
+		player.fuel = maxf(player.fuel, 1000.0)
+		# clean: a dash test with the gear hanging out is measuring the gear
+		player.gear_down = false
+		player.flaps = 0.0
+		if "airbrake" in player:
+			player.airbrake = false
+		var t_start := -1.0
+		var t_mach1 := -1.0
+		var best_m := 0.0
+		var best_v := 0.0
+		var clock := 0.0
+		for f in 36000:                                   # five minutes
+			await get_tree().physics_frame
+			if not is_instance_valid(player):
+				break
+			clock += 1.0 / 120.0
+			# Nothing is allowed to shoot the test article down. The first run
+			# of this had it killed by a SAM at twenty-eight seconds, and since
+			# the force model stops running on a dead aeroplane the readouts
+			# froze -- which read exactly like the aircraft hitting a speed it
+			# could not pass.
+			player.health = 100.0
+			var m: float = player.mach
+			if t_start < 0.0 and m >= 0.60:
+				t_start = clock
+			if t_mach1 < 0.0 and m >= 1.20:
+				t_mach1 = clock
+			if m > best_m:
+				best_m = m
+				best_v = player.linear_velocity.length()
+			if f % 1200 == 0:
+				print("[accel] t=%5.1f s  mach %.2f  %4.0f m/s  %4.0f kt IAS  alt %5.0f  agl %5.0f  thr %.2f  alive=%s ghost=%s hp %.0f  aoa %.1f  pitch %.1f" % [
+					clock, m, player.linear_velocity.length(),
+					player.ias * 1.94384, player.global_position.y,
+					player.agl, player.power, str(player.alive),
+					str(player.ghost), player.health,
+					rad_to_deg(player.aoa),
+					rad_to_deg(asin(clampf(
+						-player.global_transform.basis.z.y, -1.0, 1.0)))])
+		print("[accel] mach 0.6 at %.1f s, mach 1.2 at %.1f s -> %.1f s to accelerate" % [
+			t_start, t_mach1, t_mach1 - t_start])
+		print("[accel] best mach %.2f (%.0f m/s) at %.0f m" % [
+			best_m, best_v, _dash_alt])
+		get_tree().quit()
+		return
 	if _ab_test:
 		_ab_test = false
 		var bad := 0
@@ -4341,8 +4426,18 @@ func _process(delta: float) -> void:
 		# road rather than a motorway. What is gated now is the thing that was
 		# actually wrong: how much of the landscape the road destroys, and
 		# whether the carriageway is level across its width.
+		# The cutting bar tracks the design limit rather than being written
+		# down twice. It was 32 m against a 16 m limit; the limit is now 34,
+		# deliberately -- a road through country steeper than it may itself be
+		# is built in a deep cutting, and holding the earthworks below the
+		# depth at which a tunnel takes over meant it simply lay on the hill at
+		# whatever gradient the hill had. A little over the limit is the
+		# grading either side of the carriageway, not the cutting itself: the
+		# limit applies at the centreline, and the graded shoulder reaches
+		# 31.5 m either side of it, so on a hillside the uphill edge of a bench
+		# cut is necessarily several metres deeper than the middle of the road.
 		print("[roads] RESULT: %s" % ("ok" if g95 < 0.25 and c95 < 0.06
-			and cut_worst < 32.0 else "FAILED"))
+			and cut_worst < Sim.ROAD_CUT_MAX + 8.0 else "FAILED"))
 		get_tree().quit()
 		return
 	if _town_test:
@@ -6833,12 +6928,20 @@ func _spawn_tank(at: Vector3, yaw: float, team: int, kind := "m1a2") -> Tank:
 	_reset_interp.call_deferred(t)
 	return t
 
-func _spawn_walker(at: Vector3) -> void:
+## `thrown` puts the man in the air with that velocity and a canopy over him,
+## which is what an ejection is. Left at zero he is simply stood on the ground.
+func _spawn_walker(at: Vector3, thrown := Vector3.ZERO) -> void:
 	on_foot = true
 	walker = Walker.new()
 	walker.name = "Walker"
 	add_child(walker)
-	walker.global_position = Vector3(at.x, Sim.height_at(at.x, at.z), at.z)
+	if thrown == Vector3.ZERO:
+		walker.global_position = Vector3(at.x, Sim.height_at(at.x, at.z), at.z)
+	else:
+		walker.global_position = at
+		walker.vel = thrown
+		walker.on_floor = false
+		walker.set_chute(true)
 	walker.yaw = deg_to_rad(90.0)
 	walker.board_requested.connect(_board)
 	walker.died.connect(_on_walker_died)
@@ -7485,17 +7588,20 @@ func _do_aircraft_action(id: String) -> void:
 			actions.close()
 			_eject()
 
+## Leaving the aeroplane. You go with the seat: the pilot is the player from
+## here, under canopy, and lands as a man on foot rather than as a ragdoll
+## somebody else watches fall.
 func _eject() -> void:
 	if not is_instance_valid(player) or not player.alive:
 		return
-	Sim.report("EJECT", Sim.Ev.BAD)
-	var rd := Ragdoll.new()
-	rd.spawn_from(Transform3D(player.global_transform.basis,
-		player.global_transform * player.cockpit_offset()),
-		player.linear_velocity * 0.5 + Vector3(0, 24.0, 0))
-	add_child(rd)
+	Sim.report("EJECT — canopy out", Sim.Ev.BAD)
+	var seat: Vector3 = player.global_transform * player.cockpit_offset()
+	# up the rails first, and carrying half of what the aeroplane had
+	var thrown: Vector3 = player.linear_velocity * 0.5 + Vector3(0, 24.0, 0)
 	player.break_part("canopy")
-	player.explode()
+	# The pilot is leaving in the seat, so the wreck does not throw one as well.
+	player.explode(false)
+	_spawn_walker(seat, thrown)
 
 ## Take command of a ship. The helm is the same stick as a tank's, the mount is
 ## laid with the mouse, and U puts you back where you came from.
@@ -8912,6 +9018,9 @@ func _parse_cmdline() -> void:
 			_lod_test = true
 		elif a == "--abtest":
 			_ab_test = true
+		elif a == "--acceltest":
+			_accel_test = true
+			_auto = "dash"
 		elif a == "--cruiseland":
 			_land_test = true
 		elif a == "--subview":

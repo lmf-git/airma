@@ -5,25 +5,25 @@ extends Node3D
 const PRESETS := {
 	"clear": {
 		"cover_frac": 0.30, "density": 0.85, "base_alt": 2400.0, "top_alt": 3500.0, "cirrus": 0.22, "steps": 58, "name": "CLEAR", "hour": 13.2, "spread": 18000.0,
-		"fog": 7500.0, "fog_end": 42000.0, "sun": 1.18, "amb": 0.70,
+		"fog": 26000.0, "fog_end": 150000.0, "sun": 1.18, "amb": 0.70,
 		"top": Color(0.13, 0.28, 0.62), "horizon": Color(0.66, 0.75, 0.87),
 		"sun_rot": Vector3(-40, 136, 0), "fog_col": Color(0.68, 0.76, 0.86), "sun_col": Color(1.0, 0.96, 0.90),
 	},
 	"scattered": {
 		"cover_frac": 0.50, "density": 1.0, "base_alt": 2100.0, "top_alt": 3900.0, "cirrus": 0.35, "steps": 62, "name": "SCATTERED", "hour": 10.4, "spread": 22000.0,
-		"fog": 5200.0, "fog_end": 33000.0, "sun": 1.05, "amb": 0.78,
+		"fog": 21000.0, "fog_end": 130000.0, "sun": 1.05, "amb": 0.78,
 		"top": Color(0.16, 0.30, 0.60), "horizon": Color(0.70, 0.77, 0.86),
 		"sun_rot": Vector3(-36, 150, 0), "fog_col": Color(0.72, 0.78, 0.86), "sun_col": Color(1.0, 0.95, 0.88),
 	},
 	"overcast": {
 		"cover_frac": 0.80, "density": 1.35, "base_alt": 1400.0, "top_alt": 3200.0, "cirrus": 0.15, "steps": 68, "name": "OVERCAST", "hour": 15.1, "spread": 26000.0,
-		"fog": 2600.0, "fog_end": 19000.0, "sun": 0.55, "amb": 0.95,
+		"fog": 12000.0, "fog_end": 85000.0, "sun": 0.55, "amb": 0.95,
 		"top": Color(0.36, 0.40, 0.46), "horizon": Color(0.62, 0.65, 0.69),
 		"sun_rot": Vector3(-52, 120, 0), "fog_col": Color(0.63, 0.66, 0.70), "sun_col": Color(0.85, 0.87, 0.92),
 	},
 	"dusk": {
 		"cover_frac": 0.44, "density": 0.95, "base_alt": 2300.0, "top_alt": 3800.0, "cirrus": 0.45, "steps": 58, "name": "DUSK", "hour": 19.7, "spread": 20000.0,
-		"fog": 4200.0, "fog_end": 28000.0, "sun": 0.85, "amb": 0.55,
+		"fog": 18000.0, "fog_end": 115000.0, "sun": 0.85, "amb": 0.55,
 		"top": Color(0.09, 0.13, 0.34), "horizon": Color(0.86, 0.48, 0.28),
 		"sun_rot": Vector3(-9, 104, 0), "fog_col": Color(0.62, 0.44, 0.38), "sun_col": Color(1.0, 0.72, 0.46),
 	},
@@ -231,7 +231,7 @@ uniform int light_steps = 4;
 // round with free-look and the whole sky came with it. A uniform set from the
 // camera every frame is unambiguous.
 uniform vec3 cam_pos = vec3(0.0);
-uniform float march_far = 13000.0;
+uniform float march_far = 30000.0;
 
 group_uniforms high_cloud;
 uniform float cirrus = 0.35;
@@ -287,6 +287,35 @@ float fbm(vec3 p, float lod) {
 	return v / norm * 0.9375;
 }
 
+// Billow noise: the same field folded about its midpoint, so instead of smooth
+// hills it makes rounded lumps with creases between them.
+//
+// This is what was missing. A cloud built by thresholding plain fractal noise
+// against a coverage level is a set of large smooth blobs -- the boundary is
+// wherever a slowly varying field crosses a constant, so it is soft, round and
+// featureless at every scale. What makes cloud read as cloud is the
+// cauliflower: lumps piled on lumps, with the small ones carried on the
+// shoulders of the big ones. Folding the noise gives exactly that, and it costs
+// three octaves rather than a Worley field's twenty-seven taps per sample.
+float billow(vec3 p, float lod) {
+	float v = 0.0;
+	float a = 0.5;
+	float norm = 0.0;
+	for (int i = 0; i < 3; i++) {
+		float w = clamp((1.0 - lod) * 3.0 + 1.0 - float(i), 0.0, 1.0);
+		if (w > 0.001) {
+			v += a * w * (1.0 - abs(vnoise(p) * 2.0 - 1.0));
+			norm += a * w;
+		}
+		p *= 2.13;
+		a *= 0.5;
+	}
+	if (norm < 0.0001) {
+		return 0.5;
+	}
+	return v / norm;
+}
+
 // Density inside the slab. The vertical profile is what stops it looking like
 // fog in a box: thin at the base, full through the middle, eroded at the top,
 // which is the shape a cumulus actually has.
@@ -294,12 +323,21 @@ float cloud_density(vec3 p, float lod) {
 	vec3 q = p * 0.00026;                   // wider features: less like static
 	q += wind * wind_time * 0.00026;
 	float h = clamp((p.y - base_alt) / max(top_alt - base_alt, 1.0), 0.0, 1.0);
-	float shape = fbm(q, lod);
-	// A little detail, at a frequency that reads as billow rather than grain,
-	// and only where the sampling is fine enough to carry it.
-	shape += 0.10 * (1.0 - clamp(lod * 2.0, 0.0, 1.0)) * fbm(q * 2.6, lod);
+	// The broad field decides where there is cloud at all; the billows decide
+	// what it looks like. Mixed rather than multiplied, so the billows shape
+	// the mass instead of punching holes through it.
+	float shape = mix(fbm(q, lod), billow(q * 2.7, lod), 0.42);
 	float profile = smoothstep(0.0, 0.18, h) * (1.0 - smoothstep(0.55, 1.0, h));
 	float d = shape * profile - (1.0 - coverage);
+	if (d <= 0.0) {
+		return 0.0;
+	}
+	// Erode the edges, and only the edges. A boundary where a smooth field
+	// crosses a constant is a smooth curve however lumpy the inside is; biting
+	// finer billows out of the last of the density is what makes the outline
+	// ragged, which is most of what you actually see of a cloud.
+	float edge = 1.0 - smoothstep(0.0, 0.22, d);
+	d -= edge * 0.16 * (1.0 - billow(q * 7.3, lod));
 	return max(d, 0.0) * density_mul * 2.6;
 }
 
@@ -466,6 +504,10 @@ func apply(id: String, env: Environment, sun: DirectionalLight3D,
 	current = id if PRESETS.has(id) else "scattered"
 	_env_ref = env
 	var p: Dictionary = PRESETS[current]
+	# Haze, not soup. These distances were a few kilometres, so the country
+	# faded out before you could see any of it and every view was the inside of
+	# a grey bag. Pushed right out, the fog only softens the horizon -- which is
+	# what atmosphere actually does over tens of kilometres.
 	env.fog_light_color = p["fog_col"]
 	env.fog_depth_begin = p["fog"]
 	env.fog_depth_end = p["fog_end"]
@@ -497,20 +539,41 @@ var _fog_mat: ShaderMaterial
 ## a box rather than the whole sky because Godot's froxel grid only reaches as
 ## far as `volumetric_fog_length`; past that the sky shader takes over, and the
 ## two use the same density field so the join does not show.
+## The near volume. This is the cloud you can actually fly into -- the sky
+## shader's raymarch is background only, so with this off there is nothing in
+## front of the terrain and the sky reads as a painted backdrop.
+##
+## Turning it off was the wrong answer to "I hate the fog": the haze that was
+## closing the view in is the depth fog below, and that is what has been pushed
+## out. This is a separate thing and it is kept short, where its depth slices
+## are fine enough to be stable.
+const FOG_VOLUME := true
+
 func _ensure_fog(env: Environment) -> void:
+	if not FOG_VOLUME:
+		env.volumetric_fog_enabled = false
+		return
 	env.volumetric_fog_enabled = true
 	env.volumetric_fog_density = 0.0          # the volume supplies all of it
-	# Six kilometres was the whole reason the cloud "did not appear until you
-	# were close": the froxel grid is where the volumetric cloud exists at all,
-	# so beyond its length there simply was none, and the slab assembled itself
-	# around you as you flew into it. The grid is a fixed number of slices, so
-	# stretching it trades depth resolution for reach -- which is the right
-	# trade for cloud, whose detail is in its shape rather than along the view.
-	env.volumetric_fog_length = 22000.0
+	# Cloud is drawn twice, and each half has to do the job it is good at.
+	#
+	# This grid is the half you can fly into, and it is a fixed number of
+	# slices however long it is made. Stretched to twenty-two kilometres each
+	# slice was hundreds of metres deep, so cloud detail inside one aliased
+	# against it and the whole sky shook and swam with any movement of the
+	# camera. Kept short the slices are fine enough to be stable, and the sky
+	# shader's own raymarch -- which is in world space and does not care where
+	# the camera is -- draws everything beyond it.
+	env.volumetric_fog_length = 8000.0
 	env.volumetric_fog_detail_spread = 2.4
 	env.volumetric_fog_gi_inject = 0.0
 	env.volumetric_fog_temporal_reprojection_enabled = true
-	env.volumetric_fog_temporal_reprojection_amount = 0.92
+	# Held high. This is what averages the grid's noise out across frames, and
+	# dropping it to a half to make the cloud settle faster after a turn simply
+	# uncovered that noise: the sky then shook in every weather. The lag it
+	# causes is a symptom of the grid being too long, which is fixed above, not
+	# of the smoothing being too strong.
+	env.volumetric_fog_temporal_reprojection_amount = 0.90
 	if is_instance_valid(_fog):
 		return
 	_fog_mat = ShaderMaterial.new()
@@ -523,10 +586,10 @@ func _ensure_fog(env: Environment) -> void:
 	# Big enough that its edge is past anything you can pick out. At twelve
 	# kilometres the boundary sat inside visual range and the cloud built
 	# itself around you as you flew.
-	# and the slab has to be at least as wide as the grid now reaches, or the
-	# taper at its edge comes in before the grid runs out and puts the boundary
-	# back
-	_fog.size = Vector3(52000.0, 6000.0, 52000.0)
+	# wide enough that its taper sits outside the grid's reach, and no wider:
+	# the box costs nothing to make big, but it is the grid inside it that
+	# decides both the cost and the stability
+	_fog.size = Vector3(22000.0, 6000.0, 22000.0)
 	_fog.material = _fog_mat
 	add_child(_fog)
 
@@ -619,7 +682,10 @@ func _apply_sun(_force: bool) -> void:
 		_psm.set_shader_parameter("steps", int(p["steps"]))
 		# set explicitly rather than left on the shader's own default: an unset
 		# uniform reads back as null, which is a trap for anything inspecting it
-		_psm.set_shader_parameter("march_far", 13000.0)
+		# Everything past the froxel grid is this shader's job now, so it has to
+		# reach far enough to be the horizon rather than an edge in the middle
+		# distance.
+		_psm.set_shader_parameter("march_far", 30000.0)
 		_psm.set_shader_parameter("light_steps", 5)
 		_psm.set_shader_parameter("wind", Vector3(1.0, 0.0, 0.35))
 		_psm.set_shader_parameter("cirrus_alt", 9400.0)
