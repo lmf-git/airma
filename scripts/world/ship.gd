@@ -6,6 +6,7 @@ extends Node3D
 
 const KINDS := {
 	"destroyer": {
+		"faction": "usa",
 		"name": "Arleigh Burke destroyer", "len": 155.0, "beam": 20.0, "draught": 9.5,
 		"free": 9.0, "hp": 2200.0, "speed": 15.4, "sub": false,
 		"paint": Color(0.36, 0.39, 0.42), "deck": Color(0.30, 0.32, 0.34),
@@ -13,6 +14,7 @@ const KINDS := {
 		"mast": 22.0, "guns": 2, "vls": 32, "class": "warship",
 	},
 	"type45": {
+		"faction": "uk",
 		"name": "Type 45 destroyer", "len": 152.4, "beam": 21.2, "draught": 7.4,
 		"free": 10.5, "hp": 2050.0, "speed": 16.0, "sub": false,
 		"paint": Color(0.34, 0.37, 0.41), "deck": Color(0.28, 0.30, 0.33),
@@ -22,6 +24,7 @@ const KINDS := {
 		"mast": 27.0, "guns": 1, "vls": 48, "class": "warship",
 	},
 	"frigate": {
+		"faction": "uk",
 		"name": "Type 23 frigate", "len": 133.0, "beam": 16.1, "draught": 7.3,
 		"free": 8.0, "hp": 1500.0, "speed": 14.9, "sub": false,
 		"paint": Color(0.33, 0.36, 0.40), "deck": Color(0.28, 0.30, 0.33),
@@ -29,13 +32,54 @@ const KINDS := {
 		"mast": 19.0, "guns": 1, "vls": 16, "class": "warship",
 	},
 	"corvette": {
+		"faction": "russia",
 		"name": "Steregushchiy corvette", "len": 105.0, "beam": 13.0, "draught": 6.0,
 		"free": 7.0, "hp": 1100.0, "speed": 13.4, "sub": false,
 		"paint": Color(0.30, 0.33, 0.36), "deck": Color(0.26, 0.28, 0.31),
 		"super": [[-0.04, 0.26, 18.0, 9.0]],
 		"mast": 16.0, "guns": 1, "vls": 8, "class": "warship",
 	},
+	"type052d": {
+		"faction": "china",
+		"name": "Type 052D destroyer", "len": 157.0, "beam": 17.0, "draught": 6.5,
+		"free": 9.5, "hp": 2100.0, "speed": 15.7, "sub": false,
+		"paint": Color(0.32, 0.35, 0.39), "deck": Color(0.27, 0.29, 0.32),
+		"super": [[-0.11, 0.32, 28.0, 13.5], [0.13, 0.21, 17.0, 9.5]],
+		"mast": 24.0, "guns": 1, "vls": 64, "class": "warship",
+	},
+	"moudge": {
+		"faction": "iran",
+		"name": "Moudge frigate", "len": 95.0, "beam": 11.1, "draught": 3.3,
+		"free": 6.4, "hp": 900.0, "speed": 15.0, "sub": false,
+		"paint": Color(0.34, 0.36, 0.38), "deck": Color(0.28, 0.30, 0.32),
+		"super": [[-0.05, 0.30, 17.0, 8.5]],
+		"mast": 17.0, "guns": 1, "vls": 8, "class": "warship",
+	},
+	"lhd": {
+		"faction": "usa",
+		# An amphibious assault ship: a flat deck for helicopters, a well dock
+		# aft, and almost nothing that shoots. She is a very large thing that
+		# needs somebody else to protect her, which is the point of her.
+		"name": "Wasp amphibious assault ship", "len": 257.0, "beam": 32.0,
+		"draught": 8.1, "free": 18.0, "hp": 3400.0, "speed": 11.3, "sub": false,
+		"paint": Color(0.31, 0.34, 0.37), "deck": Color(0.22, 0.23, 0.25),
+		# island to starboard only, so the deck stays clear
+		"super": [[0.02, 0.26, 44.0, 9.0]],
+		"mast": 33.0, "guns": 1, "vls": 8, "class": "warship",
+	},
+	"missileboat": {
+		"faction": "iran",
+		# Small, fast and carrying far more than it looks like it should. The
+		# whole idea of a fast attack craft is that the missiles do not care how
+		# big the hull under them is.
+		"name": "Kaman missile boat", "len": 47.0, "beam": 7.1, "draught": 2.4,
+		"free": 3.8, "hp": 300.0, "speed": 18.5, "sub": false,
+		"paint": Color(0.29, 0.32, 0.35), "deck": Color(0.24, 0.26, 0.28),
+		"super": [[-0.05, 0.30, 9.0, 5.2]],
+		"mast": 11.0, "guns": 1, "vls": 4, "class": "boat",
+	},
 	"patrol": {
+		"faction": "usa",
 		"name": "Patrol boat", "len": 38.0, "beam": 7.0, "draught": 2.2,
 		"free": 3.4, "hp": 260.0, "speed": 18.0, "sub": false,
 		"paint": Color(0.28, 0.31, 0.29), "deck": Color(0.24, 0.26, 0.25),
@@ -43,6 +87,7 @@ const KINDS := {
 		"mast": 6.0, "guns": 1, "class": "boat",
 	},
 	"sub": {
+		"faction": "usa",
 		"name": "Attack submarine", "len": 110.0, "beam": 10.5, "draught": 8.0,
 		"free": 1.6, "hp": 1400.0, "speed": 12.0, "sub": true,
 		"paint": Color(0.14, 0.15, 0.16), "deck": Color(0.12, 0.13, 0.14),
@@ -51,6 +96,7 @@ const KINDS := {
 		"mast": 9.0, "guns": 0, "vls": 12, "class": "sub",
 	},
 	"cargo": {
+		"faction": "civil",
 		"name": "Container ship", "len": 210.0, "beam": 30.0, "draught": 12.0,
 		# A merchant hull is plate, not armour. At 1800 it was nearly as hard to
 		# sink as a destroyer and survived a 1,500 kg warhead with room to
@@ -522,8 +568,10 @@ func fire_vls(at_node: Node3D = null) -> bool:
 	if not defensive and cells_left <= _reserve_cells():
 		Sim.report("%s: tubes held for air defence" % display_name(), Sim.Ev.INFO)
 		return false
-	if defensive:
-		Sim.claim_engagement(tgt)
+	# Claimed whatever it is. Only inbound rounds were being booked, so the
+	# fleet counted how many tubes were on a missile and nothing at all about
+	# how many were on an aeroplane.
+	Sim.claim_engagement(tgt)
 	cells_left -= 1
 	vls_cd = 1.6
 	var from: Vector3 = global_transform * (_vls_muzzle + Vector3(0, 2.5, 0))
@@ -752,7 +800,7 @@ func _steer(brg: float, spd: float, delta: float) -> void:
 ## ship in the first place.
 func cycle_target() -> void:
 	var cand: Array = []
-	var reach: float = maxf(Sim.radar_range(), 26000.0)
+	var reach: float = maxf(Sim.coverage(team), 26000.0)
 	var eye: Vector3 = global_position + Vector3(0, maxf(mast_height(), 4.0), 0)
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or n == self or not (n is Node3D):
@@ -855,6 +903,17 @@ func _pick_threat() -> Node3D:
 		# no point shooting at something that arrives before we could get there
 		if tti < 4.0:
 			continue
+		# ...and that is not a four second test, it is a comparison. A cell
+		# leaves the tube at a standstill and works up to Mach four and a half,
+		# so it averages something like seven hundred metres a second: from
+		# twenty kilometres it is half a minute away from the intercept. Fired
+		# at a round that arrives before then it is simply thrown away, and that
+		# is where the tubes were going — measured over one engagement, 52 of
+		# 57 rounds went at inbound missiles and 3 of them got within a
+		# kilometre. Only take the shot the interceptor can actually make.
+		var my_tof: float = global_position.distance_to(mp) / 700.0
+		if my_tof > tti - 3.0:
+			continue
 		# and no point being the fourth ship to shoot at the same round while
 		# everything else comes through untouched
 		if Sim.engage_count(m) >= 2:
@@ -862,11 +921,31 @@ func _pick_threat() -> Node3D:
 		if tti < soonest:
 			soonest = tti
 			best = m as Node3D
+	# and the same reach test: an inbound round thirty kilometres away that the
+	# cell cannot catch is not an engagement, it is a wasted tube.
+	if best != null and not _round_reaches(best):
+		return null
 	return best
 
+## How far out a hull will engage a manoeuvring aeroplane. Not the round's
+## range -- an SM-2 will fly seventy kilometres, and the tubes were being
+## emptied at anything inside thirty-eight. Measured over one hundred second
+## engagement, by the range the shot was taken at:
+##
+##     under 8 km    8 rounds, 6 got within a kilometre   (75%)
+##     8 to 15 km   18 rounds, 1                          ( 6%)
+##     15 to 25 km  46 rounds, 4                          ( 9%)
+##     over 25 km   23 rounds, 2                          ( 9%)
+##
+## Seventy-three per cent of everything fired went at contacts beyond fifteen
+## kilometres, where the round has no realistic chance against a fighter that
+## is jinking and opening. Those shots are not defence, they are a sky full of
+## missiles flying at nothing — which is exactly what it looked like from the
+## deck. The engagement stops where it stops working.
+const AIR_ENGAGE := 12000.0
+
 func _pick_air() -> Node3D:
-	var best: Node3D = null
-	var bd := 38000.0
+	var cands: Array = []
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or not (n is Aircraft):
 			continue
@@ -874,8 +953,15 @@ func _pick_air() -> Node3D:
 			continue
 		if n.is_in_group("remote"):
 			continue
+		# Two rounds a contact, the same rule the anti-missile picture has
+		# always used. Without it every hull in the fleet fired at whatever was
+		# nearest, every few seconds, for as long as it lived: measured over one
+		# engagement, 127 rounds away with eight of them chasing a single
+		# aeroplane while everything else came through untouched.
+		if Sim.engage_count(n) >= 2:
+			continue
 		var d: float = global_position.distance_to((n as Node3D).global_position)
-		if d >= bd:
+		if d >= AIR_ENGAGE:
 			continue
 		# Terrain masking. A ship's radar horizon is a mast head and a lot of
 		# open water, but the moment the contact is over land with a ridge in
@@ -884,9 +970,46 @@ func _pick_air() -> Node3D:
 		if not Sim.line_of_sight(global_position + Vector3(0, mast_height(), 0),
 				(n as Node3D).global_position):
 			continue
-		bd = d
-		best = n as Node3D
-	return best
+		cands.append([d, n])
+	cands.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
+	# ...and the round has to be able to GET there. Being inside the seeker's
+	# range and in sight is not the same as being engageable: measured over one
+	# engagement, 87 of 98 rounds never came within a kilometre of what they
+	# were sent at, because the tubes were being emptied at fighters twenty to
+	# thirty kilometres out and opening. Fly the round forward and ask, exactly
+	# as an aeroplane does before it will let you take the shot.
+	var tried := 0
+	for c in cands:
+		if tried >= 3:
+			break
+		tried += 1
+		var tgt := c[1] as Node3D
+		if _round_reaches(tgt):
+			return tgt
+	return null
+
+## Can a cell actually make it to that contact from here? The launch geometry
+## is the one `fire_vls` uses, so the answer is about the shot that would
+## actually be taken.
+func _round_reaches(tgt: Node3D, round_id := "sm2") -> bool:
+	var from: Vector3 = global_transform * (_vls_muzzle + Vector3(0, 2.5, 0))
+	var rel: Vector3 = tgt.global_position - from
+	var brg := atan2(rel.x, -rel.z)
+	var el := deg_to_rad(62.0)
+	var dir := Vector3(sin(brg) * cos(el), sin(el), -cos(brg) * cos(el)).normalized()
+	# Where it will be by the time the round arrives, not where it is now. A
+	# fighter running out at five hundred metres a second is a different problem
+	# from the same fighter coming in.
+	var aim: Vector3 = tgt.global_position
+	var tv := Vector3.ZERO
+	if "linear_velocity" in tgt:
+		tv = tgt.linear_velocity
+	elif tgt.has_method("get_velocity"):
+		tv = tgt.call("get_velocity")
+	if tv.length_squared() > 1.0:
+		var tof: float = from.distance_to(aim) / 900.0
+		aim += tv * clampf(tof, 0.0, 45.0)
+	return WeaponSpec.can_reach(round_id, from, dir * 60.0, aim)
 
 ## Lay the mount for a ballistic shot with lead. Returns true once the solution
 ## is good enough to pull the lanyard. A shell at 820 m/s takes twelve seconds

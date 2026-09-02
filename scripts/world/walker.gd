@@ -169,6 +169,13 @@ func exit_frame(scene: Node) -> void:
 	var carry := Vector3.ZERO
 	if is_instance_valid(frame_owner) and "linear_velocity" in frame_owner:
 		carry = frame_owner.linear_velocity
+	# Walking off the ramp of an aeroplane at height is a parachute jump, and
+	# it was simply a fall: you inherited the transport's velocity and hit the
+	# ground at whatever that came to. A canopy above about fifty metres, which
+	# is the height below which one would not open anyway.
+	var agl: float = world_xf.origin.y - maxf(
+		Sim.height_at(world_xf.origin.x, world_xf.origin.z), Sim.WATER_LEVEL)
+	var jump: bool = agl > 50.0
 	frame.remove_child(self)
 	scene.add_child(self)
 	global_transform = world_xf
@@ -177,6 +184,15 @@ func exit_frame(scene: Node) -> void:
 	frame = null
 	frame_owner = null
 	on_floor = false
+	if jump:
+		# a moment of freefall first, so it reads as stepping out rather than
+		# being suspended from the tailgate
+		_chute_at = agl - 40.0
+		Sim.report("out the ramp — %d m, canopy on the way" % int(agl), Sim.Ev.INFO)
+
+## Height at which the canopy opens after stepping off a ramp. Negative means
+## there is no jump in progress.
+var _chute_at := -1.0
 
 ## Shoulder width, near enough, for deciding what he fits through.
 const BODY_R := 0.42
@@ -190,6 +206,14 @@ func _physics_process(delta: float) -> void:
 		else:
 			_step_in_frame(delta)
 			return
+	# Falling out of a transport: a few seconds of freefall, then the canopy.
+	if _chute_at >= 0.0:
+		var agl2: float = global_position.y - maxf(
+			Sim.height_at(global_position.x, global_position.z), Sim.WATER_LEVEL)
+		if agl2 <= _chute_at or agl2 < 60.0:
+			_chute_at = -1.0
+			set_chute(true)
+			Sim.report("canopy", Sim.Ev.GOOD)
 	if Sim.tapped(&"camera"):
 		third = not third
 	crouching = Sim.held(&"crouch")

@@ -13,11 +13,14 @@ func setup(k: String) -> void:
 	kind = k
 	add_to_group("hittable")
 	add_to_group("ground_targets")
-	health = {"sam": 90.0, "hangar": 260.0, "fuel": 120.0, "radar": 80.0}.get(k, 100.0)
+	health = {"sam": 90.0, "hangar": 260.0, "fuel": 120.0, "radar": 80.0,
+		"manpads": 26.0}.get(k, 100.0)
 	_build()
 
 func hit_radius() -> float:
-	return 9.0
+	# Three men and a tube is not a battery: it is a much smaller thing to hit
+	# and a much harder one to see.
+	return 2.6 if kind == "manpads" else 9.0
 
 func is_alive() -> bool:
 	return alive
@@ -48,6 +51,17 @@ func _build() -> void:
 			MeshKit.box(st, Vector3(0.6, 6, 0.6), Vector3(0, 5, 0))
 			MeshKit.box(st, Vector3(7.5, 5.0, 0.4), Vector3(0, 9, 0))
 			_mesh.add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.30, 0.33, 0.30), 0.7, 0.3)), "M"))
+		"manpads":
+			# A team, not an installation: a couple of figures, a tube on a
+			# shoulder and a crate. It is deliberately small — the whole point
+			# of one of these is that you do not see it until it fires.
+			for fx in [-0.5, 0.6]:
+				MeshKit.box(st, Vector3(0.42, 1.05, 0.30), Vector3(fx, 0.52, 0.0))
+				MeshKit.box(st, Vector3(0.34, 0.30, 0.28), Vector3(fx, 1.20, 0.0))
+			MeshKit.cone(st, 0.10, 0.10, -0.85, 0.85, Vector3(0.6, 1.32, 0.0), 6)
+			MeshKit.box(st, Vector3(1.1, 0.42, 0.60), Vector3(-0.2, 0.21, 0.9))
+			_mesh.add_child(MeshKit.mi(MeshKit.finish(st,
+				MeshKit.mat(Color(0.24, 0.28, 0.20), 0.9, 0.0)), "M"))
 		_:
 			MeshKit.box(st, Vector3(6, 2.4, 8), Vector3(0, 1.2, 0))
 			MeshKit.box(st, Vector3(4.6, 2.6, 3.2), Vector3(0, 3.4, -0.6))
@@ -56,7 +70,12 @@ func _build() -> void:
 			_mesh.add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.28, 0.32, 0.26), 0.75, 0.2)), "M"))
 
 func _physics_process(delta: float) -> void:
-	if not alive or kind != "sam":
+	if not alive:
+		return
+	if kind == "manpads":
+		_manpads(delta)
+		return
+	if kind != "sam":
 		return
 	_cool -= delta
 	if _cool > 0.0:
@@ -87,6 +106,49 @@ func _physics_process(delta: float) -> void:
 			get_tree().current_scene.add_child(m)
 			Effects.dust(get_tree().current_scene, global_position + Vector3(0, 2, 0), 4.0)
 			return
+
+## A shoulder-launched team. The mirror image of the battery above: a SAM site
+## cannot hold anything down in the clutter and so pushes you low, and this is
+## what is waiting for you when you get there. Short reach, no radar to warn
+## you, and an infrared seeker that a flare will pull off — but you have to have
+## seen it coming to throw one.
+const MANPADS_REACH := 5200.0
+const MANPADS_CEILING := 1800.0
+
+func _manpads(delta: float) -> void:
+	_cool -= delta
+	if _cool > 0.0:
+		return
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n):
+			continue
+		if not (n is Aircraft) or n.team == team or not n.is_alive():
+			continue
+		var d: float = global_position.distance_to(n.global_position)
+		if d > MANPADS_REACH:
+			continue
+		# It cannot reach anything high. Climbing out of its envelope is the
+		# answer to it, exactly as going low is the answer to a battery.
+		var agl: float = n.global_position.y - Sim.height_at(n.global_position.x,
+			n.global_position.z)
+		if agl > MANPADS_CEILING or agl < 12.0:
+			continue
+		# A man with a tube has to see it. There is no radar here to look
+		# through a hill with.
+		if not Sim.line_of_sight(global_position + Vector3(0, 1.6, 0),
+				(n as Node3D).global_position):
+			continue
+		_cool = 11.0
+		var to: Vector3 = (n.global_position - global_position).normalized()
+		var xf := Transform3D(Basis.looking_at(to, Vector3.UP),
+			global_position + Vector3(0, 1.7, 0))
+		var m := Missile.new()
+		m.launch("manpads", xf, to * 30.0, self, n)
+		m.team = team
+		get_tree().current_scene.add_child(m)
+		Effects.dust(get_tree().current_scene, global_position + Vector3(0, 1.2, 0), 2.2)
+		Sfx.play_at(get_tree().current_scene, "launch", global_position, -4.0, 1.1, 1400.0)
+		return
 
 ## How well this site can hold a low target. A radar looking down at something
 ## in the weeds is competing with the ground return behind it, and the further

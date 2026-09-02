@@ -69,6 +69,18 @@ func _pilot(delta: float) -> void:
 
 	var t := Sim.strength(&"throttle_up") - Sim.strength(&"throttle_down")
 	throttle = clampf(throttle + t * delta * 0.55, 0.0, 1.0)
+	# The autopilot has the stick unless the pilot takes it back. Taking hold of
+	# it is the disconnect — there is no separate button to remember.
+	if autopilot_on():
+		if autopilot_interrupted(in_pitch, in_roll, in_yaw) or absf(t) > 0.01:
+			set_autopilot("")
+		else:
+			fly_autopilot(delta)
+	# Fuel goes in whenever you are in the box behind a tanker: there is no
+	# switch, the same way there is no switch on the real thing once the boom
+	# is flying. Sitting still on the ground gets you rearmed instead.
+	update_refuel(delta)
+	update_ground_service(delta)
 	airbrake = Sim.held(&"brakes") and not on_ground
 	wheel_brake = Sim.held(&"brakes") and on_ground
 
@@ -94,6 +106,7 @@ func _pilot(delta: float) -> void:
 	if Sim.tapped(&"assist"):
 		assist = not assist
 		Sim.assist = assist
+		Sim.save_settings()
 		say("fly-by-wire " + ("ON" if assist else "OFF — you are on your own"))
 	if Sim.tapped(&"cycle_weapon"):
 		cycle_weapon()

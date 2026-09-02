@@ -3,7 +3,7 @@ extends Node
 ## Continuous audio for the flown aircraft: engine, afterburner, airflow, tyres,
 ## gun and the warning tones. One-shots are fired through Sfx.play_at.
 
-var jet: Aircraft = null
+var aircraft: Aircraft = null
 var cockpit := true          # muffles the airflow when the canopy is shut
 
 var _engine: AudioStreamPlayer
@@ -43,13 +43,13 @@ func _db(linear: float) -> float:
 	return -80.0 if linear <= 0.0008 else linear_to_db(clampf(linear, 0.0, 1.4))
 
 func _process(delta: float) -> void:
-	if jet == null or not is_instance_valid(jet):
+	if aircraft == null or not is_instance_valid(aircraft):
 		return
-	var alive := jet.alive
-	var power: float = jet.power if alive else 0.0
-	var rotary: bool = bool(jet.spec.get("rotary", false))
+	var alive := aircraft.alive
+	var power: float = aircraft.power if alive else 0.0
+	var rotary: bool = bool(aircraft.spec.get("rotary", false))
 	var ab: float = clampf((power - 0.78) / 0.22, 0.0, 1.0)
-	var speed := jet.linear_velocity.length()
+	var speed := aircraft.linear_velocity.length()
 	var muffle: float = 0.55 if cockpit else 1.0
 
 	if rotary:
@@ -78,26 +78,26 @@ func _process(delta: float) -> void:
 	# airflow rises with dynamic pressure, and you hear more of it with the
 	# gear, bay or airbrake hanging out
 	var q: float = clampf(speed / 340.0, 0.0, 1.6)
-	var dirty: float = 1.0 + 0.5 * jet.gear_anim + 0.6 * jet.air_anim + 0.4 * jet.canopy_anim
+	var dirty: float = 1.0 + 0.5 * aircraft.gear_anim + 0.6 * aircraft.air_anim + 0.4 * aircraft.canopy_anim
 	_wind.pitch_scale = 0.75 + q * 0.6
 	_wind.volume_db = _db(q * q * 0.55 * dirty * (0.75 if cockpit else 1.0))
 	if not _wind.playing:
 		_wind.play()
 
-	var rolling: float = 1.0 if (jet.on_ground and alive) else 0.0
+	var rolling: float = 1.0 if (aircraft.on_ground and alive) else 0.0
 	_tyres.volume_db = _db(rolling * clampf(speed / 70.0, 0.0, 1.0) * 0.55)
 	_tyres.pitch_scale = 0.7 + clampf(speed / 90.0, 0.0, 1.2)
 	if rolling > 0.0 and not _tyres.playing:
 		_tyres.play()
 
-	_buffet.volume_db = _db(0.5 if (jet.stalling and alive) else 0.0)
-	if jet.stalling and alive and not _buffet.playing:
+	_buffet.volume_db = _db(0.5 if (aircraft.stalling and alive) else 0.0)
+	if aircraft.stalling and alive and not _buffet.playing:
 		_buffet.play()
-	elif not jet.stalling and _buffet.playing and _buffet.volume_db < -70.0:
+	elif not aircraft.stalling and _buffet.playing and _buffet.volume_db < -70.0:
 		_buffet.stop()
 
 	# warning tone: missile inbound beats low fuel
-	var warn := jet.missile_warn > 0.0 and alive
+	var warn := aircraft.missile_warn > 0.0 and alive
 	if warn and not _warn.playing:
 		_warn.play()
 	elif not warn and _warn.playing:
@@ -105,7 +105,7 @@ func _process(delta: float) -> void:
 	_warn.volume_db = _db(0.75 if warn else 0.0)
 
 	# gun buzz while the trigger is down
-	var firing: bool = alive and jet.gun_cd > 0.0 and jet.ammo > 0
+	var firing: bool = alive and aircraft.gun_cd > 0.0 and aircraft.ammo > 0
 	if firing and not _gun.playing:
 		_gun.play()
 	elif not firing and _gun.playing:
@@ -113,19 +113,19 @@ func _process(delta: float) -> void:
 	_gun.volume_db = _db(0.9 if firing else 0.0)
 
 	# servo and touchdown one-shots
-	if absf(jet.gear_anim - _gear_state) > 0.02 and _gear_state in [0.0, 1.0]:
-		Sfx.play_at(get_tree().current_scene, "servo", jet.global_position, -4.0, 0.9)
-	_gear_state = jet.gear_anim
+	if absf(aircraft.gear_anim - _gear_state) > 0.02 and _gear_state in [0.0, 1.0]:
+		Sfx.play_at(get_tree().current_scene, "servo", aircraft.global_position, -4.0, 0.9)
+	_gear_state = aircraft.gear_anim
 	var bay := 0.0
-	for k in jet.bays:
-		bay = maxf(bay, jet.bays[k]["anim"] if jet.bays[k]["kind"] == "internal" else 0.0)
+	for k in aircraft.bays:
+		bay = maxf(bay, aircraft.bays[k]["anim"] if aircraft.bays[k]["kind"] == "internal" else 0.0)
 	if absf(bay - _bay_state) > 0.02 and _bay_state in [0.0, 1.0]:
-		Sfx.play_at(get_tree().current_scene, "servo", jet.global_position, -7.0, 1.25)
+		Sfx.play_at(get_tree().current_scene, "servo", aircraft.global_position, -7.0, 1.25)
 	_bay_state = bay
-	if jet.on_ground and not _was_ground and alive:
-		Sfx.play_at(get_tree().current_scene, "thump", jet.global_position,
-			clampf(-14.0 + absf(jet.vspeed) * 1.6, -18.0, 2.0))
-	_was_ground = jet.on_ground
+	if aircraft.on_ground and not _was_ground and alive:
+		Sfx.play_at(get_tree().current_scene, "thump", aircraft.global_position,
+			clampf(-14.0 + absf(aircraft.vspeed) * 1.6, -18.0, 2.0))
+	_was_ground = aircraft.on_ground
 
 func set_paused(p: bool) -> void:
 	for c in get_children():

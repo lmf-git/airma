@@ -4,7 +4,7 @@ extends ColorRect
 ## drains as +Gz is held past tolerance; negative g fills it with blood instead.
 ## Drawn under the HUD so the instruments stay legible while the world goes.
 
-var jet: Node = null            # whoever is pulling the g
+var aircraft: Node = null            # whoever is pulling the g
 var debug_strain := -1.0        # >= 0 pins the effect, for looking at it
 
 const SRC := """
@@ -62,11 +62,11 @@ func _process(_dt: float) -> void:
 		material.set_shader_parameter("strain", debug_strain)
 		material.set_shader_parameter("redout", 0.0)
 		return
-	if jet == null or not is_instance_valid(jet):
+	if aircraft == null or not is_instance_valid(aircraft):
 		visible = false
 		return
-	var st: float = jet.g_strain
-	var rd: float = jet.g_red
+	var st: float = aircraft.g_strain
+	var rd: float = aircraft.g_red
 	if st < 0.002 and rd < 0.002:
 		visible = false
 		return

@@ -225,4 +225,18 @@ static func play_at(world: Node, id: String, pos: Vector3, db := 0.0, pitch := 1
 	p.finished.connect(p.queue_free)
 	world.add_child(p)
 	p.global_position = pos
+	# A looping clip never emits `finished`, so a one-shot built on one is
+	# immortal: it plays for the rest of the session and every repeat adds
+	# another. The aeroplane's cannon did exactly that — twelve a second of a
+	# half-second buzzsaw loop, none of which ever stopped. Anything handed a
+	# looping stream here is given a life instead.
+	if p.stream is AudioStreamWAV \
+			and (p.stream as AudioStreamWAV).loop_mode != AudioStreamWAV.LOOP_DISABLED:
+		var w := p.stream as AudioStreamWAV
+		# 16-bit samples, so two bytes each
+		var secs: float = (float(w.data.size()) * 0.5) / maxf(float(w.mix_rate), 1.0)
+		var t := world.get_tree().create_timer(maxf(secs / maxf(pitch, 0.05), 0.05))
+		t.timeout.connect(func():
+			if is_instance_valid(p):
+				p.queue_free())
 	p.play()

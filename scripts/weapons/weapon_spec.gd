@@ -1,5 +1,23 @@
 class_name WeaponSpec
 ## Store database. `kind` drives the seeker logic in Missile.
+##
+## Two of the numbers below are not free, and were being set as though they
+## were. `ref_speed` is the speed a round is built around -- it is what the
+## agility term is measured against, so a round at `ref_speed` pulls its rated
+## g -- and `boost` and `drag` have to agree with it:
+##
+## * `boost * burn` is roughly the speed the motor adds, so a rocket should burn
+##   out near `ref_speed` rather than at three times it.
+## * `drag * ref_speed^2` is the deceleration the round pulls at that speed. A
+##   slender missile costs itself a couple of g there; it does not cost itself
+##   thirty.
+##
+## Set independently they were both wrong and the errors cancelled in the middle
+## of a short shot. An AIM-120 was boosted to 1704 m/s -- Mach 5.3 -- and then
+## braked at 35 g, so forty seconds later it was doing 201 m/s: slower than the
+## aeroplane that fired it, and below the speed at which its own agility term
+## gives it any turn at all. A HARM fired at a battery at its rated 48 km
+## arrived at 196 m/s. The rounds that go a long way were the ones it ruined.
 
 static func get_spec(id: String) -> Dictionary:
 	return _db().get(id, _db()["aim9"])
@@ -9,7 +27,7 @@ static func _db() -> Dictionary:
 	"aim9": {
 		"name": "AIM-9X", "short": "9X", "kind": "ir",
 		"mass": 85.0, "length": 3.02, "dia": 0.127, "fin": 0.32,
-		"boost": 320.0, "burn": 5.0, "max_g": 50.0, "drag": 0.00035, "ref_speed": 900.0,
+		"boost": 120.0, "burn": 5.0, "max_g": 50.0, "drag": 0.000019, "ref_speed": 900.0,
 		"life": 32.0, "range": 12000.0, "seeker_fov": 80.0, "lock_time": 0.5,
 		"arm_time": 0.35, "fuse": 9.0, "damage": 105.0,
 		"colour": Color(0.86, 0.86, 0.83), "band": Color(0.85, 0.55, 0.15),
@@ -20,7 +38,7 @@ static func _db() -> Dictionary:
 	"aim120": {
 		"name": "AIM-120C", "short": "120", "kind": "radar",
 		"mass": 152.0, "length": 3.65, "dia": 0.178, "fin": 0.26,
-		"boost": 420.0, "burn": 8.0, "max_g": 35.0, "drag": 0.00028, "ref_speed": 1100.0,
+		"boost": 100.0, "burn": 8.0, "max_g": 35.0, "drag": 0.000013, "ref_speed": 1100.0,
 		"life": 75.0, "range": 40000.0, "seeker_fov": 55.0, "lock_time": 1.4,
 		"arm_time": 0.6, "fuse": 13.0, "damage": 130.0,
 		"colour": Color(0.80, 0.80, 0.78), "band": Color(0.75, 0.72, 0.30),
@@ -37,7 +55,7 @@ static func _db() -> Dictionary:
 		# air defence that arrived late and did not hurt.
 		"name": "SM-2 surface-to-air", "short": "SM2", "kind": "radar",
 		"mass": 708.0, "length": 6.55, "dia": 0.343, "fin": 0.62,
-		"boost": 620.0, "burn": 16.0, "max_g": 44.0, "drag": 0.00026, "ref_speed": 1550.0,
+		"boost": 77.0, "burn": 16.0, "max_g": 44.0, "drag": 0.0000065, "ref_speed": 1550.0,
 		"life": 110.0, "range": 74000.0, "seeker_fov": 70.0, "lock_time": 0.6,
 		"arm_time": 0.8, "fuse": 22.0, "damage": 290.0,
 		"colour": Color(0.86, 0.86, 0.84), "band": Color(0.30, 0.45, 0.70),
@@ -55,7 +73,7 @@ static func _db() -> Dictionary:
 		# hundred metres a second, so it was spent inside seven kilometres and
 		# fell in the sea short of anything further. A slimmer body and a longer
 		# burn put its reach where the entry has always claimed it was.
-		"boost": 250.0, "burn": 5.2, "max_g": 22.0, "drag": 0.00015, "ref_speed": 420.0,
+		"boost": 70.0, "burn": 5.2, "max_g": 22.0, "drag": 0.000044, "ref_speed": 600.0,
 		"life": 60.0, "range": 22000.0, "seeker_fov": 45.0, "lock_time": 0.9,
 		"arm_time": 0.6, "fuse": 11.0, "damage": 260.0, "lethal": 26.0,
 		"air_to_ground": true,
@@ -65,12 +83,39 @@ static func _db() -> Dictionary:
 		"desc": "Rocket powered precision strike. Short reach, heavy warhead.",
 	},
 	"agm84": {
-		# A turbojet: low thrust for a very long time, which is what a cruise
-		# weapon is. It runs in low over the sea and only climbs at the end.
+		# A turbojet: low thrust for as long as the flight lasts, which is what
+		# a cruise weapon is. It runs in low over the sea and only climbs at the
+		# end.
+		#
+		# `burn` has to cover the whole flight, not part of it. At 240 s of a
+		# run to its own stated range the motor stopped two thirds of the way
+		# there, and a round holding its cruise speed against drag is doing
+		# walking pace within a minute of that -- so the weapon's real reach was
+		# 70 km against a table entry of 124, and the difference was
+		# self-destructed in mid-air. The throttle decides when the motor is
+		# actually on; `burn` only says how long it is available.
+		#
+		# The cruise speed is deliberately not the real weapon's. An AGM-84 does
+		# Mach 0.71, and at 290 m/s that is exactly what it did -- and it meant
+		# you released it and then overtook it, which reads as a broken weapon
+		# whatever the reference book says. It runs at Mach 1.4 on the deck
+		# here, which puts it ahead of the aeroplane that dropped it at any
+		# speed anyone actually makes an anti-ship run at. The drag went with it:
+		# holding a speed needs the motor to beat the drag at that speed, and at
+		# the old coefficient 480 m/s cost 7 g, which 46 m/s^2 of thrust cannot
+		# pay for -- it would have settled back to 391 whatever the table said.
+		#
+		# And so did `max_g`, because the whole sea-skimming profile is worked
+		# out from the turn radius and that is v^2 over a. At the old twelve g
+		# the radius tripled with the speed, so the descent the round could
+		# actually fly put its cruise at 63 m instead of 28 and it had no turn
+		# left to pull down onto the ship: it flew the length of the run and
+		# missed. Thirty-two g at 480 m/s is the same 730 m radius the weapon
+		# had at 290 and twelve.
 		"name": "AGM-84 Harpoon", "short": "HRP", "kind": "cruise",
 		"mass": 691.0, "length": 4.63, "dia": 0.343, "fin": 0.83,
-		"boost": 46.0, "burn": 240.0, "max_g": 12.0, "drag": 0.00030, "ref_speed": 290.0,
-		"life": 300.0, "range": 124000.0, "seeker_fov": 60.0, "lock_time": 1.2,
+		"boost": 46.0, "burn": 520.0, "max_g": 32.0, "drag": 0.000106, "ref_speed": 480.0,
+		"life": 520.0, "range": 124000.0, "seeker_fov": 60.0, "lock_time": 1.2,
 		"arm_time": 1.5, "fuse": 16.0, "damage": 480.0, "lethal": 30.0,
 		"cruise_alt": 28.0, "pop": 2600.0,
 		"colour": Color(0.84, 0.84, 0.80), "band": Color(0.30, 0.42, 0.62),
@@ -81,7 +126,7 @@ static func _db() -> Dictionary:
 	"agm88": {
 		"name": "AGM-88 HARM", "short": "HRM", "kind": "radar",
 		"mass": 361.0, "length": 4.17, "dia": 0.254, "fin": 0.44,
-		"boost": 520.0, "burn": 9.0, "max_g": 26.0, "drag": 0.00030, "ref_speed": 900.0,
+		"boost": 68.0, "burn": 9.0, "max_g": 26.0, "drag": 0.000019, "ref_speed": 900.0,
 		"life": 90.0, "range": 48000.0, "seeker_fov": 70.0, "lock_time": 0.8,
 		"arm_time": 0.8, "fuse": 14.0, "damage": 300.0, "lethal": 24.0,
 		"anti_radiation": true, "air_to_ground": true,
@@ -99,12 +144,12 @@ static func _db() -> Dictionary:
 	"kalibr": {
 		"name": "3M-14 Kalibr", "short": "KLB", "kind": "cruise",
 		"folding": true, "mass": 1780.0, "length": 6.20, "dia": 0.533, "fin": 0.90,
-		"boost": 42.0, "burn": 280.0, "max_g": 11.0, "drag": 0.00028,
+		"boost": 42.0, "burn": 600.0, "max_g": 11.0, "drag": 0.00028,
 		"ref_speed": 260.0,
 		# Subsonic on the way in, then the sprint stage: the real weapon runs
 		# the last stretch at close to Mach three.
 		"sprint_speed": 900.0, "sprint_at": 32000.0,
-		"life": 340.0, "range": 150000.0, "seeker_fov": 60.0, "lock_time": 1.4,
+		"life": 600.0, "range": 150000.0, "seeker_fov": 60.0, "lock_time": 1.4,
 		"arm_time": 2.0, "fuse": 18.0, "damage": 560.0, "lethal": 34.0,
 		"cruise_alt": 24.0, "pop": 2400.0,
 		"colour": Color(0.72, 0.73, 0.70), "band": Color(0.35, 0.34, 0.32),
@@ -116,7 +161,7 @@ static func _db() -> Dictionary:
 		"folding": true, "mass": 2400.0, "length": 8.40, "dia": 0.60, "fin": 0.80,
 		# Mach 8, which is what a Zircon is. At 1900 it was Mach 5.5 and did
 		# not deserve the name.
-		"boost": 260.0, "burn": 100.0, "max_g": 15.0, "drag": 0.00009,
+		"boost": 260.0, "burn": 100.0, "max_g": 15.0, "drag": 0.0000022,
 		"cruise_alt": 6000.0, "pop": 16000.0, "ref_speed": 2700.0,
 		"life": 220.0, "range": 96000.0, "seeker_fov": 45.0, "lock_time": 1.2,
 		"arm_time": 3.0, "fuse": 22.0, "damage": 1500.0, "lethal": 44.0,
@@ -129,7 +174,7 @@ static func _db() -> Dictionary:
 		"name": "Fattah-1", "short": "FTH", "kind": "cruise",
 		"folding": true, "mass": 3200.0, "length": 12.0, "dia": 0.86, "fin": 1.05,
 		# Mach 10. Fattah is claimed at 13 to 15; this is the sober end of it.
-		"boost": 300.0, "burn": 90.0, "max_g": 12.0, "drag": 0.00010,
+		"boost": 300.0, "burn": 90.0, "max_g": 12.0, "drag": 0.0000014,
 		"cruise_alt": 8000.0, "pop": 18000.0, "ref_speed": 3400.0,
 		"life": 240.0, "range": 120000.0, "seeker_fov": 40.0, "lock_time": 1.4,
 		"arm_time": 4.0, "fuse": 22.0, "damage": 1300.0, "lethal": 40.0,
@@ -141,13 +186,13 @@ static func _db() -> Dictionary:
 	"oreshnik": {
 		"name": "Oreshnik", "short": "ORE", "kind": "radar",
 		"folding": true, "mass": 9000.0, "length": 14.5, "dia": 1.60, "fin": 1.10,
-		"boost": 260.0, "burn": 110.0, "max_g": 9.0, "drag": 0.00008,
-		"ref_speed": 2400.0,
-		"life": 320.0, "range": 180000.0, "seeker_fov": 40.0, "lock_time": 1.6,
+		"boost": 260.0, "burn": 110.0, "max_g": 9.0, "drag": 0.00000171,
+		"ref_speed": 3027.4,
+		"life": 460.0, "range": 500000.0, "seeker_fov": 40.0, "lock_time": 1.6,
 		"arm_time": 6.0, "fuse": 26.0, "damage": 900.0, "lethal": 60.0,
-		"loft": true,
+		"loft": true, "depressed": true,
 		# it does not arrive as one thing
-		"mirv": 6, "mirv_at": 9000.0, "mirv_spread": 900.0, "mirv_child": "orehead",
+		"mirv": 6, "mirv_at": 9000.0, "mirv_range": 30000.0, "mirv_spread": 900.0, "mirv_child": "orehead",
 		"colour": Color(0.34, 0.34, 0.32), "band": Color(0.58, 0.52, 0.16),
 		"eject": 0.0, "trail": Color(0.96, 0.92, 0.86),
 		"flare_bait": 0.0, "chaff_bait": 0.0,
@@ -166,13 +211,13 @@ static func _db() -> Dictionary:
 		# life.
 		"name": "Khorramshahr-4", "short": "KHR", "kind": "radar",
 		"folding": true, "mass": 19500.0, "length": 13.0, "dia": 1.50, "fin": 1.05,
-		"boost": 300.0, "burn": 140.0, "max_g": 7.0, "drag": 0.00006,
-		"ref_speed": 3000.0,
-		"life": 420.0, "range": 520000.0, "seeker_fov": 36.0, "lock_time": 1.8,
+		"boost": 300.0, "burn": 140.0, "max_g": 7.0, "drag": 0.00000086,
+		"ref_speed": 4281.4,
+		"life": 660.0, "range": 1000000.0, "seeker_fov": 36.0, "lock_time": 1.8,
 		"arm_time": 6.0, "fuse": 30.0, "damage": 1100.0, "lethal": 72.0,
-		"loft": true,
+		"loft": true, "depressed": true,
 		# A separating warhead section that opens high and wide.
-		"mirv": 8, "mirv_at": 12000.0, "mirv_spread": 1400.0,
+		"mirv": 8, "mirv_at": 12000.0, "mirv_range": 42000.0, "mirv_spread": 1400.0,
 		"mirv_child": "khrhead",
 		# Too fast for a fuse to be sure of: this is what makes it worth having.
 		"guide_jitter": 0.012,
@@ -185,9 +230,9 @@ static func _db() -> Dictionary:
 		# one of the eight. Unpowered, and going far too fast to need it.
 		"name": "Khorramshahr submunition", "short": "KRV", "kind": "radar",
 		"mass": 190.0, "length": 1.70, "dia": 0.40, "fin": 0.28,
-		"boost": 0.0, "burn": 0.0, "max_g": 7.0, "drag": 0.00012,
-		"ref_speed": 2400.0,
-		"life": 90.0, "range": 40000.0, "seeker_fov": 60.0, "lock_time": 0.0,
+		"boost": 0.0, "burn": 0.0, "max_g": 30.0, "drag": 0.00000086,
+		"ref_speed": 4281.0,
+		"life": 220.0, "range": 40000.0, "seeker_fov": 60.0, "lock_time": 0.0,
 		"arm_time": 1.0, "fuse": 18.0, "damage": 620.0, "lethal": 58.0,
 		"guide_jitter": 0.011,
 		"colour": Color(0.66, 0.64, 0.58), "band": Color(0.20, 0.42, 0.24),
@@ -197,12 +242,18 @@ static func _db() -> Dictionary:
 	},
 	"orehead": {
 		# one of the six. No motor: it is already going faster than anything
-		# with a motor could push it.
+		# with a motor could push it -- but it steers, which is the whole point
+		# of a manoeuvring warhead and the reason it is hard to intercept. It
+		# was rated at eight g against the bus's fifteen, and the authority a
+		# round actually has is that figure scaled by how thin the air is and
+		# how far off its design speed it is: at nine kilometres and Mach five
+		# that came to 1.7 g, so six warheads were released and then fell
+		# wherever the bus had thrown them.
 		"name": "Oreshnik warhead", "short": "RV", "kind": "radar",
 		"mass": 320.0, "length": 1.90, "dia": 0.44, "fin": 0.30,
-		"boost": 0.0, "burn": 0.0, "max_g": 8.0, "drag": 0.00011,
-		"ref_speed": 2200.0,
-		"life": 90.0, "range": 40000.0, "seeker_fov": 60.0, "lock_time": 0.0,
+		"boost": 0.0, "burn": 0.0, "max_g": 30.0, "drag": 0.00000171,
+		"ref_speed": 3027.0,
+		"life": 220.0, "range": 40000.0, "seeker_fov": 60.0, "lock_time": 0.0,
 		"arm_time": 1.0, "fuse": 20.0, "damage": 1400.0, "lethal": 90.0,
 		"colour": Color(0.28, 0.28, 0.27), "band": Color(0.58, 0.52, 0.16),
 		"eject": 0.0, "trail": Color(0.98, 0.90, 0.78),
@@ -241,9 +292,13 @@ static func _db() -> Dictionary:
 		# them for submarines and a submarine carries them for everything.
 		"name": "Mk-48 torpedo", "short": "TRP", "kind": "cruise",
 		"mass": 1680.0, "length": 5.80, "dia": 0.533, "fin": 0.60,
-		"boost": 9.0, "burn": 300.0, "max_g": 6.0, "drag": 0.00240,
+		"boost": 9.0, "burn": 1450.0, "max_g": 6.0, "drag": 0.00240,
 		"ref_speed": 28.0,
-		"life": 320.0, "range": 38000.0, "seeker_fov": 100.0, "lock_time": 1.0,
+		# Twenty-three minutes to swim thirty-eight kilometres at 28 m/s, which
+		# is what a heavyweight torpedo takes. It was self-destructing after
+		# five, so its effective reach was nine kilometres against a stated
+		# thirty-eight and a shot at anything further simply vanished.
+		"life": 1450.0, "range": 38000.0, "seeker_fov": 100.0, "lock_time": 1.0,
 		"arm_time": 3.0, "fuse": 14.0, "damage": 1500.0, "lethal": 26.0,
 		# it runs at depth, not at cruise altitude
 		"cruise_alt": -9.0, "pop": 400.0,
@@ -255,8 +310,8 @@ static func _db() -> Dictionary:
 	"slbm": {
 		"name": "Trident submarine-launched missile", "short": "SLB", "kind": "radar",
 		"mass": 5900.0, "length": 13.4, "dia": 2.11, "fin": 0.90,
-		"boost": 190.0, "burn": 30.0, "max_g": 14.0, "drag": 0.00012, "ref_speed": 900.0,
-		"life": 260.0, "range": 90000.0, "seeker_fov": 180.0, "lock_time": 0.0,
+		"boost": 190.0, "burn": 30.0, "max_g": 14.0, "drag": 0.00000285, "ref_speed": 2345.0,
+		"life": 380.0, "range": 300000.0, "seeker_fov": 180.0, "lock_time": 0.0,
 		"arm_time": 8.0, "fuse": 24.0, "damage": 90000.0, "loft": true,
 		"colour": Color(0.80, 0.80, 0.78), "band": Color(0.55, 0.10, 0.09),
 		"eject": 0.0, "trail": Color(0.92, 0.92, 0.92),
@@ -284,6 +339,99 @@ static func _db() -> Dictionary:
 		"eject": 4.0, "trail": Color(0.85, 0.85, 0.85),
 		"flare_bait": 0.0,
 		"nuclear": true, "lethal": 1400.0,
+	},
+	# ------------------------------------------------- anti-armour and rockets
+	# What an attack helicopter actually carries. The four gunships in the
+	# hangar were flying with Sidewinders and AMRAAMs on the stub wings, which
+	# is an air superiority load on an aircraft whose job is killing tanks.
+	"agm114": {
+		"name": "AGM-114 Hellfire", "short": "HFR", "kind": "radar",
+		"mass": 49.0, "length": 1.63, "dia": 0.178, "fin": 0.33,
+		"boost": 95.0, "burn": 2.6, "max_g": 16.0, "drag": 0.000042, "ref_speed": 450.0,
+		"life": 40.0, "range": 11000.0, "seeker_fov": 40.0, "lock_time": 0.6,
+		"arm_time": 0.5, "fuse": 6.0, "damage": 340.0, "lethal": 12.0,
+		"air_to_ground": true,
+		"colour": Color(0.24, 0.25, 0.24), "band": Color(0.68, 0.62, 0.20),
+		"eject": 0.0, "trail": Color(0.82, 0.80, 0.78),
+		"flare_bait": 0.0,
+		"desc": "Anti-armour. Small, precise, and it will take the turret off a tank.",
+	},
+	"hydra": {
+		"name": "Hydra 70 rocket", "short": "RKT", "kind": "radar",
+		"mass": 11.0, "length": 1.06, "dia": 0.070, "fin": 0.14,
+		"boost": 130.0, "burn": 1.1, "max_g": 3.0, "drag": 0.000075, "ref_speed": 300.0,
+		"life": 18.0, "range": 6000.0, "seeker_fov": 25.0, "lock_time": 0.0,
+		"arm_time": 0.3, "fuse": 4.0, "damage": 90.0, "lethal": 9.0,
+		"air_to_ground": true,
+		"colour": Color(0.30, 0.31, 0.29), "band": Color(0.70, 0.30, 0.16),
+		"eject": 0.0, "trail": Color(0.88, 0.86, 0.84),
+		"flare_bait": 0.0,
+		"desc": "Unguided rocket. Barely steers — point the aircraft and fire.",
+	},
+	# ------------------------------------------------------------ air defence
+	# Ground launched. There have always been SAM sites shooting at you and no
+	# way to be the one doing it: this is the round a battery sends.
+	"sam_med": {
+		"name": "Medium SAM", "short": "SAM", "kind": "radar",
+		"mass": 690.0, "length": 5.60, "dia": 0.40, "fin": 0.60,
+		"boost": 82.0, "burn": 14.0, "max_g": 38.0, "drag": 0.0000075, "ref_speed": 1450.0,
+		"life": 95.0, "range": 65000.0, "seeker_fov": 68.0, "lock_time": 0.8,
+		"arm_time": 1.6, "fuse": 20.0, "damage": 620.0, "lethal": 30.0,
+		"colour": Color(0.74, 0.74, 0.72), "band": Color(0.60, 0.20, 0.16),
+		"eject": 0.0, "trail": Color(0.90, 0.90, 0.92),
+		"flare_bait": 0.0, "chaff_bait": 0.30,
+		"desc": "Area air defence off a launcher. Long reach and a big warhead.",
+	},
+	"manpads": {
+		"name": "Shoulder-launched SAM", "short": "MAN", "kind": "ir",
+		"mass": 11.0, "length": 1.52, "dia": 0.072, "fin": 0.16,
+		"boost": 150.0, "burn": 2.0, "max_g": 22.0, "drag": 0.000048, "ref_speed": 600.0,
+		"life": 22.0, "range": 6000.0, "seeker_fov": 40.0, "lock_time": 0.7,
+		"arm_time": 0.4, "fuse": 5.0, "damage": 150.0, "lethal": 8.0,
+		"colour": Color(0.26, 0.27, 0.25), "band": Color(0.72, 0.66, 0.22),
+		"eject": 0.0, "trail": Color(0.86, 0.84, 0.82),
+		"flare_bait": 0.70,
+		"desc": "Short range infrared. Easily flared, and everywhere.",
+	},
+	# ----------------------------------------------------------- anti-satellite
+	# A direct-ascent ASAT. It is not a missile in any sense the rest of this
+	# table means: it climbs out of the atmosphere on a very large motor, and
+	# what it has to hit is a hundred kilometres up and moving at seven and a
+	# half kilometres a second. Everything about it is oversized because the
+	# problem is.
+	"asat": {
+		"name": "Direct-ascent ASAT", "short": "AST", "kind": "radar",
+		"mass": 5400.0, "length": 12.6, "dia": 1.32, "fin": 0.72,
+		# Sized to the job. Reaching 118 km is about 1.5 km/s of climb plus what
+		# drag takes on the way through the thick part, so call it three: at the
+		# 11.5 km/s the first cut of this had, the round went to 2298 km and
+		# passed the satellite by thirty-three kilometres on its way out of the
+		# world. And the divert has to be real — the endgame is a crossing
+		# target at 1150 m/s, and nine g of which only a fifth is available in
+		# vacuum is not enough to correct anything.
+		# Sized against the orbit it has to reach, with margin: a 70 km apogee
+		# needs about 1.2 km/s of climb, and the round also spends energy
+		# steering onto a target forty kilometres off to one side. 120 x 20 is
+		# 2.4 km/s, which covers both. Measured while tuning this: 24 s of burn
+		# put the apogee at 283 km, 15 s put it at 64.
+		# Sized for the WORST shot, not the easy one. A satellite's altitude runs
+		# 58 to 82 km depending on where it is on its inclined track, and it can
+		# be forty kilometres away horizontally, so the slant range is anywhere
+		# from 58 to 91 km. Twenty seconds of burn covers the near, low case and
+		# leaves the far, high one short — which is a launcher that works
+		# sometimes and looks broken the rest of the time.
+		"boost": 120.0, "burn": 27.0, "max_g": 25.0, "drag": 0.0000012, "ref_speed": 2400.0,
+		"vacuum_divert": true,
+		"life": 300.0, "range": 700000.0, "seeker_fov": 180.0, "lock_time": 0.0,
+		# A generous fuse, because every ASAT that ever worked was either
+		# nuclear tipped or threw a cloud of fragments across the track. Asking
+		# a direct hit on a crossing target at eight hundred metres a second is
+		# asking for a weapon that never works.
+		"arm_time": 8.0, "fuse": 140.0, "damage": 9000.0, "lethal": 160.0,
+		"colour": Color(0.82, 0.82, 0.80), "band": Color(0.30, 0.35, 0.60),
+		"eject": 0.0, "trail": Color(0.92, 0.92, 0.94),
+		"flare_bait": 0.0,
+		"desc": "Direct-ascent anti-satellite round. Goes very high, very fast.",
 	},
 	"gbu32": {
 		"name": "GBU-32 JDAM", "short": "JDM", "kind": "bomb",

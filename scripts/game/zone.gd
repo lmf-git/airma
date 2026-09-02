@@ -89,23 +89,31 @@ func _build_garrison() -> void:
 	# Only a sector that actually belongs to someone gets a crewed garrison. An
 	# unclaimed sector with hostile armour parked in it flips to them the moment
 	# the match starts, which is not what "neutral" means.
-	for i in (2 if owner_team != NEUTRAL else 0):
-		var a := TAU * (float(i) / 2.0) + 1.1
+	# Armour, and a patrol vehicle with it. A sector held by nothing but two
+	# main battle tanks reads as a tank park; what actually sits on an objective
+	# is a mixed detachment, and the light 4x4 is the half of it that moves.
+	for i in (3 if owner_team != NEUTRAL else 0):
+		var a := TAU * (float(i) / 3.0) + 1.1
 		var off := Vector3(cos(a), 0, sin(a)) * (radius * 0.35)
+		var side: int = 1 if owner_team != 0 else 0
+		# Both ends pick from the same list with the same seed, so the garrison
+		# comes out identical without anyone having to be told what is in it.
+		var vk: String = Tank.pick_kind("lav", side, label.hash() + i) if i == 2 \
+			else Tank.pick_kind("mbt", side, label.hash() + i)
 		var t := Tank.new()
-		t.setup(1 if owner_team != 0 else 0, "t90" if owner_team != 0 else "m1a2")
+		t.setup(side, vk)
 		t.ai = true
-		t.name = "%s armour %d" % [label, i + 1]
+		t.name = "%s %s %d" % [label, "patrol" if i == 2 else "armour", i + 1]
 		add_child(t)
 		# Both ends build the same garrison in the same order, so the sector
 		# label plus the slot number is a key neither side has to be told.
 		t.set_meta("zone_asset", [label, assets.size()])
-		t.global_transform = Transform3D(Basis(Vector3.UP, a),
-			Vector3(global_position.x + off.x,
-				Sim.height_at(global_position.x + off.x, global_position.z + off.z) + 1.1,
-				global_position.z + off.z))
+		t.global_transform = Tank.ground_pose(global_position + off, a, t.rest_height())
 		assets.append(t)
-	var kinds := ["sam", "radar", "fuel", "hangar"]
+	# A battery cannot hold anything down in the clutter, so it pushes you low —
+	# and this is what is waiting when you get there. The pair works: neither
+	# altitude is safe from both.
+	var kinds := ["sam", "radar", "fuel", "hangar", "manpads", "manpads"]
 	for i in kinds.size():
 		var a := TAU * float(i) / float(kinds.size()) + 0.4
 		var off := Vector3(cos(a), 0, sin(a)) * (radius * 0.55)

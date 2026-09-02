@@ -65,6 +65,15 @@ Battle modes lay out capture zones with garrisons — flip one by holding the ri
 or by flattening everything inside it. Tickets, sector ownership and capture
 progress are drawn across the top of the HUD.
 
+**SANDBOX** is everything at once and nothing scoring: the vehicle park, the
+flight line, hostile aircraft, gunships and shipping, and the satellites
+overhead. The hostile side of that is *only* here and on the admin page — the
+no-threat missions stay no-threat.
+
+`F3` opens the admin page, which can put any of those sets into *any* mission,
+and does it idempotently: it counts what is already there and spawns only the
+shortfall, so asking twice tops the set up instead of laying down a second one.
+
 ## Multiplayer
 
 Host/join over ENet from the hangar screen (enter an address, HOST or JOIN).
@@ -187,6 +196,133 @@ out main-rotor torque automatically; switch the assist off with `H` and you hold
 the pedal yourself. Below translational speed the sideslip angle is meaningless,
 so the pedal loop falls back to holding yaw rate.
 
+## Support, and what an aircraft is for
+
+Two aircraft were added whose entire stated role was unimplemented — a KC-135
+that could not refuel anybody and an E-3 with no radar behind the rotodome — and
+the satellites were targets that gave their owner nothing. All three now do
+their job through one idea: **coverage**, which is how far a *side* can see, as
+opposed to how far one aeroplane's own set reaches.
+
+| | reach |
+|---|---|
+| the aeroplane's own radar | 40 km (10–80 selectable) |
+| with a reconnaissance satellite up | 130 km |
+| with an E-3 airborne | 190 km |
+
+Which is what makes the ASAT worth firing: shoot the recon satellite down and
+that side drops back to what it can see for itself.
+
+**Aerial refuelling** is a formation problem, not a button. You have to get into
+the box behind the boom — within thirty metres, inside a 26° cone off the
+tanker's tail, and matched to within 26 m/s — and stay there. Drift out and the
+boom disconnects. There is no switch: fuel goes in whenever you are in the box,
+the same way it does on the real thing once the boom is flying.
+
+**Ground servicing** closes the sortie loop, which was open: you could land and
+there was nothing you could do about being empty. `rearm` and `restock` appeared
+nowhere in the project, and the single mention of resupply was a comment on a
+tank saying its rounds were "refilled on resupply", which nothing implemented.
+Stop on the ground near a friendly base or a carrier deck and the crew come out —
+fuel, hull, belted ammunition and stores, a bit at a time, so a turnaround takes
+longer the emptier you come home.
+
+## Satellites, and shooting them down
+
+Both sides keep three satellites up — reconnaissance, communications and
+navigation — on circular tracks above the map, and each of Russia, China and the
+United States fields a **direct-ascent ASAT launcher** that can do something
+about the other side's.
+
+The orbit is an honest abstraction and worth saying so. Real low orbit is
+7.5 km/s at 400 km, which crosses this entire world in eight seconds: you would
+never see one, let alone shoot at one. These run at 70 km and 800 m/s — clearly
+above everything, with no terrain within eighty kilometres of them, and fast
+enough that the lead matters and slow enough that it can be led.
+
+Getting the round there took four attempts and all four failures were
+instructive. It began with 11.5 km/s of delta-v and went to **2298 km**, passing
+the satellite by thirty-three; sized down it still reached 283 km; sized down
+again it undershot at 64. And throughout, the round was being throttled to a
+fifth of its rated g by the air-density term — correct for something that steers
+with fins, wrong for a kill vehicle, which steers on divert thrusters and does
+not care what the air is doing. With `vacuum_divert` set, the boost matched to
+the climb it actually has to make, and the launcher laying on a lead point
+rather than firing straight up, the round reaches 58 km and passes **15 m** from
+the satellite.
+
+A satellite that is hit comes apart — there is nothing up there to burn with —
+and the pieces carry on along the track. Satellites are deliberately **not** in
+the `hittable` group: that group is the radar picture, the lock list and the
+blast sweep all at once, and putting something a hundred kilometres up in it
+would have every fighter's AMRAAM considering it. They carry `hit_radius()`
+instead, which is the path a round already uses to fuse on something that is not
+a radar contact — the same way an interceptor kills a missile.
+
+## Drones
+
+Four unmanned aircraft, one to a faction: the **MQ-9A Reaper**, **Wing Loong
+II**, **Shahed-129** and **Orion-E**. They are built round endurance rather than
+performance — twenty metres of wing, a small pusher turboprop, hours of fuel and
+a three g limit — and they are not going to win an argument with anything. What
+they do is get somewhere and stay there.
+
+That is what the autopilot is for. `TAB` gives you two modes:
+
+- **Hold altitude** captures the height you are at and keeps it, wings level.
+- **Loiter** does the same and holds a steady orbit, with **orbit direction**
+  appearing below it so you can put the turn whichever side of the target you
+  want.
+
+The orbit is flown to a **radius**, not to a bank angle. A fixed bank looks
+sensible until something fast uses it — radius is `V²/(g·tan(bank))`, so thirty
+degrees at 250 m/s is an eleven kilometre circle and an F-16 asked to loiter
+swept fifty-two degrees in a minute, a shape you cannot see the middle of.
+Holding 1800 m instead banks according to speed, up to a fifty degree limit.
+Measured over a minute: the MQ-9 comes round at 147°, the A-10 at 183°, the F-16
+at 108° on its bank limit, and the altitude hold drifts 21, 34 and 38 metres
+respectively over three quarters of a minute.
+
+Taking hold of the stick disconnects it, the way every autopilot does — there is
+no separate button to remember.
+
+## Holding a hover
+
+A helicopter's hover was a proportional-integral loop on vertical speed inside a
+proportional loop on height. It held a *number* — it did not hold the aircraft.
+Attitude was not in the loop anywhere, so a machine that had been tipped over
+stayed tipped over and flew away from where you left it, and with no derivative
+term what it did hold, it hunted.
+
+**Auto hover** on the `TAB` menu is the proper cascade, the way a real stability
+augmentation is built — outer loops slow, inner loops fast, so they do not fight
+each other:
+
+```
+drift    ->  attitude demand  ->  cyclic
+height   ->  vertical speed   ->  collective
+heading  ->                       pedal
+```
+
+Seven `Pid` controllers, each with anti-windup and a derivative taken on the
+error rather than the setpoint so a change of demand does not put a spike
+through the control. It has the cyclic, the pedals and the lever, and gives them
+straight back the moment you touch any of them — but it does **not** take the
+rest of the cockpit, so you can work the weapons and the gear while it holds the
+machine still.
+
+`--hoverhold` throws an Apache sideways at 18 m/s with twenty degrees of bank
+and a climb on, engages the hold and lets it settle. It comes back to **2.1 m
+from the spot, 0.8° of bank, 0.4 m of height and 0.10 m/s**.
+
+Getting there turned up two faults worth recording, both in the measuring rather
+than the flying. The harness first seeded its height error with the *absolute*
+altitude, and scored a perfect hover as 262 m out. Then it opened its
+measurement window at fifteen seconds while the machine was still arresting
+eighteen metres a second — and reported a hover that finished 1.3 m from the
+spot as 33 m adrift. The instrumented trace is what settled it: the controller
+had been working for two runs before the test agreed.
+
 ## Sensors
 
 `ALT` + right click raises the targeting sensor as a full screen page and arms
@@ -213,13 +349,48 @@ altitude and speed — with `1`/`2`/`3` selecting the 105 mm, the 40 mm or the
 
 ## Ground vehicles
 
-Seven drivable vehicles, listed in the hangar alongside the aircraft (or on
-their own under the GROUND tab). The ramp start parks the whole garage on the
-apron and every capture zone garrisons two. Walk up and press `U` to get in.
+Eighteen drivable vehicles, listed in the hangar alongside the aircraft — under
+their own country's tab, or all together under GROUND. The ramp start parks **your own country's** vehicles on the apron —
+everybody else's are deployed on ground that actually belongs to them, hostile
+or friendly according to which bloc you are flying for — and every capture zone
+garrisons two tanks and a patrol vehicle. Walk up and press `U` to get in.
 
 | Main battle tanks | Self propelled guns | Rocket artillery |
 |---|---|---|
 | M1A2 Abrams · T-90M Proryv · ZTZ-99A | M109A7 Paladin · 2S19 Msta-S | M270 MLRS · BM-30 Smerch |
+
+| Missile launchers | Light 4x4s |
+|---|---|
+| Kalibr · Zircon · Fattah · Khorramshahr · Oreshnik · DF-21D | M1151 HMMWV · Jackal 2 · Panhard VBL · GAZ-2330 Tigr · CSK-131 Mengshi · Safir |
+
+A **MANPADS team** is not a vehicle and not an installation — three men, a tube
+and a crate, sitting in a capture zone. It is the mirror image of a battery: a
+SAM site cannot hold anything down in the ground clutter and therefore pushes
+you low, and this is what is waiting when you get there. Five kilometres of
+reach, a ceiling of 1800 m, no radar to warn you on the RWR, and an infrared
+seeker a flare will pull off — if you saw it coming. Between the two of them,
+neither altitude is safe.
+
+| Air defence batteries | Infantry fighting vehicles | Anti-aircraft guns | Anti-satellite |
+|---|---|---|---|
+| Patriot · S-400 · HQ-9B · Bavar-373 · Sky Sabre · SAMP/T | M2A3 Bradley · BMP-3 · ZBD-04A · Warrior · VBCI · Boragh | M-SHORAD · Shilka · Gepard · PGZ-09 | GMD-A · Nudol · SC-19 |
+
+An **air defence battery** is the first thing on the field that shoots back at
+aircraft properly. It does not lay a gun: it acquires a contact, trains its
+rails on the bearing, raises them and sends a round, and everything that makes
+it dangerous is in the missile. An **anti-aircraft gun** does the short-range
+half of the same job with a very fast shell. An **infantry fighting vehicle**
+sits between the 4x4s and the tanks — an autocannon that will not trouble
+frontal armour and ruins everything softer.
+
+The **light 4x4s** are one per faction and they are not armour: a ladder
+chassis, a crew cab, a load bed, and a ring mount on the roof with a heavy
+machine gun on it. Seventy hit points against a tank's three hundred, and
+nothing on them will trouble a tank — what they have is 70 km/h across country
+and the ability to get somewhere a tracked vehicle cannot. They **steer on the
+front axle** rather than by dragging a track, so they turn 180 degrees in about
+five seconds at lock and they scrub speed doing it. The launchers steer the same
+way, on their front bogie.
 
 The howitzers and launchers fire **indirect**, laid by **bearing and range**
 rather than by a crosshair: the mouse swings the bearing and walks the fall of
@@ -233,18 +404,74 @@ charge, only flattening out at full charge beyond that. The HUD shows range,
 quadrant elevation, charge percentage and time of flight; the M109 reaches about
 32 km with a 20-70 second flight, and the MLRS ripples twelve rockets.
 
-Each of the fourteen road wheels is an independent spring/damper contact
-against the terrain with its own longitudinal and lateral friction, so the hull
-pitches over crests, rolls in turns and squats under braking. Drive is
-power-limited rather than a flat force — strong off the mark, tailing off with
-road speed — and steering is differential across the two tracks, so it will
-neutral-steer on the spot with the throttle closed. Measured: 0–31 km/h in two
-seconds, cruising about 42 km/h, scrubbing to 29 km/h through a hard turn.
+Every road wheel is an independent spring/damper contact against the terrain
+with its own longitudinal and lateral friction, so the hull pitches over crests,
+rolls in turns and squats under braking. Drive is power-limited rather than a
+flat force — strong off the mark, tailing off with road speed — and a tracked
+vehicle steers differentially, so it will neutral-steer on the spot with the
+throttle closed. Measured: 0–31 km/h in two seconds, cruising about 42 km/h,
+scrubbing to 29 km/h through a hard turn.
+
+The springs are worked out from the vehicle rather than from a tank. Travel,
+stiffness, lateral bite and the damping ratio all come from its class, and a
+vehicle put on the ground is put down **standing on its own suspension and lying
+along the slope** — `--susptest` measures the settling. It used to be dropped
+from a flat 1.1 m onto a level basis, which for a launcher (whose wheel centres
+sit a tyre radius *above* its origin) meant arriving a metre in the air; the
+damping was 1.05·√(k·m/N), about a fifth of critical on fourteen wheels, so it
+then bounced for several seconds. Measured swing on spawn: 1.44 m and still
+moving at three seconds, against 0.02 m and settled inside a frame now.
 
 `W`/`S` drive, `A`/`D` steer, `X` brake, mouse lays the turret (rate-limited
-slew), `SPACE` main gun, `V` coax, `C` gunner sight, `U` to get out.
+slew), `SPACE` main gun, `V` coax, `C` gunner sight, `U` to get out. A light
+4x4 has no main gun and no coaxial: `SPACE` runs the gun on the roof.
+
+## A tank that could not turn
+
+Tracked vehicles swept five to nine degrees in five seconds of full lock at road
+speed — a turning circle of about two kilometres. Three separate faults, and the
+arithmetic said so before any of them was changed.
+
+A skid steer yaws by shearing both track patches across the ground, and the
+condition for it is that the thrust difference between the tracks beats
+`mu·W·L/(4·B)`. For an M1A2 at the lateral coefficient of **2.4** this used to
+carry, that is **488 kN** against the 240 kN the drivetrain can produce. The
+vehicle was over-constrained by a factor of two: no amount of stick was ever
+going to turn it. Real track-on-ground lateral resistance is 0.5 to 0.7; at 0.85
+the same tank needs 173 kN, which it has.
+
+**Every tracked vehicle weighed 62 tonnes** — an Abrams. An M109 is 28 and an
+M270 is 25, and they were carrying an MBT's weight on half an MBT's power.
+
+And **braking was limited by engine power**. The inner track of a skid steer is
+being *held back*, which is a brake and does not ask the engine for anything;
+clamping it to the power-limited tractive effort was the last thing keeping the
+heavy, under-powered pieces from turning at all.
+
+| | before | after |
+|---|---|---|
+| M1A2 | 9° | 135° |
+| T-90M | 7° | 135° |
+| M109A7 | 6° | 131° |
+| 2S19 Msta | 6° | 106° |
+| BM-30 | 5° | 100° |
+
+The obvious risk of less lateral grip is a tank that slides down every hill it
+parks on, so `--slopetest` measures exactly that: across a 17.9° side slope with
+the brakes on, 0.71 m of drift in eight seconds — against 0.94 m at the old
+figure. It holds slightly better than it did.
 
 ## Ships
+
+Eleven classes plus the carrier, and every hull now carries a nation, so the
+NAVAL tab and each national page list the right ones. China and Iran had no
+vessel at all: they have a **Type 052D destroyer** and a **Moudge frigate**.
+
+Two shapes the roster was missing entirely: the **Wasp amphibious assault ship**
+— 257 m of flat deck and almost nothing that shoots, a very large thing that
+needs somebody else to protect her — and the **Kaman missile boat**, forty-seven
+metres doing 36 knots and carrying far more than it looks like it should,
+because the missiles do not care how big the hull under them is.
 
 Ten vessels work the eastern ocean: a carrier group with its screen, a hostile
 surface action group, a submarine and civil traffic. They steam on their own
@@ -366,6 +593,28 @@ for the ridge line to cover it -- and if there is something to get behind, goes
 down behind it and comes up late. If the ground between is open it stays high,
 because giving away the energy buys nothing.
 
+## Identification, jamming and the objective
+
+**IFF.** Everything filtered on `team` directly, so identification was perfect
+and free — there was nothing that could be uncertain. A transponder
+interrogation is good for 46 km: inside that a contact is friendly or hostile,
+beyond it the return is painted in amber with no name against it.
+
+**Jamming.** Chaff and flares were the only counters, so a radar round could be
+decoyed but never denied. A jammer degrades a radar seeker looking at you — the
+aim point wanders, and a seeker held in it long enough breaks lock altogether —
+with burn-through as the round closes, because jamming does not save you from
+something already on top of you. It also lights you up on every RWR for a
+hundred miles, which is the trade.
+
+**The objective marker.** Shift and click anywhere on the tactical map plants
+one. It is drawn from *every* camera — cockpit, chase, a driver's seat, a
+bridge — and when it is off the glass it becomes an arrow at the edge of the
+screen pointing round to it, with the range. The autopilot will fly to it and
+then hold overhead, which is the navigation the game never had: waypoints
+existed for road routing and cruise-missile terrain following, never for the
+pilot.
+
 ## Countermeasures
 
 Two dispensers, 240 cartridges each, and they do different jobs. **Flares**
@@ -426,8 +675,8 @@ from inside the game: a flight of three called in line astern all landed.
 ## Walking around
 
 The ramp start puts you on foot with a carbine. WASD walks, `SHIFT` runs,
-`CTRL` crouches, `SPACE` jumps, `V` fires (real ballistics — travel time and
-drop), `C` swaps first and third person, and `U` climbs into any jet you are
+`CTRL` crouches, `SPACE` jumps, left click fires (real ballistics — travel time
+and drop), `P` swaps first and third person, and `U` climbs into any jet you are
 standing next to. First and third person share one skeleton and one animation
 set; first person simply puts the eye in the head joint. Long falls hurt, and a
 killed pilot is handed to a jointed rigid-body ragdoll.
@@ -453,22 +702,23 @@ ramp and you are handed back to the world with the aircraft's velocity.
 | `\` | cycle weapon |
 | `T` | cycle target |
 | left click or `SPACE` | fire the selected weapon |
-| `V` | gun burst |
-| `N` | flare salvo |
-| `C` | cockpit / chase / orbit camera |
+| `K` | gun burst |
+| `P` | cockpit / chase / orbit camera |
 | `ALT` (hold) | free look |
 | right click, or `O` | raise / stow the sensor page |
 | `CTRL`+`T` | pod designates: point track a vehicle, or ground stabilise a spot |
 | `L` | laser designator (bombs guide onto the spot) |
 | `/` | chat line (Enter sends, Escape cancels) |
-| `N` / `B` | flares / chaff |
+| `C` / `V` | flares / chaff |
+| `N` | night vision |
 | `N` (pod up) | sensor channel: TV, night, white hot, black hot |
 | `[` / `]` | cycle the left / right corner panel: off, sensor, radar, minimap |
 | `-` / `=` | radar range: 10, 20, 40 or 80 km |
 | `Y` | weapon camera — ride the round you just released |
-| `G` (in a hold) | take the gun station from inside a gunship |
+| `J` (in a hold) | take the gun station from inside a gunship |
 | `M` | tactical map — baked relief, roads, towns, objectives, contacts |
-| `TAB` | action menu — aircraft, vehicle or ship, whichever you are in |
+| `L` | landing lamp |
+| `TAB` | action menu — aircraft, vehicle or ship, whichever you are in; the lights and the autopilot are switched from here |
 | `F3` | air traffic: call aircraft in to land and watch them do it |
 | `Z` | look back |
 | `;` | mouse stick on / off |
@@ -517,21 +767,59 @@ only pull their rated g while fast — a late, hard break with flares is a real
 defence rather than a formality. Warheads use a swept proximity fuse with
 damage falloff, so a near miss hurts instead of deleting you.
 
+## Two countries that did not exist
+
+The map assigns a nationality to every point — it is what decides a town's
+architecture, its paint and whose kit belongs on the ground there. It did it by
+averaging two noise fields and cutting the result into six equal bands of value.
+
+That looks even and is not. The sum of two roughly independent fields is
+triangular: piled up in the middle, thin at the ends. Measured over twenty
+thousand samples of the old expression:
+
+| | share of the map |
+|---|---|
+| Russia | 45.7 % |
+| France | 31.5 % |
+| China | 12.5 % |
+| Britain | 9.8 % |
+| United States | 0.6 % |
+| **Iran** | **0 %** |
+
+Two of the six nationalities did not exist anywhere in the world. There was no
+Iranian town, no Iranian ground and nowhere for Iranian equipment to be — which
+is how it surfaced: the ramp start tries to put every faction's vehicles in
+their own country, and six of them had none to go to.
+
+It picks on the *angle* of the noise pair now rather than what they add up to.
+The joint distribution is roughly radially symmetric so the angle is very nearly
+uniform, and it still moves smoothly with position, so the regions stay large
+and organic instead of turning into a checkerboard. All six exist, between 7.7 %
+and 22.2 % each.
+
 ## The world
 
-A 140 × 140 km map generated from one analytic height field. The airfield sits
-in a north–south valley so both runway approaches and the departure end stay
-clear of rising ground, with open ocean off the eastern coast.
+A 1200 × 1200 km map generated from one analytic height field, held in the
+native extension. The airfield sits in a north–south valley so both runway
+approaches and the departure end stay clear of rising ground, with open ocean
+off the eastern coast and further continents beyond it.
 
-* **Modular chunked terrain** — concentric rings of square chunks, each ring
-  coarser than the one inside it (30 m cells over the field, 110 m, 380 m, then
-  1.9 km at the rim). Each ring doubles the cell size and reaches four chunks
-  out, so the hole in the middle of a ring is *exactly* two of that ring's
-  chunks and the finer ring inside fills it precisely — get that alignment wrong
-  and coarse chunks lie over fine ones, which tears visible holes in mountains.
-  Every chunk samples the same height and biome fields, so neighbours line up
-  and biome bands run continuously; vertical skirts hide the LOD seams. 366
-  chunks, 187k triangles, frustum-culled, shadows only on the inner ring.
+* **Chunked terrain, as a quadtree over the whole world.** A node's identity is
+  its depth and grid index, so flying does not shift a single chunk boundary,
+  and a node is rebuilt only when the detail it deserves changes. Nodes split on
+  measured error against the height field, so open water and plains stop early
+  and ridge lines keep going. Edges facing a coarser neighbour are conformed to
+  the height that neighbour draws, so the seam is zero by construction rather
+  than covered by a skirt; the skirt is a few centimetres, for the crack that is
+  left. Every chunk samples the same height and biome fields, so neighbours line
+  up and biome bands run continuously.
+* **Ridge lines.** The mountains used to be the same rounded fractal field as
+  the plains, only taller: a range was a row of domes with no crest and no col
+  in it, so there was nothing for a road to look for a pass through and nothing
+  for an aeroplane to fly between. The zero crossings of a second noise field
+  are taken as the watersheds and laid over the high ground only, weighted by
+  how mountainous the base already is — so the plains, the coast and the valley
+  the airfield sits in are exactly as they were.
 * **Biomes** — a temperature/moisture field blends snow, rock, forest, grass,
   steppe, sand and marsh. It drives terrain colour *and* the scatter, so forest
   belts, dry steppe and the snow line all read differently on the ground.
@@ -543,9 +831,8 @@ clear of rising ground, with open ocean off the eastern coast.
   wide into the terrain's vertex colours, so the network reads from altitude
   where the carriageway itself is sub-pixel. Town street grids are planned
   *before* the ground is generated, otherwise the terrain paints only the trunk
-  roads and towns come out with invisible streets. Distance-to-road is baked
-  into a 256² field — asking 124 segments per vertex cost more than the rest of
-  world generation put together.
+  roads and towns come out with invisible streets. Distance-to-road is answered
+  exactly, from a uniform grid over the whole network held in the extension.
 * **Military scenery** — a dispersal base with hardened hangars and revetments,
   parked jets on the home apron, vehicles, blast walls, radar and SAM sites.
 * **Scatter** — ~33k trees, pines, bushes and rocks chosen by biome and placed
@@ -703,7 +990,7 @@ scripts/weapons/    weapon_spec.gd   store database and store meshes
                     missile.gd       separation, boost, PN guidance, fuse
                     effects.gd       tracers, explosions, smoke, embers
 scripts/world/      world.gd         main scene: env, missions, scoring, CLI
-                    terrain.gd       one warped-grid mesh for the whole 40 km map
+                    terrain.gd       a quadtree of chunks over the whole world
                     airbase.gd       runway, markings, lighting, PAPI
                     scenery.gd       towns, military sites, scatter, home base
                     weather.gd       cloud deck and environment presets
@@ -713,7 +1000,32 @@ scripts/ai/         ai_plane.gd      patrol / engage / extend / defend
                     ground_target.gd hangars, radars, fuel, shooting SAM sites
 scripts/ui/         hud.gd           world-referenced HUD
                     menu.gd          hangar screen
+
+native/src/         field.rs         the land before anything is built on it
+                    world.rs         platforms, aerodromes, the road corridor
+                    router.rs        where a road goes: A* over the cost of one
+                    survey.rs        what height it was built to
+                    raster.rs        ground mask, climate, road ribbons, map
+                    index.rs         cell keys and the segment grid
+                    lib.rs           the `Terra` class the game calls
 ```
+
+**The extension.** Anything that is one piece of arithmetic asked for a very
+large number of points lives in `native/`, behind a single `RefCounted` called
+`Terra`. That is the whole height field and everything derived from it: a
+terrain chunk asks for its 289 heights in one call rather than 289; the road
+survey hands over fifty thousand stations once and gets a finished alignment
+back; the ground mask, the climate texture, the road surfaces and the map
+relief are each one call. Every one of them runs across all the cores inside.
+
+What is left in script is the part that is decisions rather than arithmetic:
+where a town goes, what a road is for, what a chunk of terrain is called. The
+rule of thumb is that a loop over a lot of points does not belong on this side
+of the boundary — not because GDScript is slow at the arithmetic, but because
+each crossing costs more than the arithmetic does, and there is no way to spread
+it over the cores from there.
+
+Build it with `cd native && GODOT4_BIN=<godot> cargo build --release`.
 
 **Flight model.** Aerodynamics run in `_integrate_forces`: lift from a
 CL/α curve with a stall break and ground effect, induced plus parasitic drag
@@ -725,9 +1037,9 @@ Turn it off with `H` and you get the bare relaxed-stability airframe.
 
 **Ground handling.** Three suspension legs with spring/damper struts, tyre
 friction split into rolling and lateral, nose-wheel steering, and surface grip
-that drops off the paved area. Terrain height comes from one analytic noise
-field (`Sim.height_at`) shared by the visual mesh, the gear and the crash test,
-so there is no collision mesh for the world at all.
+that drops off the paved area. Terrain height comes from one analytic field
+(`Sim.height_at`, which is the extension's `ground`) shared by the visual mesh,
+the gear and the crash test, so there is no collision mesh for the world at all.
 
 ## Test harness
 
@@ -813,6 +1125,19 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--hovertest` | STOVL conversion and a hover |
 | `--ctltest=SPEED` | roll and pitch authority, assisted and raw |
 | `--wrecktest` | destroy every vehicle and watch where the hulks end up |
+| `--susptest` | stand one of every ground vehicle on the terrain: how far it swings settling, how long until it is still, and whether it then drives and steers |
+| `--navalship=KIND`, `--navallow` | which hostile hull `--navaltest` attacks, and whether it is a dive from 1500 m or a flat run from the deck |
+| `--fleetfire` | what the fleet does with its tubes over a hundred seconds: how many rounds go up, at how many contacts, and how close they ever get |
+| `--tacnuke`, `--tacnukesea`, `--tacnukenociws` | a tactical nuclear bomb onto a locked group of armour, or onto a squadron at sea with and without its close-in guns: where it bursts, how far up, and what walks away |
+| `--aptest` | the autopilot: how far the altitude hold drifts, whether the orbit goes round, and whether reversing it sends the aeroplane the other way |
+| `--adtest` | a battery and an anti-aircraft gun against an aeroplane flown at them: do the rails come up, does anything leave them, does it hurt |
+| `--asattest` | a launcher on the ground against something in orbit: how high the round gets and how close it passes |
+| `--manpadstest` | a shoulder-launched team against an aeroplane in the weeds and then against one that has climbed out of reach |
+| `--hoverhold` | throw a helicopter sideways at 18 m/s with 20 degrees of bank on, engage the hover, and measure where it ends up |
+| `--slopetest` | park a tracked vehicle across a side slope with the brakes on and see whether it stays there |
+| `--svctest` | the support systems: what the side can see with its own radar, with a satellite and with an E-3; taking fuel from a tanker; and being rearmed on the ground |
+| `--wingtest` | every pylon, wingtip rail and navigation lamp measured against the wing planform it is bolted to |
+| `--lighttest` | the lighting controls: are they in the TAB menu, and do the lamps actually go out |
 | `--gtest=STRAIN` | pin the grey-out veil at that strain, for looking at it |
 | `--debugweapons` | trace every round: guidance, why a seeker dropped its target, and the closest it ever got |
 
@@ -1483,6 +1808,126 @@ laser spot is a *place*: a bomb whose target has gone keeps flying the last
 position it had. Measured on a three-round salvo at one mark: **19 m and 8 m**,
 arriving six seconds apart.
 
+## A missile slower than the aeroplane that fired it
+
+`boost` and `drag` had been set independently, and `ref_speed` — the speed a
+round is built around, and the speed its agility term is measured against — had
+no say in either. Both were wrong, and at the midpoint of a short shot the two
+errors cancelled, which is why it had survived.
+
+An AIM-120 was boosted to **1704 m/s — Mach 5.3 — and then braked at 35 g**.
+Forty seconds later it was doing 201 m/s: slower than the F-16 that fired it,
+and far below the speed at which its own energy term gives it any turn left. A
+HARM sent at a battery at its rated 48 km arrived at 196 m/s. The rounds that go
+a long way were the ones it ruined, and the AMRAAM's own comment about pulling
+its rated g "near its peak" was being defeated by drag before the round got
+anywhere.
+
+Both numbers follow from `ref_speed` now: `boost * burn` is what the motor adds,
+so a rocket burns out *near* its design speed rather than at three times it; and
+`drag * ref_speed²` is what the round costs itself at that speed, which for a
+slender missile is a couple of g, not thirty.
+
+| | dragged at ref | burnout | at its rated range |
+|---|---|---|---|
+| AIM-9X | 29 g → 1.6 g | 1900 → 914 m/s | 12 km at 842 m/s |
+| AIM-120C | 35 g → 1.6 g | 3660 → 1099 m/s | 40 km at 883 m/s |
+| AGM-88 HARM | 25 g → 1.6 g | 4980 → 897 m/s | 48 km at 602 m/s |
+| SM-2 | 64 g → 1.6 g | 10220 → 1537 m/s | 74 km at 1273 m/s |
+| AGM-65 Maverick | 21 g → 1.6 g | 1600 → 655 m/s | 22 km at 430 m/s |
+
+Traced through a 32 km shot, an AMRAAM now leaves the rail at 373 m/s, burns out
+at 1065 and is still doing 976 twenty-two seconds later — against a target
+holding 380 to 424 the whole way. It was the *parasitic* drag that was wrong;
+the induced drag that makes a late hard break work is a separate term and is
+untouched, and countermeasures still break the lock exactly as they did.
+
+A break alone no longer beats an AMRAAM inside 32 km, which is the point of the
+weapon.
+
+**The Harpoon is meant to be slower than you**, and is: a sea-skimming turbojet
+holding Mach 0.85 while the aeroplane that dropped it does Mach 1.2. What was
+wrong there was different — the motor stopped. `burn` was 240 s of a 428 second
+run to the weapon's own stated range, so it coasted the last third against 2.6 g
+of drag and was self-destructed in mid-air at 300 s. Its real reach was 70 km
+against a table entry of 124. A turbojet runs for as long as the flight lasts;
+the throttle already decides when it is actually lit. The Kalibr and the Mk-48
+had the same fault — a torpedo rated at 38 km could swim nine.
+
+| | stated range | could actually reach |
+|---|---|---|
+| AGM-84 Harpoon | 124 km | 70 km → 124 km, arriving at 428 s of a 520 s life |
+| 3M-14 Kalibr | 150 km | 73 km → 150 km |
+| Mk-48 torpedo | 38 km | 9 km → 38 km |
+
+## A weapon that could not reach its own range
+
+Two of the numbers in the store table are not independent of the rest, and
+checking each round against its own entry turned up four weapons that could not
+do what they claimed.
+
+**The SLBM reached 44 km of a stated 90.** Range on a ballistic arc is
+`v² sin(2a) / g`, so the burnout speed sets it and nothing else can. The
+strategic round simply fell out of the sky less than half way to anything it was
+aimed at — which is why `--nuketest` had been failing by 18 km and `--subtest`
+had never destroyed a single structure. Both pass now.
+
+**The Harpoon's motor stopped at 70 km of a stated 124.** A turbojet runs for
+as long as the flight lasts; `burn` was 240 s of a 428 second run, so it coasted
+the last third against its own drag and was self-destructed in mid-air at 300 s.
+The Kalibr and the Mk-48 had the same fault — a torpedo rated at 38 km could
+swim nine.
+
+Ranges are now set from the speed each round can actually reach, and the map is
+1200 km across, so they use it: the Oreshnik goes 500 km, the Khorramshahr 1000.
+
+## The hypersonic that was not
+
+The Oreshnik cut its motor **six seconds into a hundred and ten second stage**.
+The rule was to stop burning the moment the arc the round is already on reaches
+the target, which is right at maximum range and a disaster well inside it: fired
+72 km — 40% of its rated reach — it peaked at 937 m/s against a design speed of
+2400 and went over the top at 315. A lobbed shell, from a weapon whose own entry
+calls it hypersonic.
+
+On a ballistic arc that cannot be tuned away. Range is `v² sin(2a)/g` and apogee
+is `v² sin²(a)/2g`, so at a fixed range more speed means a steeper arc and a very
+much higher one — holding 2400 m/s over 72 km needs an 85 degree launch and takes
+the round 200 km up. The way out is the one the real weapons use: depress the
+trajectory, burn the whole stage, fly low and fast. Three things had to change
+together — the flat root of the arc rather than the steep one, a motor that may
+not cut below the speed the arc was solved for, and a midcourse loft that does
+not aim twenty kilometres above a target it is trying to stay low to reach.
+
+| | before | after |
+|---|---|---|
+| peak speed | 937 m/s | 3423 m/s (Mach 10) |
+| speed at the target | 315 m/s | 1769 m/s |
+| apogee on a 72 km shot | 18 km | 2.4 km |
+
+## Independently targetable
+
+A MIRV bus was releasing on height while doing 1780 m/s, so its load had forty
+seconds of falling in which to cover sixty-eight kilometres against the five
+that were left. And the warheads were rated at 8 g against the bus's 15 —
+scaled by air density and by how far off their design speed they were, that came
+to **1.7 g**, so they could not steer at all and fell wherever the bus had thrown
+them. Measured, the six came down **19 km** from the aiming point.
+
+A guided re-entry vehicle separates on *range*, while it still has room to fly
+itself down, and it needs the authority to do it. `--teltest` had only ever
+checked that the bus opened; it measures where the load lands now.
+
+| | mean miss | worst |
+|---|---|---|
+| before | 19132 m | 19445 m |
+| after | 550 m | 764 m |
+| with each warhead given its own mark | 43 m | 53 m |
+
+That last row is the point of the letters. Shift and right click on the map
+assigns a mark to a warhead; the bus deals them out as it opens, the primary
+mark first. Without any, it spreads its load over the footprint as before.
+
 ## Defeating a missile
 
 Three things decide whether a break works, and the interesting part is which
@@ -1656,6 +2101,144 @@ separate cuttings:
 the corridor is answered from a 64 m grid index rather than by walking all 846
 legs. Terrain build cost is unchanged.
 
+## The road that could not be built
+
+The network had been surveyed to a ruling gradient of 6.2% and it held it
+everywhere, which sounds like success and was not. Holding a fixed gradient
+against rolling country puts the design surface a long way from the ground, and
+the earthworks then have to make up the difference: **1040 km of a 2021 km
+network was classified as tunnel** — more than half of it underground — with a
+120 km "viaduct" standing in open sea where a route between two continents had
+decided the cheapest way across was to pave it.
+
+Three things were wrong, and the first one caused the other two.
+
+**The profile was all cut and no fill.** The grade rule ran four sweeps: two
+taking minima and two taking maxima. Composed in that order what comes out is
+the *highest* profile that never stands above the ground — every metre of the
+road in a cutting, nowhere on an embankment. Over hills that is a cutting nearly
+the whole way, and past a cutting's depth the classifier had no choice but to
+call it a tunnel.
+
+There is exactly one right answer here and it is cheap. Among all profiles
+obeying a gradient limit, the one nearest the ground is the midpoint of two
+envelopes: `U[i] = min_j(g[j] + G·d(i,j))`, the highest such profile below the
+ground, and `L[i] = max_j(g[j] - G·d(i,j))`, the lowest above it. Both are two
+sweeps. Their midpoint has the smallest possible worst earthwork, and that worst
+earthwork is `(L - U)/2` — so the same arithmetic that draws the road also says
+whether it can be built at all.
+
+**Clamping and smoothing fought each other.** The profile was clamped into the
+cut-and-fill band, then re-graded, then clamped again, twenty-odd times. Those
+are two convex sets and alternating between them converges — in the limit, and
+slowly where they barely meet. Measured, the design surface ended up **70 m
+under a hillside** at a station the classifier had left as open ground, and the
+corridor dutifully carved a cliff trying to reach it. Both constraints are
+applied at once now: propagating the band edges along the line at the gradient
+allowance makes each edge Lipschitz in its own right, and the median of three
+Lipschitz functions is Lipschitz — so clamping the wanted profile between the
+propagated edges satisfies both in a single pass. Where the two edges *cross*,
+no road can be built there at all, and that crossing is what marks out the
+country a structure exists for.
+
+**The aerodrome was applied after the road.** The survey read the ground with
+the airfield already levelled into it — which is what lets a road run onto an
+apron instead of stopping at a cliff beside it — and then the corridor was
+applied to the hillside underneath. The survey believed it was cutting five
+metres where it was in fact carving ninety-five.
+
+Along with those: water is charged by depth rather than at a flat rate, and a
+leg whose route needs more than an eight kilometre crossing is abandoned rather
+than built; the router samples the midpoint of every search step, because a
+ridge crest is narrower than a 400 m grid cell and a step measured end to end
+runs straight over the top of one; a road that meets another is *pinned* to a
+shared height and the pin is propagated back along both roads at whatever
+gradient each is allowed, rather than being tugged toward the mean locally; and
+two stretches of road in the same place at the same height take the same
+classification, so a deck cannot stand on its twin's embankment.
+
+| | before | after |
+|---|---|---|
+| trunk network | 2021 km | 2203 km, every town on it |
+| bored | 1040 km (51%) | 55 km (2.5%) |
+| carried on a deck | 323 km, incl. a 120 km ocean span | 104 km, none over 3.2 km |
+| gradient along the road | 95th 7.7%, worst 59.5% | 95th 7.6%, worst 15.8% |
+| cross fall over the carriageway | 95th 0.0%, worst 41.7% | 95th 0.0%, worst 26.8% |
+| finished ground vs the design surface | 4.70 m high, 30.58 m low | 0.00 m, 0.00 m |
+| junctions disagreeing about the height | 22.6 m | 5.2 m |
+| earth moved | mean 5.43 m, worst 38.5 m | mean 2.63 m, worst 45.7 m |
+| spans standing on made ground | — | 0 of 113 |
+
+The worst cutting is deeper than it was, and deliberately: a run that wants a
+tunnel and does not earn one is allowed a 45 m cutting rather than being held to
+34 m and then dragged back out of the band by the next pass. `--roadtest` reads
+the limits out of the survey itself so the bars move with them.
+
+## The country, before the hangar
+
+The menu used to open on a turntable with a vehicle already standing on it,
+forty metres from the camera against a backdrop of nothing much — after nine
+seconds of building a twelve hundred kilometre world. It now opens on the world:
+a slow circuit under the cloud deck over the home valley, with the hangar fading
+in over it a couple of seconds later. Nothing stands on the turntable until
+somebody asks to look at something, and choosing a card is what cuts to it.
+
+## The helicopter that sank when you let go
+
+Release the collective after a climb and the machine dropped seventeen metres
+through the height it was at before settling. The altitude hold was grabbing the
+current altitude the moment the lever centred — but the aircraft is still going
+up at six metres a second at that point, so the loop was instantly six metres a
+second fast at a target it had already left behind. It chopped the collective to
+arrest a climb it should have been letting run out, overshot the other way, and
+the trim wound up during the climb took seconds to come back. Holding the height
+the machine is going to *reach* rather than the one it is passing through leaves
+the loop nothing to fight.
+
+| | before | after |
+|---|---|---|
+| sag on releasing the lever | 17.4 m | 0.0 m |
+
+`--helitest` had never once measured any of this. Two faults in the test itself:
+its `elif` chain fell through to "collective up" for the four seconds before the
+hands-off window and never let go, so the twenty seconds it exists to measure
+were flown on full up collective — and it drove the lever through the input map,
+which in a headless session reports the shift key as held from the moment the
+process starts. It drives the lever directly now, and gates on the drift and on
+the sag.
+
+Hands off for twenty seconds, the hold was always right: 1.3 m of drift.
+
+## Three aeroplanes that could not do their job
+
+**The flying wings could not take off.** The B-2 and the H-20 rolled the full
+three kilometres and went off the far end at 159 knots with the pitch rate
+reading exactly zero. Two faults, and the first hid the second: they were the
+only aeroplanes in the game with less than a quarter of their peers' pitch
+authority — 1.35 rad/s² against 6.2 for an F-16 — and the B-2 was rolling at
+201 t against a real maximum take-off weight of 170, so she needed 159 knots to
+rotate and could not reach it inside the runway. At an operating weight and with
+elevons that can lift the nose, she is off at 149 knots with 750 m to spare.
+
+**A helicopter left on the pad flew away by itself.** The world sets
+`auto = "wait"` while the pilot is walking out and climbing in. The fixed wing
+side has always understood that; the rotary pilot did not look at the value at
+all, so any autopilot state fell straight through to the hover hold and the
+aircraft climbed to a hundred and twenty metres with nobody in it.
+
+**The gunship's barrels had nothing to do with its fire.** The side battery was
+merged into the airframe mesh, so it pointed wherever it had been modelled while
+the rounds flew off to wherever the sensor was looking. The guns are on trunnions
+now, they train onto the sight whether or not the trigger is down, and the fire
+comes out along the bore — so a mount that cannot reach the mark is a shot that
+is not taken, which is what banking a gunship into its orbit is for. `--gunnertest`
+reports whether the battery is on the mark through the orbit.
+
+And the targeting pod's azimuth was clamped to ±137°, a stop the hardware does
+not have — a head on a roll gimbal can look anywhere the airframe is not in the
+way. Anything behind you could be point-tracked by the ship sensor, which sets
+the angle directly, and could not be reached with the mouse.
+
 ## Parts you could see through
 
 "A lot of the vehicle engines and parts don't have backface culling so I can see
@@ -1780,6 +2363,225 @@ boundary stitching leaves to cover: the T-junction residual is 0.00006 m.
 The reference project in `refenrece/PlanetTerrain (Best)` does the same thing —
 `clampf(cell_m * skirt_cells, 0.4, 5.0)` — and reaches the same conclusion in a
 comment: "LOD gaps are only ever a few meters."
+
+## Nine seconds to two and a half
+
+World generation was 9.9 s cold. Almost all of it was arithmetic being asked for
+one point at a time across the extension boundary, from script, on one thread.
+
+| phase | before | after |
+|---|---|---|
+| road network (site, route, survey) | 3204 ms | 889 ms |
+| terrain (chunks, ground mask, climate) | 1898 ms | 437 ms |
+| scenery (towns, road surfaces, scatter) | 3645 ms | 954 ms |
+| map relief | 906 ms | 95 ms |
+| **total** | **9.9 s** | **2.6 s** |
+
+What actually moved the numbers, largest first:
+
+- **Road surfaces, 2620 → 313 ms.** Four height samples every eleven metres of
+  every road and street on the map, each one its own boundary crossing, from
+  eight workers that then queued at it. Both vertex lists are built in one call.
+- **The survey tail, ~1070 → 0 ms.** Classify, hold, grade, settle and float
+  were a dozen passes over eighty thousand stations, alternating between script
+  and the extension. It is one call now, and the passes that were serial in it
+  — welding and tying — run over the stations across every core.
+- **The relaxation index.** Rebuilt once per pass, and building it is the one
+  part that cannot be spread over the cores. Welding moves a station a couple of
+  metres against a 34 m reach, so it is rebuilt every fourth pass instead:
+  598 → 284 ms, with the measured junction disagreement unchanged.
+- **The ground mask, 605 → 28 ms.** Sixteen million texels against nine thousand
+  capsules. Bucketed by row and clipped to the band of each row before scanning,
+  so a road running diagonally across the map is no longer scanned from one side
+  of every row it touches to the other — and the coverage is counted where it is
+  drawn, because a script loop over sixteen million texels cost more than
+  drawing the whole thing did.
+- **The map relief, 906 → 95 ms**, and **the climate texture, 523 → 12 ms**.
+  Both were per-pixel loops over a worker pool asking the extension for a height
+  or a noise value at a time.
+- **Terrain nodes and chunk borders.** Measuring a node's deviation was 353
+  separate height queries, on the main thread, the first time the tree ever
+  looked at one. Conforming a chunk's edges, measuring the residual and reading
+  the field either side of every border vertex was another six hundred. Both are
+  one call each now.
+- **Road distance.** A 256 x 256 raster of the distance field over an 18 km box,
+  guarded by walking the segments wherever the answer mattered — because at
+  141 m to a cell it could not resolve a 15 m carriageway, and reported a mean
+  of 30 m away while standing on the centreline. Replaced by a grid-indexed
+  exact query over the whole map, which is faster than the guard was: measured
+  standing on the centreline, mean 0.0 m, worst 0.0 m, and no point on any road
+  where the terrain paints nothing.
+
+Two things came out of the script side entirely: the second copy of the height
+field, which was still being set up and could have drifted from the real one
+without anything noticing, and the script-side spatial indexes for the road
+network, which the extension now owns because it is the only side that needs
+them.
+
+## A sky full of missiles going nowhere
+
+Friendly warships were firing constantly, in every direction, at nothing you
+could see. `--fleetfire` counts what the fleet actually does with its tubes over
+a hundred seconds of a running engagement, and the first run said it plainly: 98
+rounds away, 87 of which never came within a kilometre of what they were sent
+at, and ten of them chasing one contact.
+
+Three separate faults, and they compounded.
+
+**Nothing counted how many tubes were already on a target.** The anti-missile
+picture had always capped itself at two rounds a threat; the *air* picture had
+no cap at all, so every hull in the fleet fired at whatever was nearest, every
+few seconds, for as long as it lived.
+
+**Nothing asked whether the shot was possible.** An SM-2 will fly seventy
+kilometres, so anything inside thirty-eight was fair game — including fighters
+twenty to thirty kilometres out, jinking and opening. Broken down by the range
+the shot was taken at:
+
+| launched at | rounds | got within a kilometre |
+|---|---|---|
+| under 8 km | 8 | 6 (75 %) |
+| 8–15 km | 18 | 1 (6 %) |
+| 15–25 km | 46 | 4 (9 %) |
+| over 25 km | 23 | 2 (9 %) |
+
+Seventy-three per cent of everything fired went beyond fifteen kilometres, where
+it has no realistic chance. The engagement now stops at twelve kilometres, which
+is where it stops working, and the interceptor picture gets the comparison it
+always needed: a cell leaves the tube at a standstill and averages about seven
+hundred metres a second, so from twenty kilometres it is half a minute from the
+intercept — fired at a round that arrives before then it is simply thrown away.
+
+**And a round whose contact died flew on for a minute and a half.** Losing the
+target meant coasting to the last known position and then just carrying on:
+SM-2s alive for ninety to a hundred and eight seconds whose closest approach to
+anything was fourteen to thirty kilometres, several of which were at their
+closest three tenths of a second after launch — they flew away from the target
+and never came back. From the deck that is the whole complaint. A real one
+destroys itself, and so does this now, at the closest it gets to the last place
+it saw the target. Rounds sent to a *place* — bombs, cruise weapons and
+ballistic shots — are excluded, because arriving without ever seeing anything is
+the entire point of an inertial mark.
+
+Measured over the same hundred seconds: **98 rounds down to 20**, the most at any
+one contact down from ten to four, and four of the seven shots taken at aircraft
+now get within a kilometre. `--vlstest`, `--cmtest`, `--navaltest` and
+`--breaktest` are unchanged.
+
+## A missile that flew into the sea
+
+A Maverick locked to a warship, fired from low level, went into the water 1.4 km
+short — with LOCKED on the glass the whole way down. Instrumented, the round's
+height told the story on its own: 95 m, 73, 44, 16, and then a splash.
+
+Proportional navigation works out the turn that closes the line of sight and
+nothing else. It does not know the round is also falling. Against an aeroplane
+that barely shows — both bodies are in free fall, so gravity is very nearly
+common-mode and the geometry is forgiving. Against a ship it is the *whole* miss,
+because a hull's origin sits exactly at sea level: every centimetre the round
+sags under its own commanded course is a centimetre nearer the water, and there
+is no altitude left to spend. The steeper the shot the more it gets away with,
+which is why a dive from 1500 m hit and a flat run from 120 m did not — the dive
+had 1.1 m to spare inside an 11 m fuse, so it was never far from failing either.
+
+A real autopilot trims gravity out, and this project's own cruise profile always
+has — it is the `+ Vector3.UP * 9.81` in its steering. Every homing round now
+gets the same trim: the component of gravity across the flight path is added to
+the acceleration command, before the g limit takes its cut, so a round short of
+speed or short of air still droops, which is correct. Ballistic and cruise
+rounds are excluded — the first flies an arc on purpose and the second already
+does this.
+
+Measured, same shot: height 98, 86, 73, 58, 41, 23, 4 and a hit, closest
+approach 3.2 m against 1368 m before. Air-to-air is unchanged — three runs each
+way against a target breaking at full power from 12 km, an AMRAAM closes to a
+mean 11.7 m with the trim and 12.3 m without, a Sidewinder 10.7 and 10.3, all
+inside the run-to-run spread of the endgame.
+
+`--navaltest` was scoring that shot a **hit**, because it compared the hull's
+health before and after and the ambient battle was hurting the ship while the
+round was in the air. It now tracks the round's own closest approach to the
+hull's *surface* and calls a miss a miss.
+
+## A gun that hit like a rifle
+
+The A-10 is an aeroplane built around a gun, and its rounds landed with the same
+puff of dust as a rifle bullet. A GAU-8 fires 30 mm high explosive incendiary: a
+burst of it walking across a target is a string of small detonations. Cannon
+impacts now take a burst scale from the gun's own entry — flash, fireball and
+the dirty smoke that hangs afterwards, built from the same cheap pieces a bomb
+burst uses, because a hundred rounds a second of these have to stay affordable.
+Solid shot still puffs dust; only the A-10 is tagged, and any other gun is one
+key in its spec.
+
+## Key labels that told you to press the wrong key
+
+The countermeasures moved — flares off `N` onto `C`, chaff off `B` onto `V`, to
+get the chaff off the bomb bay key. The help page was updated to match. The
+flight strip was not, and neither was the hangar's control line nor this file:
+between them they went on naming `N` and `B` for the countermeasures, `V` for a
+gun that is on `K`, `C` for a camera that is on `P` and `M` for a mouse stick
+that is on `;`.
+
+Labels are read off the bindings now, through `Sim.key_label()`, so a key that
+moves takes its label with it. `--hudtest` also walks the help page and compares
+every control it names against the action it is really bound to, which is the
+check that was missing when this drifted the first time.
+
+## Things hanging in the air beside the aeroplane
+
+The F-16 carried two Sidewinders that were not on it. Its wingtip rails were
+authored at x = ±4.85 and z = 0.40; the wing's planform ends at x = 4.55, and at
+that station its chord runs from z = 2.20 to z = 3.30. So the rails sat thirty
+centimetres outboard of the tip and nearly two metres ahead of the wing, and the
+missiles floated in clear air. The navigation lamps were worse: they were placed
+at half the span from the data table — 4.98, not 4.55 — and at 0.6 of the
+*leading edge z of the second poly vertex*, which on a swept wing is a number
+with no geometric meaning at all. The port lamp ended up 3.32 m off the wing.
+
+None of this was an F-16 problem. Every station and every lamp was positioned by
+eye against numbers that only line up on a straight wing, and `--wingtest` — which
+asks each fitting whether its mounting point is inboard of the tip and between
+the leading and trailing edges at that station — found something adrift on 22 of
+the 23 airframes.
+
+The fix is to stop guessing. `JetFactory` now reads the planform: `_tip_x` for
+where the wing ends, and `_chord_at` for where its leading and trailing edges are
+at any half-span station, walking the two edge chains of the wing polygon. A
+pylon store is snapped to the chord at its own station and hung far enough below
+the skin for its pylon to reach; a wingtip rail goes on the tip, with its round
+positioned so the tail sits level with the trailing edge and the nose overhangs
+forward, which is what a wingtip missile actually looks like. The lamps go on the
+tip, and the tip vortex leaves the trailing edge of the tip rather than a point
+abeam it. All 23 airframes pass, and the aeroplanes carry what they are holding.
+
+## A launcher that would not stop bouncing
+
+A TEL arriving on the ground bounced for several seconds. Two faults, and they
+compounded.
+
+Every ground spawn put the hull at `Sim.height_at(...) + 1.1`. For a tank that is
+about half a metre of drop, which is survivable. For a launcher it is not: its
+wheel *centres* sit a tyre radius above the body origin, so the origin belongs at
+ground level, and 1.1 m meant dropping fourteen tonnes of lorry a full metre
+before anything touched. The vehicle now asks its own running gear where it
+belongs — `rest_height()` takes the largest `r - rest_y` across its wheels and
+subtracts the static deflection the springs will take — and `ground_pose()` also
+lays the hull along the terrain normal instead of level with the horizon, so one
+side of the running gear is not buried while the other is in the air.
+
+Then the damping. It was `1.05 * sqrt(k * mass / N)`, which reads like a critical
+damping expression and is not one. The hull sits on all N springs at once: the
+whole vehicle sees `2k` and `2c`, so the ratio that matters is `c / sqrt(2*k*m)`,
+and the old figure works out at `0.742 / sqrt(N)` — 0.20 on fourteen wheels. A
+vehicle damped at a fifth of critical does not settle, it oscillates. Solving the
+same expression for `c` at a chosen ratio (0.75 tracked, 0.95 for a launcher,
+0.80 for a 4x4) is a three-line change and the pogoing stops.
+
+`--susptest` measures it: peak swing on spawn and how long until the hull is
+still. Before, a launcher swung 1.44 m and was still moving at three seconds.
+Now it swings 0.02 m and is settled inside a frame. It then drives the vehicle
+away, because a suspension that never moves is also a way to pass this test.
 
 ## Code health
 

@@ -1261,7 +1261,7 @@ func _scatter_nature() -> void:
 					prng.randf_range(-SCAT_HALF * SCAT_CELL, SCAT_HALF * SCAT_CELL),
 					prng.randf_range(-SCAT_HALF * SCAT_CELL * 1.6,
 						SCAT_HALF * SCAT_CELL * 1.6))
-		_scat_h = Sim.native.grounds_at(_scat_pts, true)
+		_scat_h = Sim.native.grounds_at(_scat_pts, Sim.G_ALL)
 		_scat_slope = Sim.native.slopes_at(_scat_pts)
 		# and the surface as the mesh draws it, which is four more heights
 		# apiece and was the last thing the workers were crossing the boundary
@@ -1438,44 +1438,23 @@ func _wall_mesh() -> ArrayMesh:
 ## on the map that is over three seconds. None of it touches the scene tree, so
 ## a leg at a time goes to the worker pool and only the two meshes are made
 ## here.
-var _road_jobs: Array = []
-var _road_out: Array = []
-
 func _build_roads() -> void:
-	_road_jobs = []
-	for r in Sim.ROADS:
-		_road_jobs.append([r[0], r[1], 7.5])
+	# Every leg on the map in one call. Four height samples every eleven metres
+	# of every road and street, and with a settlement network spread across the
+	# world that was two and a half seconds of world generation -- each of those
+	# samples its own crossing of the extension boundary, from eight workers
+	# that then queued at it. The extension builds both vertex lists across
+	# every core and hands them back once.
+	var legs := PackedFloat32Array(Sim.road_draw)
 	for r in _streets:
-		_road_jobs.append([r[0], r[1], 5.0])
-	_road_out = []
-	_road_out.resize(_road_jobs.size())
-	var gid := WorkerThreadPool.add_group_task(_ribbon_job, _road_jobs.size(), -1,
-		true, "road surfaces")
-	WorkerThreadPool.wait_for_group_task_completion(gid)
-	# Sized once. Appending 450 arrays onto a growing PackedVector3Array
-	# reallocates and copies the whole thing over and over.
-	var ns := 0
-	var nk := 0
-	for o0 in _road_out:
-		ns += ((o0 as Array)[0] as PackedVector3Array).size()
-		nk += ((o0 as Array)[1] as PackedVector3Array).size()
-	var surf := PackedVector3Array()
-	var kerb := PackedVector3Array()
-	surf.resize(ns)
-	kerb.resize(nk)
-	var ws := 0
-	var wk := 0
-	for o in _road_out:
-		var a0: PackedVector3Array = (o as Array)[0]
-		for v in a0:
-			surf[ws] = v
-			ws += 1
-		var b0: PackedVector3Array = (o as Array)[1]
-		for v2 in b0:
-			kerb[wk] = v2
-			wk += 1
-	_road_jobs = []
-	_road_out = []
+		var a: Vector2 = r[0]
+		var b: Vector2 = r[1]
+		legs.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y,
+			5.0, 0.0, 0.0, 0.0]))
+	var out: Array = Sim.native.road_ribbons(legs)
+	var surf: PackedVector3Array = out[0]
+	var kerb: PackedVector3Array = out[1]
+	_stats["road_tris"] = int((surf.size() + kerb.size()) / 3.0)
 	add_child(MeshKit.mi(_flat_mesh(kerb,
 		MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)), "Kerbs"))
 	add_child(MeshKit.mi(_flat_mesh(surf,
@@ -1578,10 +1557,6 @@ func _build_structures() -> void:
 	_stats["piers"] = piers
 	_stats["portals"] = portals
 
-func _ribbon_job(i: int) -> void:
-	var j: Array = _road_jobs[i]
-	_road_out[i] = _ribbon(j[0], j[1], float(j[2]))
-
 ## Ground-hugging triangles need no normal but up, so the mesh is a vertex list
 ## and nothing else.
 func _flat_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
@@ -1598,66 +1573,6 @@ func _flat_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
 	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 	m.surface_set_material(0, mat)
 	return m
-
-## Runs on a worker. Returns [carriageway, kerbs].
-func _ribbon(a: Vector2, b: Vector2, half: float) -> Array:
-	var surf := PackedVector3Array()
-	var kerb := PackedVector3Array()
-	var len2 := a.distance_to(b)
-	if len2 < 1.0:
-		return [surf, kerb]
-	# One quad is enough for a leg shorter than a step. Routing chops the trunk
-	# network into thousands of short segments, and a floor of two steps gave
-	# every fifteen metre piece of road four rows of height samples and
-	# thirty-six vertices it had no detail to put in them.
-	var steps := maxi(int(round(len2 / (11.0 if half > 6.0 else 17.0))), 1)
-	var dir := (b - a).normalized()
-	var nrm := Vector2(-dir.y, dir.x)
-	var prev: Array = []
-	for i in steps + 1:
-		var t := float(i) / float(steps)
-		var p := a.lerp(b, t)
-		var row: Array = []
-		for k in [-1.55, -1.0, 1.0, 1.55]:
-			var q: Vector2 = p + nrm * half * float(k)
-			var y := Sim.height_at(q.x, q.y)
-			if half > 6.0:
-				# A trunk road on an embankment or a bridge rides on the design
-				# surface, not on whatever is underneath it. Drawn on the ground
-				# instead, a crossing was painted along the seabed and the road
-				# ran through the water.
-				var rs := Sim.road_surface(q.x, q.y)
-				# ...but only as far as the ground was actually raised to meet
-				# it. The corridor fills to a limit and then gives up, while the
-				# ribbon was drawn on the design surface whatever that limit
-				# did -- so where the design stood higher than the embankment
-				# the terrain got, the carriageway hung in the air over an
-				# untouched hillside, which reads as a strip of road attached to
-				# nothing.
-				if rs.y > 0.35 and rs.x - rs.z <= Sim.ROAD_FILL_MAX * 1.25:
-					y = maxf(y, rs.x)
-			row.append(Vector3(q.x, y + 0.16, q.y))
-		# lift the surface to the highest of the two kerbs so it never sinks in
-		var top: float = maxf(row[1].y, row[2].y)
-		row[1] = Vector3(row[1].x, top, row[1].z)
-		row[2] = Vector3(row[2].x, top, row[2].z)
-		row[0] = Vector3(row[0].x, minf(row[0].y, top) - 0.04, row[0].z)
-		row[3] = Vector3(row[3].x, minf(row[3].y, top) - 0.04, row[3].z)
-		if i > 0:
-			_strip(surf, prev[1], prev[2], row[2], row[1])
-			_strip(kerb, prev[0], prev[1], row[1], row[0])
-			_strip(kerb, prev[2], prev[3], row[3], row[2])
-		prev = row
-	return [surf, kerb]
-
-func _strip(out: PackedVector3Array, a: Vector3, b: Vector3, c: Vector3,
-		d: Vector3) -> void:
-	out.append(a)
-	out.append(b)
-	out.append(c)
-	out.append(a)
-	out.append(c)
-	out.append(d)
 
 # ---------------------------------------------------------------- infrastructure
 const PYLON_ROUTES := [

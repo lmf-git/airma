@@ -125,18 +125,53 @@ func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: 
 		var far_flat: float = Vector2(tgt.global_position.x - xf.origin.x,
 			tgt.global_position.z - xf.origin.z).length()
 		var vbo: float = maxf(float(ws.get("ref_speed", 1000.0)) * 0.85, 100.0)
+		_vbo = vbo
 		var s2: float = clampf(far_flat * 9.81 * BALLISTIC_DRAG_ALLOW
 			/ (vbo * vbo), 0.0, 1.0)
-		# The steep solution. Two angles reach any given range, and a ballistic
-		# missile flies the high one -- that is what makes it ballistic. The
-		# weapons that want the flat, fast, depressed profile are the hypersonic
-		# anti-ship rounds, and those are cruise missiles: they hold a speed and
-		# follow the ground, and they never come through here.
-		_pitch = clampf((PI - asin(s2)) * 0.5, deg_to_rad(34.0), deg_to_rad(60.0))
+		# Two angles reach any given range, and which one this round flies
+		# depends on how much of its reach the shot is using.
+		#
+		# The high one is what makes a ballistic missile ballistic, and at
+		# something near maximum range it is the only one there is -- both roots
+		# converge on forty-five degrees. Well inside that reach it is a
+		# disaster, because the motor is cut the moment the arc it is on already
+		# reaches the target and on a steep arc that happens almost at once. An
+		# Oreshnik sent 72 km -- 40% of its rated range -- burned six seconds of
+		# a hundred and ten second stage, peaked at 937 m/s against a design
+		# speed of 2400, and went over the top at 315: a lobbed shell, from a
+		# weapon whose entry calls it hypersonic.
+		#
+		# On a ballistic arc that is not a bug that can be tuned away. Range is
+		# v^2 sin(2a)/g and apogee is v^2 sin^2(a)/2g, so at a fixed range more
+		# speed means a steeper arc and a very much higher one: holding 2400 m/s
+		# over 72 km needs an 85 degree launch and takes the round 200 km up.
+		# The way out is the one the real weapons use, which is to depress the
+		# trajectory -- burn the whole stage, fly low and shallow, and arrive in
+		# a third of the time still doing Mach six. It is also what makes them
+		# hard to intercept, which is the entire point of the class.
+		# Only where the entry asks for it. A strategic round is meant to fly the
+		# high arc whatever the range -- that is what it is for, and depressing
+		# it put the warhead twelve kilometres off the mark. This is for the
+		# weapons whose whole selling point is that they arrive fast.
+		var reach: float = maxf(float(ws.get("range", 100000.0)), 1.0)
+		_depressed = bool(ws.get("depressed", false)) and far_flat < reach * 0.55
+		if _depressed:
+			_pitch = clampf(asin(s2) * 0.5, deg_to_rad(3.0), deg_to_rad(45.0))
+		else:
+			_pitch = clampf((PI - asin(s2)) * 0.5, deg_to_rad(34.0), deg_to_rad(60.0))
 
+## The burnout speed the ballistic arc was solved for, and whether this shot is
+## flying the depressed root. The motor is only held to that speed on a
+## depressed shot: there the arc really was solved for it, and there the whole
+## point is arriving fast.
+var _vbo := 0.0
+var _depressed := false
 ## The cruising height this particular shot chose, which depends on how far it
 ## has to go. Zero until a cruise round with a target works it out at launch.
 var _deck := 0.0
+## Aiming points programmed before launch, one per warhead as the bus opens.
+## Empty for an ordinary shot, which spreads its load over the footprint.
+var programmed: Array = []
 ## Its turn radius at cruising speed, which is what decides both that height and
 ## how early the descent has to begin.
 var _turn_r := 0.0
@@ -276,7 +311,19 @@ func _physics_process(delta: float) -> void:
 				# reached the target put a Zircon into the ground thirty-four
 				# kilometres short. The allowance is what the drag costs it.
 				var reach: float = vnow * vnow * maxf(2.0 * sn * cs, 0.02) / 9.81
-				if sn > 0.05 and reach >= flat * BALLISTIC_DRAG_ALLOW:
+				# ...but not before the round is doing the speed the arc was
+				# worked out for.
+				#
+				# The test above is against the arc the round is on *now*, and
+				# the guidance is steering it the whole time -- so a moment of
+				# nose-up early in the boost reads as an arc that already
+				# reaches the target and stops the motor there and then. That is
+				# how a hundred and ten second stage came to burn for six. The
+				# launch angle was chosen on the assumption that the round would
+				# reach `_vbo`, so cutting below it is answering a question the
+				# aiming solution never asked.
+				if (not _depressed or vnow >= _vbo * 0.94) \
+						and sn > 0.05 and reach >= flat * BALLISTIC_DRAG_ALLOW:
 					# and it stays out. `boosting` is worked out afresh every
 					# frame from the age against the burn time, so cutting it
 					# locally lasted exactly one frame: the motor relit and the
@@ -358,7 +405,31 @@ func _physics_process(delta: float) -> void:
 		# kilometres short. What decides the release is whether the bus is on
 		# the target *ballistically* -- how far the load will travel before it
 		# is down, against how far there is left to go.
-		var open_now: bool = vel.y < 0.0 \
+		# A bus whose load flies itself lets go on *range*, not on height.
+		#
+		# The height-and-ballistic-arc rule is right for a cluster bomb, whose
+		# bomblets are dropped and fall. It is meaningless for a re-entry
+		# vehicle: released at nine kilometres doing 1780 m/s a warhead has
+		# forty seconds of falling in which to cover sixty-eight kilometres
+		# against the five that are left, so the arc never crosses the range and
+		# the bus flew straight over the aiming point at seven and a half
+		# kilometres without ever opening. Before that rule was tightened it
+		# opened anyway and put its six warheads a mean of two kilometres off.
+		#
+		# Neither is a release problem. A guided warhead does not need the bus
+		# to be on the ballistic solution -- it needs enough distance left to
+		# steer itself down, and at 1700 m/s and eight g that is tens of
+		# kilometres, not hundreds of metres. So it separates while it still has
+		# the room, which is also what a real bus does.
+		var open_now: bool
+		var by_range: float = float(ws.get("mirv_range", 0.0))
+		if by_range > 0.0:
+			open_now = is_instance_valid(target) \
+				and global_position.distance_to(target.global_position) <= by_range
+			if open_now:
+				_open_up()
+				return
+		open_now = vel.y < 0.0 \
 			and global_position.y - bed < float(ws.get("mirv_at", 1000.0))
 		if open_now and is_instance_valid(target):
 			var drop: float = maxf(global_position.y - bed, 1.0)
@@ -396,6 +467,28 @@ func _physics_process(delta: float) -> void:
 		if dm < _mark_best:
 			_mark_best = dm
 		elif _mark_best < 9000.0 and dm > _mark_best + 15.0:
+			_die(true)
+			return
+	# ...and a round whose contact has gone does the same thing rather than
+	# wandering off. An air defence round that loses its target -- because
+	# somebody else killed it, or it was decoyed -- was coasting to the last
+	# known position and then simply carrying on: measured over one engagement,
+	# SM-2s alive for ninety to a hundred and eight seconds whose closest
+	# approach to anything was fourteen to thirty kilometres. From the deck that
+	# is a sky full of missiles flying at nothing, in every direction but the
+	# right one. A real one destroys itself; so does this, at the closest it
+	# gets to the last place it saw the target.
+	#
+	# Only rounds that home on a contact. A bomb, a cruise weapon and a
+	# ballistic shot are all sent to a *place* and arrive perfectly well without
+	# ever seeing anything, which is the whole point of an inertial mark.
+	if armed and target == null and _last_aim != Vector3.INF \
+			and String(ws["kind"]) != "bomb" and String(ws["kind"]) != "cruise" \
+			and not bool(ws.get("loft", false)):
+		var dl := global_position.distance_to(_last_aim)
+		if dl < _mark_best:
+			_mark_best = dl
+		elif _mark_best < 9000.0 and dl > _mark_best + 25.0:
 			_die(true)
 			return
 	# The sea is a surface, not a window. Testing only against the height field
@@ -440,8 +533,30 @@ func _physics_process(delta: float) -> void:
 	# to speed yet has not arrived anywhere.
 	if armed and vel.length() < 40.0 and age > 1.5 \
 			and not (_vls and age < VLS_BOOST_FOR + 0.6):
-		_die(true)
-		return
+		# ...but it has to have stopped somewhere that means something. A glide
+		# bomb aimed at a target at sea level flies a long, shallow, decelerating
+		# profile — it trades speed for range to stay on the sight line — and if
+		# it ran out of speed while still high and still short, this rule
+		# detonated it where it was. Measured: a B61 released at 2400 m six
+		# kilometres from a squadron went off 900 m in the air, 1.9 km short,
+		# and hit nothing at all. A nuclear weapon bursting harmlessly above a
+		# formation that then sails on.
+		#
+		# Being slow is not the same as having arrived. Near the target, or near
+		# the surface, it has; otherwise let it fall — it is a bomb, it will
+		# arrive properly a moment later, and the water burst that follows puts
+		# the warhead where it belongs.
+		var over: float = global_position.y - maxf(
+			Sim.height_at(global_position.x, global_position.z), Sim.WATER_LEVEL)
+		# How near counts as "arrived", which is a proximity radius and NOT the
+		# blast radius: a nuke's lethal radius is 1400 m, and using it here said
+		# a round a mile away had arrived and detonated it there anyway.
+		var reach: float = maxf(float(ws["fuse"]) * 2.0, 40.0)
+		var close: bool = is_instance_valid(target) \
+			and global_position.distance_to((target as Node3D).global_position) < reach
+		if close or over < 60.0:
+			_die(true)
+			return
 	if Sim.debug_weapons and ws["kind"] == "bomb" and fmod(age, 1.0) < delta:
 		var td := -1.0
 		if target and is_instance_valid(target):
@@ -590,6 +705,29 @@ func _guide(delta: float) -> void:
 				return
 		else:
 			_clutter_t = maxf(_clutter_t - delta * 1.5, 0.0)
+	# Jamming. A radar seeker looking at an aircraft that is jamming has a
+	# degraded track: it does not lose it outright the way chaff can break it,
+	# it just steers worse, and it gets better as the round closes and burns
+	# through. Nothing in the game did this at all — a lock, once had, was
+	# perfect until something decoyed it.
+	if String(ws["kind"]) == "radar" and target.has_method("jam_strength") \
+			and not bool(ws.get("anti_radiation", false)):
+		var jam: float = float(target.call("jam_strength", global_position))
+		if jam > 0.01:
+			# the aim point wanders, proportional to how well it is being jammed
+			var wob := Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0),
+				randf_range(-1.0, 1.0))
+			tpos += wob * jam * 90.0
+			_jam_t += delta * jam
+			# and a heavily jammed seeker eventually breaks lock altogether
+			if _jam_t > 5.0:
+				if Sim.debug_weapons:
+					print("[msl] %s lost %s at age %.1f: jammed" % [
+						wid, str(target.name), age])
+				target = null
+				return
+		else:
+			_jam_t = maxf(_jam_t - delta, 0.0)
 	var cb: float = float(ws.get("chaff_bait", 0.0))
 	if cb > 0.0 and target.has_method("chaff_active") and target.chaff_active():
 		if randf() < cb * delta * 2.0:
@@ -613,7 +751,16 @@ func _guide(delta: float) -> void:
 		# the target rather than being carried past it: aiming high all the way
 		# in overshot by seven kilometres.
 		var taper: float = clampf((flat_d - 3000.0) / 7000.0, 0.0, 1.0)
-		tpos.y += clampf(flat_d * 0.35, 0.0, 20000.0) * taper
+		# ...but only as much as the profile this shot is flying wants. A
+		# depressed round is deliberately low and flat, and aiming twenty
+		# kilometres above the target -- which is what the cap comes to at
+		# seventy-odd kilometres -- carried it to a ten kilometre apogee when
+		# its own ballistic solution called for under two. That is also what
+		# put the warheads wide: a bus that high has nine kilometres of height
+		# to get rid of and no distance left to do it in.
+		var lift: float = 0.06 if _depressed else 0.35
+		var cap: float = 2500.0 if _depressed else 20000.0
+		tpos.y += clampf(flat_d * lift, 0.0, cap) * taper
 	# Fuse and guidance timing, expressed as a miss distance.
 	#
 	# A hit is a decision taken in the last few milliseconds of a closing pass.
@@ -705,8 +852,10 @@ func _guide(delta: float) -> void:
 		return
 	_seek_lost = 0.0
 	if Sim.debug_weapons and fmod(age, 1.0) < delta:
-		print("[gd] %s age=%.1f d=%.0f spd=%.0f tspd=%.0f seek=%.0f los=%s" % [
-			wid, age, dist, vel.length(), tvel.length(), seeker_ang,
+		print("[gd] %s age=%.1f d=%.0f spd=%.0f tspd=%.0f alt=%.0f deck=%.0f seek=%.0f los=%s" % [
+			wid, age, dist, vel.length(), tvel.length(),
+			global_position.y - maxf(Sim.height_at(global_position.x,
+				global_position.z), Sim.WATER_LEVEL), _deck, seeker_ang,
 			str((los / dist).snapped(Vector3.ONE * 0.01))])
 	var rel := tvel - vel
 	# lead using proportional navigation, with a lofted midcourse for bombs
@@ -901,6 +1050,37 @@ func _guide(delta: float) -> void:
 	# m/s had this term pinned at 1.0 for the whole engagement and pulled the
 	# full thirty-five g right down to the merge, so breaking hard bought
 	# nothing at all.
+	# Gravity bias, before the g limit takes its cut of it.
+	#
+	# Proportional navigation works out the turn that closes the line of sight
+	# and nothing else -- it does not know the round is also falling. Against an
+	# aeroplane that barely shows: both bodies are in free fall and the geometry
+	# is forgiving. Against a ship it is the whole miss, because a hull's origin
+	# sits exactly AT sea level, so every centimetre the round sags under its
+	# own collision course is a centimetre nearer the water. Measured: a
+	# Maverick locked to a corvette and fired level from 120 m, four kilometres
+	# out, lost height 95 -> 73 -> 44 -> 16 m and went into the sea 1.4 km
+	# short, with LOCKED on the glass the whole way.
+	#
+	# A real autopilot trims this out, and the cruise profile below has always
+	# done so -- it is the `+ Vector3.UP * 9.81` in its own steering. This gives
+	# the same trim to every round that homes, which is what makes the round
+	# fly the course its guidance actually commanded. It is applied as an
+	# acceleration like any other, so a round short of speed or short of air
+	# cannot fully afford it and still droops -- which is correct.
+	# Powered rounds only. A bomb has no motor: its only energy is the height it
+	# was dropped from, and trimming gravity out of a shallow glide would hand
+	# it that height for free. Measured, it makes no odds either way here -- a
+	# B61 released at 2400 m six kilometres out flies for 48 s and arrives on
+	# the deck with the trim, without it, and with it applied to bombs as well
+	# -- because the bomb's own guidance is already holding it on the line. It
+	# is excluded on principle rather than on evidence: an unpowered weapon must
+	# not be given lift it has no engine to pay for.
+	if not is_cruise and not ballistic and String(ws["kind"]) != "bomb":
+		var vdir_g := vel.normalized() if vel.length() > 1.0 \
+			else -global_transform.basis.z
+		var g_vec := Vector3.DOWN * 9.81
+		accel -= g_vec - vdir_g * g_vec.dot(vdir_g)
 	var energy := clampf(vel.length() / float(ws.get("ref_speed", 420.0)), 0.15, 1.0)
 	# And the air it is turning against. A fin makes its lift from dynamic
 	# pressure, which is density times speed squared, so the same round is far
@@ -910,6 +1090,12 @@ func _guide(delta: float) -> void:
 	var rho_g: float = exp(-clampf(global_position.y, 0.0, 30000.0) / 8500.0)
 	var g_max: float = ws["max_g"] * 9.81 * energy * energy \
 		* clampf(rho_g, 0.22, 1.0)
+	# ...unless it does not steer with fins. A kill vehicle going after
+	# something in orbit has divert thrusters, which do not care what the air is
+	# doing: throttled to a fifth of its rated g in vacuum, an ASAT could not
+	# correct a crossing target at all and went past by twenty-eight kilometres.
+	if bool(ws.get("vacuum_divert", false)):
+		g_max = float(ws["max_g"]) * 9.81 * energy * energy
 	if Sim.debug_weapons and String(ws["kind"]) == "radar" and fmod(age, 0.5) < delta:
 		print("[g] %s age=%.1f spd=%.0f alt=%.0f  wants %.1f g, has %.1f g%s" % [
 			wid, age, vel.length(), global_position.y, accel.length() / 9.81,
@@ -973,6 +1159,11 @@ func _coast_to_mark(_delta: float) -> void:
 		accel = accel.normalized() * g_max
 	vel += accel * _delta
 
+## Destroyed in flight rather than arriving. A round that is shot down must not
+## deliver what it was carrying.
+## How long this seeker has been looking into a jammer.
+var _jam_t := 0.0
+var _shot_down := false
 var _last_gap := 1e9
 var _mark_best := 1e9
 var _split := false
@@ -1014,7 +1205,17 @@ func _open_up() -> void:
 	var marks: Array = []
 	var centre: Vector3 = target.global_position if is_instance_valid(target) \
 		else global_position
-	for n in get_tree().get_nodes_in_group("hittable"):
+	# Programmed points first, where somebody has laid them. This is the whole
+	# difference between a cluster and a MIRV: one scatters over a footprint,
+	# the other is aimed, warhead by warhead.
+	if not programmed.is_empty():
+		for i2 in count:
+			var pt2 := _Submark.new()
+			pt2.team = 1 if team == 0 else 0
+			get_tree().current_scene.add_child(pt2)
+			pt2.global_position = programmed[i2 % programmed.size()]
+			marks.append(pt2)
+	for n in (get_tree().get_nodes_in_group("hittable") if marks.is_empty() else []):
 		if not is_instance_valid(n) or n.is_in_group("no_lock") or not (n is Node3D):
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
@@ -1175,6 +1376,23 @@ func _die(big: bool) -> void:
 					nm = str(n.name)
 		print("[bomb] detonated at %s, nearest ground target %s at %.1f m" % [
 			str(global_position.round()), nm, nearest])
+	# A round that was shot down does not deliver its warhead. `_die` did the
+	# same thing however the round ended, so a weapon killed on the way in still
+	# put its full damage into everything around the point it was intercepted —
+	# and for a nuclear round that is a 1400 m blast in mid-air. Measured: a
+	# B61 locked to a destroyer was shot down by the squadron's close-in guns at
+	# 1.7 km and 600 m up, went off at full yield just outside its own lethal
+	# radius, and the formation sailed on untouched. From the cockpit that is a
+	# nuclear weapon detonating over the target and doing nothing.
+	#
+	# Shooting something down is supposed to deny the warhead, which is the
+	# whole point of doing it — and a real weapon destroyed in flight does not
+	# go nuclear. There is still a bang where it died: that is the round coming
+	# apart, not the warhead functioning.
+	if _shot_down:
+		Effects.explosion(get_tree().current_scene, global_position, 7.0, false)
+		queue_free()
+		return
 	if ws["kind"] == "bomb" or bool(ws.get("nuclear", false)):
 		# A big warhead does not need a direct hit: lethal radius with a linear
 		# falloff, whether it went off on the target or in the dirt. Keyed on
@@ -1237,4 +1455,7 @@ func hit_radius() -> float:
 
 func take_hit(_amount: float, _from: Node = null) -> void:
 	if not dead:
+		# Killed, not arrived. The warhead does not get to go off on the way
+		# down: see `_shot_down`.
+		_shot_down = true
 		_die(true)

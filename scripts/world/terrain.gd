@@ -72,36 +72,23 @@ const SEABED_DETAIL := 0.12
 static func span_at(depth: int) -> float:
 	return ROOT_SPAN / float(1 << depth)
 
+## The deviation and the high point of one node.
+##
+## Both come back from the extension in one call. Worked out here this was 289
+## height queries for the grid and another 64 for the cell centres, each of them
+## its own crossing of the boundary -- and the tree measures a node the first
+## time it ever looks at one, so a flight into new country paid 353 of them per
+## node, on the main thread, in the middle of a frame.
 static func node_error(depth: int, ix: int, iz: int) -> float:
 	var k := _node_key(depth, ix, iz)
 	if _err.has(k):
 		return float(_err[k])
 	var span := span_at(depth)
-	var cell := span / float(CELLS)
-	var x0 := float(ix) * span
-	var z0 := float(iz) * span
-	var n := CELLS + 1
-	var g := PackedFloat32Array()
-	g.resize(n * n)
-	for j in n:
-		for i in n:
-			g[j * n + i] = Sim.height_at(x0 + float(i) * cell, z0 + float(j) * cell)
-	# At a cell's centre both of its triangles read the mean of the two corners
-	# the shared diagonal runs through, so the drawn height there is exact and
-	# needs no interpolation. Every other cell is plenty to find a ridge.
-	var e := 0.0
-	var top := -1e9
-	for j2 in range(0, CELLS, 2):
-		for i2 in range(0, CELLS, 2):
-			var drawn: float = (g[j2 * n + i2] + g[(j2 + 1) * n + i2 + 1]) * 0.5
-			var truth := Sim.height_at(x0 + (float(i2) + 0.5) * cell,
-				z0 + (float(j2) + 0.5) * cell)
-			e = maxf(e, absf(truth - drawn))
-	for gv in g:
-		top = maxf(top, gv)
-	_err[k] = e
-	_top[k] = top
-	return e
+	var st: PackedFloat32Array = Sim.native.node_stats(
+		PackedFloat32Array([float(ix) * span, float(iz) * span, span]), CELLS)
+	_err[k] = st[0]
+	_top[k] = st[1]
+	return st[0]
 
 ## The highest ground in a node. Asked after `node_error`, which is what fills
 ## it in.
@@ -470,14 +457,7 @@ func _bake_climate() -> ImageTexture:
 	if cached is PackedByteArray and (cached as PackedByteArray).size() == n * n * 4:
 		buf = cached
 	else:
-		_climate_rows.resize(n)
-		var id := WorkerThreadPool.add_group_task(_climate_row, n, -1, true,
-			"climate")
-		WorkerThreadPool.wait_for_group_task_completion(id)
-		buf = PackedByteArray()
-		for j in n:
-			buf.append_array(_climate_rows[j])
-		_climate_rows = []
+		buf = Sim.native.climate_map(n, Sim.WORLD_HALF)
 		WorldBake.put("climate_%d" % n, buf)
 	stats["climate_ms"] = Time.get_ticks_msec() - t0
 	var img := Image.create_from_data(n, n, false, Image.FORMAT_RGH, buf)
@@ -487,24 +467,6 @@ func _bake_climate() -> ImageTexture:
 
 ## The climate texture as an image, kept only where something will measure it.
 var climate_img: Image = null
-
-## One row per worker, each into its own buffer: a shared byte array written
-## from eight threads at once is a race waiting to be found.
-var _climate_rows: Array = []
-
-func _climate_row(j: int) -> void:
-	var n := CLIMATE_N
-	var span := Sim.WORLD_HALF * 2.0
-	var z: float = (float(j) + 0.5) / float(n) * span - Sim.WORLD_HALF
-	var row := PackedByteArray()
-	row.resize(n * 4)
-	for i in n:
-		var x: float = (float(i) + 0.5) / float(n) * span - Sim.WORLD_HALF
-		row.encode_half(i * 4,
-			(Sim.noise_temp.get_noise_2d(x, z) + 1.0) * 0.5)
-		row.encode_half(i * 4 + 2,
-			(Sim.noise_moist.get_noise_2d(x, z) + 1.0) * 0.5)
-	_climate_rows[j] = row
 
 const MASK_N := 4096                  # texels across the inhabited box
 const MASK_HALF := 18000.0            # and how far that box reaches
@@ -523,43 +485,42 @@ var mask_centre := Vector2.ZERO
 func _bake_ground_mask() -> ImageTexture:
 	var n := MASK_N
 	var t0 := Time.get_ticks_msec()
-	var cached: Variant = WorldBake.get_baked("ground_mask_%d_%d" % [
-		int(mask_centre.x), int(mask_centre.y)])
+	var key := "ground_mask_%d_%d" % [int(mask_centre.x), int(mask_centre.y)]
+	var cached: Variant = WorldBake.get_baked(key)
 	if cached is PackedByteArray and (cached as PackedByteArray).size() == n * n * 2:
 		return _mask_texture(cached, n, t0)
-	var buf := PackedByteArray()
-	buf.resize(n * n * 2)
-	var tpm: float = float(n) / (MASK_HALF * 2.0)     # texels per metre
-	# made ground under the settlements
+	# The shapes, then one call. Sixteen million texels against nine thousand
+	# capsules is the kind of arithmetic there is no point doing anywhere else:
+	# the extension buckets the shapes by row and fills the rows across every
+	# core, where this was a pair of nested loops per capsule in script.
+	var discs := PackedFloat32Array()      # x, z, solid, fade, channel
 	for pad in Sim._town_pads:
 		var pc: Vector2 = pad["c"]
 		var pr: float = pad["r"]
 		if not _in_box(pc, pr * 1.4):
 			continue
-		_stamp_disc(buf, n, tpm, pc - mask_centre, pr * 1.02, pr * 1.32, 1)
-	# then the network: trunk roads wide, streets narrow
-	for r in Sim.ROADS:
-		if not _in_box(r[0], 40.0) and not _in_box(r[1], 40.0):
-			continue
-		_stamp_capsule(buf, n, tpm, (r[0] as Vector2) - mask_centre,
-			(r[1] as Vector2) - mask_centre, 9.0, 30.0, 0)
-	for r in Sim._segments:
-		if not _in_box(r[0], 20.0) and not _in_box(r[1], 20.0):
-			continue
-		_stamp_capsule(buf, n, tpm, (r[0] as Vector2) - mask_centre,
-			(r[1] as Vector2) - mask_centre, 5.0, 13.0, 0)
-	var road_px := 0
-	var town_px := 0
-	for k in range(0, buf.size(), 2):
-		if buf[k] > 96:
-			road_px += 1
-		if buf[k + 1] > 96:
-			town_px += 1
-	stats["mask_road_px"] = road_px
-	stats["mask_town_px"] = town_px
-	stats["mask_m_per_texel"] = snappedf(1.0 / tpm, 0.01)
-	WorldBake.put("ground_mask_%d_%d" % [int(mask_centre.x), int(mask_centre.y)],
-		buf)
+		discs.append_array(PackedFloat32Array([pc.x, pc.y, pr * 1.02, pr * 1.32, 1.0]))
+	var caps := PackedFloat32Array()       # ax, az, bx, bz, solid, fade, channel
+	# the network: trunk roads wide, streets narrow
+	for src in [[Sim.ROADS, 9.0, 30.0, 40.0], [Sim._segments, 5.0, 13.0, 20.0]]:
+		var solid: float = src[1]
+		var fade: float = src[2]
+		var reach: float = src[3]
+		for r in (src[0] as Array):
+			var a: Vector2 = r[0]
+			var b: Vector2 = r[1]
+			if not _in_box(a, reach) and not _in_box(b, reach):
+				continue
+			caps.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y,
+				solid, fade, 0.0]))
+	var made: Array = Sim.native.ground_mask(discs, caps, n, MASK_HALF,
+		mask_centre)
+	var buf: PackedByteArray = made[0]
+	var cover: Vector2 = made[1]
+	stats["mask_road_px"] = int(cover.x)
+	stats["mask_town_px"] = int(cover.y)
+	stats["mask_m_per_texel"] = snappedf(MASK_HALF * 2.0 / float(n), 0.01)
+	WorldBake.put(key, buf)
 	return _mask_texture(buf, n, t0)
 
 func _mask_texture(buf: PackedByteArray, n: int, t0: int) -> ImageTexture:
@@ -593,51 +554,12 @@ func mask_at(x: float, z: float) -> Vector2:
 	var c := mask_img.get_pixel(i, j)
 	return Vector2(c.r, c.g)
 
-## World metres to texel, clamped to the image.
-func _to_texel(tpm: float, n: int, v: float) -> int:
-	return clampi(int((v + MASK_HALF) * tpm), 0, n - 1)
-
 ## Is any of this worth stamping, or is it in a different part of the world?
 ## Clamping put every distant town and road on the edge texels of the box, as a
 ## smear down one side of the map.
 func _in_box(c: Vector2, r: float) -> bool:
 	return absf(c.x - mask_centre.x) < MASK_HALF + r \
 		and absf(c.y - mask_centre.y) < MASK_HALF + r
-
-func _stamp_disc(buf: PackedByteArray, n: int, tpm: float, c: Vector2,
-		solid: float, fade: float, channel: int) -> void:
-	var lo_x := _to_texel(tpm, n, c.x - fade)
-	var hi_x := _to_texel(tpm, n, c.x + fade)
-	var lo_z := _to_texel(tpm, n, c.y - fade)
-	var hi_z := _to_texel(tpm, n, c.y + fade)
-	for j in range(lo_z, hi_z + 1):
-		var wz := float(j) / tpm - MASK_HALF
-		for i in range(lo_x, hi_x + 1):
-			var wx := float(i) / tpm - MASK_HALF
-			var d := Vector2(wx - c.x, wz - c.y).length()
-			var v := 1.0 - smoothstep(solid, fade, d)
-			if v <= 0.0:
-				continue
-			var idx := (j * n + i) * 2 + channel
-			buf[idx] = maxi(buf[idx], int(clampf(v, 0.0, 1.0) * 255.0))
-
-func _stamp_capsule(buf: PackedByteArray, n: int, tpm: float, a: Vector2,
-		b: Vector2, solid: float, fade: float, channel: int) -> void:
-	var lo_x := _to_texel(tpm, n, minf(a.x, b.x) - fade)
-	var hi_x := _to_texel(tpm, n, maxf(a.x, b.x) + fade)
-	var lo_z := _to_texel(tpm, n, minf(a.y, b.y) - fade)
-	var hi_z := _to_texel(tpm, n, maxf(a.y, b.y) + fade)
-	for j in range(lo_z, hi_z + 1):
-		var wz := float(j) / tpm - MASK_HALF
-		for i in range(lo_x, hi_x + 1):
-			var wx := float(i) / tpm - MASK_HALF
-			var q := Vector2(wx, wz)
-			var d := Geometry2D.get_closest_point_to_segment(q, a, b).distance_to(q)
-			var v := 1.0 - smoothstep(solid, fade, d)
-			if v <= 0.0:
-				continue
-			var idx := (j * n + i) * 2 + channel
-			buf[idx] = maxi(buf[idx], int(clampf(v, 0.0, 1.0) * 255.0))
 
 ## Live leaves, keyed by depth and grid index plus the depths of the four
 ## neighbours -- because those decide how the edges are conformed, and a node
@@ -709,7 +631,17 @@ func build_progress() -> float:
 
 ## The depth of the leaf covering a point. Used to ask what the neighbour across
 ## an edge is drawn at, which is the only thing an edge needs to know.
+## Is this point covered by the tree at all? The root is one square and the
+## outermost leaves have nothing on the far side of them.
+static func in_root(x: float, z: float) -> bool:
+	var h := ROOT_SPAN * 0.5
+	return absf(x) < h and absf(z) < h
+
+## What depth the tree draws a point at, by descent from the root. Zero when the
+## point is outside the root entirely.
 func depth_at(x: float, z: float, eye: Vector3) -> int:
+	if not in_root(x, z):
+		return 0
 	var d := 1
 	var s := span_at(1)
 	var ix: int = clampi(int(floor(x / s)), -1, 0)
@@ -731,6 +663,13 @@ func depth_at(x: float, z: float, eye: Vector3) -> int:
 ## a walk cost. A neighbour is almost always the same depth or one either side,
 ## so this tries those first and only sweeps if it has to.
 func _neighbour_depth(px: float, pz: float, own: int, leaves: Dictionary) -> int:
+	# Off the edge of the world there is no neighbour. Answering with our own
+	# depth is what says "nothing to conform to here"; the sweep below would
+	# otherwise find whichever leaf happens to share a cell index with a point
+	# the tree does not cover, and the outermost chunks would stitch themselves
+	# to the far side of the map.
+	if not in_root(px, pz):
+		return own
 	for probe in [own, own + 1, own - 1, own + 2, own - 2]:
 		if probe < 1 or probe > MAX_DEPTH:
 			continue
@@ -805,13 +744,21 @@ func _wanted(eye: Vector3) -> Dictionary:
 			_neighbour_depth(x0 + half, z0 + span + step, d2, leaves),
 		]
 		if debug_count:
-			var chk := [
-				depth_at(x0 - step, z0 + half, eye),
-				depth_at(x0 + span + step, z0 + half, eye),
-				depth_at(x0 + half, z0 - step, eye),
-				depth_at(x0 + half, z0 + span + step, eye),
+			var probes := [
+				Vector2(x0 - step, z0 + half),
+				Vector2(x0 + span + step, z0 + half),
+				Vector2(x0 + half, z0 - step),
+				Vector2(x0 + half, z0 + span + step),
 			]
+			var chk: Array = []
+			for pv in probes:
+				chk.append(depth_at((pv as Vector2).x, (pv as Vector2).y, eye))
 			for ci in 4:
+				# A probe off the edge of the world has no neighbour to
+				# disagree about, and both sides say so in their own way.
+				if not in_root((probes[ci] as Vector2).x,
+						(probes[ci] as Vector2).y):
+					continue
 				if int(chk[ci]) != int(raw[ci]):
 					debug_nb_bad += 1
 					if debug_nb_bad <= 4:
@@ -1152,19 +1099,34 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	var x0 := float(ix) * span
 	var z0 := float(iz) * span
 	var n := CELLS + 1
-	var h := PackedFloat32Array()
-	h.resize(n * n)
 	# The whole grid in one call. A chunk is 289 points and the game builds
 	# hundreds of them; asked for as a block they come back off every core at
 	# once, and what is left to do here is only the part that depends on what
 	# has been built on the land.
-	var raw: PackedFloat32Array = Sim.native.grounds(x0, z0, cell, n)
-	for j in n:
-		var zz: float = z0 + float(j) * cell
-		for i in n:
-			h[j * n + i] = Sim._deform_top(raw[j * n + i],
-				x0 + float(i) * cell, zz)
-	_stitch(h, n, x0, z0, cell, depth, nb)
+	var h: PackedFloat32Array = Sim.native.grounds(x0, z0, cell, n, Sim.G_ALL)
+	if not Sim.decks.is_empty():
+		# A landable platform is the one part of the world the extension does
+		# not hold, because it moves. Only worth walking the grid for when
+		# there is one.
+		for j in n:
+			var zz: float = z0 + float(j) * cell
+			for i in n:
+				h[j * n + i] = Sim._deck_top(h[j * n + i],
+					x0 + float(i) * cell, zz)
+	# Every height the border needs, in one call.
+	#
+	# Conforming an edge to a coarser neighbour, measuring the residual that
+	# leaves, and reading the field either side of every border vertex for its
+	# normal are between them six hundred separate height queries per chunk --
+	# each one its own crossing of the extension boundary, on the thread
+	# building the chunk. Asked for as a block they are one crossing and come
+	# back off every core.
+	var edge := _edge_probe(n, x0, z0, cell, depth, nb)
+	var eh: PackedFloat32Array = Sim.native.grounds_at(edge, Sim.G_ALL)
+	if not Sim.decks.is_empty():
+		for k in eh.size():
+			eh[k] = Sim._deck_top(eh[k], edge[k].x, edge[k].y)
+	_stitch(h, n, x0, z0, cell, depth, nb, eh)
 	# What the level above this one draws at each of our grid points. Even
 	# indices sit on the parent's grid, so they read the same height and their
 	# difference is zero; the odd ones in between are where the two surfaces
@@ -1211,10 +1173,13 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	var cvn := PackedVector3Array()
 	cvn.resize(n * n)
 	var big := cell * 2.0
+	var nrm_base := 0
+	for side0 in 4:
+		if int(nb[side0]) < depth:
+			nrm_base += (n - 2) * 2
+	var nrm_at := 0
 	for j in n:
 		for i in n:
-			var px: float = x0 + float(i) * cell
-			var pz: float = z0 + float(j) * cell
 			var gx: float
 			var gz: float
 			var cx: float
@@ -1225,14 +1190,12 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 				# answer from the one the chunk next door works out for the very
 				# same vertex -- and the ground picks up a shading seam along
 				# every chunk edge in the world. Both sides read the field.
-				gx = (Sim.height_at(px + cell, pz)
-					- Sim.height_at(px - cell, pz)) / (2.0 * cell)
-				gz = (Sim.height_at(px, pz + cell)
-					- Sim.height_at(px, pz - cell)) / (2.0 * cell)
-				cx = (Sim.height_at(px + big, pz)
-					- Sim.height_at(px - big, pz)) / (2.0 * big)
-				cz = (Sim.height_at(px, pz + big)
-					- Sim.height_at(px, pz - big)) / (2.0 * big)
+				var b: int = nrm_base + nrm_at * 8
+				nrm_at += 1
+				gx = (eh[b] - eh[b + 1]) / (2.0 * cell)
+				gz = (eh[b + 2] - eh[b + 3]) / (2.0 * cell)
+				cx = (eh[b + 4] - eh[b + 5]) / (2.0 * big)
+				cz = (eh[b + 6] - eh[b + 7]) / (2.0 * big)
 			else:
 				gx = (h[j * n + i + 1] - h[j * n + i - 1]) / (2.0 * cell)
 				gz = (h[(j + 1) * n + i] - h[(j - 1) * n + i]) / (2.0 * cell)
@@ -1279,7 +1242,7 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	for mv in count:
 		morph[mv] = Vector2(morph[mv].x, span)
 	return [verts, nrms,
-		_conform_residual(h, n, x0, z0, cell, depth, nb), morph, cnrm]
+		_conform_residual(h, n, x0, z0, cell, depth, nb, eh), morph, cnrm]
 
 ## A leaf's identity without its neighbour state, so a rebuild triggered only by
 ## a change next door can be matched to the chunk it supersedes.
@@ -1287,49 +1250,97 @@ func _base_key(k: String) -> String:
 	var bits := k.split(":")
 	return "%s:%s:%s" % [bits[0], bits[1], bits[2]] if bits.size() >= 4 else k
 
-## What the stitching left behind: how far each conformed edge vertex still sits
-## off the straight line its coarse neighbour draws through that span. Zero by
-## construction if `_stitch` did its job, and the number the seam harnesses gate
-## on -- so it is measured rather than assumed.
-func _conform_residual(h: PackedFloat32Array, n: int, x0: float, z0: float,
-		cell: float, depth: int, nb: Array) -> float:
+## Where a conformed edge vertex sits, and which of the chunk's grid points it
+## is. Written once and read by the probe, the stitching and the residual, so
+## the three cannot walk the border in different orders.
+static func _edge_point(side: int, t: float, x0: float, z0: float,
+		span: float) -> Vector2:
+	if side == 0:
+		return Vector2(x0, z0 + t)
+	if side == 1:
+		return Vector2(x0 + span, z0 + t)
+	if side == 2:
+		return Vector2(x0 + t, z0)
+	return Vector2(x0 + t, z0 + span)
+
+static func _edge_index(side: int, i: int, n: int) -> int:
+	if side == 0:
+		return i * n
+	if side == 1:
+		return i * n + n - 1
+	if side == 2:
+		return i
+	return (n - 1) * n + i
+
+## Every point on a chunk's border whose height has to come from the field
+## rather than from the chunk's own grid: first the pairs a coarser neighbour
+## interpolates between, then eight points around each border vertex -- four for
+## its normal and four for the normal of the surface the level above draws.
+static func _edge_probe(n: int, x0: float, z0: float, cell: float, depth: int,
+		nb: Array) -> PackedVector2Array:
 	var span := cell * float(CELLS)
-	var worst := 0.0
+	var big2 := cell * 2.0
+	var out := PackedVector2Array()
 	for side in 4:
 		var nd: int = int(nb[side])
 		if nd >= depth:
 			continue
 		var big := span_at(nd) / float(CELLS)
 		for i in range(1, n - 1):
-			var t: float = float(i) * cell
-			var got: float
-			var want: float
-			if side == 0:
-				got = h[i * n]
-				want = _coarse_at(x0, z0 + t, big, false)
-			elif side == 1:
-				got = h[i * n + n - 1]
-				want = _coarse_at(x0 + span, z0 + t, big, false)
-			elif side == 2:
-				got = h[i]
-				want = _coarse_at(x0 + t, z0, big, true)
+			var p := _edge_point(side, float(i) * cell, x0, z0, span)
+			if side >= 2:
+				var lo: float = floor(p.x / big) * big
+				out.append(Vector2(lo, p.y))
+				out.append(Vector2(lo + big, p.y))
 			else:
-				got = h[(n - 1) * n + i]
-				want = _coarse_at(x0 + t, z0 + span, big, true)
-			worst = maxf(worst, absf(got - want))
-	return worst
+				var lo2: float = floor(p.y / big) * big
+				out.append(Vector2(p.x, lo2))
+				out.append(Vector2(p.x, lo2 + big))
+	for j in n:
+		for i in n:
+			if not (i == 0 or j == 0 or i == n - 1 or j == n - 1):
+				continue
+			var px: float = x0 + float(i) * cell
+			var pz: float = z0 + float(j) * cell
+			out.append(Vector2(px + cell, pz))
+			out.append(Vector2(px - cell, pz))
+			out.append(Vector2(px, pz + cell))
+			out.append(Vector2(px, pz - cell))
+			out.append(Vector2(px + big2, pz))
+			out.append(Vector2(px - big2, pz))
+			out.append(Vector2(px, pz + big2))
+			out.append(Vector2(px, pz - big2))
+	return out
 
-## The height the coarser ring draws at a point on the shared edge: its two
+## The height the coarser neighbour draws at one of our edge vertices: its two
 ## nearest vertices on that edge, linearly interpolated, which is what its
-## triangles do between them.
-func _coarse_at(x: float, z: float, big: float, along_x: bool) -> float:
-	if along_x:
-		var lo: float = floor(x / big) * big
-		var f: float = (x - lo) / big
-		return lerpf(Sim.height_at(lo, z), Sim.height_at(lo + big, z), f)
-	var lo2: float = floor(z / big) * big
-	var f2: float = (z - lo2) / big
-	return lerpf(Sim.height_at(x, lo2), Sim.height_at(x, lo2 + big), f2)
+## triangles do between them. The two heights are the pair `_edge_probe` put at
+## `at`; this is only the interpolation between them.
+static func _coarse_from(eh: PackedFloat32Array, at: int, p: Vector2,
+		big: float, along_x: bool) -> float:
+	var v: float = p.x if along_x else p.y
+	return lerpf(eh[at], eh[at + 1], (v - floor(v / big) * big) / big)
+
+## What the stitching left behind: how far each conformed edge vertex still sits
+## off the straight line its coarse neighbour draws through that span. Zero by
+## construction if `_stitch` did its job, and the number the seam harnesses gate
+## on -- so it is measured rather than assumed.
+func _conform_residual(h: PackedFloat32Array, n: int, x0: float, z0: float,
+		cell: float, depth: int, nb: Array, eh: PackedFloat32Array) -> float:
+	var span := cell * float(CELLS)
+	var worst := 0.0
+	var at := 0
+	for side in 4:
+		var nd: int = int(nb[side])
+		if nd >= depth:
+			continue
+		var big := span_at(nd) / float(CELLS)
+		for i in range(1, n - 1):
+			var p := _edge_point(side, float(i) * cell, x0, z0, span)
+			worst = maxf(worst, absf(h[_edge_index(side, i, n)]
+				- _coarse_from(eh, at, p, big, side >= 2)))
+			at += 2
+	return worst
 
 ## Stitch the edges that face a coarser neighbour.
 ##
@@ -1337,16 +1348,17 @@ func _coarse_at(x: float, z: float, big: float, along_x: bool) -> float:
 ## shared boundary it has a vertex only at every second, fourth, eighth one of
 ## ours. Its edge runs straight past the rest of ours, and wherever the ground
 ## is not flat the two surfaces part company: measured across this map, ten
-## metres on average and two hundred and fifty at worst. Skirts were hiding
-## that rather than fixing it. Reading the height the coarse neighbour would
-## read puts our edge exactly on its edge, and the gap becomes zero by
-## construction rather than by being covered up.
+## metres on average and two hundred and fifty at worst. Skirts were hiding that
+## rather than fixing it. Reading the height the coarse neighbour would read
+## puts our edge exactly on its edge, and the gap becomes zero by construction
+## rather than by being covered up.
 ##
 ## Only the coarse side of a boundary is deferred to, so exactly one of the two
 ## chunks moves and they cannot both chase each other.
 func _stitch(h: PackedFloat32Array, n: int, x0: float, z0: float,
-		cell: float, depth: int, nb: Array) -> void:
+		cell: float, depth: int, nb: Array, eh: PackedFloat32Array) -> void:
 	var span := cell * float(CELLS)
+	var at := 0
 	for side in 4:
 		var nd: int = int(nb[side])
 		if nd >= depth:
@@ -1354,15 +1366,9 @@ func _stitch(h: PackedFloat32Array, n: int, x0: float, z0: float,
 		# the neighbour's cell, which its edge is straight across
 		var big := span_at(nd) / float(CELLS)
 		for i in range(1, n - 1):
-			var t: float = float(i) * cell
-			if side == 0:
-				h[i * n] = _coarse_at(x0, z0 + t, big, false)
-			elif side == 1:
-				h[i * n + n - 1] = _coarse_at(x0 + span, z0 + t, big, false)
-			elif side == 2:
-				h[i] = _coarse_at(x0 + t, z0, big, true)
-			else:
-				h[(n - 1) * n + i] = _coarse_at(x0 + t, z0 + span, big, true)
+			var p := _edge_point(side, float(i) * cell, x0, z0, span)
+			h[_edge_index(side, i, n)] = _coarse_from(eh, at, p, big, side >= 2)
+			at += 2
 	# The corners belong to both edges at once. A corner that is an endpoint of
 	# a coarse span on one axis has to sit on that span, and since the two
 	# meeting edges share it, doing them in sequence would let the second undo

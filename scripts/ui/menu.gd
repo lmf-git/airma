@@ -15,6 +15,7 @@ const MISSIONS := [
 	["free", "FREE FLIGHT", "No threats. Airborne over the valley with a full tank. Roam, then come back and land."],
 	["landing", "APPROACH", "No threats. Twelve km final at 3000 ft — fly the PAPI down and grease it on."],
 	["ramp", "RAMP WALK", "No threats. Start on foot beside the flight line — walk over and press E to climb into any jet."],
+	["sandbox", "SANDBOX", "Everything at once. The vehicle park, the flight line, hostile aircraft and the satellites, with nothing trying to score. Somewhere to try things out."],
 	["conquest", "CONQUEST", "Hostile. Five sectors across the valley — hold more than they do and their tickets bleed away."],
 	["rush", "RUSH", "Hostile. Sectors open one at a time; smash the garrison or hold the ring to advance."],
 	["warlords", "WARLORDS", "Hostile. Sequential sectors that pay command points as you take them."],
@@ -232,9 +233,16 @@ func _ready() -> void:
 	btns.add_child(quit)
 
 	var help := Label.new()
+	# Read off the bindings rather than written out here. This line said TAB
+	# cycled weapons, V fired the gun, N threw flares and M was the mouse stick
+	# -- four keys that had all moved, on the first screen anybody sees.
 	help.text = "W/S pitch  ·  A/D roll  ·  Q/E rudder  ·  SHIFT/CTRL throttle  ·  G gear  ·  F flaps  ·  X brakes\n" \
-		+ "B bay doors  ·  1-4 pick weapon  ·  TAB cycle  ·  T target  ·  SPACE fire  ·  V gun  ·  N flares\n" \
-		+ "P camera (cockpit / chase / orbit)  ·  N night vision  ·  M mouse stick  ·  H fly-by-wire  ·  ESC menu"
+		+ "B bay doors  ·  1-8 pick weapon  ·  %s cycle  ·  %s target  ·  SPACE fire  ·  %s gun  ·  %s flares  ·  %s chaff\n" % [
+			Sim.key_label(&"cycle_weapon"), Sim.key_label(&"cycle_target"),
+			Sim.key_label(&"gun"), Sim.key_label(&"flare"), Sim.key_label(&"chaff")] \
+		+ "%s camera (cockpit / chase / orbit)  ·  %s night vision  ·  %s mouse stick  ·  %s fly-by-wire  ·  ESC menu" % [
+			Sim.key_label(&"camera"), Sim.key_label(&"night_vision"),
+			Sim.key_label(&"mouse_fly"), Sim.key_label(&"assist")]
 	help.add_theme_font_size_override("font_size", 13)
 	help.add_theme_color_override("font_color", Color(0.55, 0.62, 0.7))
 	root.add_child(help)
@@ -250,7 +258,7 @@ func _select_faction(f: String) -> void:
 		_faction_btns[k].modulate = Color(1, 1, 1) if k != f else Color(0.55, 1.0, 0.75)
 	_rebuild_cards()
 	if f == "ground":
-		_select("veh:" + Tank.KINDS.keys()[0])
+		_select("veh:" + str(Tank.KINDS.keys()[0]))
 		return
 	if f == "sea":
 		_select("sea:" + _crewable_ships()[0])
@@ -318,18 +326,22 @@ func _rebuild_cards() -> void:
 	# aircraft first, then everything that drives, so the ground fleet is visible
 	# without having to know the GROUND tab exists
 	# a ship you can take command of: the ones with a gun on the foredeck
-	if faction == "" or faction == "sea":
+	var sea_ids := _sea_for(faction)
+	if not sea_ids.is_empty() or faction == "sea":
 		# The carrier first: she is the biggest thing afloat and she is not in
-		# `Ship.KINDS`, so nothing would ever have listed her.
-		var cb := Button.new()
-		cb.custom_minimum_size = Vector2(152, 62)
-		cb.text = "Fleet carrier\n%.0f m, %.0f kts" % [Carrier.LEN,
-			Carrier.TOP_SPEED * 1.94384]
-		cb.add_theme_font_size_override("font_size", 12)
-		cb.pressed.connect(_select.bind("sea:carrier"))
-		_grid.add_child(cb)
-		_cards["sea:carrier"] = cb
-		for k in _crewable_ships():
+		# `Ship.KINDS`, so nothing would ever have listed her. She is American,
+		# so she belongs on that page and on the ones that show everybody —
+		# not under CHINA next to a Type 052D.
+		if faction == "" or faction == "sea" or faction == "usa":
+			var cb := Button.new()
+			cb.custom_minimum_size = Vector2(152, 62)
+			cb.text = "Fleet carrier\n%.0f m, %.0f kts" % [Carrier.LEN,
+				Carrier.TOP_SPEED * 1.94384]
+			cb.add_theme_font_size_override("font_size", 12)
+			cb.pressed.connect(_select.bind("sea:carrier"))
+			_grid.add_child(cb)
+			_cards["sea:carrier"] = cb
+		for k in sea_ids:
 			var sd: Dictionary = Ship.KINDS[k]
 			var sb := Button.new()
 			sb.custom_minimum_size = Vector2(152, 62)
@@ -341,14 +353,17 @@ func _rebuild_cards() -> void:
 			_cards["sea:" + k] = sb
 		if faction == "sea":
 			return
-	if faction == "" or faction == "ground":
-		for k in Tank.KINDS:
+	# A national tab shows that country's ground fleet as well as its aircraft:
+	# the vehicles carry a faction now, and hiding a Humvee from the UNITED
+	# STATES page only to list it under GROUND was the wrong way round.
+	var ground_ids := _ground_for(faction)
+	if not ground_ids.is_empty():
+		for k in ground_ids:
 			var kd: Dictionary = Tank.KINDS[k]
 			var vb := Button.new()
 			vb.custom_minimum_size = Vector2(152, 62)
-			var vclass: String = {"mbt": "Main battle tank", "spg": "Self propelled gun",
-				"mlrs": "Rocket artillery"}.get(String(kd.get("class", "mbt")), "Vehicle")
-			vb.text = "%s\n%s" % [str(kd["name"]), vclass]
+			vb.text = "%s\n%s" % [str(kd["name"]), VCLASS_NAMES.get(
+				String(kd.get("class", "mbt")), "Vehicle")]
 			vb.add_theme_font_size_override("font_size", 12)
 			vb.pressed.connect(_select.bind("veh:" + k))
 			_grid.add_child(vb)
@@ -389,11 +404,21 @@ func _select(id: String) -> void:
 		for k in _cards:
 			_cards[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
 		var kd: Dictionary = Tank.KINDS[id.substr(4)]
-		var indirect: bool = String(kd.get("class", "mbt")) != "mbt"
-		_blurb.text = "%s\n\n%s\n\nW/S drive, A/D steer, mouse lays the gun, SPACE fire, V coax, C sight, U to get out." % [
-			str(kd["name"]),
-			"Point the barrel at the ground where you want the rounds; the gun works out the elevation and charge." if indirect
-			else "Direct fire. Put the crosshair on it and pull."]
+		var vcl: String = String(kd.get("class", "mbt"))
+		var indirect: bool = vcl == "spg" or vcl == "mlrs" or vcl == "tel"
+		var how := "Direct fire. Put the crosshair on it and pull."
+		if indirect:
+			how = "Point the barrel at the ground where you want the rounds; the gun works out the elevation and charge."
+		elif vcl == "lav":
+			how = "A gun on the roof and no armour worth the name. It steers on its front wheels and it will outrun anything tracked; being seen is the thing that kills it."
+		elif vcl == "sam":
+			how = "Area air defence. It does not lay a gun: it acquires an aircraft, raises its rails and sends a round, and the round does the rest. Everything that makes it dangerous is in the missile."
+		elif vcl == "spaag":
+			how = "Short range air defence with a gun. Nothing else on the field can touch a helicopter at two kilometres, and it will shred anything soft on the ground too."
+		elif vcl == "ifv":
+			how = "An autocannon rather than a main gun: it fires fast and it will not trouble a tank's frontal armour, but it ruins everything softer."
+		_blurb.text = "%s\n\n%s\n\nW/S drive, A/D steer, mouse lays the gun, SPACE fire, %sC sight, U to get out." % [
+			str(kd["name"]), how, "" if vcl == "lav" else "V coax, "]
 		for c in _stats.get_children():
 			c.queue_free()
 		var top: float = float(kd["top"]) * 3.6
@@ -402,8 +427,14 @@ func _select(id: String) -> void:
 			["TOP SPEED", clampf(top / 70.0, 0.05, 1.0), "%d km/h" % int(top)],
 			["ARMOUR", clampf(float(kd["hp"]) / 320.0, 0.05, 1.0), "%d" % int(kd["hp"])],
 			["GUN", clampf(float(kd["gun"]) / 1000.0, 0.05, 1.0), "%d" % int(kd["gun"])],
-			["RELOAD", clampf(1.0 - float(kd["reload"]) / 32.0, 0.05, 1.0),
-				"%.1f s" % float(kd["reload"])],
+			# A machine gun does not reload, it cycles: the vehicles with one
+			# were showing "0.0 s" and a full bar, which read as the fastest
+			# gun on the field.
+			["RELOAD" if vcl != "lav" else "RATE OF FIRE",
+				clampf(1.0 - float(kd["reload"]) / 32.0, 0.05, 1.0) if vcl != "lav"
+				else 1.0,
+				"%.1f s" % float(kd["reload"]) if vcl != "lav"
+				else "%d rpm" % int(60.0 / maxf(float(kd.get("mg_rate", 0.11)), 0.01))],
 			["FIRE", 1.0, "indirect" if indirect else "direct"],
 		]
 		for r in vrows:
@@ -458,10 +489,42 @@ func _select(id: String) -> void:
 		_stats.add_child(h)
 	jet_changed.emit(id)
 
+## What each ground vehicle class is called on its card and in the stats page.
+const VCLASS_NAMES := {
+	"mbt": "Main battle tank", "spg": "Self propelled gun",
+	"mlrs": "Rocket artillery", "tel": "Missile launcher",
+	"lav": "Light 4x4", "sam": "Air defence battery",
+	"ifv": "Infantry fighting vehicle", "spaag": "Anti-aircraft gun",
+}
+
 func vclass_of(id: String) -> String:
 	var kd: Dictionary = Tank.KINDS[id.substr(4)]
-	return {"mbt": "main battle tank", "spg": "self propelled gun",
-		"mlrs": "rocket artillery"}.get(String(kd.get("class", "mbt")), "vehicle")
+	return String(VCLASS_NAMES.get(String(kd.get("class", "mbt")), "Vehicle")).to_lower()
+
+## The hulls on show under the current tab. Ships carry a faction now, so a
+## national page lists that navy rather than everybody's.
+func _sea_for(f: String) -> Array:
+	var out: Array = []
+	if f == "ground":
+		return out
+	for k in _crewable_ships():
+		if f == "" or f == "sea" \
+				or String(Ship.KINDS[k].get("faction", "")) == f:
+			out.append(k)
+	return out
+
+## The ground fleet on show under the current tab: everything under GROUND and
+## under ALL, that nation's own vehicles under a national tab, and nothing at
+## all under NAVAL.
+func _ground_for(f: String) -> Array:
+	var out: Array = []
+	if f == "sea":
+		return out
+	for k in Tank.KINDS:
+		if f == "" or f == "ground" \
+				or String(Tank.KINDS[k].get("faction", "")) == f:
+			out.append(k)
+	return out
 
 ## One labelled bar in the stats column.
 func _stat_row(label: String, frac: float, value: String) -> HBoxContainer:
@@ -488,6 +551,9 @@ func _select_weather(id: String) -> void:
 	for k in _weather_btns:
 		_weather_btns[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
 	weather_changed.emit(id)
+	# Remembered between runs, along with the fly-by-wire and the radar range.
+	Sim.weather = id
+	Sim.save_settings()
 
 ## In a session the host picks the match and everybody flies it. A joiner who
 ## could choose for itself would either be quietly corrected a moment later or,

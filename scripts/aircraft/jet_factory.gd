@@ -423,26 +423,39 @@ void fragment() {
 	# ------------------------------------------------------- side firing battery
 	# Barrels run out through the port side of the belly, the way a gunship
 	# actually carries them, rather than hanging off pylons.
+	# The barrels are on trunnions, so they are built as their own nodes and
+	# aimed. Merged into the airframe mesh they could not move at all: the
+	# battery sat at a fixed depression while the rounds flew off to wherever
+	# the sensor was pointing, so the guns visibly had nothing to do with the
+	# fire coming out of them.
 	var sg: Array = sh.get("side_guns", [])
 	if not sg.is_empty():
-		var gst := MeshKit.begin()
-		for g in sg:
+		var fixed := MeshKit.begin()
+		var mounts := Node3D.new()
+		mounts.name = "SideGuns"
+		for gi in sg.size():
+			var g: Dictionary = sg[gi]
 			var at: Vector3 = g["pos"]
-			var dep := deg_to_rad(float(g.get("depress", 10.0)))
-			var out_dir := Vector3(-cos(dep), -sin(dep), 0.0)
 			var barrel: float = g["length"]
 			var rad: float = g["radius"]
-			# sponson blister where the mount passes through the skin
-			MeshKit.box(gst, Vector3(0.55, rad * 4.0, rad * 7.0), at + Vector3(0.10, 0, 0))
-			# trunnion and barrel, built along the outboard axis
+			# sponson blister and recoil housing stay on the fuselage
+			MeshKit.box(fixed, Vector3(0.55, rad * 4.0, rad * 7.0),
+				at + Vector3(0.10, 0, 0))
+			MeshKit.box(fixed, Vector3(rad * 8.0, rad * 4.0, rad * 4.0),
+				at + Vector3(rad * 5.0, 0, 0))
+			# trunnion and barrel, in the mount's own frame: built straight out
+			# to port along -X, and the rest depression is the mount's own
+			# rotation, so aiming it is a matter of setting that rotation.
+			var gst := MeshKit.begin()
+			var out_dir := Vector3(-1.0, 0.0, 0.0)
 			var seg := 9
 			for i in seg:
 				var t0 := float(i) / float(seg)
 				var t1 := float(i + 1) / float(seg)
 				var r0: float = lerpf(rad * 1.55, rad, t0)
 				var r1: float = lerpf(rad * 1.55, rad, t1)
-				var a := at + out_dir * (barrel * t0)
-				var b := at + out_dir * (barrel * t1)
+				var a := out_dir * (barrel * t0)
+				var b := out_dir * (barrel * t1)
 				var ring_a := MeshKit.ring(r0, r0, 0.0, 0.0, 2.0, 8)
 				var ring_b := MeshKit.ring(r1, r1, 0.0, 0.0, 2.0, 8)
 				var fa := PackedVector3Array()
@@ -451,14 +464,16 @@ void fragment() {
 					fa.append(a + Vector3(0, ring_a[k].y, ring_a[k].x))
 					fb.append(b + Vector3(0, ring_b[k].y, ring_b[k].x))
 				MeshKit.loft(gst, [fa, fb], (a + b) * 0.5, false, false)
-			# muzzle brake on the big one
 			if rad > 0.09:
-				var tip := at + out_dir * barrel
-				MeshKit.box(gst, Vector3(0.34, rad * 3.0, rad * 3.0), tip)
-			# recoil housing inboard
-			MeshKit.box(gst, Vector3(rad * 8.0, rad * 4.0, rad * 4.0),
-				at + Vector3(rad * 5.0, 0, 0))
-		root.add_child(MeshKit.mi(MeshKit.finish(gst, mat_dark), "SideGuns"))
+				MeshKit.box(gst, Vector3(0.34, rad * 3.0, rad * 3.0),
+					out_dir * barrel)
+			var mount := MeshKit.mi(MeshKit.finish(gst, mat_dark), "Gun%d" % gi)
+			mount.position = at
+			mount.rotation = Vector3(0.0, 0.0,
+				deg_to_rad(float(g.get("depress", 10.0))))
+			mounts.add_child(mount)
+		root.add_child(MeshKit.mi(MeshKit.finish(fixed, mat_dark), "GunSponsons"))
+		root.add_child(mounts)
 
 	# ------------------------------------------------------------------ rotors
 	for ro in sh.get("rotors", []):
@@ -659,14 +674,28 @@ void fragment() {
 		for stn in bay["stations"]:
 			var holder := Node3D.new()
 			holder.name = "Store"
-			holder.position = stn["pos"]
+			# Hung off the wing the model actually has. The pylon positions are
+			# authored by eye, and on a cropped-delta planform they missed: an
+			# F-16's wingtip rails sat thirty centimetres outboard of the tip
+			# and nearly two metres ahead of the tip chord, so the Sidewinders
+			# floated in clear air beside the aeroplane. Anything on the wing is
+			# now put back on it, with the authored position only saying WHICH
+			# station it is.
+			var pos: Vector3 = stn["pos"]
+			if bay["kind"] == "external":
+				pos = _on_wing(raw_poly, float(wing["y"]), pos,
+					bool(stn.get("tip", false)),
+					float(WeaponSpec.get_spec(String(stn["weapon"])).get("length", 3.0)))
+			holder.position = pos
 			if bay["kind"] == "external" and not stn.get("tip", false):
 				var pyl := MeshInstance3D.new()
 				var pb := BoxMesh.new()
-				pb.size = Vector3(0.16, 0.42, 1.1)
+				# tall enough to actually reach the wing it hangs from, rather
+				# than stopping short and leaving the store floating
+				pb.size = Vector3(0.16, maxf(float(wing["y"]) - pos.y, 0.42) + 0.16, 1.1)
 				pyl.mesh = pb
 				pyl.material_override = mat_paint
-				pyl.position = Vector3(0, 0.34, 0)
+				pyl.position = Vector3(0, pb.size.y * 0.5 + 0.10, 0)
 				holder.add_child(pyl)
 			holder.visible = bay["kind"] == "external"
 			var mi := MeshKit.mi(WeaponSpec.build_mesh(stn["weapon"]), "Round")
@@ -677,9 +706,13 @@ void fragment() {
 			idx += 1
 
 	# ---------------------------------------------------------------- lights
-	var half_span: float = spec["span"] * 0.5
-	var wing_z: float = sh["wing"]["poly"][1].y
-	for l in [[-half_span, Color(1.0, 0.15, 0.15)], [half_span, Color(0.2, 1.0, 0.35)]]:
+	# On the wingtip the aeroplane actually has. Placed from the span in the
+	# data and the leading-edge z, a navigation light on a swept wing ended up
+	# outboard of the tip and a metre or two ahead of it -- a red lamp hanging
+	# in the air off the F-16's wing with nothing under it.
+	var tip_x: float = _tip_x(raw_poly)
+	var tip_c: Vector2 = _chord_at(raw_poly, tip_x)
+	for l in [[-1.0, Color(1.0, 0.15, 0.15)], [1.0, Color(0.2, 1.0, 0.35)]]:
 		var lm := MeshInstance3D.new()
 		var sp := SphereMesh.new()
 		sp.radius = 0.09
@@ -688,7 +721,8 @@ void fragment() {
 		sp.rings = 4
 		lm.mesh = sp
 		lm.material_override = MeshKit.mat(Color.BLACK, 0.4, 0.0, l[1])
-		lm.position = Vector3(l[0] * 0.97, sh["wing"]["y"], wing_z * 0.6)
+		lm.position = Vector3(float(l[0]) * tip_x, float(wing["y"]) + 0.05,
+			lerpf(tip_c.x, tip_c.y, 0.62))
 		lm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		root.add_child(lm)
 		out["lights"].append(lm)
@@ -772,8 +806,13 @@ void fragment() {
 	out["hook"] = hook
 	out["hook_tip"] = hook.position + Vector3(0, 0, 2.5)
 
-	out["tips"] = [Vector3(half_span * 0.94, sh["wing"]["y"], wing_z * 0.75),
-		Vector3(-half_span * 0.94, sh["wing"]["y"], wing_z * 0.75)]
+	# The tip vortex leaves the trailing edge of the tip, not a point abeam it.
+	out["tips"] = [Vector3(tip_x, float(wing["y"]), lerpf(tip_c.x, tip_c.y, 0.92)),
+		Vector3(-tip_x, float(wing["y"]), lerpf(tip_c.x, tip_c.y, 0.92))]
+	# Where the navigation lamps go, so the aeroplane hangs them off the wing
+	# rather than off half the span in the data table.
+	out["nav_tips"] = [Vector3(-tip_x, float(wing["y"]) + 0.05, lerpf(tip_c.x, tip_c.y, 0.62)),
+		Vector3(tip_x, float(wing["y"]) + 0.05, lerpf(tip_c.x, tip_c.y, 0.62))]
 	out["cockpit"] = Vector3(0.0, cp["y"] - 0.10, lerpf(cp["z0"], cp["z1"], 0.34))
 	return out
 
@@ -925,3 +964,84 @@ static func _add_fin(st: SurfaceTool, f: Dictionary, side: float) -> void:
 	var fwd := Vector3(0, 0, 1)
 	MeshKit.prism(st, poly, fwd, up, up.cross(fwd).normalized(), thick,
 		Vector3(f["x"] * side, 0, 0))
+
+# --------------------------------------------------------------------------
+# Wing planform queries. `poly` is the wing outline in (half-span, z): it runs
+# from the root leading edge outboard along the leading edge to the tip, then
+# back along the trailing edge to the root. Everything that has to sit ON the
+# wing -- pylons, wingtip rails, navigation lamps, the vortex source -- asks
+# these rather than guessing from the span and a single leading-edge corner,
+# which is how stores and lamps ended up floating clear of the aeroplane.
+
+## Outboard-most station of the planform.
+static func _tip_x(poly: Array) -> float:
+	var x := 0.0
+	for p in poly:
+		x = maxf(x, float((p as Vector2).x))
+	return x
+
+## Index of the tip, which is where the leading edge chain ends and the
+## trailing edge chain begins.
+static func _tip_index(poly: Array) -> int:
+	var best := 0
+	for i in poly.size():
+		if float((poly[i] as Vector2).x) > float((poly[best] as Vector2).x):
+			best = i
+	return best
+
+## Leading and trailing edge z at a half-span station, as (fore, aft).
+static func _chord_at(poly: Array, x: float) -> Vector2:
+	var tip := _tip_index(poly)
+	var le: Array = []
+	for i in range(0, tip + 1):
+		le.append(poly[i])
+	var te: Array = []
+	for i in range(poly.size() - 1, tip - 1, -1):
+		te.append(poly[i])
+	return Vector2(_edge_z(le, x), _edge_z(te, x))
+
+## Walk one edge chain, which runs inboard to outboard, and read off its z.
+static func _edge_z(chain: Array, x: float) -> float:
+	if chain.is_empty():
+		return 0.0
+	if chain.size() == 1 or x <= float((chain[0] as Vector2).x):
+		return float((chain[0] as Vector2).y)
+	for i in range(1, chain.size()):
+		var a: Vector2 = chain[i - 1]
+		var b: Vector2 = chain[i]
+		if x <= b.x:
+			var t: float = 0.0 if absf(b.x - a.x) < 0.0001 else (x - a.x) / (b.x - a.x)
+			return lerpf(a.y, b.y, t)
+	return float((chain[chain.size() - 1] as Vector2).y)
+
+## Put a station back on the wing. `pos` only says which station it is -- how
+## far out, and whether it hangs under the wing or sits on the tip rail; where
+## it actually goes comes from the planform. A station inboard of the wing root
+## is a fuselage or centreline station and is left exactly where it was put.
+static func _on_wing(poly: Array, wing_y: float, pos: Vector3, tip: bool,
+		length: float) -> Vector3:
+	if poly.size() < 3:
+		return pos
+	var root_x: float = float((poly[0] as Vector2).x)
+	var tip_x := _tip_x(poly)
+	var ax := absf(pos.x)
+	if ax + 0.05 < root_x or tip_x - root_x < 0.4:
+		return pos
+	var sx: float = 1.0 if pos.x >= 0.0 else -1.0
+	# A tip rail is ON the tip; anything else keeps clear of both ends of the
+	# wing so the pylon has skin to bolt to.
+	ax = tip_x if tip else clampf(ax, root_x + 0.25, tip_x - 0.30)
+	var c := _chord_at(poly, ax)
+	var z: float
+	if tip:
+		# tail level with the trailing edge, so the round overhangs forward the
+		# way a wingtip missile does instead of sitting in front of the wing
+		z = c.y - length * 0.5 + 0.10
+	else:
+		# centred on the chord: a long round then overhangs at both ends, which
+		# is what a pylon load looks like
+		z = lerpf(c.x, c.y, 0.46)
+	# Under the skin, keeping the authored clearance when it was deeper than the
+	# pylon needs. A tip rail sits in the plane of the wing instead.
+	var y: float = (wing_y + 0.04) if tip else (wing_y - maxf(wing_y - pos.y, 0.36))
+	return Vector3(sx * ax, y, z)

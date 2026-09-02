@@ -9,18 +9,18 @@ extends Control
 ## of ground in the middle of a great deal of nothing, which is exactly what one
 ## chunk looks like. It now covers the whole world, and at enough resolution
 ## that the extra ground is worth having.
-## The baked relief, fetched in one block before the rows are dispatched.
-var _relief := PackedFloat32Array()
-
 const RES := 512
 const HALF := 600000.0         # metres covered by the baked image, each way
 
-var jet: Node = null
+var aircraft: Node = null
 var world: Node = null
 var tank: Node = null          # set while driving, enables map fire missions
 var ship: Node = null          # set while crewing, enables strategic aiming
 ## Where the strategic round has been sent, or INF.
 var strategic_mark := Vector3.INF
+## Which satellite the ASAT launchers have been told to shoot at. Picked with
+## shift and click on the map, because there is nowhere else you can see one.
+var sat_target: Node = null
 
 ## What the map is holding as an aiming point. `_strategic_strike` asks for this.
 func target_point() -> Vector3:
@@ -44,13 +44,9 @@ func _ready() -> void:
 	visible = false
 	set_process(false)
 
-## Shaded relief over biome colour, sampled straight from the world fields.
-##
-## 512 x 512 pixels, each of them three height samples, a biome lookup and a
-## road distance -- two seconds of the start. The rows go out to the worker
-## pool, and the finished image is kept on disk, so only the very first launch
-## after a change to the world ever pays for it.
-var _map_rows: Array = []
+## Shaded relief over biome colour, rasterised from the world fields and kept
+## on disk, so only the very first launch after a change to the world pays for
+## it.
 var map_stats := {}
 
 func bake() -> void:
@@ -60,27 +56,13 @@ func bake() -> void:
 	if cached is PackedByteArray and (cached as PackedByteArray).size() == RES * RES * 3:
 		buf = cached
 	else:
-		# The whole relief in one call before any row starts.
-		#
-		# Each pixel wants three heights -- itself and a step east and south for
-		# the hill shading -- and asking for them a point at a time from every
-		# row worker means half a million crossings of the extension boundary
-		# from eight threads that then queue at it. As a block it is one call,
-		# worked out across the cores inside.
-		var step0 := HALF * 2.0 / float(RES)
-		_relief = Sim.native.grounds(-HALF, -HALF, step0, RES + 1)
-		_map_rows = []
-		_map_rows.resize(RES)
-		var gid := WorkerThreadPool.add_group_task(_bake_row, RES, -1, true,
-			"map relief")
-		WorkerThreadPool.wait_for_group_task_completion(gid)
-		buf = PackedByteArray()
-		buf.resize(RES * RES * 3)
-		for j in RES:
-			var row: PackedByteArray = _map_rows[j]
-			for k in RES * 3:
-				buf[j * RES * 3 + k] = row[k]
-		_map_rows = []
+		# The whole picture in one call: relief, hill shade, biome colour and
+		# the road network. Every one of a quarter of a million pixels wants
+		# three heights, a biome and a distance to the nearest road, and asking
+		# for them a point at a time from eight row workers meant a million and
+		# a half crossings of the extension boundary with all eight queueing at
+		# it. It is the same arithmetic; it is simply done where the fields are.
+		buf = Sim.native.map_relief(RES, HALF)
 		WorldBake.put("map_relief", buf)
 	var img := Image.create_from_data(RES, RES, false, Image.FORMAT_RGB8, buf)
 	_tex = ImageTexture.create_from_image(img)
@@ -94,36 +76,6 @@ func bake() -> void:
 	map_stats = {"res": RES, "ms": Time.get_ticks_msec() - t0, "land": land,
 		"sea": sea}
 
-## Runs on a worker. Reads the height, biome and road fields and nothing else.
-func _bake_row(j: int) -> void:
-	var step := HALF * 2.0 / float(RES)
-	var z := -HALF + float(j) * step
-	var row := PackedByteArray()
-	row.resize(RES * 3)
-	var n1: int = RES + 1
-	for i in RES:
-		var x := -HALF + float(i) * step
-		var h: float = Sim._deform_top(_relief[j * n1 + i], x, z)
-		var c: Color
-		if h < Sim.WATER_LEVEL:
-			c = Color(0.06, 0.16, 0.26).lerp(Color(0.10, 0.24, 0.34),
-				clampf((h + 400.0) / 400.0, 0.0, 1.0))
-		else:
-			c = Sim.biome_colour(x, z, h, 1.0)
-			# hill shade from the local gradient, sun from the north west
-			var dx: float = Sim._deform_top(_relief[j * n1 + i + 1],
-				x + step, z) - h
-			var dz: float = Sim._deform_top(_relief[(j + 1) * n1 + i],
-				x, z + step) - h
-			var shade: float = clampf(0.72 + (-dx - dz) / (step * 0.55), 0.35, 1.5)
-			c = Color(c.r * shade, c.g * shade, c.b * shade)
-			if Sim.road_distance(x, z) < step * 0.8:
-				c = c.lerp(Color(0.14, 0.14, 0.15), 0.75)
-		row[i * 3] = int(clampf(c.r, 0.0, 1.0) * 255.0)
-		row[i * 3 + 1] = int(clampf(c.g, 0.0, 1.0) * 255.0)
-		row[i * 3 + 2] = int(clampf(c.b, 0.0, 1.0) * 255.0)
-	_map_rows[j] = row
-
 func toggle() -> void:
 	visible = not visible
 	set_process(visible)
@@ -131,7 +83,7 @@ func toggle() -> void:
 	if visible:
 		_mouse_was = Input.mouse_mode
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		if jet != null and is_instance_valid(jet):
+		if aircraft != null and is_instance_valid(aircraft):
 			follow = true
 	else:
 		Input.mouse_mode = _mouse_was
@@ -178,7 +130,11 @@ func _refresh_contacts() -> void:
 			var fp: Vector3 = (f2 as Node3D).global_position
 			var d: float = fp.distance_to(p)
 			# an aeroplane carries a radar; anything else has to be able to see it
-			var reach: float = maxf(Sim.radar_range(), 26000.0) if f2 is Aircraft \
+			# The side's whole picture, not just this airframe's own set: a
+			# satellite or an early warning aircraft widens what the map shows,
+			# which is most of the reason for having either.
+			var reach: float = maxf(Sim.coverage(
+				int(f2.team) if ("team" in f2) else 0), 26000.0) if f2 is Aircraft \
 				else 14000.0
 			if d > reach:
 				continue
@@ -234,6 +190,21 @@ func _gui_input(e: InputEvent) -> void:
 			# the unit happened to be standing on when you pressed the button.
 			var hit := _contact_near(mb.position, org, scl)
 			if tank != null and is_instance_valid(tank) and tank.is_indirect():
+				# Shift adds a point rather than replacing one. A round that
+				# carries several warheads can be given several marks -- which
+				# is what "independently targetable" means -- and each warhead
+				# takes one as the bus opens. Without shift it is the primary
+				# mark and the extra ones are forgotten.
+				if mb.shift_pressed:
+					var extra: Vector3 = (hit as Node3D).global_position \
+						if hit != null else at
+					tank.mirv_marks.append(extra)
+					Sim.report("warhead %d assigned: %.1f km" % [
+						tank.mirv_marks.size(),
+						tank.global_position.distance_to(extra) * 0.001],
+						Sim.Ev.INFO)
+					return
+				tank.mirv_marks.clear()
 				tank.map_lock = hit
 				tank.map_target = (hit as Node3D).global_position if hit != null else at
 				if hit != null:
@@ -251,6 +222,48 @@ func _gui_input(e: InputEvent) -> void:
 				Sim.report("aiming point set: %.0f km" % (
 					ship.global_position.distance_to(at) * 0.001), Sim.Ev.INFO)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			# CTRL and click plants an objective marker, and CTRL and click on a
+			# satellite assigns it to the ASAT launchers. Deliberately not
+			# shift: shift already belongs to the weapons — it is what assigns
+			# a warhead on a MIRV bus and picks the extra aiming points for a
+			# cluster round — and putting a navigation marker on the same
+			# modifier meant reaching for one and getting the other.
+			if (mb.ctrl_pressed or mb.meta_pressed) and mb.pressed:
+				# On a satellite? Then this is an orbital assignment, not a
+				# place on the ground.
+				var vpS := get_viewport_rect().size
+				var ppmS := minf(vpS.x, vpS.y) * 0.86 * zoom / (HALF * 2.0)
+				var orgS := vpS * 0.5
+				var hit: Node = null
+				var best := 18.0
+				for sat2 in get_tree().get_nodes_in_group("satellites"):
+					if not is_instance_valid(sat2) or not (sat2 is Node3D):
+						continue
+					var q: Vector3 = (sat2 as Node3D).global_position
+					var d2: float = _w2s(Vector2(q.x, q.z), orgS, ppmS).distance_to(
+						mb.position)
+					if d2 < best:
+						best = d2
+						hit = sat2
+				if hit != null:
+					sat_target = hit if sat_target != hit else null
+					Sim.sat_target = sat_target
+					Sim.report("orbital target: %s" % (
+						hit.call("display_name") if sat_target != null
+						else "released"), Sim.Ev.INFO)
+					return
+				var vp0 := get_viewport_rect().size
+				var ppm0 := minf(vp0.x, vp0.y) * 0.86 * zoom / (HALF * 2.0)
+				var org0 := vp0 * 0.5
+				var w := centre + (mb.position - org0) / ppm0
+				var at := Vector3(w.x, Sim.height_at(w.x, w.y), w.y)
+				if Sim.objective != Vector3.INF \
+						and Vector2(Sim.objective.x - at.x,
+							Sim.objective.z - at.z).length() < 40.0 / ppm0 * 12.0:
+					Sim.clear_objective()
+				else:
+					Sim.set_objective(at)
+				return
 			_drag = mb.pressed
 			if mb.pressed:
 				follow = false
@@ -260,8 +273,8 @@ func _gui_input(e: InputEvent) -> void:
 		centre -= (e as InputEventMouseMotion).relative / px_per_m
 
 func _process(d: float) -> void:
-	if follow and jet != null and is_instance_valid(jet):
-		centre = Vector2(jet.global_position.x, jet.global_position.z)
+	if follow and aircraft != null and is_instance_valid(aircraft):
+		centre = Vector2(aircraft.global_position.x, aircraft.global_position.z)
 	# Twice a second is plenty for a picture, and working out who can see what
 	# is a line of sight march per pair.
 	_contact_t -= d
@@ -407,7 +420,7 @@ func _draw() -> void:
 
 	# contacts
 	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or n == jet:
+		if not is_instance_valid(n) or n == aircraft:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
@@ -420,19 +433,46 @@ func _draw() -> void:
 			draw_circle(p, 3.0, col)
 
 	# own aircraft, with its heading
-	if jet != null and is_instance_valid(jet):
-		var p := _w2s(Vector2(jet.global_position.x, jet.global_position.z), org, ppm)
-		var fwd: Vector3 = -jet.global_transform.basis.z
+	if aircraft != null and is_instance_valid(aircraft):
+		var p := _w2s(Vector2(aircraft.global_position.x, aircraft.global_position.z), org, ppm)
+		var fwd: Vector3 = -aircraft.global_transform.basis.z
 		var dir := Vector2(fwd.x, fwd.z).normalized()
 		var side := Vector2(-dir.y, dir.x)
 		draw_colored_polygon(PackedVector2Array([p + dir * 11.0, p - dir * 6.0 + side * 6.0,
 			p - dir * 6.0 - side * 6.0]), Color(0.4, 1.0, 0.5))
 		_label(Vector2(24, vp.y - 96), "POS  %+.1f km E   %+.1f km N   ALT %d ft" % [
-			jet.global_position.x * 0.001, -jet.global_position.z * 0.001,
-			int(jet.global_position.y * 3.28084)], Color(0.7, 1.0, 0.8))
+			aircraft.global_position.x * 0.001, -aircraft.global_position.z * 0.001,
+			int(aircraft.global_position.y * 3.28084)], Color(0.7, 1.0, 0.8))
 
 	# artillery fire mission marker
 	# where the strategic round has been sent
+	# What is overhead. A satellite is not a ground contact and does not belong
+	# in the contact list, but it is the only thing an ASAT launcher can shoot
+	# at — so the map is where you find one and pick it.
+	for sat in get_tree().get_nodes_in_group("satellites"):
+		if not is_instance_valid(sat) or not (sat is Node3D):
+			continue
+		var sp2: Vector3 = (sat as Node3D).global_position
+		var s2 := _w2s(Vector2(sp2.x, sp2.z), org, ppm)
+		var friendly: bool = int(sat.get("team")) == 0
+		var satc := Color(0.45, 0.85, 1.0) if friendly else Color(1.0, 0.55, 0.35)
+		if sat == sat_target:
+			satc = Color(1.0, 0.9, 0.35)
+			draw_arc(s2, 13.0, 0.0, TAU, 20, satc, 2.0)
+		# a lozenge, so it does not read as an aircraft or a ship
+		draw_line(s2 + Vector2(-7, 0), s2 + Vector2(0, -5), satc, 1.6)
+		draw_line(s2 + Vector2(0, -5), s2 + Vector2(7, 0), satc, 1.6)
+		draw_line(s2 + Vector2(7, 0), s2 + Vector2(0, 5), satc, 1.6)
+		draw_line(s2 + Vector2(0, 5), s2 + Vector2(-7, 0), satc, 1.6)
+		_label(s2 + Vector2(10, -6), "%s %d km" % [
+			String(sat.get("kind")).to_upper(), int(sp2.y * 0.001)], satc, 11)
+	if Sim.objective != Vector3.INF:
+		var op := _w2s(Vector2(Sim.objective.x, Sim.objective.z), org, ppm)
+		var oc := Color(1.0, 0.82, 0.25)
+		draw_arc(op, 11.0, 0.0, TAU, 20, oc, 2.0)
+		draw_line(op + Vector2(-16, 0), op + Vector2(16, 0), oc, 1.4)
+		draw_line(op + Vector2(0, -16), op + Vector2(0, 16), oc, 1.4)
+		_label(op + Vector2(14, -14), "OBJECTIVE", oc, 12)
 	if strategic_mark != Vector3.INF:
 		var sp := _w2s(Vector2(strategic_mark.x, strategic_mark.z), org, ppm)
 		draw_arc(sp, 9.0, 0.0, TAU, 20, Color(1.0, 0.45, 0.2), 1.8)
@@ -450,7 +490,16 @@ func _draw() -> void:
 			_label(mp + Vector2(18, 4), "%.1f km" % (
 				tank.global_position.distance_to(tank.map_target) * 0.001),
 				Color(1.0, 0.6, 0.3))
-		_label(Vector2(24, vp.y - 120), "right click to lay a fire mission",
+		# and every warhead that has been given a mark of its own
+		for wi in tank.mirv_marks.size():
+			var wm: Vector3 = tank.mirv_marks[wi]
+			var wp := _w2s(Vector2(wm.x, wm.z), org, ppm)
+			draw_arc(wp, 9.0, 0, TAU, 16, Color(1.0, 0.75, 0.25), 1.4)
+			draw_line(wp - Vector2(0, 9), wp + Vector2(0, 9), Color(1.0, 0.75, 0.25), 1.2)
+			_label(wp + Vector2(12, 4), "RV%d" % (wi + 1), Color(1.0, 0.8, 0.4), 11)
+		_label(Vector2(24, vp.y - 120), "right click to lay a fire mission"
+			+ ("  ·  shift+right click assigns a warhead (%d)" % tank.mirv_marks.size()
+				if tank.mirv_marks.size() > 0 else "  ·  shift+right click assigns a warhead"),
 			Color(1.0, 0.7, 0.4), 14)
 
 	# scale bar and legend
@@ -462,7 +511,9 @@ func _draw() -> void:
 		Color(0.9, 0.95, 1.0), 2.0)
 	_label(Vector2(bx, vp.y - 60), "%d km" % int(bar_m * 0.001), Color(0.9, 0.95, 1.0))
 	_label(Vector2(24, 40), "TACTICAL MAP", Color(0.6, 0.95, 1.0), 22)
-	_label(Vector2(24, 64), "wheel zoom   drag to pan   M to close", Color(0.6, 0.7, 0.8), 14)
+	_label(Vector2(24, 64),
+		"wheel zoom   drag to pan   ctrl+click sets an objective or picks a satellite   M to close",
+		Color(0.6, 0.7, 0.8), 14)
 	# north arrow
 	var na := Vector2(vp.x - 60.0, 70.0)
 	draw_line(na + Vector2(0, 18), na - Vector2(0, 18), Color(0.9, 0.95, 1.0), 2.0)

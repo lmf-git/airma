@@ -44,6 +44,20 @@ func _build() -> Array:
 		{"id": "follow", "label": "Camera follows the traffic",
 		 "note": "ON" if following else "OFF"},
 		{"id": "clear", "label": "Clear the circuit", "note": "%d up" % traffic},
+		# Populate whatever mission you are in, without ending up with two of
+		# everything. Each of these reports what is already there, and asking
+		# again tops it up rather than laying down a second set.
+		{"id": "add_garage", "label": "Put the vehicle park out",
+		 "note": "%d parked" % Sim.census("vehicles")},
+		{"id": "add_parked", "label": "Put aircraft on the flight line",
+		 "note": "%d parked" % Sim.census("parked")},
+		{"id": "add_bandits", "label": "Put hostile aircraft up",
+		 "note": "%d up" % Sim.census("bandits")},
+		{"id": "add_choppers", "label": "Put hostile gunships up", "note": "rotary"},
+		{"id": "add_ships", "label": "Put hostile shipping at sea",
+		 "note": "%d afloat" % Sim.census("ships")},
+		{"id": "add_sats", "label": "Put satellites in orbit",
+		 "note": "%d in orbit" % Sim.census("satellites")},
 	]
 
 func _process(_dt: float) -> void:

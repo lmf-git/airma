@@ -176,6 +176,10 @@ func setup(id: String) -> void:
 	_rotors = _model.get("rotors", [])
 	_build_aero_fx()
 	_build_lights()
+	if bool(spec.get("awacs", false)):
+		add_to_group("awacs")
+	if float(spec.get("tanker", 0.0)) > 0.0:
+		add_to_group("tankers")
 
 	mass = spec["mass"]
 	inertia = spec["inertia"]
@@ -350,6 +354,10 @@ func _physics_process(delta: float) -> void:
 	_chaff_t = maxf(_chaff_t - delta, 0.0)
 	_chaff_cd = maxf(_chaff_cd - delta, 0.0)
 	gun_cd = maxf(gun_cd - delta, 0.0)
+	_gun_snd = maxf(_gun_snd - delta, 0.0)
+	# trigger off: stop the buzzsaw rather than leaving it running
+	if _gun_snd <= 0.0 and is_instance_valid(_gun_audio) and _gun_audio.playing:
+		_gun_audio.stop()
 	fire_cd = maxf(fire_cd - delta, 0.0)
 	missile_warn = maxf(missile_warn - delta, 0.0)
 	_update_lock(delta)
@@ -484,18 +492,34 @@ func _animate(delta: float) -> void:
 ## under it. Real lights are always on -- they simply cannot be seen against
 ## daylight -- so nothing here is switched by the clock except the lamp, which
 ## is switched by the pilot.
+## Time left on the cannon's report. Refreshed on every burst and run down by
+## the physics step, so the sound stops shortly after the trigger does.
+var _gun_snd := 0.0
+var _gun_audio: AudioStreamPlayer3D = null
 var _nav: Array = []
+## The lamps themselves, so switching the navigation lights off puts out
+## something you can see as well as something that lights the skin.
+var _nav_bulbs: Array = []
 var _burn_lights: Array = []
 var _flood: SpotLight3D = null
 var lights_on := false
+## Navigation lights. On is the normal state -- they cannot be seen in daylight
+## anyway -- but there are nights when being the only lit thing in the valley is
+## exactly what you do not want.
+var nav_on := true
 
 func _build_lights() -> void:
-	var half: float = maxf(float(spec.get("span", 10.0)) * 0.5, 2.0)
 	var back: float = maxf(float(spec.get("length", 14.0)) * 0.45, 3.0)
+	# On the wingtips the model actually has. Half the span from the data table
+	# put them outboard of a swept wing and well ahead of it, which is why the
+	# F-16's lamps hung in clear air beside the aeroplane.
+	var half: float = maxf(float(spec.get("span", 10.0)) * 0.5, 2.0)
+	var tips: Array = _model.get("nav_tips",
+		[Vector3(-half, 0.0, 0.0), Vector3(half, 0.0, 0.0)])
 	# port red, starboard green, tail white: the arrangement every aircraft has
-	for e in [[Vector3(-half, 0.0, 0.0), Color(1.0, 0.10, 0.08)],
-			[Vector3(half, 0.0, 0.0), Color(0.12, 1.0, 0.22)],
-			[Vector3(0.0, 0.6, back), Color(1.0, 1.0, 0.96)]]:
+	for e in [[tips[0], Color(1.0, 0.10, 0.08), true],
+			[tips[1], Color(0.12, 1.0, 0.22), true],
+			[Vector3(0.0, 0.6, back), Color(1.0, 1.0, 0.96), false]]:
 		var l := OmniLight3D.new()
 		l.position = e[0]
 		l.light_color = e[1]
@@ -504,8 +528,10 @@ func _build_lights() -> void:
 		l.shadow_enabled = false
 		add_child(l)
 		_nav.append(l)
-		# and the lamp itself, so there is something to see as well as something
-		# to be lit by
+		# The wingtip lamps are part of the airframe already -- the factory puts
+		# them on the tip it built -- so only the tail one is wanted here.
+		if bool(e[2]):
+			continue
 		var b := MeshInstance3D.new()
 		var sm := SphereMesh.new()
 		sm.radius = 0.13
@@ -523,6 +549,10 @@ func _build_lights() -> void:
 		b.position = e[0]
 		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(b)
+		_nav_bulbs.append(b)
+	for lm in _model.get("lights", []):
+		if is_instance_valid(lm):
+			_nav_bulbs.append(lm)
 	# One light per nozzle, driven by the burner. An afterburner is the
 	# brightest thing for miles and it was casting nothing at all.
 	for n in _burners:
@@ -547,12 +577,325 @@ func _build_lights() -> void:
 	_flood.shadow_enabled = false
 	add_child(_flood)
 
+# --------------------------------------------------------------------------
+## Electronic warfare.
+##
+## Chaff and flares were the only counters in the game — there was no jamming of
+## any kind, so a radar round could be decoyed but never denied a lock in the
+## first place. A jammer does the other half: it does not break a round already
+## tracking you, it makes you harder to acquire and it degrades a radar seeker
+## that is looking at you, at the cost of telling everybody exactly where you
+## are while it is running.
+var jammer := false
+
+func toggle_jammer() -> void:
+	jammer = not jammer
+	_ap_say("jammer %s" % ("ON — you are lit up on every RWR for a hundred miles"
+		if jammer else "off"))
+
+## How much a radar seeker's tracking of this aircraft is degraded, 0 to 1. Only
+## radar: an infrared round is looking at the engines and does not care.
+func jam_strength(at: Vector3) -> float:
+	if not jammer or not alive:
+		return 0.0
+	# Burn-through: close enough and the return beats the noise, which is why
+	# jamming does not save you from something already on top of you.
+	var d: float = global_position.distance_to(at)
+	return clampf((d - 1800.0) / 9000.0, 0.0, 0.85)
+
+# --------------------------------------------------------------------------
+## Ground servicing: fuel, ammunition, stores and repair.
+##
+## You could land and you could not do anything about it. A sortie ended when
+## the aeroplane was empty, and the only way to get another one was to restart
+## the mission — `rearm` and `restock` appear nowhere in this project, and the
+## one mention of resupply is a comment on a tank saying its rounds are
+## "refilled on resupply", which nothing implemented.
+##
+## Stopped, on the ground, near somewhere friendly: the crew come out. It takes
+## time proportional to what you have used, so coming back empty and shot up is
+## a longer turnaround than topping off.
+const SERVICE_RADIUS := 260.0     # how near the apron the crew will come out
+const SERVICE_FUEL := 120.0       # kg a second
+const SERVICE_REPAIR := 6.0       # hull points a second
+## What a whole airframe is worth. `health` starts here and nothing recorded a
+## maximum, because until now nothing ever put any back.
+const FULL_HEALTH := 100.0
+
+var servicing := false
+var _svc_said := false
+
+## Somewhere with people and fuel: an airbase apron, or a carrier deck.
+func near_service() -> bool:
+	# A carrier is in a group; an airbase is not, so it is found by type.
+	for n in get_tree().get_nodes_in_group("carrier"):
+		if not is_instance_valid(n) or not (n is Node3D):
+			continue
+		if ("team" in n) and int(n.team) != team:
+			continue
+		if global_position.distance_to((n as Node3D).global_position) < SERVICE_RADIUS:
+			return true
+	for n2 in get_tree().current_scene.get_children():
+		var base := n2 as Airbase
+		if base == null:
+			continue
+		if global_position.distance_to(base.global_position) < SERVICE_RADIUS * 4.0:
+			return true
+	return false
+
+func needs_service() -> bool:
+	if fuel < float(spec["fuel"]) - 1.0:
+		return true
+	if health < FULL_HEALTH - 0.5:
+		return true
+	if ammo < int((spec.get("gun", {}) as Dictionary).get("rounds", 0)):
+		return true
+	for st in stores:
+		if st["gone"]:
+			return true
+	return false
+
+func update_ground_service(delta: float) -> bool:
+	if not alive or not on_ground or linear_velocity.length() > 1.5:
+		if servicing:
+			servicing = false
+			_svc_said = false
+		return false
+	if not near_service() or not needs_service():
+		if servicing:
+			servicing = false
+			_svc_said = false
+			_ap_say("ready — fuel %d kg, %d rounds" % [int(fuel), ammo])
+		return false
+	if not servicing:
+		servicing = true
+		_ap_say("ground crew out — rearming and refuelling")
+	fuel = minf(fuel + SERVICE_FUEL * delta, float(spec["fuel"]))
+	health = minf(health + SERVICE_REPAIR * delta, FULL_HEALTH)
+	# Stores and belted ammunition come back a bit at a time too, so a rearm is
+	# something you wait for rather than something that happens on touchdown.
+	_svc_accum += delta
+	if _svc_accum > 2.5:
+		_svc_accum = 0.0
+		var full: int = int((spec.get("gun", {}) as Dictionary).get("rounds", 0))
+		if ammo < full:
+			ammo = mini(ammo + maxi(int(full / 6.0), 1), full)
+		for st in stores:
+			if st["gone"]:
+				# the bay update drives the node's visibility off this flag
+				# every frame, so putting the round back is the whole job
+				st["gone"] = false
+				_refresh_mass()
+				break
+	_refresh_mass()
+	return true
+
+var _svc_accum := 0.0
+
+# --------------------------------------------------------------------------
+## Aerial refuelling.
+##
+## The KC-135 was added as an airframe whose entire stated role is refuelling,
+## and there was no refuelling: no boom, no envelope, no transfer. This is it.
+##
+## Taking fuel is a formation problem, not a button. You have to get into the
+## box behind the boom — close, roughly astern, and matched in speed — and stay
+## there. Drift out of it and the boom disconnects, which is what actually
+## happens and is the whole difficulty of the thing.
+const AAR_RANGE := 32.0           # how far back the boom will reach
+const AAR_CONE := deg_to_rad(26.0)  # how far off the tanker's tail you may sit
+const AAR_CLOSURE := 26.0         # m/s of speed mismatch the boom tolerates
+
+var refuelling := false
+var _aar_tanker: Aircraft = null
+## Seconds in contact, so the HUD can say something and so a momentary brush
+## with the envelope does not read as a hookup.
+var _aar_t := 0.0
+
+func tanker_in_reach() -> Aircraft:
+	for n in get_tree().get_nodes_in_group("tankers"):
+		if not is_instance_valid(n) or n == self:
+			continue
+		var t := n as Aircraft
+		if t == null or not t.alive or t.team != team:
+			continue
+		var boom: Vector3 = t.global_transform * (t.spec.get("boom",
+			Vector3(0, -2.0, 24.0)) as Vector3)
+		if global_position.distance_to(boom) > AAR_RANGE:
+			continue
+		# behind it, not alongside: the receiver sits in the tanker's own
+		# six o'clock, which is +Z in its frame
+		var rel: Vector3 = t.global_transform.basis.inverse() \
+			* (global_position - t.global_position)
+		if rel.z <= 0.0:
+			continue
+		if Vector2(rel.x, rel.y).length() > rel.z * tan(AAR_CONE):
+			continue
+		# and flying the same speed. A closure of thirty metres a second is not
+		# a hookup, it is a collision waiting to happen.
+		if (linear_velocity - t.linear_velocity).length() > AAR_CLOSURE:
+			continue
+		return t
+	return null
+
+## Called every physics tick by whoever is flying. Returns true while fuel is
+## actually going in.
+func update_refuel(delta: float) -> bool:
+	var t := tanker_in_reach()
+	_aar_tanker = t
+	if t == null or fuel >= float(spec["fuel"]) - 0.5:
+		if refuelling:
+			refuelling = false
+			_aar_t = 0.0
+			_ap_say("boom disconnect")
+		return false
+	if not refuelling:
+		refuelling = true
+		_aar_t = 0.0
+		_ap_say("contact — taking fuel from %s" % t.display_name())
+	_aar_t += delta
+	var rate: float = float(t.spec.get("tanker", 40.0))
+	fuel = minf(fuel + rate * delta, float(spec["fuel"]))
+	_refresh_mass()
+	if fuel >= float(spec["fuel"]) - 0.5:
+		_ap_say("full — %d kg" % int(fuel))
+	return true
+
+func display_name() -> String:
+	return String(spec.get("name", "aircraft"))
+
+# --------------------------------------------------------------------------
+## Autopilot. Two modes and nothing else: hold what you have, or orbit where you
+## are. Both exist because there are long stretches of this game — a transit, a
+## drone on station over a sector, a bomber waiting for a mark — where flying
+## the aeroplane by hand is not the interesting part.
+##
+## "" is off, "hold" keeps the altitude and wings level, "loiter" keeps the
+## altitude and holds a steady turn. `ap_turn` is +1 for a clockwise orbit seen
+## from above and -1 for anticlockwise.
+var ap_mode := ""
+var ap_alt := 0.0
+var ap_turn := 1.0
+## The orbit is flown to a RADIUS, not to a bank angle. A fixed thirty degrees
+## looks reasonable until something fast uses it: radius is V^2/(g*tan(bank)),
+## so at 250 m/s that is an eleven kilometre circle, and an F-16 asked to loiter
+## swept fifty-two degrees in a minute — a shape you cannot see the middle of.
+## Holding a radius instead banks according to speed, which is what "orbit this
+## place" actually means.
+const AP_RADIUS := 1800.0
+const AP_BANK_MIN := deg_to_rad(12.0)
+const AP_BANK_MAX := deg_to_rad(50.0)
+
+## Only the aeroplane somebody is sitting in has a voice: `say` is the crewed
+## aircraft's, and an unmanned one on station has nobody to tell.
+func _ap_say(text: String) -> void:
+	if has_method("say"):
+		call("say", text)
+
+func autopilot_on() -> bool:
+	return ap_mode != ""
+
+## Engage, or change mode. Engaging captures the altitude you are at, which is
+## what "hold" means to a pilot: it holds THIS, not some number typed in.
+func set_autopilot(mode: String) -> void:
+	if mode == ap_mode:
+		mode = ""
+	ap_mode = mode
+	if ap_mode != "":
+		ap_alt = global_position.y
+	match ap_mode:
+		"goto":
+			if Sim.objective == Vector3.INF:
+				ap_mode = ""
+				_ap_say("no objective marked — set one on the map with shift and click")
+			else:
+				var d: float = global_position.distance_to(Sim.objective)
+				_ap_say("autopilot: to the objective, %.1f km" % (d * 0.001))
+		"hold":
+			_ap_say("autopilot: holding %d ft" % int(ap_alt * 3.28084))
+		"loiter":
+			_ap_say("autopilot: orbit %s at %d ft" % [
+				"right" if ap_turn > 0.0 else "left", int(ap_alt * 3.28084)])
+		_:
+			_ap_say("autopilot off")
+
+func toggle_orbit_direction() -> void:
+	ap_turn = -ap_turn
+	if ap_mode == "loiter":
+		_ap_say("orbit reversed — turning %s" % (
+			"right" if ap_turn > 0.0 else "left"))
+
+## Fly it. Sets the same stick and throttle the pilot would, so everything
+## downstream — the flight model, the fly-by-wire, the g limiter — is untouched.
+func fly_autopilot(_delta: float) -> void:
+	if ap_mode == "" or not alive:
+		return
+	# Height: how far off, turned into a climb rate, turned into a pitch demand.
+	# Going straight from altitude error to stick is what makes an autopilot
+	# porpoise — it arrives at the height with all its climb rate still on.
+	var err: float = ap_alt - global_position.y
+	var want_vs: float = clampf(err * 0.20, -35.0, 35.0)
+	var vs: float = linear_velocity.y
+	in_pitch = clampf((want_vs - vs) * 0.055, -0.55, 0.55)
+	# Bank: wings level, held over in the orbit, or turned onto a course.
+	var bank: float = 0.0
+	if ap_mode == "goto" and Sim.objective != Vector3.INF:
+		# Fly to the objective the player marked on the map. This is the
+		# navigation the game did not have: waypoints existed for road routing
+		# and cruise-missile terrain following, never for the pilot.
+		var to: Vector3 = Sim.objective - global_position
+		var want_hdg: float = atan2(to.x, -to.z)
+		var hdg: float = global_rotation.y
+		var hdg_err: float = wrapf(-want_hdg - hdg, -PI, PI)
+		bank = clampf(hdg_err * 1.4, -AP_BANK_MAX, AP_BANK_MAX)
+		# Arriving: hold over it rather than flying past and turning round.
+		if Vector2(to.x, to.z).length() < AP_RADIUS * 1.2:
+			ap_mode = "loiter"
+			_ap_say("overhead the objective — holding")
+	elif ap_mode == "loiter":
+		var v: float = maxf(linear_velocity.length(), 40.0)
+		bank = clampf(atan((v * v) / (9.81 * AP_RADIUS)), AP_BANK_MIN, AP_BANK_MAX) \
+			* ap_turn
+	# `basis.x.y` is how far the starboard wing has dropped, which is the roll
+	# angle for anything short of vertical — and it does not wrap, so there is
+	# no discontinuity to fight at the back of the orbit.
+	var roll_now: float = asin(clampf(-global_transform.basis.x.y, -1.0, 1.0))
+	in_roll = clampf((bank - roll_now) * 1.6, -0.85, 0.85)
+	in_yaw = 0.0
+	# and enough power to stay up. A turn costs speed, so the orbit needs more
+	# than straight and level does.
+	var ias_want: float = maxf(float(spec.get("vne", 600.0)) * 0.33, 95.0)
+	var hold: float = 0.55 if ap_mode == "hold" else 0.68
+	throttle = clampf(hold + (ias_want - ias) * 0.004, 0.15, 1.0)
+	airbrake = false
+
+## The pilot taking hold of the stick again. Any real input drops the
+## autopilot, which is what every autopilot does and saves having to remember to
+## switch it off before manoeuvring.
+func autopilot_interrupted(pitch: float, roll: float, yaw: float) -> bool:
+	return absf(pitch) > 0.15 or absf(roll) > 0.15 or absf(yaw) > 0.15
+
 ## The lamp the pilot switches.
 func toggle_lights() -> void:
 	lights_on = not lights_on
 	if is_instance_valid(_flood):
 		_flood.light_energy = 14.0 if lights_on else 0.0
-	Sim.report("lights %s" % ("on" if lights_on else "off"), Sim.Ev.INFO)
+	Sim.report("landing lamp %s" % ("on" if lights_on else "off"), Sim.Ev.INFO)
+
+## Navigation lights out. Both the lamps and the light they cast go, or the
+## aeroplane still glows red and green from a mile away with the bulbs dark.
+func set_nav_lights(on: bool) -> void:
+	nav_on = on
+	for l in _nav:
+		if is_instance_valid(l):
+			(l as Light3D).visible = on
+	for b in _nav_bulbs:
+		if is_instance_valid(b):
+			(b as Node3D).visible = on
+
+func toggle_nav_lights() -> void:
+	set_nav_lights(not nav_on)
+	Sim.report("nav lights %s" % ("on" if nav_on else "off"), Sim.Ev.INFO)
 
 func _build_aero_fx() -> void:
 	for tip in _model.get("tips", []):
@@ -1237,14 +1580,64 @@ func gunship_gun() -> Dictionary:
 			return g
 	return spec["guns"][0]
 
+## How far a sponson mount will train: a generous arc off the port beam, which
+## is where a gunship's whole business is conducted, and well down.
+const BATTERY_AZ := 0.79         # +/- 45 degrees fore and aft of the beam
+const BATTERY_EL_LO := -0.09     # a shade above the horizontal
+const BATTERY_EL_HI := 1.40      # to eighty degrees below it
+
+## Lay the side battery on a point, and say whether it can actually get there.
+##
+## The barrels used to be part of the airframe mesh, so they pointed wherever
+## they had been modelled and the rounds went wherever the sensor was looking:
+## the two had nothing to do with one another. They are on trunnions now, and
+## the fire comes out along the barrel -- so if the mount cannot train onto the
+## mark, the shot cannot be taken either, which is what banking a gunship into
+## its orbit is for.
+func aim_battery(at: Vector3) -> bool:
+	var mounts := get_node_or_null("SideGuns")
+	if mounts == null:
+		return true
+	var ok := true
+	for m in mounts.get_children():
+		var node := m as Node3D
+		if node == null:
+			continue
+		var local: Vector3 = global_transform.affine_inverse() * at - node.position
+		if local.length() < 1.0:
+			continue
+		local = local.normalized()
+		var az: float = atan2(local.z, -local.x)
+		var el: float = asin(clampf(-local.y, -1.0, 1.0))
+		if absf(az) > BATTERY_AZ or el < BATTERY_EL_LO or el > BATTERY_EL_HI:
+			ok = false
+		node.rotation = Vector3(0.0, clampf(az, -BATTERY_AZ, BATTERY_AZ),
+			clampf(el, BATTERY_EL_LO, BATTERY_EL_HI))
+	return ok
+
+## Where a given barrel is pointing, in world space. The mount was built along
+## its own -X, so that axis rotated into the world is the bore.
+func _bore(node: Node3D) -> Vector3:
+	return (node.global_transform.basis * Vector3(-1.0, 0.0, 0.0)).normalized()
+
 func fire_gunship(world: Node, aim: Vector3) -> bool:
 	var g := gunship_gun()
 	if g.is_empty() or gun_cd > 0.0 or not alive:
 		return false
+	if not aim_battery(aim):
+		return false
 	gun_cd = 60.0 / float(g["rpm"])
 	var ports: Array = spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
-	var muzzle: Vector3 = global_transform * (ports[randi() % ports.size()] as Vector3)
-	var dir := (aim - muzzle)
+	var pick: int = randi() % ports.size()
+	var muzzle: Vector3 = global_transform * (ports[pick] as Vector3)
+	# Along the barrel that is actually firing, not along the sight line. The
+	# two agree whenever the mount is on the mark, which is the point.
+	var dir := aim - muzzle
+	var mounts := get_node_or_null("SideGuns")
+	if mounts != null and pick < mounts.get_child_count():
+		var node := mounts.get_child(pick) as Node3D
+		if node != null:
+			dir = _bore(node)
 	if dir.length() < 1.0:
 		return false
 	dir = dir.normalized()
@@ -1275,8 +1668,30 @@ func fire_gun(world: Node) -> bool:
 	var muzzle := global_transform * (g["pos"] as Vector3)
 	var dir := -global_transform.basis.z
 	var v: float = g["muzzle"]
-	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * 4.0, team)
+	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * 4.0,
+		team, float(g.get("he", 0.0)))
 	Effects.muzzle_flash(world, muzzle, dir, 1.1)
+	# The one gun in the game you could not hear. The tank's coaxial, the
+	# gunship's battery and the man on foot all make a noise when they fire;
+	# an aeroplane's cannon put tracer and a muzzle flash out in silence.
+	#
+	# One player that runs while the trigger is down, not a clip per burst. The
+	# "gun" clip is a looping buzzsaw — that is what a gatling sounds like — and
+	# firing it as a one-shot twelve times a second left twelve immortal loops a
+	# second behind, because a looping stream never reports finishing. The gun
+	# went on firing for the rest of the sortie after you let go.
+	_gun_snd = 0.12
+	if _gun_audio == null or not is_instance_valid(_gun_audio):
+		_gun_audio = AudioStreamPlayer3D.new()
+		_gun_audio.stream = Sfx.get_clip("gun")
+		_gun_audio.volume_db = -3.0
+		_gun_audio.max_distance = 2400.0
+		_gun_audio.unit_size = 26.0
+		_gun_audio.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		add_child(_gun_audio)
+		_gun_audio.position = g["pos"] as Vector3
+	if not _gun_audio.playing:
+		_gun_audio.play()
 	return true
 
 # --------------------------------------------------------------------------

@@ -8,7 +8,7 @@ signal chose(id: String)
 const W := 330.0
 const ROW := 34.0
 
-var jet: Aircraft = null
+var aircraft: Aircraft = null
 var items: Array = []          # [{id, label, note}]
 var index := 0
 var _font: Font
@@ -24,9 +24,45 @@ var vehicle: Node = null          # a tank or a ship, when that is what you are 
 ## Open on whatever the player is actually crewing. A tank captain has no use
 ## for a tailhook and a ship has no bays: showing an aeroplane's actions from
 ## the bridge was simply the wrong menu.
+## Which page is up, so that choosing something rebuilds the list it came from.
+## `_fire` rebuilt the aircraft page whatever you were in, so picking an action
+## in a tank emptied the menu.
+var _page := "air"
+
+## On foot. There is no vehicle and no aeroplane, but there is still something
+## to command: what is in orbit. Without this, TAB did nothing at all once you
+## climbed out, and the satellite terminal was unreachable on foot.
+func open_for_foot() -> void:
+	aircraft = null
+	vehicle = null
+	_page = "foot"
+	items = _build_foot()
+	index = 0
+	visible = not items.is_empty()
+	set_process(visible)
+	queue_redraw()
+
+func _build_foot() -> Array:
+	var out: Array = []
+	var sats: int = Sim.census("satellites")
+	if sats > 0:
+		out.append({"id": "satlink", "label": "Satellite terminal",
+			"note": Sim.coverage_source(0)})
+		out.append({"id": "asattgt", "label": "Assign ASAT target",
+			"note": Sim.label_of(Sim.sat_target)
+				if is_instance_valid(Sim.sat_target) else "none"})
+	else:
+		out.append({"id": "satlink", "label": "Satellite terminal",
+			"note": "nothing in orbit"})
+	if Sim.objective != Vector3.INF:
+		out.append({"id": "objclear", "label": "Clear the objective marker",
+			"note": "set"})
+	return out
+
 func open_for_vehicle(v: Node) -> void:
-	jet = null
+	aircraft = null
 	vehicle = v
+	_page = "vehicle"
 	items = _build_vehicle()
 	index = 0
 	visible = not items.is_empty()
@@ -62,8 +98,9 @@ func _build_vehicle() -> Array:
 	return out
 
 func open_for(a: Aircraft) -> void:
-	jet = a
+	aircraft = a
 	vehicle = null
+	_page = "air"
 	items = _build()
 	index = 0
 	visible = not items.is_empty()
@@ -76,30 +113,61 @@ func close() -> void:
 
 func _build() -> Array:
 	var out: Array = []
-	if jet == null or not is_instance_valid(jet):
+	if aircraft == null or not is_instance_valid(aircraft):
 		return out
-	if jet._model.has("hook"):
+	if aircraft._model.has("hook"):
 		out.append({"id": "hook", "label": "Tailhook",
-			"note": "DOWN" if jet.hook_down else "UP"})
-	var internal: bool = jet.bays.values().any(func(b): return b["kind"] == "internal")
+			"note": "DOWN" if aircraft.hook_down else "UP"})
+	var internal: bool = aircraft.bays.values().any(func(b): return b["kind"] == "internal")
 	if internal:
 		out.append({"id": "bay", "label": "Weapon bay",
-			"note": "OPEN" if jet.any_bay_open() else "SHUT"})
+			"note": "OPEN" if aircraft.any_bay_open() else "SHUT"})
 	out.append({"id": "gear", "label": "Landing gear",
-		"note": "DOWN" if jet.gear_down else "UP"})
+		"note": "DOWN" if aircraft.gear_down else "UP"})
 	out.append({"id": "flaps", "label": "Flaps",
-		"note": "DOWN" if jet.flaps > 0.5 else "UP"})
-	if jet.has_canopy():
+		"note": "DOWN" if aircraft.flaps > 0.5 else "UP"})
+	if aircraft.has_canopy():
 		out.append({"id": "canopy", "label": "Canopy",
-			"note": "OPEN" if jet.canopy_open else "SHUT"})
-	if jet.has_hold():
+			"note": "OPEN" if aircraft.canopy_open else "SHUT"})
+	if aircraft.has_hold():
 		out.append({"id": "ramp", "label": "Cargo ramp",
-			"note": "OPEN" if jet.ramp_open else "SHUT"})
+			"note": "OPEN" if aircraft.ramp_open else "SHUT"})
 	out.append({"id": "fbw", "label": "Fly-by-wire",
-		"note": "ON" if jet.assist else "OFF"})
-	if jet.on_ground and jet.linear_velocity.length() < 1.5:
+		"note": "ON" if aircraft.assist else "OFF"})
+	# Autopilot. Hold what you have, or orbit where you are — and which way
+	# round, because a drone watching a sector wants to be on one side of it.
+	# A helicopter gets the hover instead of the aeroplane's altitude hold: it
+	# is a different thing, it holds a place rather than a height.
+	if aircraft is PlayerHeli:
+		out.append({"id": "hover", "label": "Auto hover",
+			"note": "ON" if (aircraft as PlayerHeli).hover_hold else "OFF"})
+	out.append({"id": "aphold", "label": "Autopilot: hold altitude",
+		"note": "ON" if aircraft.ap_mode == "hold" else "OFF"})
+	out.append({"id": "aploiter", "label": "Autopilot: loiter",
+		"note": "ON" if aircraft.ap_mode == "loiter" else "OFF"})
+	if Sim.objective != Vector3.INF:
+		out.append({"id": "apgoto", "label": "Autopilot: fly to objective",
+			"note": "ON" if aircraft.ap_mode == "goto" else "OFF"})
+	if aircraft.ap_mode == "loiter":
+		out.append({"id": "apturn", "label": "Orbit direction",
+			"note": "RIGHT" if aircraft.ap_turn > 0.0 else "LEFT"})
+	# Lighting. Both lamps were switched from the keyboard only, and the
+	# navigation lights not at all -- so going dark before a night ingress
+	# meant there was nothing to press.
+	# The satellite terminal. Only offered when there is actually something
+	# overhead to talk to.
+	if Sim.census("satellites") > 0:
+		out.append({"id": "satlink", "label": "Satellite terminal",
+			"note": Sim.coverage_source(aircraft.team if "team" in aircraft else 0)})
+	out.append({"id": "jammer", "label": "Jammer",
+		"note": "ON" if aircraft.jammer else "OFF"})
+	out.append({"id": "nav", "label": "Nav lights",
+		"note": "ON" if aircraft.nav_on else "OFF"})
+	out.append({"id": "lamp", "label": "Landing lamp",
+		"note": "ON" if aircraft.lights_on else "OFF"})
+	if aircraft.on_ground and aircraft.linear_velocity.length() < 1.5:
 		out.append({"id": "dismount", "label": "Climb out", "note": ""})
-	if jet.spec.get("gunship", false):
+	if aircraft.spec.get("gunship", false):
 		out.append({"id": "gunner", "label": "Gunner station", "note": "G"})
 	out.append({"id": "eject", "label": "Eject", "note": "!"})
 	return out
@@ -133,7 +201,15 @@ func _unhandled_input(e: InputEvent) -> void:
 func _fire() -> void:
 	if index < items.size():
 		chose.emit(items[index]["id"])
-	items = _build()
+	# Rebuild the page you are actually on.
+	match _page:
+		"vehicle":
+			items = _build_vehicle()
+		"foot":
+			items = _build_foot()
+		_:
+			items = _build()
+	index = clampi(index, 0, maxi(items.size() - 1, 0))
 	queue_redraw()
 
 func _process(_d: float) -> void:
@@ -147,7 +223,12 @@ func _draw() -> void:
 	var org := Vector2(vp.x * 0.5 - W * 0.5, vp.y * 0.5 - h * 0.5)
 	draw_rect(Rect2(org, Vector2(W, h)), Color(0.03, 0.06, 0.08, 0.88), true)
 	draw_rect(Rect2(org, Vector2(W, h)), Color(0.35, 0.95, 0.55, 0.8), false, 1.6)
-	draw_string(_font, org + Vector2(14, 26), "AIRCRAFT ACTIONS", HORIZONTAL_ALIGNMENT_LEFT,
+	var title := "AIRCRAFT ACTIONS"
+	if _page == "vehicle":
+		title = "VEHICLE ACTIONS"
+	elif _page == "foot":
+		title = "ORBITAL COMMAND"
+	draw_string(_font, org + Vector2(14, 26), title, HORIZONTAL_ALIGNMENT_LEFT,
 		-1, 15, Color(0.5, 0.95, 0.65))
 	for i in items.size():
 		var y := org.y + 44.0 + i * ROW

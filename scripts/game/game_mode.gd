@@ -272,13 +272,15 @@ func _send_up_armour(team: int) -> void:
 	var a := randf() * TAU
 	var off := Vector3(cos(a), 0.0, sin(a)) * randf_range(240.0, 620.0)
 	var p := at + off
+	# One in three reinforcements is a patrol vehicle rather than a tank: they
+	# are quick to get to a sector and they are what a side actually has most of.
+	var roll := randi()
 	var t := Tank.new()
-	t.setup(team, "t90" if team != 0 else "m1a2")
+	t.setup(team, Tank.pick_kind("lav" if roll % 3 == 0 else "mbt", team, roll >> 4))
 	t.ai = true
-	t.name = "armour %d" % (randi() % 100000)
+	t.name = "%s %d" % ["patrol" if roll % 3 == 0 else "armour", roll % 100000]
 	get_parent().add_child(t)
-	t.global_transform = Transform3D(Basis(Vector3.UP, a),
-		Vector3(p.x, Sim.height_at(p.x, p.z) + 1.1, p.z))
+	t.global_transform = Tank.ground_pose(p, a, t.rest_height())
 
 ## Command points accrue from the sectors you hold, not just from taking them.
 ## Without an income the number sat still between captures and told you nothing

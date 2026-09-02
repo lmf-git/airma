@@ -119,12 +119,15 @@ static func vortex_particles(colour: Color, length := 3.0, amount := 48) -> GPUP
 	p.explosiveness = 0.0
 	return p
 
-static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float, team: int) -> void:
+## `he` is the burst scale of an explosive shell, 0 for solid shot.
+static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
+		team: int, he := 0.0) -> void:
 	var t := Tracer.new()
 	t.vel = vel
 	t.shooter = owner
 	t.dmg = dmg
 	t.team = team
+	t.he = he
 	world.add_child(t)
 	t.global_position = pos
 
@@ -520,6 +523,37 @@ static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -
 	Sim.last_burst = pos
 	Sim.last_burst_r = radius
 
+## A high explosive shell going off where it lands.
+##
+## Every cannon round in the game hit with a puff of dust, which is right for a
+## solid shot and wrong for the one gun the A-10 was built around: a GAU-8 fires
+## 30 mm high explosive incendiary, and a burst of it walking across a target
+## is a string of small detonations. The flash, a fireball, and the dirty smoke
+## that hangs afterwards -- built from the same cheap pieces a bomb burst uses,
+## because a hundred rounds a second of these have to stay affordable.
+static func he_impact(world: Node, pos: Vector3, scale := 1.0) -> void:
+	if world == null or not is_instance_valid(world):
+		return
+	var f := Flash.new()
+	f.size = 0.85 * scale
+	f.dir = Vector3.UP
+	world.add_child(f)
+	f.global_position = pos
+	var e := Boom.new()
+	e.radius = 1.35 * scale
+	e.tint = Color(1.0, 0.70, 0.30)
+	e.life_max = 0.30
+	world.add_child(e)
+	e.global_position = pos
+	# what is left standing in the air after it
+	var sm := Boom.new()
+	sm.radius = 2.1 * scale
+	sm.tint = Color(0.20, 0.19, 0.18)
+	sm.lit = false
+	sm.life_max = 1.05
+	world.add_child(sm)
+	sm.global_position = pos + Vector3(0.0, 0.55 * scale, 0.0)
+
 static func dust(world: Node, pos: Vector3, scale := 3.0) -> void:
 	var e := Boom.new()
 	e.radius = scale
@@ -716,6 +750,8 @@ class Tracer extends Node3D:
 	var dmg := 30.0
 	var team := 0
 	var life := 2.2
+	## Burst scale of an explosive shell; 0 is solid shot and puffs dust.
+	var he := 0.0
 
 	func _ready() -> void:
 		var mi := MeshInstance3D.new()
@@ -762,11 +798,17 @@ class Tracer extends Node3D:
 			if Geometry3D.get_closest_point_to_segment(n.global_position, from, to).distance_to(n.global_position) < r:
 				if n.has_method("take_hit"):
 					n.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
-				Effects.dust(get_tree().current_scene, to, 1.2)
+				if he > 0.0:
+					Effects.he_impact(get_tree().current_scene, to, he)
+				else:
+					Effects.dust(get_tree().current_scene, to, 1.2)
 				queue_free()
 				return
 		if to.y < Sim.height_at(to.x, to.z):
-			Effects.dust(get_tree().current_scene, to, 1.6)
+			if he > 0.0:
+				Effects.he_impact(get_tree().current_scene, to, he * 0.85)
+			else:
+				Effects.dust(get_tree().current_scene, to, 1.6)
 			queue_free()
 		elif life <= 0.0:
 			queue_free()
@@ -777,6 +819,10 @@ class Boom extends Node3D:
 	var life_max := 0.85
 	var tint := Color(1.0, 0.62, 0.22)
 	var smoke := true
+	## Whether the burst lights what is around it. A fireball does; the dirty
+	## smoke left hanging behind one does not, and a grey lamp under a shell
+	## burst reads as fog rather than as soot.
+	var lit := true
 	var _mi: MeshInstance3D
 	var _light: OmniLight3D
 	var _mat: StandardMaterial3D
@@ -812,11 +858,12 @@ class Boom extends Node3D:
 		# got no light either, so at night a salvo arriving was a few grey
 		# puffs: the one time of day an explosion should be the brightest thing
 		# for miles.
-		_light = OmniLight3D.new()
-		_light.light_color = tint
-		_light.light_energy = 14.0 + radius * 2.6
-		_light.omni_range = maxf(radius * 11.0, 90.0)
-		add_child(_light)
+		if lit:
+			_light = OmniLight3D.new()
+			_light.light_color = tint
+			_light.light_energy = 14.0 + radius * 2.6
+			_light.omni_range = maxf(radius * 11.0, 90.0)
+			add_child(_light)
 
 	func _process(delta: float) -> void:
 		life += delta
