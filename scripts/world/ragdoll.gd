@@ -86,7 +86,7 @@ func _ground_patch(at: Vector3) -> void:
 	cs.shape = box
 	sb.add_child(cs)
 	add_child(sb)
-	sb.global_position = Vector3(at.x, maxf(Sim.height_at(at.x, at.z), Sim.WATER_LEVEL) - 2.0, at.z)
+	sb.global_position = Vector3(at.x, maxf(Sim.height_at(at.x, at.z), Sim.sea_at(at.x, at.z)) - 2.0, at.z)
 
 func _process(delta: float) -> void:
 	life -= delta

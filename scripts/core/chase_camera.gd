@@ -175,7 +175,9 @@ func _process(delta: float) -> void:
 	var look_back := Input.is_action_pressed(&"look_back")
 
 	# hold ALT to look around; the view eases back to boresight on release
-	var want_free := Input.is_action_pressed(&"freelook") and not pod_slew
+	# Not while a screen that wants the pointer is up: see `Sim.ui_pointer`.
+	var want_free := Input.is_action_pressed(&"freelook") and not pod_slew \
+		and not Sim.ui_pointer
 	if want_free != _free:
 		_free = want_free
 		if _free:

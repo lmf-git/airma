@@ -45,7 +45,34 @@ func _on_event(text: String, kind: int) -> void:
 	if log_lines.size() > 6:
 		log_lines.resize(6)
 
+## The world, as the HUD needs to see it, fetched a few times a second instead
+## of five times a frame.
+##
+## Five separate panels walked `get_nodes_in_group("hittable")` in `_draw`, and
+## `_draw` runs every frame: on a world of five thousand nodes that is five
+## fresh arrays and five full walks, sixty times a second, for a picture that
+## cannot change meaningfully between one frame and the next. It was the largest
+## single script cost in the game after the terrain.
+const CONTACT_EVERY := 0.1
+var _seen: Array = []
+var _seen_zones: Array = []
+var _seen_t := 0.0
+
+func _refresh_seen(delta: float) -> void:
+	_seen_t -= delta
+	if _seen_t > 0.0 and not _seen.is_empty():
+		return
+	_seen_t = CONTACT_EVERY
+	_seen = get_tree().get_nodes_in_group("hittable")
+	_seen_zones = get_tree().get_nodes_in_group("zones")
+
 func _process(delta: float) -> void:
+	var _pp := Sim.prof_at()
+	_refresh_seen(delta)
+	_tick(delta)
+	Sim.prof_end(&"hud.process", _pp)
+
+func _tick(delta: float) -> void:
 	_t += delta
 	for l in log_lines:
 		l["age"] += delta
@@ -58,10 +85,17 @@ func _box(r: Rect2, col := GREEN, width := 1.0) -> void:
 	draw_rect(r, col, false, width)
 
 func _draw() -> void:
+	var _ph := Sim.prof_at()
+	_draw_all()
+	Sim.prof_end(&"hud.draw", _ph)
+
+func _draw_all() -> void:
 	# The objective marker belongs on every page too, and before anything
 	# returns: the whole point of planting one on the map is that you can see it
 	# from the cockpit, the chase camera, a driver's seat and a bridge.
+	var _p12 := Sim.prof_at()
 	_draw_objective()
+	Sim.prof_end(&"hud.objective", _p12)
 	# The key card belongs on every page. It was drawn at the end of the
 	# aeroplane one, and every other page returns before it gets there — so F2
 	# did nothing at all on a bridge, in a driver's seat or on foot, and the
@@ -105,18 +139,42 @@ func _draw() -> void:
 	if alive:
 		if _hud_clip:
 			_draw_hud_glass()
+		var _p0 := Sim.prof_at()
 		_draw_ladder()
+		Sim.prof_end(&"hud.ladder", _p0)
+		var _p1 := Sim.prof_at()
 		_draw_fpm()
+		Sim.prof_end(&"hud.fpm", _p1)
+		var _p2 := Sim.prof_at()
 		_draw_targets()
+		Sim.prof_end(&"hud.targets", _p2)
+		var _p3 := Sim.prof_at()
 		_draw_bomb_cue()
+		Sim.prof_end(&"hud.bomb_cue", _p3)
+	var _p4 := Sim.prof_at()
 	_draw_left(vp)
+	Sim.prof_end(&"hud.left", _p4)
+	var _p5 := Sim.prof_at()
 	_draw_right(vp)
+	Sim.prof_end(&"hud.right", _p5)
+	var _p6 := Sim.prof_at()
 	_draw_heading(vp)
+	Sim.prof_end(&"hud.heading", _p6)
+	var _p7 := Sim.prof_at()
 	_draw_status(vp)
+	Sim.prof_end(&"hud.status", _p7)
+	var _p8 := Sim.prof_at()
 	_draw_panels(vp)
+	Sim.prof_end(&"hud.panels", _p8)
+	var _p9 := Sim.prof_at()
 	_draw_landing(vp)
+	Sim.prof_end(&"hud.landing", _p9)
+	var _p10 := Sim.prof_at()
 	_draw_warnings(vp, c)
+	Sim.prof_end(&"hud.warnings", _p10)
+	var _p11 := Sim.prof_at()
 	_draw_log(vp)
+	Sim.prof_end(&"hud.log", _p11)
 	if mode != null and is_instance_valid(mode):
 		_draw_mode(vp)
 	if show_help:
@@ -212,7 +270,7 @@ func _draw_world_contacts(src: Node3D, eye: Camera3D) -> void:
 			held = raw
 	var reach: float = maxf(Sim.coverage(my_team), 26000.0)
 	var vp := get_viewport_rect().size
-	for n in get_tree().get_nodes_in_group("hittable"):
+	for n in _seen:
 		if not is_instance_valid(n) or n == src or not (n is Node3D):
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
@@ -321,6 +379,13 @@ func _draw_bridge() -> void:
 
 func _draw_driver() -> void:
 	var vp := get_viewport_rect().size
+	# An air defence vehicle is a radar with rounds attached, and crewing one
+	# gave you no radar picture at all: you were expected to find aircraft by
+	# looking out of the hatch. Anything with a set of its own gets a scope.
+	if is_instance_valid(tank) and tank.has_method("radar_range") \
+			and float(tank.call("radar_range")) > 0.0:
+		_scope_src = tank
+		_draw_radar_at(Vector2(vp.x - 140.0, vp.y - 150.0), 104.0)
 	# Through the camera that is actually rendering, the way the ship and the
 	# carrier already do it. A tank has its own camera, and projecting the
 	# contacts through the aeroplane's instead meant the markers were laid out
@@ -621,7 +686,7 @@ func _draw_fpm() -> void:
 		draw_line(g - Vector2(0, 14), g - Vector2(0, 5), WHITE, 1.4)
 
 func _draw_targets() -> void:
-	for n in get_tree().get_nodes_in_group("hittable"):
+	for n in _seen:
 		if not is_instance_valid(n) or n == aircraft:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
@@ -940,14 +1005,14 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 	var rw_a: Vector2 = to_screen.call(Vector2(0, -Sim.RUNWAY_LEN * 0.5))
 	var rw_b: Vector2 = to_screen.call(Vector2(0, Sim.RUNWAY_LEN * 0.5))
 	draw_line(rw_a, rw_b, Color(0.8, 0.85, 0.9, 0.8), 2.0)
-	for z in get_tree().get_nodes_in_group("zones"):
+	for z in _seen_zones:
 		if not is_instance_valid(z):
 			continue
 		var col := Color(0.35, 0.75, 1.0) if z.owner_team == 0 else (
 			RED if z.owner_team == 1 else Color(0.8, 0.8, 0.8))
 		var zp: Vector2 = to_screen.call(Vector2(z.global_position.x, z.global_position.z))
 		draw_circle(zp, 3.0, col)
-	for n in get_tree().get_nodes_in_group("hittable"):
+	for n in _seen:
 		if not is_instance_valid(n) or n == aircraft:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
@@ -989,6 +1054,15 @@ func _scope_team() -> int:
 		return int(_scope_src.team)
 	return int(aircraft.team) if is_instance_valid(aircraft) else 0
 
+## How far the scope reaches: the mount's own radar if it has one, otherwise
+## the selected range on the aeroplane's set.
+func _scope_reach() -> float:
+	if is_instance_valid(_scope_src) and _scope_src.has_method("radar_range"):
+		var rr: float = float(_scope_src.call("radar_range"))
+		if rr > 0.0:
+			return rr
+	return Sim.radar_range()
+
 func _scope_target() -> Node:
 	if is_instance_valid(_scope_src):
 		return _scope_src.ai_target if "ai_target" in _scope_src else null
@@ -1002,14 +1076,18 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 	draw_arc(c, r * 0.5, 0, TAU, 30, Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
 	draw_line(c - Vector2(0, r), c + Vector2(0, r), Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
 	draw_line(c - Vector2(r, 0), c + Vector2(r, 0), Color(DIM.r, DIM.g, DIM.b, 0.25), 1.0)
-	_txt(c + Vector2(-r, r + 16), "RWR  %d km   [ ] panels   - = range" % int(Sim.radar_range() * 0.001), 12, DIM)
+	# Scale to whatever set is actually doing the looking. A battery's search
+	# radar reaches seventy-eight kilometres and the scope was drawing it at the
+	# aeroplane's selected range whatever it was mounted on.
+	var reach: float = _scope_reach()
+	_txt(c + Vector2(-r, r + 16), "RADAR  %d km   [ ] panels   - = range" % int(reach * 0.001), 12, DIM)
 	var b := _scope_basis()
 	var origin := _scope_origin()
 	var my_team := _scope_team()
 	var my_target := _scope_target()
 	var fwd := -b.z
 	var hdg := atan2(fwd.x, -fwd.z)
-	for n in get_tree().get_nodes_in_group("hittable"):
+	for n in _seen:
 		if not is_instance_valid(n) or n == _scope_src or n == aircraft:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
@@ -1018,10 +1096,10 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 			continue
 		var rel: Vector3 = n.global_position - origin
 		var d := rel.length()
-		if d > Sim.radar_range():
+		if d > reach:
 			continue
 		var bearing := atan2(rel.x, -rel.z) - hdg
-		var rr := r * clampf(d / Sim.radar_range(), 0.0, 1.0)
+		var rr := r * clampf(d / reach, 0.0, 1.0)
 		var p := c + Vector2(sin(bearing), -cos(bearing)) * rr
 		var hostile: bool = ("team" in n) and int(n.team) != my_team
 		var col := RED if hostile else Color(0.4, 0.8, 1.0)

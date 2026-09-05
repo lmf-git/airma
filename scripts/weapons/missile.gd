@@ -279,8 +279,14 @@ func _physics_process(delta: float) -> void:
 		# A round leaving a wing pylon is dropped clear before the motor lights.
 		# One leaving a canister is thrown *up* out of it, and pushing it down
 		# for the first quarter second undid most of the launch.
-		vel += (Vector3.UP * _eject - Vector3.DOWN * 9.81) * delta if _vls \
-			else Vector3.DOWN * (9.81 + _eject) * delta
+		# MINUS gravity, not plus. The original read `UP * eject - DOWN * 9.81`,
+		# which is the eject impulse *plus* a cancellation of gravity while the
+		# round is still in the tube. Swapping in `gravity_at` without flipping
+		# the sign turned that cancellation into a second dose of gravity and
+		# quietly halved every vertical launch.
+		vel += (Sim.up_at(global_position) * _eject
+			- Sim.gravity_at(global_position)) * delta if _vls \
+			else -Sim.up_at(global_position) * (9.81 + _eject) * delta
 	else:
 		if not _trail.emitting:
 			_trail.emitting = true
@@ -376,7 +382,10 @@ func _physics_process(delta: float) -> void:
 		var sp := vel.length()
 		var rho: float = 1.225 * exp(-maxf(global_position.y, 0.0) / 8500.0)
 		vel -= vel.normalized() * ws["drag"] * rho / 1.225 * sp * sp * delta
-		vel += Vector3.DOWN * 9.81 * delta
+		# Toward the centre of the planet, not toward -Y. Over the length of a
+		# cruise or ballistic flight the two differ by most of a degree, and a
+		# round that ignores it flies a straight line over a curved world.
+		vel += Sim.gravity_at(global_position) * delta
 		_guide(delta)
 
 	var from := global_position
@@ -393,7 +402,7 @@ func _physics_process(delta: float) -> void:
 	# load finish the job.
 	if armed and not _split and ws.has("mirv"):
 		var bed: float = maxf(Sim.height_at(global_position.x, global_position.z),
-			Sim.WATER_LEVEL)
+			Sim.sea_at(global_position.x, global_position.z))
 		# On the way down, not on the way up. The test was height above the
 		# ground alone, which is satisfied the moment the round leaves the
 		# ground -- so a bus lofted from a launcher opened at three kilometres
@@ -495,8 +504,9 @@ func _physics_process(delta: float) -> void:
 	# let a weapon aimed at a ship swim down to the seabed a couple of hundred
 	# metres below and go off there, harming nothing on the way past.
 	var sea_bed := Sim.height_at(to.x, to.z)
-	if to.y < Sim.WATER_LEVEL and sea_bed < Sim.WATER_LEVEL:
-		var hit := Vector3(to.x, Sim.WATER_LEVEL, to.z)
+	var sea_y: float = Sim.sea_at(to.x, to.z)
+	if to.y < sea_y and sea_bed < sea_y:
+		var hit := Vector3(to.x, sea_y, to.z)
 		# Up onto the surface before it goes off. `_die` draws the fireball at
 		# the round's own position, and by the time this test trips the round is
 		# already under the sea — so a bomb into the water made a splash with
@@ -547,7 +557,7 @@ func _physics_process(delta: float) -> void:
 		# arrive properly a moment later, and the water burst that follows puts
 		# the warhead where it belongs.
 		var over: float = global_position.y - maxf(
-			Sim.height_at(global_position.x, global_position.z), Sim.WATER_LEVEL)
+			Sim.height_at(global_position.x, global_position.z), Sim.sea_at(global_position.x, global_position.z))
 		# How near counts as "arrived", which is a proximity radius and NOT the
 		# blast radius: a nuke's lethal radius is 1400 m, and using it here said
 		# a round a mile away had arrived and detonated it there anyway.
@@ -627,7 +637,7 @@ func _fuse_check(from: Vector3, to: Vector3) -> bool:
 	# there is nothing on the other side of it to wait for.
 	# only held while there is somewhere left to go: the step that would put the
 	# round through the surface is the last chance it gets
-	var sea: float = maxf(Sim.height_at(to.x, to.z), Sim.WATER_LEVEL)
+	var sea: float = maxf(Sim.height_at(to.x, to.z), Sim.sea_at(to.x, to.z))
 	if best == target and best_gap > 1.5 and best_gap < _last_gap - 0.05 \
 			and to.y > sea:
 		_last_gap = best_gap
@@ -855,7 +865,8 @@ func _guide(delta: float) -> void:
 		print("[gd] %s age=%.1f d=%.0f spd=%.0f tspd=%.0f alt=%.0f deck=%.0f seek=%.0f los=%s" % [
 			wid, age, dist, vel.length(), tvel.length(),
 			global_position.y - maxf(Sim.height_at(global_position.x,
-				global_position.z), Sim.WATER_LEVEL), _deck, seeker_ang,
+				global_position.z), Sim.sea_at(global_position.x,
+				global_position.z)), _deck, seeker_ang,
 			str((los / dist).snapped(Vector3.ONE * 0.01))])
 	var rel := tvel - vel
 	# lead using proportional navigation, with a lofted midcourse for bombs
@@ -949,7 +960,7 @@ func _guide(delta: float) -> void:
 		for k in probes + 1:
 			var reach_k: float = sense * float(k) / float(probes)
 			var q: Vector3 = global_position + step * reach_k
-			var gh: float = maxf(Sim.height_at(q.x, q.z), Sim.WATER_LEVEL)
+			var gh: float = maxf(Sim.height_at(q.x, q.z), Sim.sea_at(q.x, q.z))
 			clear = maxf(clear, gh)
 			if reach_k > 1.0:
 				# Against a safety margin, not against the cruising height.
@@ -1079,7 +1090,7 @@ func _guide(delta: float) -> void:
 	if not is_cruise and not ballistic and String(ws["kind"]) != "bomb":
 		var vdir_g := vel.normalized() if vel.length() > 1.0 \
 			else -global_transform.basis.z
-		var g_vec := Vector3.DOWN * 9.81
+		var g_vec := Sim.gravity_at(global_position)
 		accel -= g_vec - vdir_g * g_vec.dot(vdir_g)
 	var energy := clampf(vel.length() / float(ws.get("ref_speed", 420.0)), 0.15, 1.0)
 	# And the air it is turning against. A fin makes its lift from dynamic
@@ -1186,7 +1197,7 @@ func _open_up() -> void:
 	# how long the children have left to fall decides how much sideways speed
 	# it takes to cover the footprint
 	var bed: float = maxf(Sim.height_at(global_position.x, global_position.z),
-		Sim.WATER_LEVEL)
+		Sim.sea_at(global_position.x, global_position.z))
 	var fall: float = sqrt(maxf(2.0 * maxf(global_position.y - bed, 10.0) / 9.81, 0.5))
 	var lateral: float = spread / maxf(fall, 0.5)
 	var fwd := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z

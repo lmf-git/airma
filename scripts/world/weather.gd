@@ -40,8 +40,46 @@ var time_rate := 1.0 / 240.0          # game hours per real second: a day in 4 h
 var _sun_elev := 0.0
 var _sun_az := 0.0
 
-const LATITUDE := deg_to_rad(45.0)
-const DECLINATION := deg_to_rad(14.0)  # a summer-ish sun
+## How far the planet's axis is tipped from its orbit. Earth's, and the reason
+## there are seasons at all: the sun's declination swings between plus and minus
+## this over a year, which is what moves the tropics and the polar circles to
+## where they are. The climate bands are derived from it rather than written
+## down separately -- see `Sim.TROPIC` and `Sim.POLAR`.
+const OBLIQUITY := deg_to_rad(23.44)
+## How long a year is, in game days. Short enough that a season turns inside a
+## session; the real figure would never visibly change.
+const YEAR_DAYS := 24.0
+## Where in the year it is, in days. Advances with the clock.
+var day_of_year := 0.0
+
+## The sun's declination now: the tilt, projected onto where the planet is in
+## its orbit. Zero at the equinoxes, plus or minus the obliquity at the
+## solstices.
+##
+## This was a constant 14 degrees -- "a summer-ish sun" -- which is a fair
+## approximation of one afternoon and no approximation at all of a planet. With
+## the countries spread from the tropics to the far north, a fixed declination
+## gives the same sun everywhere and no seasons anywhere.
+## Where the planet is in its year: +1 at northern midsummer, -1 at northern
+## midwinter. The same phase the declination is taken from, so the sun and the
+## snow line cannot disagree about what season it is.
+func season() -> float:
+	return sin(TAU * day_of_year / YEAR_DAYS)
+
+func declination() -> float:
+	return OBLIQUITY * season()
+
+## The latitude the sun is being worked out for.
+##
+## Fixed at 45 degrees, which was the one place the old world was. The chart is
+## now put on whichever country the sortie is flown from and they are found all
+## over the planet, so the sun has to be worked out for where you actually are:
+## at the equator it passes overhead, and in the far north it never gets far off
+## the horizon in winter.
+func latitude() -> float:
+	if not Sim.globe:
+		return deg_to_rad(45.0)
+	return asin(clampf(Sim.chart_origin.dot(Sim.PLANET_NORTH), -1.0, 1.0))
 
 ## Elevation and azimuth of the sun for the current time, by the standard solar
 ## position formulae. Azimuth is measured clockwise from north.
@@ -163,12 +201,14 @@ func deck_count() -> int:
 	return 0
 
 func solar_angles(hours: float) -> Vector2:
+	var dec := declination()
+	var lat := latitude()
 	var ha := deg_to_rad((hours - 12.0) * 15.0)
-	var sin_e: float = sin(DECLINATION) * sin(LATITUDE) \
-		+ cos(DECLINATION) * cos(LATITUDE) * cos(ha)
+	var sin_e: float = sin(dec) * sin(lat) \
+		+ cos(dec) * cos(lat) * cos(ha)
 	var elev := asin(clampf(sin_e, -1.0, 1.0))
-	var cos_a: float = (sin(DECLINATION) - sin_e * sin(LATITUDE)) \
-		/ maxf(cos(elev) * cos(LATITUDE), 1e-4)
+	var cos_a: float = (sin(dec) - sin_e * sin(lat)) \
+		/ maxf(cos(elev) * cos(lat), 1e-4)
 	var az := acos(clampf(cos_a, -1.0, 1.0))
 	if ha > 0.0:
 		az = TAU - az                  # afternoon: west of south
@@ -232,6 +272,16 @@ uniform int light_steps = 4;
 // camera every frame is unambiguous.
 uniform vec3 cam_pos = vec3(0.0);
 uniform float march_far = 30000.0;
+// Whether the sky draws cloud at all.
+//
+// It is off, and the reason is what it can never do rather than what it does.
+// A sky shader is the background: it is only ever seen where nothing solid was
+// drawn, so its cloud cannot appear in front of a hill however good it looks.
+// Between the volumetric slab's eight kilometres and the horizon there was
+// therefore no cloud in front of the terrain at all, which is why the sky read
+// as clear with the weather piled up at the far edge of it. `CloudShell` draws
+// the same layer as geometry wrapped round the planet, which can.
+uniform float sky_clouds = 0.0;
 
 group_uniforms high_cloud;
 uniform float cirrus = 0.35;
@@ -347,7 +397,7 @@ void sky() {
 	// The cubemap pass is generating radiance, not a picture. It sweeps the
 	// whole sphere from a position that is not the camera's, so marching cloud
 	// in it is both wrong and expensive; the gradient alone lights the world.
-	if (AT_HALF_RES_PASS && !AT_CUBEMAP_PASS) {
+	if (sky_clouds > 0.5 && AT_HALF_RES_PASS && !AT_CUBEMAP_PASS) {
 		// --- the cloud layer -------------------------------------------
 		vec4 acc = vec4(0.0);
 		// Where the ray crosses the slab. Looking level or down from below it
@@ -478,26 +528,120 @@ void sky() {
 		if (up < 0.0) {
 			sky_col = mix(horizon_colour, ground_colour, pow(-up, 0.35));
 		}
-		// the sun's own disc and the glow around it
+		// No altitude ramp here.
+		//
+		// The air is the atmosphere shell's business, and it has one of its own
+		// -- gentle, over a hundred kilometres. A second ramp here at eight and
+		// a half kilometres to an e-fold simply fought it: the shell faded away
+		// smoothly while this snapped the background to black between twenty and
+		// forty kilometres, and a rocket crossing that band changes colour in a
+		// step. One model of the air, in one place.		// the sun's own disc and the glow around it
 		float sd = max(dot(dir, -LIGHT0_DIRECTION), 0.0);
 		sky_col += LIGHT0_COLOR * pow(sd, 320.0) * 6.0 * (1.0 - night);
 		sky_col += LIGHT0_COLOR * pow(sd, 8.0) * 0.16 * (1.0 - night);
 		// a warm band low down when the sun is on the horizon
 		sky_col = mix(sky_col, sky_col * vec3(1.25, 0.86, 0.66),
 			dusk * (1.0 - smoothstep(0.0, 0.35, abs(up))));
-		// stars, once it is dark enough to see them
-		if (night > 0.02 && up > -0.05) {
+		// Stars are space, not weather.
+		//
+		// They used to be switched on by the sky's own `space` factor -- so
+		// they belonged to the atmosphere, appeared at whatever height that
+		// factor decided, and were absent below it. They are always there. What
+		// hides them is scattered sunlight, and the atmosphere shell drawn over
+		// this supplies exactly that: at sea level it is opaque and they cannot
+		// be seen, and as it thins they come out on their own.
+		if (up > -0.05) {
 			vec3 sp = floor(dir * 780.0);
 			float star = hash13(sp);
 			star = pow(max(star - 0.9965, 0.0) * 285.0, 2.2);
-			sky_col += vec3(0.85, 0.88, 1.0) * star * night
+			// Above the air they are there in daylight too: what hides stars
+			// is scattered sunlight, and there is none of it in vacuum.
+			sky_col += vec3(0.85, 0.88, 1.0) * star
 				* smoothstep(-0.05, 0.15, up);
 		}
-		vec4 cl = HALF_RES_COLOR;
-		COLOR = mix(sky_col, cl.rgb, clamp(cl.a, 0.0, 1.0));
+		// The half resolution pass has nothing to say unless it drew cloud.
+		//
+		// The cloud march above is gated on `sky_clouds`, which is off -- so
+		// when it is off, BOTH passes fall through to here. The half res pass
+		// then computed the gradient and never set ALPHA, which defaults to
+		// one, and this line mixed that buffer over the sky at full weight.
+		// The sky was therefore whatever the half res target happened to hold,
+		// which is why it came out flat, colourless, the same at sea level and
+		// at a hundred and forty kilometres, and unmoved by every colour it was
+		// given: measured 0.83 bright at 0.01 saturation with its own top and
+		// horizon colours set to 0.002 and 0.015.
+		if (AT_HALF_RES_PASS) {
+			COLOR = vec3(0.0);
+			ALPHA = 0.0;
+		} else {
+			vec4 cl = HALF_RES_COLOR;
+			COLOR = sky_clouds > 0.5
+				? mix(sky_col, cl.rgb, clamp(cl.a, 0.0, 1.0))
+				: sky_col;
+			ALPHA = 1.0;
+		}
 	}
 }
 """
+
+## The distances the current weather asks for at sea level, before altitude
+## thins them.
+var fog_near := 24000.0
+var fog_far := 140000.0
+## The sky's colours at sea level, likewise. `thin_air` fades them to space.
+var sky_top := Color(0.13, 0.28, 0.62)
+var sky_horizon := Color(0.66, 0.75, 0.87)
+## What is behind the air when there is no air left.
+const SPACE := Color(0.004, 0.006, 0.014)
+## How much of the sky's own gradient is left once the atmosphere shell is
+## drawing the sky. It is the backdrop now, not the thing you look at.
+const SKY_BEHIND := 0.14
+## How much of the fog's colour the sky carries at sea level. Faded to nothing
+## with the air, because it is haze and there is none of it in space.
+const SKY_FOG := 0.08
+
+## Air thins with height, and so does the haze in it.
+##
+## The fog is a depth fade from about twenty-four to a hundred and forty
+## kilometres, which is what atmosphere does when you are standing in it. It was
+## applied at every altitude: from an ASAT on its way to a satellite everything
+## more than a hundred and forty kilometres off was solid fog colour, which is
+## most of what there is to look at up there. There is no air at fifty
+## kilometres, so there is no haze either -- the distances are stretched by the
+## air density at the eye, and past the top of the atmosphere the fog is off.
+func thin_air(env: Environment, alt: float, psm: ShaderMaterial = null) -> void:
+	# The sky's own gradient goes with it. The blue is the atmosphere shell's
+	# job now; this is what is behind the shell, and above the air that is
+	# space. Left at its sea-level colours the gradient stayed blue at any
+	# height, so the shell could thin away to nothing over it and you would
+	# still never see black.
+	# The sky's colours no longer fade with height either. That was a third
+	# altitude ramp -- 26 km to an e-fold, against the shader's 8.5 and the
+	# shell's 33 -- and three models of the same air is how a climb ends up with
+	# steps in it. The gradient is a dim constant backdrop; the shell decides
+	# what the sky looks like at any height.
+	if psm != null:
+		psm.set_shader_parameter("top_colour", sky_top)
+		psm.set_shader_parameter("horizon_colour", sky_horizon)
+	if env == null:
+		return
+	# The usual exponential atmosphere: about eight and a half kilometres to an
+	# e-fold, which is why aeroplanes fly where they do.
+	var rho: float = exp(-maxf(alt, 0.0) / 8500.0)
+	# Faded out, not switched off.
+	#
+	# This turned the fog off outright once the air was under two per cent,
+	# which is 8500 * ln(50) = 33.2 km -- and the sky carries `fog_sky_affect`
+	# of the fog's colour whatever the depth range has been stretched to, so
+	# that threshold removed a pale eight per cent wash in one frame. Measured,
+	# the sky went from 0.40 bright and 0.64 saturated at 33 km to 0.31 and 0.86
+	# at 34: a step of a kilometre, which is a fifth of a second in a climbing
+	# rocket. That is the jolt to dark blue.
+	env.fog_enabled = true
+	env.fog_sky_affect = SKY_FOG * clampf(rho / 0.20, 0.0, 1.0)
+	var stretch: float = 1.0 / maxf(rho, 0.004)
+	env.fog_depth_begin = fog_near * stretch
+	env.fog_depth_end = fog_far * stretch
 
 func apply(id: String, env: Environment, sun: DirectionalLight3D,
 		fill: DirectionalLight3D, psm: ShaderMaterial) -> void:
@@ -509,12 +653,18 @@ func apply(id: String, env: Environment, sun: DirectionalLight3D,
 	# a grey bag. Pushed right out, the fog only softens the horizon -- which is
 	# what atmosphere actually does over tens of kilometres.
 	env.fog_light_color = p["fog_col"]
-	env.fog_depth_begin = p["fog"]
-	env.fog_depth_end = p["fog_end"]
+	fog_near = float(p["fog"])
+	fog_far = float(p["fog_end"])
+	env.fog_depth_begin = fog_near
+	env.fog_depth_end = fog_far
 	env.ambient_light_energy = p["amb"]
 	sun.light_energy = p["sun"]
 	sun.light_color = p["sun_col"]
-	sun.rotation_degrees = p["sun_rot"]
+	# The sun is not set here. It was -- `sun.rotation_degrees = p["sun_rot"]` --
+	# and the assignment did nothing, because `_apply_sun` recomputes the light
+	# from the clock on the very next frame. The clock owns the sun; a weather
+	# preset owns cloud and haze, and says what time it is by setting the hour
+	# below, which is how "dusk" still means dusk.
 	fill.light_energy = 0.3 if current != "overcast" else 0.5
 	if p.has("hour"):
 		time_of_day = float(p["hour"])
@@ -547,7 +697,16 @@ var _fog_mat: ShaderMaterial
 ## closing the view in is the depth fog below, and that is what has been pushed
 ## out. This is a separate thing and it is kept short, where its depth slices
 ## are fine enough to be stable.
-const FOG_VOLUME := true
+## The near volumetric slab, superseded by `CloudShell`.
+##
+## It was the half of the cloud you could fly into, and it reached eight
+## kilometres because Godot's froxel grid is a fixed number of slices however
+## long you make it -- stretched to twenty-two the slices were hundreds of
+## metres deep and the sky shook with every movement of the camera. The shell
+## marches from the eye when the eye is inside the layer, so it does that job
+## without a grid to be short of, and drawing both would simply double the
+## cloud.
+const FOG_VOLUME := false
 
 func _ensure_fog(env: Environment) -> void:
 	if not FOG_VOLUME:
@@ -624,7 +783,13 @@ func _process(delta: float) -> void:
 	if _sun_node == null or not is_instance_valid(_sun_node):
 		return
 	if time_rate > 0.0:
+		var was := time_of_day
 		time_of_day = fposmod(time_of_day + delta * time_rate, 24.0)
+		# The year turns with the days. Counted off midnight rather than from
+		# elapsed time, so the season is a function of the clock and any two
+		# peers on the same clock are in the same season.
+		if time_of_day < was:
+			day_of_year = fposmod(day_of_year + 1.0, YEAR_DAYS)
 	_apply_sun(false)
 
 ## Put the sun where the clock says it is, and colour the world to match.
@@ -654,9 +819,19 @@ func _apply_sun(_force: bool) -> void:
 		var night_top := Color(0.012, 0.017, 0.045)
 		var night_horizon := Color(0.045, 0.055, 0.10)
 		var dusk_horizon := Color(0.86, 0.42, 0.24)
-		_psm.set_shader_parameter("top_colour", top.lerp(night_top, night))
-		_psm.set_shader_parameter("horizon_colour",
-			horizon.lerp(dusk_horizon, dusk * 0.8).lerp(night_horizon, night * 0.9))
+		# Dimmed, because the atmosphere shell draws the sky now.
+		#
+		# These are what is *behind* the air: at sea level the shell covers them
+		# almost completely, and above the air they are all there is, which is
+		# space. Left at full strength the two added together and the sky came
+		# out flat white -- measured at 0.82 brightness and 0.01 saturation,
+		# where the shell alone gives 0.51 and 0.60. The sun's disc and the
+		# stars are added after this and are not dimmed with it.
+		sky_top = top.lerp(night_top, night) * SKY_BEHIND
+		sky_horizon = horizon.lerp(dusk_horizon, dusk * 0.8) \
+			.lerp(night_horizon, night * 0.9) * SKY_BEHIND
+		_psm.set_shader_parameter("top_colour", sky_top)
+		_psm.set_shader_parameter("horizon_colour", sky_horizon)
 		_psm.set_shader_parameter("ground_colour",
 			Color(0.30, 0.32, 0.30).lerp(Color(0.03, 0.04, 0.06), night))
 		_psm.set_shader_parameter("night", night)
@@ -703,3 +878,19 @@ func _apply_sun(_force: bool) -> void:
 			.lerp(Color(0.05, 0.06, 0.11), night * 0.9)
 
 
+
+## What the current weather asks of the cloud layer. Read rather than copied, so
+## the shell round the planet and the sky above it cannot disagree about whether
+## it is overcast.
+func cloud_cover() -> float:
+	return float(PRESETS[current].get("cover_frac", 0.48))
+
+func cloud_density() -> float:
+	return float(PRESETS[current].get("density", 1.0))
+
+## Where the layer sits, so anything drawing it stands it in the right place.
+func cloud_base() -> float:
+	return float(PRESETS[current].get("base_alt", 2200.0))
+
+func cloud_top() -> float:
+	return float(PRESETS[current].get("top_alt", 3600.0))

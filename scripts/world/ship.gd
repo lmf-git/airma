@@ -195,7 +195,7 @@ func refit() -> void:
 	ai_target = null
 	strategic_aim = Vector3.INF
 	visible = true
-	global_position.y = Sim.WATER_LEVEL
+	global_position.y = Sim.sea_at(global_position.x, global_position.z)
 	rotation = Vector3(0.0, heading, 0.0)
 
 # --------------------------------------------------------------- close in
@@ -289,7 +289,7 @@ func fire_torpedo(at_node: Node3D = null) -> bool:
 	_torp_cd = 12.0
 	var from: Vector3 = global_transform * Vector3(0.0, -2.0,
 		-float(KINDS[kind]["len"]) * 0.42)
-	from.y = minf(from.y, Sim.WATER_LEVEL - 3.0)
+	from.y = minf(from.y, Sim.sea_at(from.x, from.z) - 3.0)
 	var rel: Vector3 = tgt.global_position - from
 	var dir := Vector3(rel.x, 0.0, rel.z).normalized()
 	if dir.length_squared() < 0.1:
@@ -1222,7 +1222,7 @@ func _physics_process(delta: float) -> void:
 	# the ground under it, so a hull sailed straight through headlands and a
 	# submarine through the seabed.
 	var draught: float = float(KINDS[kind]["draught"])
-	var keel: float = Sim.WATER_LEVEL - depth - draught
+	var keel: float = Sim.sea_at(global_position.x, global_position.z) - depth - draught
 	var step: Vector3 = Vector3(sin(heading), 0.0, -cos(heading)) * speed * delta
 	var ahead: Vector3 = global_position + step * 2.0 + step.normalized() * 40.0 \
 		if speed > 0.1 else global_position
@@ -1247,7 +1247,8 @@ func _physics_process(delta: float) -> void:
 	# water under her allows.
 	if can_dive():
 		var bed: float = Sim.height_at(global_position.x, global_position.z)
-		var room: float = maxf(Sim.WATER_LEVEL - (bed + draught + 2.0), 0.0)
+		var room: float = maxf(Sim.sea_at(global_position.x, global_position.z)
+			- (bed + draught + 2.0), 0.0)
 		depth = move_toward(depth, minf(depth_order, room), delta * 2.2)
 		# Out of sight below periscope depth.
 		#
@@ -1266,14 +1267,48 @@ func _physics_process(delta: float) -> void:
 				remove_from_group("no_lock")
 	else:
 		depth = 0.0
-	# the scend fades out as she goes under: there is no swell at depth
-	var scend: float = sin(_t * 0.35) * 0.35 * (1.0 - clampf(depth / 12.0, 0.0, 1.0))
-	global_position.y = Sim.WATER_LEVEL - depth + scend
-	rotation = Vector3(sin(_t * 0.31) * 0.012, heading,
-		sin(_t * 0.24) * 0.02 + list_ang * list_side)
-	# turn back at the edge of the world rather than steaming off it
-	if absf(global_position.x) > Sim.WORLD_HALF - 3000.0 \
-			or absf(global_position.z) > Sim.WORLD_HALF - 3000.0:
+	# She rides the sea that is actually drawn, rather than a sine of her own
+	# clock. The scend used to be `sin(_t)` — a hull bobbing on a timer,
+	# unrelated to the water under it and identical for every ship in the fleet,
+	# so a squadron in company all rose and fell together whatever the sea was
+	# doing. Now the swell is a field: three samples along the hull give the
+	# heave, the pitch and the roll, so a destroyer pitches into a sea that is
+	# visibly there and a boat forty metres long feels it far more than she does.
+	var px: float = global_position.x
+	var pz: float = global_position.z
+	var fade: float = 1.0 - clampf(depth / 12.0, 0.0, 1.0)
+	var kd2: Dictionary = KINDS[kind]
+	var half_l: float = float(kd2["len"]) * 0.5
+	var half_b: float = float(kd2["beam"]) * 0.5
+	var fwd2 := Vector2(sin(heading), -cos(heading))
+	var rgt2 := Vector2(cos(heading), sin(heading))
+	# amidships, and then fore/aft and port/starboard to read the slope
+	var h_mid: float = Sim.wave_at(px, pz)
+	var h_bow: float = Sim.wave_at(px + fwd2.x * half_l, pz + fwd2.y * half_l)
+	var h_stern: float = Sim.wave_at(px - fwd2.x * half_l, pz - fwd2.y * half_l)
+	var h_stbd: float = Sim.wave_at(px + rgt2.x * half_b, pz + rgt2.y * half_b)
+	var h_port: float = Sim.wave_at(px - rgt2.x * half_b, pz - rgt2.y * half_b)
+	# A long hull bridges the swell instead of following it: she pitches to the
+	# average slope over her length, which is why a corvette bucks where a
+	# carrier barely nods.
+	var pitch_w: float = atan2(h_bow - h_stern, half_l * 2.0) * fade
+	var roll_w: float = atan2(h_stbd - h_port, half_b * 2.0) * fade
+	global_position.y = Sim.sea_at(px, pz) - depth + h_mid * fade
+	rotation = Vector3(pitch_w, heading, -roll_w + list_ang * list_side)
+	# Turn back at the shore, not at the edge of the world.
+	#
+	# A flat world has an edge and a hull steaming off it is a hull gone; a
+	# planet does not, and a box drawn at 600 km is the last piece of the old
+	# authored square left telling ships where the sea stops. What a ship should
+	# actually turn away from is the ground, so that is what it turns away from:
+	# a look ahead at where she would be in a minute, and about if it is dry.
+	var minute: Vector3 = global_position + Vector3(sin(heading), 0.0,
+		-cos(heading)) * maxf(speed, 4.0) * 60.0
+	if Sim.height_at(minute.x, minute.z) > Sim.sea_at(minute.x, minute.z) - 12.0:
+		heading = wrapf(heading + PI, -PI, PI)
+	elif not Sim.globe and (absf(global_position.x) > Sim.WORLD_HALF - 3000.0
+			or absf(global_position.z) > Sim.WORLD_HALF - 3000.0):
+		# the flat world still has an edge, and it is still not to be sailed off
 		heading = wrapf(heading + PI, -PI, PI)
 
 ## She goes down over the better part of a minute: way comes off, the list
@@ -1304,7 +1339,7 @@ func _sink(delta: float) -> void:
 	var kd: Dictionary = KINDS[kind]
 	var down: float = float(kd["free"]) + float(kd["draught"]) + 6.0
 	var t: float = clampf(_sinking / 46.0, 0.0, 1.0)
-	global_position.y = Sim.WATER_LEVEL - down * t
+	global_position.y = Sim.sea_at(global_position.x, global_position.z) - down * t
 	rotation = Vector3(clampf(_sinking * 0.006, 0.0, 0.20), heading,
 		list_ang * list_side)
 	if _broken:
@@ -1338,7 +1373,8 @@ func launch_strategic(at: Vector3) -> bool:
 	# Clear of the water. The boat rides with its deck at the surface and the
 	# hull below it, so a tube exit six metres up is still under the sea as far
 	# as the height field is concerned, and the round detonated on the rail.
-	var from := Vector3(global_position.x, Sim.WATER_LEVEL + 25.0, global_position.z)
+	var from := Vector3(global_position.x,
+		Sim.sea_at(global_position.x, global_position.z) + 25.0, global_position.z)
 	# Lofted onto the target bearing rather than fired straight up. A rocket at
 	# two and a half thousand metres a second pulling six g has a turn radius
 	# of a hundred kilometres, so anything launched vertically simply carries on
@@ -1544,7 +1580,8 @@ func net_apply(pos: Vector3, yaw: float, hp: float, fl: float, fi: float,
 		list_ang = 1.15 * frac
 		var kd: Dictionary = KINDS[kind]
 		var down: float = float(kd["free"]) + float(kd["draught"]) + 6.0
-		global_position.y = Sim.WATER_LEVEL - down * frac
+		global_position.y = Sim.sea_at(global_position.x,
+			global_position.z) - down * frac
 		if _broken:
 			_pose_sections(frac, down)
 		if is_instance_valid(_wreck_fire):

@@ -4,6 +4,303 @@ extends Node
 
 const WORLD_HALF := 600000.0     # world extends +/- 600 km
 const COAST_X := 15000.0         # open water east of here
+# ------------------------------------------------------------------ planet
+## The world is a cap of a sphere, not a plane.
+##
+## The centre sits one radius BELOW the origin, so a point on the surface is
+## near y = 0 and every position in the world stays inside a hundred kilometres
+## or so. That is the whole trick: a real 6371 km radius expressed directly in
+## 32-bit floats leaves well under a metre of precision, which is why curved
+## worlds normally need a floating origin. Put the centre underneath instead and
+## the numbers stay small while the geometry stays honest.
+##
+## Everything else follows from one function: how far the surface falls below
+## the tangent plane at a horizontal distance, which for small angles is exactly
+## the sagitta d^2/2R. Subtract it in `height_at` and every one of the two
+## hundred odd places that ask where the ground is gets a curved world without
+## knowing anything about it.
+const PLANET_R := 6_371_000.0
+var planet_centre := Vector3(0.0, -PLANET_R, 0.0)
+
+func planet_drop(x: float, z: float) -> float:
+	if globe:
+		# Exact, because on the planet this is asked at any range. The parabola
+		# is the first term of it and holds to thirty metres over the theatre;
+		# fifteen thousand kilometres out it is wrong by seven thousand.
+		return PLANET_R * (1.0 - cos(sqrt(x * x + z * z) / PLANET_R))
+	return (x * x + z * z) / (2.0 * PLANET_R)
+
+## Which way is up here. Away from the centre, which over this world tilts by
+## about eight tenths of a degree at the far edge.
+## Which way the planet's north pole lies.
+##
+## Not the same axis the world is a cap on. The theatre sits at the *top* of the
+## sphere in world coordinates, but that is a fact about where the cap was put,
+## not about the planet's geography: `z` is north-south -- it is what the
+## climate bands run along -- so the pole is on the z axis and the airfield is
+## on the equator, which is what it has always been climatically.
+##
+## Negative z, because the flat chart draws increasing z *down* the screen. Get
+## this backwards and the globe comes out with the world's north at the bottom.
+const PLANET_NORTH := Vector3(0.0, 0.0, -1.0)
+
+# ------------------------------------------------------------------ the chart
+#
+# Everything in this game asks the world for ground with two numbers, `x` and
+# `z`, and there are thousands of those calls. On a flat world they are world
+# coordinates. On a planet they cannot be -- a sphere has no flat coordinates --
+# but they can be something almost as convenient: *surface offsets from a chart
+# origin*, measured along the ground.
+#
+# That is the hinge the whole spherical world turns on. `height_at(x, z)` keeps
+# its signature and its meaning ("the ground this far east and this far south of
+# where the chart is centred"), so the aeroplane, the missiles, the vehicles and
+# the AI do not have to know the world is round. What changes is only what the
+# pair is turned into before the field is asked: a direction from the planet's
+# centre, which is what a planetary field is a function of.
+#
+# The projection is azimuthal equidistant about the origin -- distances along the
+# ground from the middle of the chart are exact, which is the property every
+# range readout, weapon envelope and turn radius in the game depends on. Away
+# from the origin it stretches, like every projection; over the 1200 km the
+# theatre covers, that stretch is under a tenth of a per cent.
+#
+# The origin is fixed at the theatre for now, so `chart_to_dir` reproduces the
+# existing world exactly and nothing moves. Making it follow the player is what
+# turns the rest of the planet into somewhere you can fly to, and it is the next
+# thing this needs.
+var chart_origin := Vector3.UP
+var chart_east := Vector3.RIGHT
+var chart_south := Vector3(0.0, 0.0, 1.0)
+
+## The world is a planet.
+##
+## It was a flag and a second world for as long as the planet was being built
+## next to the flat one; it is the world now. The same `(x, z)` pair is read on
+## the chart, the ground under it comes from the planetary field, and what has
+## been built on it is carved in wherever it stands.
+##
+## `--flat` still gets the old 1200 km height field with nothing outside it,
+## because a good deal of measurement is written against it and a world you can
+## compare against is worth keeping.
+var globe := true
+
+## Put the chart somewhere else on the planet. East and south are worked out
+## from the planet's own axis, so the chart is always the right way up.
+func set_chart(dir: Vector3) -> void:
+	chart_origin = dir.normalized()
+	var north: Vector3 = -PLANET_NORTH
+	# At the poles the axis and the origin are the same line and there is no
+	# bearing; any consistent frame will do there.
+	var e: Vector3 = chart_origin.cross(north)
+	if e.length() < 1e-6:
+		e = chart_origin.cross(Vector3.RIGHT)
+	chart_east = e.normalized()
+	chart_south = chart_east.cross(chart_origin).normalized()
+	# The extension does the conversion on its own side, once per call rather
+	# than once per sample, so it has to be told where the chart is.
+	if native == null and globe:
+		push_warning("chart set before the extension exists: the router will "
+			+ "survey the flat field while the ground is a planet")
+	if native != null:
+		native.set_globe(globe)
+		native.set_chart(chart_origin, chart_east, chart_south, PLANET_R)
+
+## Chart coordinates to a direction from the planet's centre. `x` is metres east
+## along the ground and `z` metres south, which is the sense the flat map has
+## always drawn.
+func chart_to_dir(x: float, z: float) -> Vector3:
+	var s: float = sqrt(x * x + z * z)
+	if s < 1e-6:
+		return chart_origin
+	var ang: float = s / PLANET_R
+	var t: Vector3 = (chart_east * (x / s) + chart_south * (z / s)).normalized()
+	return (chart_origin * cos(ang) + t * sin(ang)).normalized()
+
+## And back again. Exact inverse of `chart_to_dir` over the near hemisphere.
+func dir_to_chart(d: Vector3) -> Vector2:
+	var u := d.normalized()
+	var c: float = u.dot(chart_origin)
+	var t: Vector3 = u - chart_origin * c
+	var tl: float = t.length()
+	if tl < 1e-12:
+		return Vector2.ZERO
+	# atan2 of the perpendicular against the parallel, not acos of the parallel.
+	# Near the origin `c` is within a float's last digit of 1 and acos throws the
+	# answer away: a point one kilometre out came back as the origin itself.
+	var ang: float = atan2(tl, c)
+	t /= tl
+	var s: float = ang * PLANET_R
+	return Vector2(t.dot(chart_east) * s, t.dot(chart_south) * s)
+
+## How cold a place is for being where it is, from 0 at the equator to 1 at the
+## pole. What the climate bands are cut from.
+##
+## On the flat world this was `|z|` over most of the map's half width, which is
+## the last piece of the authored square in the biome system: it is a function
+## of the *chart*, so moving the chart under a fixed piece of ground changes its
+## climate, and 1200 km of world was made to span pole to equator.
+##
+## On the planet it is the real latitude -- so the poles are cold, the equator
+## is hot, and a place keeps its climate whoever is looking at it -- multiplied
+## by a compression that is written down rather than hidden.
+##
+## Barely compressed at all, in the end. The tempting number is a large one --
+## the whole 1200 km world is 5.4 degrees of a real planet, and 5.4 degrees of
+## anywhere is one climate, so squeezing hard gives the ground the variety the
+## flat world had. Seven and a half does that and it makes the *planet* absurd:
+## snow beyond six degrees of latitude, which is 89 per cent of the surface, and
+## a globe that is white from pole to pole with a green fleck on it.
+##
+## At 1.15 the snow line sits at 44 degrees and the ice covers 30 per cent, which
+## is a cold but believable world. The country you fly over is then warm, and its
+## variety comes from moisture and from height -- which is where a real place's
+## variety comes from over 1200 km, latitude having almost nothing to say across
+## five degrees of it.
+## Where the climate scale reaches 1, as a fraction of the way to the pole.
+##
+## The scale is the sine of the latitude times this, so 1 lands at the polar
+## circle -- and where the polar circle is, is a fact about the axial tilt: it
+## is the latitude beyond which the sun does not set at midsummer, which is
+## ninety degrees less the obliquity. This was 1.15, chosen because it looked
+## right; it is now the same number the planet's tilt says it should be, so the
+## climate bands and the seasons come from one fact instead of two.
+##
+## Mirrored in `sphere::CLIMATE_SQUEEZE`, which `--suntest` checks.
+const CLIMATE_SQUEEZE := 1.0899
+## How much warmer midsummer is than midwinter at the pole, on the 0..1 scale
+## the biome rule works in. Mirrored in `sphere::SEASON_AMP`.
+const SEASON_AMP := 0.12
+## Where the planet is in its year: +1 at northern midsummer, -1 at northern
+## midwinter. Set from the clock, which is what owns the sun.
+var season := 0.0
+
+## What the season is worth in temperature at a place.
+##
+## Nothing at the equator, most at the poles, and opposite signs either side of
+## the line -- which is the whole of the difference between one hemisphere
+## having winter and both of them having it at once.
+func season_warmth(x: float, z: float) -> float:
+	if not globe:
+		return 0.0
+	return season * chart_to_dir(x, z).dot(PLANET_NORTH) * SEASON_AMP
+
+func climate_lat(x: float, z: float) -> float:
+	if not globe:
+		return clampf(absf(z) / (WORLD_HALF * 0.85), 0.0, 1.0)
+	var d := chart_to_dir(x, z)
+	return clampf(absf(d.dot(PLANET_NORTH)) * CLIMATE_SQUEEZE, 0.0, 1.0)
+
+## Carry the built world across when the chart moves.
+##
+## The floating origin renumbers everything that is *somewhere*, and the roads,
+## the towns and the aerodromes are somewhere. They are stored as chart pairs,
+## which means that left alone they do not stay where they are when the chart
+## moves -- they move with it, and the airfield ends up a hundred and fifty
+## kilometres from the airfield. Measured before this existed: 44 of 120 places
+## came back with a different biome after a rechart, because the carving under
+## them had walked off across the planet.
+##
+## Only positions are carried. A profile height is an elevation above sea level
+## in the flat frame, and that is the same number wherever the chart is.
+func rechart_world(o: Vector3, e: Vector3, s2: Vector3) -> void:
+	var move := func(p: Vector2) -> Vector2:
+		var d: float = sqrt(p.x * p.x + p.y * p.y)
+		if d < 1e-6:
+			return dir_to_chart(o)
+		var ang: float = d / PLANET_R
+		var t: Vector3 = (e * (p.x / d) + s2 * (p.y / d)).normalized()
+		return dir_to_chart((o * cos(ang) + t * sin(ang)).normalized())
+	for i in ROADS.size():
+		var r: Array = ROADS[i]
+		ROADS[i] = [move.call(r[0]), move.call(r[1])]
+	for li in _road_lines.size():
+		var line: PackedVector2Array = _road_lines[li]
+		var out := PackedVector2Array()
+		for p in line:
+			out.append(move.call(p))
+		_road_lines[li] = out
+	for pad in _town_pads:
+		pad["c"] = move.call(pad["c"] as Vector2)
+	for f in fields:
+		f["at"] = move.call(f["at"] as Vector2)
+	for coll in [road_bridges, road_tunnels]:
+		for b in coll:
+			b["a"] = move.call(b["a"] as Vector2)
+			b["b"] = move.call(b["b"] as Vector2)
+			var pts: PackedVector2Array = b.get("pts", PackedVector2Array())
+			var np := PackedVector2Array()
+			for p2 in pts:
+				np.append(move.call(p2))
+			b["pts"] = np
+	_index_corridor()
+	_push_segments()
+	_push_world()
+
+## Latitude of a point on the ground, in radians: zero at the airfield, positive
+## toward the top of the chart. Real, in the sense that it is the angle at the
+## planet's centre -- the whole 1200 km world is inside five and a half degrees
+## of the equator, which is what a 1200 km world on a 6371 km planet is.
+func latitude_at(x: float, z: float) -> float:
+	var u := Vector3(x, sqrt(maxf(PLANET_R * PLANET_R - x * x - z * z, 0.0)), z)
+	return asin(clampf(u.normalized().dot(PLANET_NORTH), -1.0, 1.0))
+
+func up_at(p: Vector3) -> Vector3:
+	return (p - planet_centre).normalized()
+
+## Height above the sphere, not above the y = 0 plane. Sixty kilometres out
+## those differ by 283 m.
+func altitude(p: Vector3) -> float:
+	return p.distance_to(planet_centre) - PLANET_R
+
+func gravity_at(p: Vector3) -> Vector3:
+	return -up_at(p) * 9.81
+
+## Sea level at a point. The ocean is a shell, so it falls away with everything
+## else — a flat sea plane against curved ground would flood the far half of the
+## map. This is the MEAN surface: the swell rides on top of it.
+func sea_at(x: float, z: float) -> float:
+	return WATER_LEVEL - planet_drop(x, z)
+
+# -------------------------------------------------------------------- swell
+## Two long crossing swells, five hundred metres from crest to crest and a
+## couple of metres high. Defined here and nowhere else: the water shader is
+## handed the same constants and the same clock, so what a hull rides is exactly
+## what you can see it riding. A sea drawn by one formula and floated on by
+## another is worse than a flat one.
+## Three components, because a real sea is a spectrum and one wavelength is
+## not. Two long swells crossing at 450 and 400 m carry the heave; a 70 m chop
+## on top of them is what a small hull actually pitches to. Without the short
+## one every ship behaved the same — a 500 m swell is so long that a 47 m boat
+## and a 257 m assault ship both simply follow it, and the size of the hull
+## stopped meaning anything.
+##
+## The frequencies are not free: in deep water omega = sqrt(g*k), so a long wave
+## is slow and a short one quick. Setting them by eye gives a sea where the big
+## swell hurries and the chop crawls, which reads as wrong even if you cannot
+## say why.
+const SWELL_A := 1.25            # metres, the long swell    (454 m, 17.1 s)
+const SWELL_B := 0.75            # crossing it               (401 m, 16.0 s)
+const SWELL_C := 0.42            # the chop on top           ( 70 m,  6.7 s)
+const SWELL_KA := Vector2(0.01210, 0.00670)
+const SWELL_KB := Vector2(-0.00740, 0.01380)
+const SWELL_KC := Vector2(0.06200, 0.06500)
+const SWELL_WA := 0.368
+const SWELL_WB := 0.392
+const SWELL_WC := 0.939
+## Advanced by the world, not read from the engine's clock, so the shader and
+## the physics cannot drift apart across a pause or a frame spike.
+var sea_time := 0.0
+
+func wave_at(x: float, z: float) -> float:
+	return SWELL_A * sin(SWELL_KA.x * x + SWELL_KA.y * z + sea_time * SWELL_WA) \
+		+ SWELL_B * sin(SWELL_KB.x * x + SWELL_KB.y * z + sea_time * SWELL_WB) \
+		+ SWELL_C * sin(SWELL_KC.x * x + SWELL_KC.y * z + sea_time * SWELL_WC)
+
+## The surface a hull actually floats on: the shell plus the swell riding on it.
+func sea_surface(x: float, z: float) -> float:
+	return sea_at(x, z) + wave_at(x, z)
+
 const WATER_LEVEL := -35.0
 const RUNWAY_LEN := 3000.0       # 36/18, aligned with the Z axis
 const RUNWAY_HALF_W := 23.0
@@ -19,6 +316,23 @@ enum Ev { INFO, GOOD, BAD }
 ## lives in `field.rs` and is the extension's business; this is the one noise
 ## the game still reads directly.
 var noise_cont := FastNoiseLite.new()
+## Whose ground it is. Deliberately not the continental field: that one carries
+## three fractal octaves because coastlines want the detail, and an *angle*
+## taken from a field with detail in it flips every few kilometres. Nations came
+## out as a 16 km checkerboard rather than as territories.
+var noise_faction := FastNoiseLite.new()
+## And whose ground it is on the planet.
+##
+## A separate field because it has to be sampled on the *direction*, not on the
+## chart pair. Territory belongs to the planet: read off the pair it would move
+## under your feet every time the chart did, and the country you were standing
+## in would change because you flew a hundred and fifty kilometres.
+var noise_faction3 := FastNoiseLite.new()
+## Temperature and moisture on the planet, matching `sphere::climate` in the
+## extension exactly: same seeds, same octaves, same frequencies on the unit
+## sphere. Two copies of one rule, and they have to stay one rule.
+var noise_temp3 := FastNoiseLite.new()
+var noise_moist3 := FastNoiseLite.new()
 ## The native extension. It owns the height field: see `height_at`.
 var native: Object = null
 
@@ -326,6 +640,32 @@ func _setup_noise() -> void:
 	noise_cont.fractal_octaves = 3
 	noise_cont.fractal_lacunarity = 2.3
 	noise_cont.fractal_gain = 0.45
+	noise_faction.seed = 20260903
+	noise_faction.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	# One octave, and slow: a feature is most of the width of the world, so a
+	# nation holds a piece of ground you can fly across rather than a patch.
+	# Measured by walking lines across the world and counting how far one flag
+	# lasts, this takes the mean run from 22 km to 95 km and the median from
+	# 16 km to 80 km, with the six shares still even -- 13 to 20 per cent each.
+	noise_faction.frequency = 0.0000024
+	noise_faction.fractal_octaves = 1
+	noise_faction3.seed = 20260903
+	noise_faction3.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	# On the unit sphere, so a frequency is a number of features round the
+	# planet rather than a size in metres. Measured rather than derived: 19.5
+	# puts a border about every 89 km of surface, against the 95 km the flat
+	# world was tuned to. The first estimate of 68 was out by three and a half
+	# times and gave 27 km -- a checkerboard again, on a planet this time.
+	noise_faction3.frequency = 19.5
+	noise_faction3.fractal_octaves = 1
+	noise_temp3.seed = 515
+	noise_temp3.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise_temp3.frequency = 40.0
+	noise_temp3.fractal_octaves = 2
+	noise_moist3.seed = 811
+	noise_moist3.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise_moist3.frequency = 29.0
+	noise_moist3.fractal_octaves = 3
 
 	noise_temp.seed = 515
 	noise_temp.noise_type = FastNoiseLite.TYPE_SIMPLEX
@@ -353,10 +693,15 @@ var _siting := false
 ## the field is there, so it sits at the natural height of its site instead of
 ## dragging the country up or down to meet it.
 func register_field(at: Vector2, yaw: float, elev := INF) -> Dictionary:
+	# In the flat frame, like the decks and for the same reason: this number is
+	# handed to the extension, which levels the field on the plane and knows
+	# nothing about the planet. `height_at` drops the result afterwards, so a
+	# curved elevation stored here would have the drop taken off it twice --
+	# and it was, leaving the opposing airfield's pavement in a 471 m crater.
 	var e := elev
 	if e == INF:
 		_siting = true
-		e = height_at(at.x, at.y)
+		e = height_at(at.x, at.y) + planet_drop(at.x, at.y)
 		_siting = false
 	var f := {"at": at, "yaw": yaw, "elev": e}
 	fields.append(f)
@@ -366,6 +711,172 @@ func register_field(at: Vector2, yaw: float, elev := INF) -> Dictionary:
 	# the list again on this side.
 	_push_world()
 	return f
+
+## Put the home field back on the land it is actually standing on.
+##
+## `RUNWAY_ELEV` is zero, which was right for as long as the world was flat and
+## the home strip sat at sea level by definition. On the planet the chart is put
+## on a country, and that country's ground is wherever the generator left it --
+## 516 m up for the one this started on. Levelling the field to zero there does
+## not lower the runway, it tells the extension to cut the whole aerodrome down
+## through half a kilometre of hill, and the road network then runs down into
+## the hole to meet it. Both the field test and the road test were reading the
+## same 516 m.
+##
+## Called once the chart is on the chosen country, because until then there is
+## no land under (0, 0) to ask about.
+func resite_home_field() -> void:
+	if not globe or fields.is_empty():
+		return
+	var f: Dictionary = fields[0]
+	var at: Vector2 = f["at"]
+	# As `register_field` samples: with the fields held off, so the strip takes
+	# the natural height of its site rather than the height it has already been
+	# levelled to.
+	_siting = true
+	f["elev"] = height_at(at.x, at.y) + planet_drop(at.x, at.y)
+	_siting = false
+	_push_world()
+
+## A field's pavement as a world height. `elev` is stored flat because the
+## extension levels the field there; this is that pavement once it has been
+## dropped onto the sphere, which is what anything standing on it wants. Pass a
+## point to get the height under that point: a runway follows the curve, so a
+## strip three kilometres long is 37 m lower at the ends 78 km out -- tilted by
+## the same eight tenths of a degree that gravity is.
+func field_elev(fd: Dictionary, x := INF, z := INF) -> float:
+	var at: Vector2 = fd["at"]
+	var px: float = at.x if is_inf(x) else x
+	var pz: float = at.y if is_inf(z) else z
+	return float(fd["elev"]) - planet_drop(px, pz)
+
+## The countries, and which one you are flying for.
+##
+## There is no centre to this planet and no main airfield on it. Each side has a
+## country somewhere on the globe -- the same six the ground is divided between
+## -- and starting a mission means starting in one of them. The chart is then
+## centred on that country's aerodrome, which is what makes it *the* aerodrome
+## for that sortie: the world is built around wherever you began.
+##
+## Where they are is `sphere::HOMELANDS` in the extension, which is also what
+## raises the land under them; this side keeps only the names and their order.
+## It was two tables once, and the copies disagreed about which way north was.
+## The names, in the order the extension has them. Positions live there; this
+## side only needs to know which country is which.
+const HOMELAND_ORDER := ["usa", "uk", "france", "russia", "china", "iran"]
+const HOMELANDS := {
+	"usa": 0, "uk": 1, "france": 2, "russia": 3, "china": 4, "iran": 5,
+}
+## Whose side you are on. Chosen before the world is built, because the world is
+## built around it.
+var home_faction := "usa"
+
+## A country's direction from the planet's centre.
+##
+## Asked of the extension rather than worked out here. This was a second copy of
+## `sphere::HOMELANDS` with its own trigonometry, and the copy had north's sign
+## the other way round: every country came out at the mirror of its own
+## latitude, so the game asked about six places the generator had never raised
+## land at and found three of them under the sea. The list below is names and
+## the order they are in; where they *are* is the extension's business.
+func homeland_dir(who: String) -> Vector3:
+	if native == null:
+		return Vector3.UP
+	return native.homeland_dir(HOMELAND_ORDER.find(who) if HOMELAND_ORDER.has(who)
+		else 0)
+
+## Where this sortie begins. The chart is put here before anything is built.
+func home_dir() -> Vector3:
+	return homeland_dir(home_faction) if globe else Vector3.UP
+
+## The landmass the world is built on.
+##
+## A settlement is not merely somewhere dry. On a flat world with one continent
+## in it that distinction never came up; on a planet it is the difference
+## between a trunk network and a trunk network that crosses an ocean, because
+## the router will dutifully connect any two towns it is given and the survey
+## does something desperate when it has to. Measured, towns on separate
+## landmasses gave a design surface 280 m off the ground and gradients over
+## 300 %.
+##
+## A flood fill over a coarse grid, out from the airfield, across land. One
+## batched call to the extension for the heights and then a breadth-first walk:
+## a few hundred thousand cells is nothing once the heights are not fetched one
+## at a time.
+const LAND_N := 512
+const LAND_HALF := 768_000.0
+var _land_mask := PackedByteArray()
+
+func build_landmass() -> void:
+	var n := LAND_N
+	var cell: float = LAND_HALF * 2.0 / float(n)
+	var x0: float = -LAND_HALF
+	var h: PackedFloat32Array = native.grounds_globe(x0, x0, cell, n) if globe \
+		else native.grounds(x0, x0, cell, n, G_ALL)
+	var wet := PackedByteArray()
+	wet.resize(n * n)
+	for j in n:
+		var z: float = x0 + float(j) * cell
+		for i in n:
+			var x: float = x0 + float(i) * cell
+			# The flat field comes back without the drop on it; the planetary
+			# one already carries it. Either way the test is against the sea
+			# under that point.
+			var g: float = h[j * n + i] - (planet_drop(x, z) if not globe else 0.0)
+			wet[j * n + i] = 1 if g > sea_at(x, z) else 0
+	_land_mask = PackedByteArray()
+	_land_mask.resize(n * n)
+	var mid := int(n / 2.0)
+	var start := mid * n + mid
+	if wet[start] == 0:
+		# The airfield is not on land, which should not happen and is worth
+		# saying rather than silently marking the whole world unbuildable.
+		push_warning("the airfield is not on land: no landmass to build on")
+		return
+	var queue := PackedInt32Array([start])
+	_land_mask[start] = 1
+	var head := 0
+	while head < queue.size():
+		var c: int = queue[head]
+		head += 1
+		var ci: int = c % n
+		var cj: int = int(c / float(n))
+		for d in [[1, 0], [-1, 0], [0, 1], [0, -1]]:
+			var ni: int = ci + int(d[0])
+			var nj: int = cj + int(d[1])
+			if ni < 0 or nj < 0 or ni >= n or nj >= n:
+				continue
+			var k: int = nj * n + ni
+			if _land_mask[k] == 1 or wet[k] == 0:
+				continue
+			_land_mask[k] = 1
+			queue.append(k)
+
+## Is this point on the same land as the airfield? True everywhere if the fill
+## has not been run, so nothing is refused a site for want of an answer.
+func on_home_land(x: float, z: float) -> bool:
+	if _land_mask.is_empty():
+		return true
+	if absf(x) >= LAND_HALF or absf(z) >= LAND_HALF:
+		return false
+	var cell: float = LAND_HALF * 2.0 / float(LAND_N)
+	var i := int((x + LAND_HALF) / cell)
+	var j := int((z + LAND_HALF) / cell)
+	return _land_mask[clampi(j, 0, LAND_N - 1) * LAND_N
+		+ clampi(i, 0, LAND_N - 1)] == 1
+
+## How much of the world is the landmass the airfield stands on, as a fraction
+## of everything above water. Reported rather than gated: a world whose one
+## continent is a tenth of its land is a world where most towns have nowhere to
+## be, and that is worth seeing.
+func landmass_share() -> float:
+	if _land_mask.is_empty():
+		return 1.0
+	var on := 0
+	for v in _land_mask:
+		if v == 1:
+			on += 1
+	return float(on) / float(LAND_N * LAND_N)
 
 ## How much of a given field applies at a point, in that field's own frame.
 func field_factor(fd: Dictionary, x: float, z: float) -> float:
@@ -423,7 +934,30 @@ func height_at(x: float, z: float) -> float:
 	# The field, the town platforms, the made roads and the aerodromes all come
 	# back from the extension. The carrier decks are the one thing left on this
 	# side: there are two of them and they move every frame.
-	return _deck_top(native.ground(x, z, _ground_flags()), x, z)
+	# ...and then dropped onto the sphere. The extension builds the field on a
+	# plane and knows nothing about the planet; this is the single point where
+	# a flat height becomes a height on a curved world.
+	if globe:
+		# The planetary field already carries the curve, so there is no drop to
+		# take off here: it is a height on a round world, not a flat one bent.
+		#
+		# With the flags, like the flat world. Asked without them, a surveyor
+		# siting an aerodrome read the ground with that aerodrome already
+		# levelled into it and got back the elevation it was trying to choose.
+		var fl: int = _ground_flags()
+		if fl == G_ALL:
+			return _deck_top(native.ground_globe(x, z), x, z)
+		return _deck_top(native.ground_globe_flags(x, z, fl), x, z)
+	return _deck_top(native.ground(x, z, _ground_flags()), x, z) - planet_drop(x, z)
+
+## Ground height in the flat frame -- the height a surveyor works in, taken from
+## the local horizontal rather than from world level. On a sphere the two part
+## company by the drop, and the difference is not a slope anybody has to climb:
+## a dead level road 138 km out reads as a 2.2 % gradient in world coordinates
+## and the whole network reads as 1.5 % off camber. Gradients, cross falls and
+## earthworks are set out against local up, so they are measured here.
+func survey_height_at(x: float, z: float) -> float:
+	return height_at(x, z) + planet_drop(x, z)
 
 ## A landable platform standing over the ground. Applied here rather than in
 ## the extension because it is the one part of the world that is not fixed once
@@ -431,6 +965,13 @@ func height_at(x: float, z: float) -> float:
 func _deck_top(h: float, x: float, z: float) -> float:
 	if decks.is_empty():
 		return h
+	# A deck is registered in the flat frame, because on the flat world the drop
+	# is taken off everything afterwards. On the planet nothing is taken off --
+	# the field already carries the curve -- so the deck has to be dropped here
+	# instead, or a carrier forty kilometres out lands aeroplanes forty-five
+	# metres above its own flight deck.
+	if globe:
+		return maxf(h, deck_height(x, z) - planet_drop(x, z))
 	return maxf(h, deck_height(x, z))
 
 ## How much of a settlement's levelled platform applies at a point. Zero is
@@ -627,6 +1168,11 @@ const ROAD_CUT_MAX := 34.0
 ## The trunk network as polylines and the made height at each of their
 ## stations, in build order. Both come back from the extension's survey.
 var _road_lines: Array = []
+
+## The routed trunk lines, as chart polylines. Read-only to everything outside;
+## the map and the tests both want to see the network as it was laid.
+func road_lines() -> Array:
+	return _road_lines
 var _road_prof: Array = []
 ## The untouched ground under each station, so a cutting can be told from a
 ## road running along the floor of a valley.
@@ -917,7 +1463,12 @@ func road_surface(x: float, z: float) -> Vector3:
 	# only place it exists: `_corr` here is just the list handed over to it.
 	if _corr.is_empty() or _road_prof.size() != _road_lines.size():
 		return Vector3.ZERO
-	return native.road_surface_at(x, z)
+	var r: Vector3 = native.road_surface_at(x, z)
+	# x is the corridor's running surface and comes back in the extension's flat
+	# frame; everything that compares it against the ground wants it on the
+	# sphere, the same as `height_at`. y is a weight and is left alone.
+	r.x -= planet_drop(x, z)
+	return r
 
 ## A road between two places that goes round the hills instead of over them.
 ##
@@ -996,8 +1547,10 @@ func load_road_state(d: Dictionary) -> void:
 	_push_corridor()
 	_push_segments()
 
-func register_town_pads(sites: Array) -> void:
+## Level the ground under each settlement, and report which sites survived it.
+func register_town_pads(sites: Array) -> Array:
 	_town_pads.clear()
+	var kept: Array = []
 	for site in sites:
 		var c: Vector2 = site["c"]
 		var r: float = site["r"]
@@ -1009,13 +1562,35 @@ func register_town_pads(sites: Array) -> void:
 				var q := c + Vector2(float(i - 4), float(j - 4)) * (r * 0.22)
 				if q.distance_to(c) > r:
 					continue
-				total += height_at(q.x, q.y)
+				# In the flat frame, because this platform is handed to the
+				# extension and stamped into the field there -- the same reason
+				# an aerodrome's elevation is. Levelled to a curved height it
+				# was dug in by the drop: a town 130 km out sat at the bottom
+				# of a 1330 m pit, and the trunk roads reaching it inherited
+				# gradients that no survey had asked for.
+				total += survey_height_at(q.x, q.y)
 				n += 1
-		var y: float = (total / maxf(float(n), 1.0)) if n > 0 else height_at(c.x, c.y)
-		_town_pads.append({"c": c, "r": r, "y": maxf(y, WATER_LEVEL + 8.0)})
+		var y: float = (total / maxf(float(n), 1.0)) if n > 0 \
+			else survey_height_at(c.x, c.y)
+		# A town is not a reason to raise land out of the sea.
+		#
+		# This used to clamp the platform to at least eight metres above the
+		# water, which on a world where every site was dry by construction was a
+		# harmless floor. On a generated planet it is a licence to build: a site
+		# whose ground averages below sea level got a pad above it anyway, and
+		# the field obligingly lifted an island out of the ocean to stand one
+		# small town on. Sites that are not already land are dropped, and the
+		# caller is told which so it does not build a town on a pad that is not
+		# there.
+		if y < WATER_LEVEL + 8.0:
+			continue
+		kept.append(site)
+		_town_pads.append({"c": c, "r": r, "y": y})
 
 ## Mean gradient over a footprint, as a fraction. Used to choose where a town
 ## goes: the flattest workable ground within reach of where it was wanted.
+	return kept
+
 func site_roughness(c: Vector2, r: float) -> float:
 	var total := 0.0
 	var n := 0
@@ -1145,23 +1720,50 @@ var _bw := PackedFloat32Array([0, 0, 0, 0, 0, 0, 0])
 ## the baked texture the ground shader reads. Only the harness passes it, and it
 ## is what lets the fidelity of that texture be measured against this, the
 ## arithmetic both sides share, rather than against a second copy of it.
-func biome_weights(x: float, z: float, y: float, slope: float,
+func biome_weights(x: float, z: float, y_in: float, slope: float,
 		cl: Vector2 = Vector2(-1.0, -1.0)) -> PackedFloat32Array:
+	# Height above the sea under this point, not the world `y`.
+	#
+	# The two are the same on a flat world and they are not on a planet: the
+	# ground falls away from the middle of the chart, so a fixed place has a
+	# different `y` depending on where the chart is centred, and its climate
+	# moved with it. Measured, 44 of 120 places came back with a different
+	# biome after the chart was moved 150 km. Elevation above the local sea is
+	# the same number from any chart.
+	var y: float = y_in - sea_at(x, z) + WATER_LEVEL
 	# Latitude first, weather second. Without a band running with the map there
 	# is no reason for the far north to be colder than the middle, so climate
 	# was noise alone and the world had no geography to it — the same patchwork
 	# everywhere. `z` is north-south, so this is the only term that can make a
 	# pole cold and a middle latitude hot.
-	var lat: float = clampf(absf(z) / (WORLD_HALF * 0.85), 0.0, 1.0)
+	var lat: float = climate_lat(x, z)
 	var band: float = 1.0 - lat * 1.25
 	# the dry belts sit either side of the hot middle, the way they do on Earth
 	var belt: float = clampf(1.0 - absf(lat - 0.32) * 3.0, 0.0, 1.0)
-	var nt: float = cl.x if cl.x >= 0.0 \
-		else (noise_temp.get_noise_2d(x, z) + 1.0) * 0.5
-	var nm: float = cl.y if cl.y >= 0.0 \
-		else (noise_moist.get_noise_2d(x, z) + 1.0) * 0.5
+	# The same pair the ground shader reads, and on the planet the same field:
+	# sampled on the chart the climate slides out from under a place whenever
+	# the chart moves off it.
+	var nt: float = cl.x
+	var nm: float = cl.y
+	if nt < 0.0 or nm < 0.0:
+		if globe:
+			# Their own fields, at their own frequencies.
+			#
+			# Scaling the *coordinates* by forty and handing them to the flat
+			# world's noise -- which carries a frequency of 6.2e-6 -- asks for
+			# features a hundred and sixty thousand times too large, and gets
+			# back very nearly a constant. The extension bakes the texture with
+			# a frequency of forty on the unit sphere, so this has to be the
+			# same field or the map and the ground disagree about the weather.
+			var cd := chart_to_dir(x, z)
+			nt = (noise_temp3.get_noise_3d(cd.x, cd.y, cd.z) + 1.0) * 0.5
+			nm = (noise_moist3.get_noise_3d(cd.x, cd.y, cd.z) + 1.0) * 0.5
+		else:
+			nt = (noise_temp.get_noise_2d(x, z) + 1.0) * 0.5
+			nm = (noise_moist.get_noise_2d(x, z) + 1.0) * 0.5
 	var temp: float = clampf(band * 0.70 + nt * 0.42
-		- clampf((y - 300.0) / 2200.0, 0.0, 1.0) * 0.85, 0.0, 1.0)
+		- clampf((y - 300.0) / 2200.0, 0.0, 1.0) * 0.85
+		+ season_warmth(x, z), 0.0, 1.0)
 	var moist: float = clampf(nm
 		+ clampf(1.0 - absf(y - WATER_LEVEL) / 900.0, 0.0, 1.0) * 0.25
 		- belt * 0.66, 0.0, 1.0)
@@ -1274,8 +1876,17 @@ func claim_engagement(threat: Node) -> void:
 ## anything the mission declares, so the props and the paint in a town match
 ## the country it stands in — and the country changes as you fly across the map.
 func region_faction(x: float, z: float) -> String:
-	var n := noise_cont.get_noise_2d(x * 1.7 + 90000.0, z * 1.7 - 40000.0)
-	var m := noise_cont.get_noise_2d(z * 1.3 - 15000.0, x * 1.3 + 62000.0)
+	var n: float
+	var m: float
+	if globe:
+		# On the planet, and of the planet: the same piece of ground answers the
+		# same way whatever chart is looking at it.
+		var d := chart_to_dir(x, z)
+		n = noise_faction3.get_noise_3d(d.x, d.y, d.z)
+		m = noise_faction3.get_noise_3d(d.z + 4.0, d.x - 2.0, d.y + 7.0)
+	else:
+		n = noise_faction.get_noise_2d(x + 90000.0, z - 40000.0)
+		m = noise_faction.get_noise_2d(z - 15000.0, x + 62000.0)
 	# Which way the pair of noise fields points, not what they add up to.
 	#
 	# Averaging two noise samples and cutting the result into six equal value
@@ -1418,6 +2029,18 @@ func block_until_released(actions: Array) -> void:
 		_blocked[a] = true
 		_taps.erase(a)
 
+## The sea's own clock, advanced with the physics rather than with the frame.
+##
+## A hull floats in `_physics_process` and reads the swell there. Advanced on
+## render frames, the clock could be several frames ahead or behind of what the
+## hull last saw -- headless especially, where the two rates are not tied -- and
+## a test that asks where the surface is *now* disagrees with a hull that
+## settled to where it was *then*. Measured, that drift reached 0.1 m against a
+## swell that only moves 8 mm in a tick. One clock, stepped once, and the
+## question has one answer.
+func _physics_process(delta: float) -> void:
+	sea_time += delta
+
 func _process(_delta: float) -> void:
 	if _blocked.is_empty():
 		return
@@ -1452,6 +2075,59 @@ func tapped(action: StringName) -> bool:
 ## chaff off the bomb bay key -- the help page was updated and the flight strip
 ## was not. It went on telling you to press N and B for the rest of the sortie.
 ## Read the binding instead and it cannot drift again.
+# ------------------------------------------------------------- the frame budget
+#
+# Where the frame goes, measured rather than guessed.
+#
+# A profiler that is always on is a tax on every frame it measures, and one that
+# is never on means optimising by argument. This is two `Time.get_ticks_usec()`
+# calls around a block, skipped entirely unless something asked for them, and it
+# reports in the same units the frame is spent in.
+var profiling := false
+var _prof: Dictionary = {}
+var _prof_n: Dictionary = {}
+var _prof_frames := 0
+
+## Start timing a block. Returns the stamp to hand back to `prof_end`.
+func prof_at() -> int:
+	return Time.get_ticks_usec() if profiling else 0
+
+## Close one. Named at this end so the name sits with the number it produced.
+func prof_end(tag: StringName, t0: int) -> void:
+	if not profiling or t0 == 0:
+		return
+	_prof[tag] = float(_prof.get(tag, 0.0)) + float(Time.get_ticks_usec() - t0)
+	_prof_n[tag] = int(_prof_n.get(tag, 0)) + 1
+
+func prof_frame() -> void:
+	if profiling:
+		_prof_frames += 1
+
+func prof_reset() -> void:
+	_prof.clear()
+	_prof_n.clear()
+	_prof_frames = 0
+
+## What each block cost per frame, in microseconds, worst first.
+func prof_report() -> Array:
+	var out: Array = []
+	var f: float = maxf(float(_prof_frames), 1.0)
+	for k in _prof.keys():
+		out.append([String(k), float(_prof[k]) / f, int(_prof_n[k])])
+	out.sort_custom(func(a, b): return float(a[1]) > float(b[1]))
+	return out
+
+func prof_frames() -> int:
+	return _prof_frames
+
+## A screen is up that wants the pointer, so nothing may capture the mouse.
+##
+## Freelook is on ALT and CMD, and the map plants an objective on CTRL or CMD
+## and click. Holding CMD over the map therefore engaged freelook, which
+## captures the mouse -- and a captured cursor is parked in the middle of the
+## screen, so the marker could only ever be dropped dead centre.
+var ui_pointer := false
+
 func key_label(action: StringName, fallback := "?") -> String:
 	if not InputMap.has_action(action):
 		return fallback
@@ -1596,6 +2272,10 @@ func _setup_input() -> void:
 	_add(&"chaff",        [_key(KEY_V), _btn(JOY_BUTTON_DPAD_DOWN)])
 	_add(&"mouse_fly",    [_key(KEY_SEMICOLON)])
 	_add(&"map",          [_key(KEY_M), _key(KEY_F1)])
+	# The same map drawn on the planet. Not on a modifier and not on M twice:
+	# it is a mode you sit in, and cycling through it to close the map would
+	# mean pressing M three times to put the chart away.
+	_add(&"map_globe",    [_key(KEY_O), _key(KEY_F2)])
 	# Not backslash: `cycle_weapon` is already there, and `tapped` erases the
 	# press when it is read, so whichever of the two was polled first that frame
 	# ate the other. Cycling the weapon and slowing time fought over one key.

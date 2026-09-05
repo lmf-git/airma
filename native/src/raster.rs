@@ -129,7 +129,7 @@ pub fn ground_mask(stamps: &[Stamp], n: usize, half: f32, cx: f32, cz: f32)
 /// IEEE half, which is what `Image.FORMAT_RGH` holds. Only finite values in
 /// 0..1 reach this, so the subnormal and infinity cases cannot arise.
 #[inline]
-fn f16(v: f32) -> u16 {
+pub fn f16(v: f32) -> u16 {
     let b = v.to_bits();
     let sign = ((b >> 16) & 0x8000) as u16;
     let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
@@ -345,12 +345,29 @@ const BIOME_RGB: [[f32; 3]; 7] = [
 
 pub fn biome_weights(x: f32, z: f32, y: f32, slope: f32) -> [f32; 7] {
     let lat = (z.abs() / (WORLD_HALF * 0.85)).clamp(0.0, 1.0);
+    let (nt, nm) = climate(x, z);
+    // The flat world has no orbit, so it has no seasons.
+    weights_from(lat, nt, nm, y, slope, 0.0)
+}
+
+/// The same rule with its inputs handed in.
+///
+/// Split out so the planet can use it. What the ground looks like is one rule
+/// and has to stay one rule -- the ground shader draws it, the tactical chart
+/// is rasterised from it, the scatter picks its species by it and the orbital
+/// sheet is coloured by it. The planet had its own hand-written palette for a
+/// while, which is why the map and the view out of the window did not agree.
+/// `warmth` is the season: what the sun's declination is worth in temperature
+/// here and now. Zero on the flat world and at the equator, and the reason the
+/// snow line moves through the year.
+pub fn weights_from(lat: f32, nt: f32, nm: f32, y: f32, slope: f32, warmth: f32)
+        -> [f32; 7] {
     let band = 1.0 - lat * 1.25;
     // the dry belts sit either side of the hot middle, the way they do on Earth
     let belt = (1.0 - (lat - 0.32).abs() * 3.0).clamp(0.0, 1.0);
-    let (nt, nm) = climate(x, z);
     let temp = (band * 0.70 + nt * 0.42
-        - ((y - 300.0) / 2200.0).clamp(0.0, 1.0) * 0.85)
+        - ((y - 300.0) / 2200.0).clamp(0.0, 1.0) * 0.85
+        + warmth)
         .clamp(0.0, 1.0);
     let moist = (nm + (1.0 - (y - WATER_LEVEL).abs() / 900.0).clamp(0.0, 1.0) * 0.25
         - belt * 0.66)
@@ -389,7 +406,7 @@ pub fn biome_weights(x: f32, z: f32, y: f32, slope: f32) -> [f32; 7] {
     w
 }
 
-fn biome_colour(x: f32, z: f32, y: f32, slope: f32) -> (f32, f32, f32) {
+pub fn biome_colour(x: f32, z: f32, y: f32, slope: f32) -> (f32, f32, f32) {
     let w = biome_weights(x, z, y, slope);
     let mut c = [0.0f32; 3];
     for k in 0..7 {
@@ -410,6 +427,21 @@ fn biome_colour(x: f32, z: f32, y: f32, slope: f32) -> (f32, f32, f32) {
         let t = ((WATER_LEVEL - y) / 10.0).clamp(0.0, 1.0);
         for ch in 0..3 {
             c[ch] = lerp(c[ch], bed[ch], t);
+        }
+    }
+    (c[0], c[1], c[2])
+}
+
+/// The colour of the ground at a place on the planet, by the one rule.
+pub fn planet_colour(lat: f32, nt: f32, nm: f32, elev: f32, slope: f32,
+        warmth: f32) -> (f32, f32, f32) {
+    // `weights_from` reckons height in the flat world's `y`, where the sea is
+    // at WATER_LEVEL rather than at zero.
+    let w = weights_from(lat, nt, nm, elev + WATER_LEVEL, slope, warmth);
+    let mut c = [0.0f32; 3];
+    for k in 0..7 {
+        for ch in 0..3 {
+            c[ch] += BIOME_RGB[k][ch] * w[k];
         }
     }
     (c[0], c[1], c[2])

@@ -994,8 +994,15 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 
 	var ground := Sim.height_at(pos.x, pos.z)
 	agl = pos.y - ground
+	# The engine pulls a rigid body straight down; the planet pulls it toward
+	# its centre. Over this world those differ by up to eight tenths of a
+	# degree, so the correction is the difference between the two — small, but
+	# it is the difference between flying over a sphere and flying over a plate.
+	# Applied as an acceleration so it is independent of what the aeroplane
+	# weighs.
+	state.apply_central_force((Sim.gravity_at(pos) - Vector3.DOWN * 9.81) * mass)
 	vspeed = vel.y
-	var rho: float = RHO0 * exp(-maxf(pos.y, 0.0) / 8500.0)
+	var rho: float = RHO0 * exp(-maxf(Sim.altitude(pos), 0.0) / 8500.0)
 	var q := 0.5 * rho * speed * speed
 	ias = speed * sqrt(rho / RHO0)
 	mach = speed / (340.3 - 0.0039 * clampf(pos.y, 0.0, 11000.0))
@@ -1293,8 +1300,9 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 			_impact(maxf(vel.length(), 30.0))
 	if agl < -2.0:
 		_impact(200.0)
-	if pos.y < Sim.WATER_LEVEL and ground < Sim.WATER_LEVEL:
-		Effects.dust(get_tree().current_scene, Vector3(pos.x, Sim.WATER_LEVEL, pos.z), 8.0)
+	var sea_p: float = Sim.sea_at(pos.x, pos.z)
+	if pos.y < sea_p and ground < sea_p:
+		Effects.dust(get_tree().current_scene, Vector3(pos.x, sea_p, pos.z), 8.0)
 		_impact(200.0)
 
 	if debug_forces and Engine.get_physics_frames() % 120 == 0:
@@ -2340,11 +2348,12 @@ class Shell extends Node3D:
 				_burst(to)
 				return
 		var bed := Sim.height_at(to.x, to.z)
-		if to.y <= Sim.WATER_LEVEL and bed < Sim.WATER_LEVEL:
+		var sea_b: float = Sim.sea_at(to.x, to.z)
+		if to.y <= sea_b and bed < sea_b:
 			# a shell striking the sea goes off at the surface
 			Effects.splash(get_tree().current_scene,
-				Vector3(to.x, Sim.WATER_LEVEL, to.z), maxf(blast * 0.8, 5.0))
-			_burst(Vector3(to.x, Sim.WATER_LEVEL, to.z))
+				Vector3(to.x, sea_b, to.z), maxf(blast * 0.8, 5.0))
+			_burst(Vector3(to.x, sea_b, to.z))
 		elif to.y <= bed:
 			_burst(Vector3(to.x, bed, to.z))
 		elif life <= 0.0:

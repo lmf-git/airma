@@ -31,7 +31,6 @@ const KINDS := {
 ## and eight hundred metres a second is fast enough that the lead matters and
 ## slow enough that it can be led.
 const ALT := 70_000.0
-const ORBIT_R := 40_000.0
 const SPEED := 800.0
 
 var kind := "recon"
@@ -103,12 +102,20 @@ func _place(dt: float) -> void:
 	if not is_inside_tree():
 		return
 	_t += dt
-	var a: float = phase + _t * SPEED / ORBIT_R
-	var flat := Vector3(cos(a) * ORBIT_R, 0.0, sin(a) * ORBIT_R)
-	flat = flat.rotated(Vector3(0, 0, 1), incl)
-	global_position = centre + Vector3(flat.x, ALT + flat.y, flat.z)
+	# Round the planet, not round the airfield.
+	#
+	# This was a forty kilometre circle at a fixed seventy kilometres above the
+	# tangent plane -- an orbit for a flat world, and on a flat world it read
+	# perfectly well. On a planet the whole constellation is a dot: forty
+	# kilometres is a third of a degree of arc, so every satellite sat on top of
+	# the aerodrome at the middle of the map and none of them could be picked
+	# out. A great circle about the planet's centre instead, tipped by the
+	# inclination so the tracks are not all the same line.
+	var a: float = phase + _t * SPEED / orbit_r()
+	var p: Vector3 = _track(a)
+	global_position = Sim.planet_centre + p * orbit_r()
 	# nose along the track, wings across it
-	var ahead := Vector3(-sin(a), 0.0, cos(a)).rotated(Vector3(0, 0, 1), incl)
+	var ahead: Vector3 = _track(a + 0.001) - p
 	if ahead.length_squared() > 0.001:
 		look_at(global_position + ahead, Vector3.UP)
 
@@ -126,8 +133,18 @@ func is_alive() -> bool:
 	return alive
 
 func get_velocity() -> Vector3:
-	var a: float = phase + _t * SPEED / ORBIT_R
-	return Vector3(-sin(a), 0.0, cos(a)).rotated(Vector3(0, 0, 1), incl) * SPEED
+	var a: float = phase + _t * SPEED / orbit_r()
+	return (_track(a + 0.001) - _track(a)).normalized() * SPEED
+
+## How far out the track runs, from the planet's centre.
+func orbit_r() -> float:
+	return Sim.PLANET_R + ALT
+
+## A point on the track, as a unit direction from the planet's centre. The base
+## circle runs through the chart's own origin so the constellation passes over
+## the world that is built; the inclination turns each track off that line.
+func _track(a: float) -> Vector3:
+	return Vector3(sin(a), cos(a), 0.0).rotated(Vector3.UP, incl).normalized()
 
 func take_hit(amount: float, _from: Node = null) -> void:
 	if not alive:

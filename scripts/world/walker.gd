@@ -174,7 +174,7 @@ func exit_frame(scene: Node) -> void:
 	# ground at whatever that came to. A canopy above about fifty metres, which
 	# is the height below which one would not open anyway.
 	var agl: float = world_xf.origin.y - maxf(
-		Sim.height_at(world_xf.origin.x, world_xf.origin.z), Sim.WATER_LEVEL)
+		Sim.height_at(world_xf.origin.x, world_xf.origin.z), Sim.sea_at(world_xf.origin.x, world_xf.origin.z))
 	var jump: bool = agl > 50.0
 	frame.remove_child(self)
 	scene.add_child(self)
@@ -209,7 +209,7 @@ func _physics_process(delta: float) -> void:
 	# Falling out of a transport: a few seconds of freefall, then the canopy.
 	if _chute_at >= 0.0:
 		var agl2: float = global_position.y - maxf(
-			Sim.height_at(global_position.x, global_position.z), Sim.WATER_LEVEL)
+			Sim.height_at(global_position.x, global_position.z), Sim.sea_at(global_position.x, global_position.z))
 		if agl2 <= _chute_at or agl2 < 60.0:
 			_chute_at = -1.0
 			set_chute(true)

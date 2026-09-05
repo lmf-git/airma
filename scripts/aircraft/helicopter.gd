@@ -117,7 +117,8 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# were ending up 190 km underground, still reporting themselves alive.
 	if agl < -2.0:
 		_impact(200.0)
-	if pos.y < Sim.WATER_LEVEL and ground < Sim.WATER_LEVEL:
+	var sea_h: float = Sim.sea_at(pos.x, pos.z)
+	if pos.y < sea_h and ground < sea_h:
 		_impact(200.0)
 
 	state.apply_central_force(force)

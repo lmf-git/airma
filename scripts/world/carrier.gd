@@ -41,12 +41,16 @@ func build(at: Vector3, hdg: float) -> void:
 	# placed at y = 0 as well, while the water sits at WATER_LEVEL -- so the
 	# whole carrier floated twenty-six metres clear of the surface with its
 	# bottom on show. Everything else here is measured from the waterline.
-	position = Vector3(at.x, Sim.WATER_LEVEL, at.z)
+	position = Vector3(at.x, Sim.sea_at(at.x, at.z), at.z)
 	rotation.y = hdg
 	_hull()
 	_deck_markings()
 	_island()
 	_lights()
+	# Registered in the flat frame, not the world one: `Sim.height_at` folds a
+	# deck in before it drops the result onto the sphere, so a deck handed the
+	# curved height would have the drop taken off it twice and the landing
+	# surface would sit a hundred metres under the ship carrying it.
 	deck = Sim.register_deck(Vector3(at.x, 0, at.z), hdg,
 		Vector2(BEAM * 0.5 + 12.0, LEN * 0.5), Sim.WATER_LEVEL + DECK_Y)
 	for w in WIRES:
@@ -73,11 +77,20 @@ func _physics_process(delta: float) -> void:
 	if speed != 0.0:
 		position += Vector3(sin(heading), 0.0, -cos(heading)) * speed * delta
 		rotation.y = heading
+	# She floats where she is, not where she was built. The height was set once
+	# at build time, so steaming five kilometres further out left her thirty
+	# metres above her own water -- the sea falls away as she goes.
+	var wave: float = Sim.wave_at(position.x, position.z)
+	position.y = Sim.sea_at(position.x, position.z) + wave
 	if not deck.is_empty():
 		deck["origin"] = Vector3(position.x, 0.0, position.z)
 		deck["yaw"] = heading
 		deck["cos"] = cos(-heading)
 		deck["sin"] = sin(-heading)
+		# Flat frame, as it was registered: `height_at` drops it. The heave goes
+		# in here too, or an approach is flown to a deck the ship is no longer
+		# holding. She is 333 m on a 454 m swell, so it is about a metre.
+		deck["y"] = Sim.WATER_LEVEL + DECK_Y + wave
 
 func mount(on: bool) -> void:
 	occupied = on

@@ -47,6 +47,10 @@ var pylon_spots: Array = []
 ## colours, so the street grid has to exist before the ground is generated or
 ## the towns end up with invisible streets.
 func _ready() -> void:
+	_scat_clump.seed = 20260905
+	_scat_clump.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_scat_clump.frequency = SCAT_CLUMP_FREQ
+	_scat_clump.fractal_octaves = 2
 	current = self
 
 ## Where each town actually ended up, after being moved onto workable ground.
@@ -147,8 +151,12 @@ static func _land_score(c: Vector2, r: float) -> float:
 			if q.distance_to(c) > r:
 				continue
 			n += 1
-			var h := Sim.height_at(q.x, q.y)
-			if h > Sim.WATER_LEVEL + 30.0 and h < 1500.0:
+			# How high the ground stands over its own sea, which is the same
+			# number in either frame -- the drop cancels. A ceiling written as
+			# a world y instead put the whole band 1300 m out of place at the
+			# far corner of the map, and moved where towns can be sited.
+			var h: float = Sim.height_at(q.x, q.y) - Sim.sea_at(q.x, q.y)
+			if h > 30.0 and h < 1535.0:
 				dry += 1.0
 	return dry / maxf(float(n), 1.0)
 
@@ -190,6 +198,9 @@ static func find_regions() -> Array:
 
 func _site_towns() -> void:
 	sites.clear()
+	# Which ground is reachable ground. A town across a strait is a town the
+	# trunk network has to swim to.
+	Sim.build_landmass()
 	var pads: Array = []
 	for t in TOWNS:
 		var want := Vector2(float(t[0].x), float(t[0].z))
@@ -200,8 +211,9 @@ func _site_towns() -> void:
 		# was asked for never was -- so a settlement wanted somewhere that
 		# turned out to be under water stayed there unless something else beat
 		# it on roughness, and open sea is very smooth.
-		if Sim.height_at(want.x, want.y) < Sim.WATER_LEVEL + 25.0 \
-				or not Sim.clear_of_airfield(want.x, want.y):
+		if Sim.height_at(want.x, want.y) < Sim.sea_at(want.x, want.y) + 25.0 \
+				or not Sim.clear_of_airfield(want.x, want.y) \
+				or not Sim.on_home_land(want.x, want.y):
 			best_rough = 1e9
 		var step: float = r * 0.45
 		for i in range(-3, 4):
@@ -210,9 +222,13 @@ func _site_towns() -> void:
 					continue
 				var q := want + Vector2(float(i), float(j)) * step
 				# still near the airfield's valley, still on dry land
-				if Sim.height_at(q.x, q.y) < Sim.WATER_LEVEL + 25.0:
+				if Sim.height_at(q.x, q.y) < Sim.sea_at(q.x, q.y) + 25.0:
 					continue
 				if not Sim.clear_of_airfield(q.x, q.y):
+					continue
+				# and on the same land as everything else, or the road to it
+				# has to cross water
+				if not Sim.on_home_land(q.x, q.y):
 					continue
 				var rough := Sim.site_roughness(q, r)
 				if rough < best_rough:
@@ -238,7 +254,7 @@ func _site_towns() -> void:
 			for i2 in range(-3, 4):
 				for j2 in range(-3, 4):
 					var q2: Vector2 = want2 + Vector2(float(i2), float(j2)) * (rad * 0.7)
-					if Sim.height_at(q2.x, q2.y) < Sim.WATER_LEVEL + 30.0:
+					if Sim.height_at(q2.x, q2.y) < Sim.sea_at(q2.x, q2.y) + 30.0:
 						continue
 					var rg: float = Sim.site_roughness(q2, rad)
 					if rg < rough2:
@@ -294,7 +310,7 @@ func _site_towns() -> void:
 			for i3 in range(-3, 4):
 				for j3 in range(-3, 4):
 					var q3: Vector2 = want3 + Vector2(float(i3), float(j3)) * 1100.0
-					if Sim.height_at(q3.x, q3.y) < Sim.WATER_LEVEL + 30.0:
+					if Sim.height_at(q3.x, q3.y) < Sim.sea_at(q3.x, q3.y) + 30.0:
 						continue
 					var rg3: float = Sim.site_roughness(q3, rad3)
 					if rg3 < rough3:
@@ -312,7 +328,23 @@ func _site_towns() -> void:
 		if not chain.is_empty():
 			_free_chains.append([ba, hb, chain])
 	var t_rp := Time.get_ticks_msec()
-	Sim.register_town_pads(pads)
+	# Sites whose ground is under water get no platform, so they get no town:
+	# a settlement is not a reason to raise an island out of the sea. `sites`
+	# and `pads` are built in step, so the survivors index the same way.
+	var kept_pads: Array = Sim.register_town_pads(pads)
+	if kept_pads.size() < pads.size():
+		var keep: Dictionary = {}
+		for k in kept_pads:
+			keep[(k as Dictionary)["c"]] = true
+		var dry_sites: Array = []
+		for si in sites.size():
+			var sc = (sites[si] as Dictionary).get("c")
+			if keep.has(sc):
+				dry_sites.append(sites[si])
+		if Sim.debug_roads:
+			print("[plan]   %d of %d sites were under water and are not built" % [
+				pads.size() - kept_pads.size(), pads.size()])
+		sites = dry_sites
 	if Sim.debug_roads:
 		print("[plan]   register_town_pads (%d): %d ms" % [pads.size(),
 			Time.get_ticks_msec() - t_rp])
@@ -626,7 +658,7 @@ func _town_detail() -> void:
 				for sx in [-1.0, 1.0]:
 					var q: Vector2 = a + dir * along + side * (sx * 9.5)
 					var gy: float = Terrain.surface_height(q.x, q.y)
-					if gy < Sim.WATER_LEVEL + 1.0:
+					if gy < Sim.sea_at(q.x, q.y) + 1.0:
 						continue
 					var xf := Transform3D(Basis(Vector3.UP,
 						atan2(dir.x, -dir.y)), Vector3(q.x, gy, q.y))
@@ -761,7 +793,7 @@ func _landmarks() -> void:
 		# out from where it was wanted until there is dry ground under it.
 		var at: Vector2 = lm["at"]
 		var g: float = Terrain.surface_height(at.x, at.y)
-		if g < Sim.WATER_LEVEL + 6.0:
+		if g < Sim.sea_at(at.x, at.y) + 6.0:
 			var found := false
 			for ring in range(1, 60):
 				var step: float = float(ring) * 2500.0
@@ -771,7 +803,7 @@ func _landmarks() -> void:
 					if absf(q.x) > Sim.WORLD_HALF or absf(q.y) > Sim.WORLD_HALF:
 						continue
 					var gg: float = Terrain.surface_height(q.x, q.y)
-					if gg >= Sim.WATER_LEVEL + 6.0:
+					if gg >= Sim.sea_at(q.x, q.y) + 6.0:
 						at = q
 						g = gg
 						found = true
@@ -1173,7 +1205,8 @@ func _farms() -> void:
 		var pz := _rng.randf_range(-14000.0, 14000.0)
 		if absf(px) < 700.0 and absf(pz) < 2200.0:
 			continue
-		if not Sim.buildable(px, pz, 0.93, 6.0) or Sim.height_at(px, pz) > 260.0:
+		if not Sim.buildable(px, pz, 0.93, 6.0) \
+				or Sim.height_at(px, pz) - Sim.sea_at(px, pz) > 295.0:
 			continue
 		if not Sim.clear_of_airfield(px, pz) or _inside_town(Vector2(px, pz)):
 			continue
@@ -1195,10 +1228,25 @@ const SCAT_RANGE := {"tree": 6200.0, "pine": 7000.0, "rock": 4600.0, "bush": 280
 
 ## Species and density follow the biome field, so forest belts, steppe and the
 ## snow line all read differently on the ground.
+## How much of a biome's ground carries something, before clumping.
+##
+## Thinned by about half. Every candidate that passed was planted, which put an
+## even carpet of trees across whole biomes -- and country does not look like
+## that from the air. What reads as woodland is a *pattern*: thickets, glades
+## and edges. The numbers below set how much there is; `SCAT_CLUMP` sets where.
 const SCAT_DENSITY := {
-	"forest": 1.0, "grass": 0.62, "steppe": 0.38, "marsh": 0.46,
-	"rock": 0.26, "snow": 0.28, "sand": 0.12,
+	"forest": 0.62, "grass": 0.34, "steppe": 0.20, "marsh": 0.26,
+	"rock": 0.15, "snow": 0.16, "sand": 0.07,
 }
+## Where it clumps. A slow field over the ground, so trees gather into stands
+## with open country between them instead of being spread evenly over
+## everything that will take them.
+const SCAT_CLUMP_FREQ := 0.0013
+const SCAT_CLUMP_LO := 0.34
+const SCAT_CLUMP_HI := 0.74
+## What the thickest part of a stand gets back, so clumping thins the open
+## ground rather than the whole world.
+const SCAT_CLUMP_GAIN := 1.9
 const SCAT_SPECIES := {
 	"forest": ["tree", "tree", "tree", "pine", "bush"],
 	"grass": ["tree", "bush", "bush", "rock"],
@@ -1225,6 +1273,10 @@ var _scat_pts := PackedVector2Array()
 var _scat_h := PackedFloat32Array()
 var _scat_slope := PackedFloat32Array()
 var _scat_surf := PackedFloat32Array()
+
+## The clump field. Built once and read from the workers, which is safe because
+## nothing writes it after setup.
+static var _scat_clump := FastNoiseLite.new()
 
 const SCAT_TASKS := 24
 ## Per slice, so the total is a round 150,000 without an integer division that
@@ -1318,6 +1370,9 @@ func _scat_slice(t: int) -> void:
 		if absf(x) < 330.0 and absf(z) < 2150.0:
 			continue                                        # keep the field clear
 		var y: float = _scat_h[base + i]
+		# Still the flat frame here: this is the raw field, so it is the flat
+		# sea it gets compared against. The drop goes on below, once the height
+		# we actually stand the thing on has been picked.
 		if y < Sim.WATER_LEVEL + 2.0 or y > 2400.0:
 			continue
 		# On the surface as it is drawn, not as the field computes it. The two
@@ -1326,13 +1381,24 @@ func _scat_slice(t: int) -> void:
 		# the air above the triangles -- which is what you see looking up at the
 		# underside of the ground.
 		y = _scat_surf[base + i]
+		# The field and the mesh both work in the flat frame; the ground is bent
+		# down onto the planet in the terrain shader. Nothing else is, so every
+		# thing we stand on it has to be dropped here or it hangs in the air --
+		# a hundred metres of it by thirty kilometres out.
+		y -= Sim.planet_drop(x, z)
 		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
 			continue
 		var slope: float = _scat_slope[base + i]
 		if slope < 0.55:
 			continue                                        # nothing clings to a cliff
 		var biome := Sim.biome_kind(x, z, y, slope)
-		if rng.randf() > float(SCAT_DENSITY.get(biome, 0.3)):
+		# Thickets and glades, not a carpet. The clump field is slow -- about
+		# 800 m across -- so a stand is the size of a wood rather than the size
+		# of a bush, and the open ground between stands is genuinely open.
+		var clump: float = (_scat_clump.get_noise_2d(x, z) + 1.0) * 0.5
+		var dens: float = float(SCAT_DENSITY.get(biome, 0.3)) \
+			* smoothstep(SCAT_CLUMP_LO, SCAT_CLUMP_HI, clump) * SCAT_CLUMP_GAIN
+		if rng.randf() > dens:
 			continue
 		var options: Array = SCAT_SPECIES.get(biome, ["bush"])
 		var kind: String = options[rng.randi() % options.size()]
@@ -1455,10 +1521,24 @@ func _build_roads() -> void:
 	var surf: PackedVector3Array = out[0]
 	var kerb: PackedVector3Array = out[1]
 	_stats["road_tris"] = int((surf.size() + kerb.size()) / 3.0)
-	add_child(MeshKit.mi(_flat_mesh(kerb,
-		MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)), "Kerbs"))
-	add_child(MeshKit.mi(_flat_mesh(surf,
-		MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)), "Roads"))
+	# Neither casts a shadow, and the saving is not small.
+	#
+	# A road is a ribbon lying on the ground: its shadow is cast onto the very
+	# surface it is painted on, from a metre above it at most, so it is
+	# invisible in principle and z-fighting in practice. Measured, these two
+	# meshes were 1.52 M of the 1.85 M triangles in the whole world that were
+	# casting shadows -- eighty-two per cent of the shadow cost, for nothing you
+	# can see. A shadow-casting mesh is drawn again for every split of the
+	# directional light, so this is four passes over a million and a half
+	# triangles, every frame.
+	var kerb_mi := MeshKit.mi(_flat_mesh(kerb,
+		MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)), "Kerbs")
+	kerb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(kerb_mi)
+	var road_mi := MeshKit.mi(_flat_mesh(surf,
+		MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)), "Roads")
+	road_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(road_mi)
 
 ## Viaducts and tunnel portals.
 ##
@@ -1490,8 +1570,13 @@ func _build_structures() -> void:
 				continue
 			var dir := (b2 - a2) / run
 			var nrm := Vector2(-dir.y, dir.x)
-			var ya: float = ys[i]
-			var yb: float = ys[i + 1]
+			# The surveyed profile is in the flat frame, like everything the
+			# router produces. The piers under this deck reach down to
+			# `height_at`, which is not -- so left flat the deck floated a
+			# kilometre over the country at the far end of the network and
+			# stood on kilometre-high legs.
+			var ya: float = ys[i] - Sim.planet_drop(a2.x, a2.y)
+			var yb: float = ys[i + 1] - Sim.planet_drop(b2.x, b2.y)
 			# the running surface
 			var p0 := Vector3(a2.x + nrm.x * DECK_HALF, ya, a2.y + nrm.y * DECK_HALF)
 			var p1 := Vector3(a2.x - nrm.x * DECK_HALF, ya, a2.y - nrm.y * DECK_HALF)
@@ -1536,7 +1621,7 @@ func _build_structures() -> void:
 			var at: Vector2 = tp[endi]
 			var toward: Vector2 = tp[1] if endi == 0 else tp[tp.size() - 2]
 			var d2 := (at - toward).normalized()
-			var y2: float = ty[endi]
+			var y2: float = ty[endi] - Sim.planet_drop(at.x, at.y)
 			# a headwall standing in the hillside, with the bore cut into it
 			var face := at + d2 * 2.0
 			var side := Vector2(-d2.y, d2.x)
@@ -1589,13 +1674,19 @@ func _off_the_road(q: Vector2, a: Vector2, b: Vector2) -> Vector2:
 	var nrm := Vector2(-dir.y, dir.x)
 	for step in [22.0, -22.0, 40.0, -40.0, 62.0, -62.0, 90.0, -90.0]:
 		var t: Vector2 = q + nrm * float(step)
-		if Sim.height_at(t.x, t.y) < Sim.WATER_LEVEL + 3.0:
+		if Sim.height_at(t.x, t.y) < Sim.sea_at(t.x, t.y) + 3.0:
 			continue
 		if not Sim.clear_of_airfield(t.x, t.y) or _inside_town(t):
 			continue
 		if Sim.clear_of_roads(t.x, t.y, 12.0):
 			return t
 	return Vector2.INF
+
+## Close a run of pylons off. A run of one carries no wire and is a tower
+## standing on its own in a field, so it is dropped.
+func _pylon_break(runs: Array, pts: Array) -> void:
+	if pts.size() >= 2:
+		runs.append(pts.duplicate())
 
 func _pylon_mesh() -> ArrayMesh:
 	var st := MeshKit.begin()
@@ -1617,6 +1708,17 @@ func _powerlines() -> void:
 	var xf := []
 	var wire := MeshKit.begin()
 	for route in PYLON_ROUTES:
+		# Runs, not one list of points.
+		#
+		# A pylon that cannot stand -- in water, on the airfield, inside a town,
+		# or on ground too steep to found one on -- used to be dropped from the
+		# list, and the wire was then strung from the pylon before it to the
+		# pylon after it. That is a conductor spanning two hundred metres of
+		# open air with nothing holding it up, and across a lake it was
+		# kilometres of it. A line that cannot be carried across something stops
+		# at the edge of it and starts again on the far side, which is what a
+		# real one does.
+		var runs: Array = []
 		var pts: Array = []
 		for i in range(route.size() - 1):
 			var a: Vector2 = route[i]
@@ -1625,9 +1727,19 @@ func _powerlines() -> void:
 			var n := maxi(int(span / 190.0), 1)
 			for k in n:
 				var q: Vector2 = a.lerp(b, float(k) / float(n))
-				if Sim.height_at(q.x, q.y) < Sim.WATER_LEVEL + 3.0:
+				if Sim.height_at(q.x, q.y) < Sim.sea_at(q.x, q.y) + 3.0:
+					_pylon_break(runs, pts)
+					pts = []
 					continue
 				if not Sim.clear_of_airfield(q.x, q.y) or _inside_town(q):
+					_pylon_break(runs, pts)
+					pts = []
+					continue
+				# Nothing is founded on a cliff. A tower needs a base eight
+				# metres across, and on ground this steep it stands on one leg.
+				if Sim.normal_at(q.x, q.y).dot(Vector3.UP) < 0.86:
+					_pylon_break(runs, pts)
+					pts = []
 					continue
 				# A pylon has a base about eight metres across and stands
 				# thirty-four metres up; putting one in the carriageway is worse
@@ -1636,6 +1748,8 @@ func _powerlines() -> void:
 				if not Sim.clear_of_roads(q.x, q.y, 12.0):
 					var moved := _off_the_road(q, a, b)
 					if moved == Vector2.INF:
+						_pylon_break(runs, pts)
+						pts = []
 						continue
 					q = moved
 				pts.append(q)
@@ -1643,21 +1757,33 @@ func _powerlines() -> void:
 		# them. Appended unconditionally it was the one that ended up in the
 		# carriageway: 1 of 128.
 		var last: Vector2 = route[route.size() - 1]
-		if Sim.clear_of_roads(last.x, last.y, 12.0):
+		if Sim.height_at(last.x, last.y) < Sim.sea_at(last.x, last.y) + 3.0:
+			_pylon_break(runs, pts)
+			pts = []
+		elif Sim.clear_of_roads(last.x, last.y, 12.0):
 			pts.append(last)
 		else:
 			var shifted := _off_the_road(last, route[route.size() - 2], last)
 			if shifted != Vector2.INF:
 				pts.append(shifted)
-		var prev := Vector3.INF
-		for q in pts:
-			var y: float = Sim.height_at(q.x, q.y)
-			xf.append(Transform3D(Basis(Vector3.UP, 0.0), Vector3(q.x, y - 1.0, q.y)))
-			pylon_spots.append(Vector3(q.x, y, q.y))
-			var top := Vector3(q.x, y + 23.8, q.y)
-			if prev != Vector3.INF:
-				_catenary(wire, prev, top)
-			prev = top
+		_pylon_break(runs, pts)
+		for r in runs:
+			var prev := Vector3.INF
+			for q in (r as Array):
+				var qq: Vector2 = q
+				var y: float = Sim.height_at(qq.x, qq.y)
+				xf.append(Transform3D(Basis(Vector3.UP, 0.0),
+					Vector3(qq.x, y - 1.0, qq.y)))
+				pylon_spots.append(Vector3(qq.x, y, qq.y))
+				var top := Vector3(qq.x, y + 23.8, qq.y)
+				if prev != Vector3.INF:
+					_catenary(wire, prev, top)
+					# The longest thing a conductor is asked to cross. A span
+					# that runs away is the run-breaking having failed, and it
+					# is invisible in a count of towers.
+					_stats["pylon_span"] = maxf(float(_stats.get(
+						"pylon_span", 0.0)), prev.distance_to(top))
+				prev = top
 	_scatter(mesh, xf, "Pylons")
 	add_child(MeshKit.mi(MeshKit.finish(wire, MeshKit.mat(Color(0.07, 0.07, 0.08), 0.9, 0.1)), "Wires"))
 	_stats["pylons"] = xf.size()
@@ -1697,7 +1823,7 @@ func _comms_masts() -> void:
 	var xf := []
 	for q in spots:
 		var y := Sim.height_at(q.x, q.y)
-		if y < Sim.WATER_LEVEL + 5.0 or not Sim.clear_of_airfield(q.x, q.y) or _inside_town(q):
+		if y < Sim.sea_at(q.x, q.y) + 5.0 or not Sim.clear_of_airfield(q.x, q.y) or _inside_town(q):
 			continue
 		xf.append(Transform3D(Basis(), Vector3(q.x, y, q.y)))
 		var beacon := MeshInstance3D.new()
@@ -1755,7 +1881,7 @@ func _windfarm() -> void:
 	for i in 9:
 		var q := ridge + Vector2(float(i % 3) * 420.0, floorf(float(i) / 3.0) * 480.0)
 		var y := Sim.height_at(q.x, q.y)
-		if y < Sim.WATER_LEVEL + 20.0 or not Sim.clear_of_airfield(q.x, q.y):
+		if y < Sim.sea_at(q.x, q.y) + 20.0 or not Sim.clear_of_airfield(q.x, q.y):
 			continue
 		var t := Turbine.new()
 		t.build()
@@ -1813,5 +1939,10 @@ class Turbine extends Node3D:
 			MeshKit.mat(Color(0.90, 0.91, 0.92), 0.6, 0.1)), "Rotor"))
 
 	func _process(delta: float) -> void:
+		var _ps := Sim.prof_at()
+		_tick(delta)
+		Sim.prof_end(&"scenery.process", _ps)
+
+	func _tick(delta: float) -> void:
 		if hub:
 			hub.rotate_z(delta * 0.85)

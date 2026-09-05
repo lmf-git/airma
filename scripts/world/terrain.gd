@@ -69,6 +69,10 @@ static var _top: Dictionary = {}
 ## couple of hundred metres of water and, from a submarine, in the dark.
 const SEABED_DETAIL := 0.12
 
+## Every ground material, so the season can be pushed to all of them. The
+## chunks are built as the tree splits, so there is no single material to hold.
+var _ground_mats: Array = []
+
 static func span_at(depth: int) -> float:
 	return ROOT_SPAN / float(1 << depth)
 
@@ -84,8 +88,9 @@ static func node_error(depth: int, ix: int, iz: int) -> float:
 	if _err.has(k):
 		return float(_err[k])
 	var span := span_at(depth)
-	var st: PackedFloat32Array = Sim.native.node_stats(
-		PackedFloat32Array([float(ix) * span, float(iz) * span, span]), CELLS)
+	var q := PackedFloat32Array([float(ix) * span, float(iz) * span, span])
+	var st: PackedFloat32Array = Sim.native.node_stats_globe(q, CELLS) \
+		if Sim.globe else Sim.native.node_stats(q, CELLS)
 	_err[k] = st[0]
 	_top[k] = st[1]
 	return st[0]
@@ -118,6 +123,15 @@ static func node_top(depth: int, ix: int, iz: int) -> float:
 ## directions exact, and the shelf of built chunks -- which is what actually
 ## fixed the churn -- absorbs the crossing for nothing.
 const HYST := 1.0
+## Asking for chunks before they are needed was tried and made it worse.
+##
+## A chunk hands over invisibly only if it appears at the far end of its own
+## blend, still drawn in its parent's shape, and 86 of 1222 were arriving half
+## unfolded. The obvious fix is to order them sooner -- but the wanted set grows
+## with the cube of the radius, so asking a quarter early put 715 chunks in the
+## world instead of 505 and the longer queue swallowed the head start whole:
+## 191 of 1518 arrived mid-blend, more than twice as many. The limit is the
+## queue's throughput, not when it is asked.
 
 ## Which nodes were subdivided last time the tree was walked. Read during a walk
 ## and only replaced at the end of it, so every decision inside one walk -- the
@@ -209,6 +223,8 @@ var stats := {"chunks": 0, "tris": 0, "seam": 0.0}
 
 const GROUND_SHADER := """
 shader_type spatial;
+// Radius of the planet the ground is drawn as a piece of. Zero draws it flat.
+uniform float curve_radius = 6371000.0;
 // Drawn from underneath as well. Terrain faces up, so with back faces culled
 // every triangle of the seabed is a back face when you are below it: from a
 // submarine you looked straight through the ground at the sky.
@@ -217,6 +233,13 @@ render_mode diffuse_burley, specular_schlick_ggx, cull_disabled;
 // How far out the fine grain is worth drawing. Beyond this the ground goes back
 // to flat biome colour, which is all you can resolve anyway and costs nothing.
 uniform float detail_fade = 1100.0;
+
+// Crossfade against the planet body: 1 draws the ground, 0 leaves it to the
+// sphere. Done by dropping pixels on an interleaved gradient rather than by
+// turning the ground transparent -- the ground would then have to be sorted
+// against itself, and a quadtree of chunks has no sort order worth the name.
+// Dithered it stays opaque, keeps writing depth, and simply thins out.
+uniform float ground_fade = 1.0;
 
 // Roads and made ground, baked once into a mask and sampled per fragment.
 //
@@ -248,6 +271,16 @@ uniform vec3 made_ground : source_color = vec3(0.56, 0.55, 0.53);
 // a cell.
 uniform sampler2D climate : filter_linear;
 uniform float world_half = 600000.0;
+// The planet's frame, for working out where a fragment is on it.
+uniform float round_world = 0.0;
+uniform float planet_r = 6371000.0;
+uniform float climate_squeeze = 7.5;
+uniform float season = 0.0;
+uniform float season_amp = 0.12;
+uniform vec3 chart_origin = vec3(0.0, 1.0, 0.0);
+uniform vec3 chart_east = vec3(1.0, 0.0, 0.0);
+uniform vec3 chart_south = vec3(0.0, 0.0, 1.0);
+uniform vec3 planet_north = vec3(0.0, 0.0, -1.0);
 uniform float water_level = -35.0;
 
 varying vec3 wpos;
@@ -277,12 +310,51 @@ const vec3 C_MARSH  = vec3(0.19, 0.28, 0.20);
 
 // `upness` is the normal's y: 1 is flat ground, 0 is a wall. `cl` is the
 // climate sample. Returns the colour in sRGB, as the palette is authored.
-vec3 biome_at(vec2 xz, float y, float upness, vec2 cl) {
-	float lat = clamp(abs(xz.y) / (world_half * 0.85), 0.0, 1.0);
+vec3 biome_at(vec2 xz, float y_in, float upness, vec2 cl) {
+	// Height above the sea under this point, not the world `y`.
+	//
+	// The two are the same on a flat world and are not on a planet: the ground
+	// falls away from the middle of the chart, so a place's height -- and with
+	// it its snow line, its treeline and its beaches -- depended on where the
+	// chart happened to be centred. `Sim.biome_weights` makes the same
+	// correction, and the two have to agree or the ground is not the colour the
+	// game thinks it is.
+	float y = y_in;
+	if (round_world > 0.5) {
+		float rr = length(xz);
+		y += planet_r * (1.0 - cos(rr / planet_r));
+	}
+	// Where this is on the planet, not where it is on the chart. See
+	// `Sim.climate_lat`: the flat world reads the pair's `z`, which makes a
+	// place's climate depend on where the chart happens to be centred.
+	float lat;
+	if (round_world > 0.5) {
+		float s = max(length(xz), 1.0);
+		float ang = s / planet_r;
+		vec3 d = chart_origin * cos(ang)
+			+ (chart_east * (xz.x / s) + chart_south * (xz.y / s)) * sin(ang);
+		lat = clamp(abs(dot(normalize(d), planet_north)) * climate_squeeze,
+			0.0, 1.0);
+	} else {
+		lat = clamp(abs(xz.y) / (world_half * 0.85), 0.0, 1.0);
+	}
+	// What the season is worth here. Nothing at the equator, most at the poles,
+	// and opposite signs either side of the line -- which is the difference
+	// between one hemisphere having winter and both of them having it at once.
+	// `slat` is the signed latitude; `lat` above is it folded.
+	float warmth = 0.0;
+	if (round_world > 0.5) {
+		float s2 = max(length(xz), 1.0);
+		float ang2 = s2 / planet_r;
+		vec3 d2 = chart_origin * cos(ang2)
+			+ (chart_east * (xz.x / s2) + chart_south * (xz.y / s2)) * sin(ang2);
+		warmth = season * dot(normalize(d2), planet_north) * season_amp;
+	}
 	float band = 1.0 - lat * 1.25;
 	float belt = clamp(1.0 - abs(lat - 0.32) * 3.0, 0.0, 1.0);
 	float temp = clamp(band * 0.70 + cl.r * 0.42
-		- clamp((y - 300.0) / 2200.0, 0.0, 1.0) * 0.85, 0.0, 1.0);
+		- clamp((y - 300.0) / 2200.0, 0.0, 1.0) * 0.85
+		+ warmth, 0.0, 1.0);
 	float moist = clamp(cl.g
 		+ clamp(1.0 - abs(y - water_level) / 900.0, 0.0, 1.0) * 0.25
 		- belt * 0.66, 0.0, 1.0);
@@ -359,6 +431,29 @@ void vertex() {
 	// straddling a triangle edge gets a normal belonging to neither -- which
 	// speckles the whole surface and is worse than the fault it fixed.
 	NORMAL = normalize(mix(NORMAL, TANGENT, m));
+	// Planet curvature, applied to the drawn surface only.
+	//
+	// The simulation is a height field on a plane and everything in it — every
+	// road wheel's contact, every missile's ground test, the router, the
+	// survey, the water plane — is written against that. What curvature does is
+	// bend the ground AWAY from the viewer with distance, which is what a
+	// planet looks like: the horizon drops, and something far off goes below it
+	// feet first instead of shrinking to a dot on a flat plate.
+	//
+	// Falling away as d^2 / 2R is the exact sagitta of a sphere of radius R for
+	// small angles, so with R set to the Earth's this is not an approximation of
+	// the curve, it IS the curve — it is only the physics that stays flat.
+	// About the WORLD ORIGIN, not the camera. Curving away from the viewer is
+	// the cheap trick that keeps whoever is looking permanently on top of the
+	// hill — it looks right and is a lie, and worse, it cannot agree with the
+	// physics, because `Sim.height_at` has to answer the same question without
+	// knowing where anyone is standing. Both now drop by exactly d^2/2R from
+	// the same fixed point, so the ground you see and the ground you land on
+	// are the same surface.
+	if (curve_radius > 0.0) {
+		vec3 wv = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+		VERTEX.y -= (wv.x * wv.x + wv.z * wv.z) / (2.0 * curve_radius);
+	}
 	// The colour needs no morph of its own any more. It used to be carried per
 	// vertex and blended toward the parent level's colour through a hand-over;
 	// now the fragment stage works it out from this position and this normal,
@@ -369,6 +464,13 @@ void vertex() {
 }
 
 void fragment() {
+	if (ground_fade < 0.999) {
+		float ign = fract(52.9829189 * fract(dot(FRAGCOORD.xy,
+			vec2(0.06711056, 0.00583715))));
+		if (ground_fade <= ign) {
+			discard;
+		}
+	}
 	// underside: the surface faces up, so light it with the normal turned round
 	// rather than as though the sun were shining up through it
 	if (!FRONT_FACING) {
@@ -438,7 +540,48 @@ func _ground_material() -> ShaderMaterial:
 	m.set_shader_parameter("climate", _bake_climate())
 	m.set_shader_parameter("world_half", Sim.WORLD_HALF)
 	m.set_shader_parameter("water_level", Sim.WATER_LEVEL)
+	# Who bends the ground onto the planet.
+	#
+	# On the flat world the field is a plane and the shader curves it. On the
+	# planet the field is already a function of a direction, so the heights come
+	# back curved and the shader must leave them alone -- bending them a second
+	# time drops the horizon twice as fast as it should and the ground closes
+	# over your head at a hundred kilometres.
+	m.set_shader_parameter("curve_radius", 0.0 if Sim.globe else Sim.PLANET_R)
+	_climate_frame(m)
 	return m
+
+## Tell the ground where it is on the planet, so its climate can be a fact about
+## the place rather than about the chart. Called again whenever the chart moves.
+func _climate_frame(m: ShaderMaterial) -> void:
+	m.set_shader_parameter("round_world", 1.0 if Sim.globe else 0.0)
+	m.set_shader_parameter("planet_r", Sim.PLANET_R)
+	m.set_shader_parameter("climate_squeeze", Sim.CLIMATE_SQUEEZE)
+	m.set_shader_parameter("season_amp", Sim.SEASON_AMP)
+	m.set_shader_parameter("season", Sim.season)
+	_ground_mats.append(m)
+	m.set_shader_parameter("chart_origin", Sim.chart_origin)
+	m.set_shader_parameter("chart_east", Sim.chart_east)
+	m.set_shader_parameter("chart_south", Sim.chart_south)
+	m.set_shader_parameter("planet_north", Sim.PLANET_NORTH)
+
+## The chart has moved: the ground's idea of where it is has moved with it.
+func rechart() -> void:
+	if _mat == null:
+		return
+	_climate_frame(_mat)
+	# and the climate picture itself, which is drawn over the ground the chart
+	# is on rather than over a fixed square of world
+	if Sim.globe:
+		_mat.set_shader_parameter("climate", _bake_climate())
+
+## How much of the ground to draw, against the planet body fading in behind it.
+## Both surfaces are told, or the sea stays behind after the land has gone.
+func set_ground_fade(f: float) -> void:
+	if _mat != null:
+		_mat.set_shader_parameter("ground_fade", f)
+	if _sea_mat != null:
+		_sea_mat.set_shader_parameter("ground_fade", f)
 
 const CLIMATE_N := 1024               # texels across the whole world
 
@@ -453,12 +596,19 @@ func _bake_climate() -> ImageTexture:
 	var n := CLIMATE_N
 	var t0 := Time.get_ticks_msec()
 	var buf: PackedByteArray
-	var cached: Variant = WorldBake.get_baked("climate_%d" % n)
-	if cached is PackedByteArray and (cached as PackedByteArray).size() == n * n * 4:
-		buf = cached
+	# On the planet this is a picture of the country under the chart, and the
+	# chart moves -- so it is neither the same picture as last time nor worth
+	# keeping on disk.
+	if Sim.globe:
+		buf = Sim.native.climate_map_globe(n, Sim.WORLD_HALF)
 	else:
-		buf = Sim.native.climate_map(n, Sim.WORLD_HALF)
-		WorldBake.put("climate_%d" % n, buf)
+		var cached: Variant = WorldBake.get_baked("climate_%d" % n)
+		if cached is PackedByteArray \
+				and (cached as PackedByteArray).size() == n * n * 4:
+			buf = cached
+		else:
+			buf = Sim.native.climate_map(n, Sim.WORLD_HALF)
+			WorldBake.put("climate_%d" % n, buf)
 	stats["climate_ms"] = Time.get_ticks_msec() - t0
 	var img := Image.create_from_data(n, n, false, Image.FORMAT_RGH, buf)
 	if OS.has_feature("headless") or OS.is_debug_build():
@@ -602,6 +752,9 @@ var _retire_key: Dictionary = {}
 ## What the last look at the tree asked for, so a chunk that finishes building
 ## after the viewer has moved on is not hung in the tree anyway.
 var _want_keys: Dictionary = {}
+## Whether the world has been brought fully up to date at least once. Until it
+## has, a chunk arriving is the world being built rather than a hand-over.
+var _settled := false
 
 func build() -> void:
 	prepare()
@@ -808,7 +961,17 @@ func recentre(eye: Vector3, immediate := false) -> void:
 	# along the flight path is what actually gets chunks built early.
 	if not immediate and _centre.distance_squared_to(eye) < 14400.0:
 		return
+	# A jump is not a hand-over. `immediate` is how the world is told the eye
+	# has been put somewhere rather than flown there -- a teleport, a respawn, a
+	# harness setting up -- and everything that arrives afterwards is the world
+	# being built at the new place, from nothing, with nothing to pop from. Left
+	# counted, a single teleport contributed 87 "pops" to a 22 km run that had
+	# not started yet.
+	if immediate:
+		_settled = false
+	var _pw := Sim.prof_at()
 	var want := _wanted(eye)
+	Sim.prof_end(&"terrain.tree", _pw)
 	# Retired, not freed. Rebuilds are metered at a few a frame, so dropping a
 	# chunk the instant it falls out of the wanted set left a hole in the ground
 	# for however many frames it took to get to its replacement -- terrain
@@ -903,6 +1066,12 @@ func _job_dist(a: Array, eye: Vector3) -> float:
 ## never blocks. Without one -- at load, and in the harnesses -- it runs the
 ## queue to the end before returning, still on the pool.
 func flush_pending(budget := -1) -> int:
+	var _pf := Sim.prof_at()
+	var made := _flush_inner(budget)
+	Sim.prof_end(&"terrain.build", _pf)
+	return made
+
+func _flush_inner(budget: int) -> int:
 	var made := _collect()
 	if budget < 0:
 		while not _pending.is_empty() or _batch_id != -1:
@@ -912,6 +1081,10 @@ func flush_pending(budget := -1) -> int:
 				_batch_done = true
 			made += _collect()
 		stats["chunks"] = _live.size()
+		# The world is now standing: everything wanted is up. Anything that
+		# arrives after this is replacing something, which is the only kind of
+		# arrival that can be seen to happen.
+		_settled = true
 		return made
 	if _batch_id == -1:
 		_dispatch(budget)
@@ -1071,7 +1244,16 @@ func _commit(job: Array, built: Variant) -> MeshInstance3D:
 		# back as the same surface with a differently conformed edge -- nothing
 		# moves, nothing pops, and counting those as appearances buried the real
 		# number under twice as many non-events.
-		if first_ever:
+		# ...and only once the world is standing.
+		#
+		# A pop is a *visible change*, and that needs a before as well as an
+		# after. At load the whole world is built at once from nothing with the
+		# eye standing still: hundreds of chunks arrive at whatever blend their
+		# distance happens to imply, about a half on average, and not one of
+		# them pops, because there was nothing there to pop from. Counted as
+		# appearances they were most of the failure and they hid whatever the
+		# real number was.
+		if first_ever and _settled:
 			var ddy: float = maxf(_centre.y - node_top(depth, int(a[1]),
 				int(a[2])), 0.0)
 			var dd := sqrt(ddx * ddx + ddz * ddz + ddy * ddy)
@@ -1103,7 +1285,11 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	# hundreds of them; asked for as a block they come back off every core at
 	# once, and what is left to do here is only the part that depends on what
 	# has been built on the land.
-	var h: PackedFloat32Array = Sim.native.grounds(x0, z0, cell, n, Sim.G_ALL)
+	# On the planet the grid is read off the planetary field, which already
+	# carries the curve; on the flat world it is the flat field with the drop
+	# taken off below. Same grid, same chunk, different ground under it.
+	var h: PackedFloat32Array = Sim.native.grounds_globe(x0, z0, cell, n) \
+		if Sim.globe else Sim.native.grounds(x0, z0, cell, n, Sim.G_ALL)
 	if not Sim.decks.is_empty():
 		# A landable platform is the one part of the world the extension does
 		# not hold, because it moves. Only worth walking the grid for when
@@ -1122,7 +1308,8 @@ func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
 	# building the chunk. Asked for as a block they are one crossing and come
 	# back off every core.
 	var edge := _edge_probe(n, x0, z0, cell, depth, nb)
-	var eh: PackedFloat32Array = Sim.native.grounds_at(edge, Sim.G_ALL)
+	var eh: PackedFloat32Array = Sim.native.grounds_at_globe(edge) \
+		if Sim.globe else Sim.native.grounds_at(edge, Sim.G_ALL)
 	if not Sim.decks.is_empty():
 		for k in eh.size():
 			eh[k] = Sim._deck_top(eh[k], edge[k].x, edge[k].y)
@@ -1438,26 +1625,210 @@ func _face(verts: PackedVector3Array, nrms: PackedVector3Array,
 		cnrm[k * 4 + 3] = 1.0
 		w[0] = k + 1
 
+## The sea. Curvature is already in the mesh; this puts the swell on top of it
+## and gives the surface some life.
+const SEA_SHADER := """
+shader_type spatial;
+render_mode blend_mix, depth_draw_always, cull_back, specular_schlick_ggx;
+
+uniform float swell_a = 1.25;
+uniform float swell_b = 0.75;
+uniform float swell_c = 0.42;
+uniform vec2 ka = vec2(0.0121, 0.0067);
+uniform vec2 kb = vec2(-0.0074, 0.0138);
+uniform vec2 kc = vec2(0.062, 0.065);
+uniform float wa = 0.368;
+uniform float wb = 0.392;
+uniform float wc = 0.939;
+// Handed in rather than taken from TIME: the hulls advance their own clock and
+// the two must not drift.
+uniform float sea_time = 0.0;
+// Fades with the ground it belongs to; already transparent, so no dither.
+uniform float ground_fade = 1.0;
+// Whether the sea is a sphere about `up_axis` or a flat shell about the origin.
+uniform float round_world = 0.0;
+uniform vec3 up_axis = vec3(0.0);
+
+varying vec3 wpos;
+
+// The identical expression Sim.wave_at uses. If these two ever disagree, ships
+// float above or sink into a sea that looks nothing like what they are on.
+float swell(vec2 p) {
+	return swell_a * sin(ka.x * p.x + ka.y * p.y + sea_time * wa)
+		+ swell_b * sin(kb.x * p.x + kb.y * p.y + sea_time * wb)
+		+ swell_c * sin(kc.x * p.x + kc.y * p.y + sea_time * wc);
+}
+
+void vertex() {
+	vec3 w = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	// Up is not `y` on a sphere. On the flat shell the two are the same and
+	// lifting the vertex along `y` is right; on the planet it has to be lifted
+	// along its own radius, or the swell shears the sea sideways and on the far
+	// side of the world lifts it *into* the planet. `round_world` is what tells
+	// the two apart, and `up_axis` is the centre it is round about.
+	vec3 up = round_world > 0.5 ? normalize(w - up_axis) : vec3(0.0, 1.0, 0.0);
+	float lift = swell(w.xz);
+	VERTEX += up * lift;
+	wpos = w + up * lift;
+	// the surface normal follows the swell, which is what makes the light run
+	// along the crests
+	float e = 6.0;
+	float hx = swell(w.xz + vec2(e, 0.0)) - swell(w.xz - vec2(e, 0.0));
+	float hz = swell(w.xz + vec2(0.0, e)) - swell(w.xz - vec2(0.0, e));
+	vec3 flat_n = normalize(vec3(-hx, 2.0 * e, -hz));
+	// The ripple is worked out about a flat up; on the planet it is carried
+	// onto the surface's own up so the highlight still runs along the crests.
+	NORMAL = round_world > 0.5
+		? normalize(up * flat_n.y + vec3(flat_n.x, 0.0, flat_n.z))
+		: flat_n;
+}
+
+void fragment() {
+	// small chop on top of the swell, in the normal only
+	vec2 q = wpos.xz;
+	vec3 ripple = vec3(
+		sin(q.x * 0.42 + sea_time * 1.9) + sin(q.y * 0.61 + sea_time * 1.1),
+		0.0,
+		sin(q.y * 0.37 + sea_time * 2.1) + sin(q.x * 0.55 + sea_time * 0.9));
+	NORMAL = normalize(NORMAL + ripple * 0.05);
+	ALBEDO = vec3(0.07, 0.19, 0.28);
+	ROUGHNESS = 0.06;
+	METALLIC = 0.45;
+	RIM = 0.7;
+	ALPHA = 0.86 * ground_fade;
+}
+"""
+
+var _sea_mat: ShaderMaterial = null
+
+## The sea has its own clock, advanced by Sim, and the shader is handed it every
+## frame so the drawn swell and the swell the hulls ride stay in step.
+func _process(_dt: float) -> void:
+	if _sea_mat != null:
+		_sea_mat.set_shader_parameter("sea_time", Sim.sea_time)
+
+
 func _water() -> void:
-	var pm := PlaneMesh.new()
-	pm.size = Vector2(Sim.WORLD_HALF * 2.4, Sim.WORLD_HALF * 2.4)
-	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.07, 0.19, 0.28, 0.86)
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	m.roughness = 0.06
-	m.metallic = 0.45
-	m.rim_enabled = true
-	m.rim = 0.7
+	# The sea is a shell, not a plate. A flat plane against curved ground floods
+	# the far half of the world: sixty kilometres out the land has dropped 283 m
+	# and a level sea is 283 m over the top of it. Built as a grid that follows
+	# the same d^2/2R the ground does, so the coastline stays where it is drawn.
+	# On the planet it is a sphere, because the sea is. A shell over the near
+	# 1400 km ends in a rim you can fly to and look over the edge of, and with
+	# the world square gone there is no reason for the water to be square
+	# either. Same shader, same swell, same clock -- only the surface it is
+	# painted on is closed.
+	var pm := _sea_sphere(120, 60) if Sim.globe \
+		else _sea_shell(Sim.WORLD_HALF * 1.2, 96)
+	# A shader, because the swell has to be drawn where a hull actually rides
+	# it. The constants and the clock come from Sim, which is the same pair the
+	# ships read — a sea drawn by one formula and floated on by another is worse
+	# than a flat one.
+	var sh := Shader.new()
+	sh.code = SEA_SHADER
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	_sea_mat = m
 	# The sea sorts before every other transparent thing. It is a single mesh
 	# the width of the world, so its sort origin is nowhere near the piece of
 	# water you are actually looking at, and without this it happily draws over
 	# splashes, explosions and anything else at the surface.
 	m.render_priority = -8
+	m.set_shader_parameter("swell_a", Sim.SWELL_A)
+	m.set_shader_parameter("swell_b", Sim.SWELL_B)
+	m.set_shader_parameter("ka", Sim.SWELL_KA)
+	m.set_shader_parameter("kb", Sim.SWELL_KB)
+	m.set_shader_parameter("wa", Sim.SWELL_WA)
+	m.set_shader_parameter("wb", Sim.SWELL_WB)
+	m.set_shader_parameter("swell_c", Sim.SWELL_C)
+	m.set_shader_parameter("round_world", 1.0 if Sim.globe else 0.0)
+	m.set_shader_parameter("up_axis", Sim.planet_centre)
+	m.set_shader_parameter("kc", Sim.SWELL_KC)
+	m.set_shader_parameter("wc", Sim.SWELL_WC)
 	var mi := MeshKit.mi(pm, "Water")
 	mi.material_override = m
-	mi.position = Vector3(0, Sim.WATER_LEVEL, 0)
+	# The sphere is built about the planet's centre and already carries sea
+	# level in its radius; the flat shell is built about the origin and is set
+	# down at it.
+	mi.position = Sim.planet_centre if Sim.globe \
+		else Vector3(0, Sim.WATER_LEVEL, 0)
+	# It is 12742 km across and wraps the camera, so no culling volume the
+	# engine works out for it can be right in a useful direction.
+	mi.extra_cull_margin = 16384.0
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
+
+## A curved sheet for the sea: a grid over the world, each vertex dropped by the
+## sagitta at its own distance from the origin, exactly as the ground and the
+## terrain shader are.
+## The sea as the planet's own surface: a sphere at sea level.
+##
+## Vertices are placed on the sphere and the shader lifts them by the same swell
+## a hull rides, so the two agree everywhere rather than only near the middle of
+## a patch. The normal is the outward radius, which is what makes the specular
+## roll off toward the horizon on a round world instead of staying flat.
+func _sea_sphere(segs: int, rings: int) -> ArrayMesh:
+	var r: float = Sim.PLANET_R + Sim.WATER_LEVEL
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var idx := PackedInt32Array()
+	for j in rings + 1:
+		var th: float = PI * float(j) / float(rings)
+		for i in segs + 1:
+			var ph: float = TAU * float(i) / float(segs)
+			var u := Vector3(sin(th) * cos(ph), cos(th), sin(th) * sin(ph))
+			verts.append(u * r)
+			norms.append(u)
+			uvs.append(Vector2(float(i) / float(segs), float(j) / float(rings)))
+	for j2 in rings:
+		for i2 in segs:
+			var a: int = j2 * (segs + 1) + i2
+			var b: int = a + 1
+			var c: int = a + segs + 1
+			var d: int = c + 1
+			idx.append_array([a, c, b, b, c, d])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idx
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return mesh
+
+func _sea_shell(half: float, n: int) -> ArrayMesh:
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var idx := PackedInt32Array()
+	var step: float = half * 2.0 / float(n)
+	for j in n + 1:
+		for i in n + 1:
+			var x: float = -half + float(i) * step
+			var z: float = -half + float(j) * step
+			verts.append(Vector3(x, -Sim.planet_drop(x, z), z))
+			# The shell's own normal leans with it, which is what makes the
+			# specular roll off toward the horizon instead of staying flat.
+			norms.append(Vector3(x, Sim.PLANET_R, z).normalized())
+			uvs.append(Vector2(float(i) / float(n), float(j) / float(n)))
+	for j in n:
+		for i in n:
+			var a: int = j * (n + 1) + i
+			var b: int = a + 1
+			var c: int = a + n + 1
+			var d: int = c + 1
+			idx.append_array([a, c, b, b, c, d])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return am
 
 ## The height of the ground as it is actually *drawn* at a point.
 ##
@@ -1501,3 +1872,10 @@ static func surface_height(x: float, z: float) -> float:
 ## map bake.
 static func cell_at(_x: float, _z: float) -> float:
 	return BASE_CELL
+
+
+## The year has turned: the snow line and the treeline move with it.
+func set_season(s: float) -> void:
+	for m in _ground_mats:
+		if is_instance_valid(m):
+			(m as ShaderMaterial).set_shader_parameter("season", s)

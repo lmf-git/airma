@@ -416,8 +416,9 @@ func _ground_hit(origin: Vector3, dir: Vector3) -> Vector3:
 		# The sea is a surface. Marching only against the height field put the
 		# spot on the seabed a couple of hundred metres down, so a bomb aimed at
 		# a ship dived past it looking for a mark that was underneath.
-		if p.y <= Sim.WATER_LEVEL and Sim.height_at(p.x, p.z) < Sim.WATER_LEVEL:
-			var f: float = (prev.y - Sim.WATER_LEVEL) / maxf(prev.y - p.y, 0.001)
+		var sea_s: float = Sim.sea_at(p.x, p.z)
+		if p.y <= sea_s and Sim.height_at(p.x, p.z) < sea_s:
+			var f: float = (prev.y - sea_s) / maxf(prev.y - p.y, 0.001)
 			return prev.lerp(p, clampf(f, 0.0, 1.0))
 		if p.y <= Sim.height_at(p.x, p.z):
 			for i in 12:                       # bisect onto the surface
@@ -705,7 +706,7 @@ func _draw_bomb_mark(frame: Vector2) -> void:
 		v.y -= 9.81 * 0.12
 		q += v * 0.12
 		var bed := Sim.height_at(q.x, q.z)
-		if q.y <= maxf(bed, Sim.WATER_LEVEL if bed < Sim.WATER_LEVEL else bed):
+		if q.y <= maxf(bed, Sim.sea_at(q.x, q.z)):
 			break
 	if _cam.is_position_behind(q):
 		return

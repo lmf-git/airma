@@ -266,7 +266,49 @@ pub const G_ALL: u32 = G_ROADS | G_FIELDS;
 /// still applied on the far side of the boundary: they move every frame, and
 /// there are two of them.
 pub fn ground_at(w: &World, c: &Corridor, x: f32, z: f32, flags: u32) -> f32 {
-    let mut h = natural(x, z);
+    carve(w, c, base(x, z), x, z, flags)
+}
+
+/// The ground before anything was built on it, whichever world this is.
+///
+/// This is the one place that decides, and it has to be one place. The router
+/// costs its edges against it, the survey draws its profile against it and the
+/// settlements are sited on it -- so a planet whose roads were laid out against
+/// the *flat* field is a planet with a trunk network surveyed for terrain that
+/// is not there: cuttings through nothing, embankments across hills, and a
+/// coast road under water.
+static GLOBE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the world is the planet or the old flat one.
+pub fn is_globe() -> bool {
+    GLOBE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_globe(on: bool) {
+    GLOBE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn base(x: f32, z: f32) -> f32 {
+    if GLOBE.load(std::sync::atomic::Ordering::Relaxed) {
+        let c = crate::sphere::chart();
+        return crate::field::WATER_LEVEL
+            + crate::sphere::generated(crate::sphere::dir_from_chart(&c, x, z));
+    }
+    natural(x, z)
+}
+
+/// The carving, over whatever ground is underneath it.
+///
+/// Split out from `ground_at` so the planet can have it. The town platforms,
+/// the aerodromes and the road earthworks are not part of the *terrain*: they
+/// are what is done to terrain once people are living on it, and they apply to
+/// a planetary height field exactly as they applied to a flat one. Only the
+/// base underneath them changed.
+pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
+        -> f32 {
+    let mut h = base;
     let mut pad_w = 0.0f32;
     for p in &w.pads {
         let dx = x - p.x;
@@ -344,7 +386,7 @@ fn road_over(c: &Corridor, x: f32, z: f32, h: f32, pad_w: f32) -> f32 {
 /// the router, which is what actually steers a road around it.
 #[inline]
 pub fn road_height(w: &World, x: f32, z: f32) -> f32 {
-    let mut h = natural(x, z);
+    let mut h = base(x, z);
     for p in &w.pads {
         let dx = x - p.x;
         let dz = z - p.z;
@@ -352,6 +394,24 @@ pub fn road_height(w: &World, x: f32, z: f32) -> f32 {
         if d < p.r * 1.60 {
             let t = 1.0 - smoothstep(p.r * 1.06, p.r * 1.60, d);
             h = lerp(h, p.y, t);
+        }
+    }
+    // The aerodromes too, in the same order `carve` applies them.
+    //
+    // `carve` says the road is laid last "because the road was surveyed against
+    // the ground with the aerodrome already in it -- that is what lets a road
+    // run onto an airfield's apron instead of ending at a cliff beside it".
+    // That was the intent and this is where it has to happen; without it the
+    // surveyor read the raw ground *under* the pavement. It did not matter
+    // while the ground under an aerodrome was much the same height as the
+    // aerodrome. Once rivers were cut into the planet one ran under a strip,
+    // the survey followed the river bed, and the road carve then dug the
+    // apron out from under the runway to meet it -- a hundred and thirty
+    // metres down, on a field the flattening had correctly levelled.
+    for f in &w.fields {
+        let ff = field_factor(f, x, z);
+        if ff > 0.0 {
+            h = lerp(h, f.elev, ff);
         }
     }
     h

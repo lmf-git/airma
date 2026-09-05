@@ -26,11 +26,6 @@ const RT_HEUR: f32 = 1.6;
 const RT_MARGIN: f32 = 9000.0;
 const RT_MAX_NODES: usize = 60000;
 
-/// Water this deep is the sea, not a river. A road crosses a channel on a
-/// bridge; it does not cross an ocean on one, and the network came out with a
-/// hundred and twenty kilometre viaduct standing in open water because nothing
-/// said so.
-const DEEP_WATER: f32 = 90.0;
 /// The longest water crossing that is worth building. A fixed link of a few
 /// kilometres is a real thing -- the Oresund is eight, the Confederation Bridge
 /// thirteen -- and a hundred and twenty is not. Past this the leg is abandoned
@@ -67,9 +62,26 @@ pub fn step_cost(w: &World, ha: f32, hb: f32, run: f32, wx: f32, wz: f32) -> f32
     // Water is crossable -- that is what a bridge is for -- but the price goes
     // up with the depth, so a road will ford a river or cross a strait and will
     // not strike out across a bay. A flat charge let it do both.
+    //
+    // Quadratic in the depth, and not capped.
+    //
+    // `180 + min(depth/90, 4) * 2600` was written when the only water on the
+    // map was the sea and the thing to prevent was a viaduct across a bay. It
+    // charges 816 a metre to cross a river twenty-two metres deep, against
+    // something under one a metre for ordinary road -- so a kilometre of bridge
+    // cost as much as a thousand kilometres of road, and the router would go
+    // round almost any distance rather than build one. With rivers cut into the
+    // planet that is most of the network: measured, seven routes in fifty-two
+    // walked more than twice the distance between their own ends and the worst
+    // walked seven times it, out fifteen kilometres past its destination and
+    // back. That is the looping the network was reported for.
+    //
+    // Squared instead: a shallow river is worth about ten kilometres of detour,
+    // the shelf is worth hundreds, and open ocean is still arithmetic nobody
+    // will pay. `MAX_CROSSING` remains the hard limit on any single span.
     let depth = WATER_LEVEL + 6.0 - hb;
     if depth > 0.0 {
-        cost += run * (180.0 + (depth / DEEP_WATER).min(4.0) * 2600.0);
+        cost += run * (6.0 + depth * depth * 0.0165);
     }
     if !clear_of_airfield(wx, wz) {
         cost += run * 400.0;

@@ -19,6 +19,7 @@
 //! - `index`  cell keys and the segment grid they index
 
 mod field;
+mod sphere;
 mod index;
 mod raster;
 mod router;
@@ -51,8 +52,165 @@ static LAST_MS: AtomicUsize = AtomicUsize::new(0);
 /// Rebuilt whenever the network changes and read from every core after that.
 static SEGS: Mutex<Option<&'static SegGrid>> = Mutex::new(None);
 
+/// How far a road may wander before the connection is not worth making, as a
+/// multiple of the distance between the two places it joins.
+const ROUTE_DETOUR: f32 = 4.0;
+
+/// A sheet window being baked off the main thread. One at a time: the map only
+/// ever wants the newest one, and a queue of stale windows is work nobody is
+/// waiting for.
+#[derive(Default)]
+struct PatchJob {
+    busy: bool,
+    done: bool,
+    data: Vec<u8>,
+}
+
+static PATCH: std::sync::OnceLock<Mutex<PatchJob>> = std::sync::OnceLock::new();
+
+/// A canvas triangle array under construction: the four parallel arrays
+/// `canvas_item_add_triangle_array` wants.
+#[derive(Default)]
+struct MeshOut {
+    pts: Vec<Vector2>,
+    uvs: Vec<Vector2>,
+    cols: Vec<Color>,
+    idx: Vec<i32>,
+}
+
+impl MeshOut {
+    /// Where a direction lands on the sheet. Longitude east of the prime
+    /// meridian, latitude from the pole -- the same mapping the sheet is baked
+    /// with, or the picture would be indexed by one rule and drawn by another.
+    fn uv_of(n: Vector3) -> Vector2 {
+        let d = [n.x, n.y, n.z];
+        let pole = sphere::NORTH;
+        let home = sphere::HOME;
+        let ex = [
+            pole[1] * home[2] - pole[2] * home[1],
+            pole[2] * home[0] - pole[0] * home[2],
+            pole[0] * home[1] - pole[1] * home[0],
+        ];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let lat = dot(d, pole).clamp(-1.0, 1.0).asin();
+        let lon = dot(d, ex).atan2(dot(d, home));
+        Vector2::new(lon / std::f32::consts::TAU + 0.5,
+            0.5 - lat / std::f32::consts::PI)
+    }
+
+    fn quad(&mut self, ns: &[Vector3; 4], org: Vector2, rad: f32, b: Basis,
+            lit: Vector3, seam: bool) {
+        let mut uvs = [Vector2::ZERO; 4];
+        for k in 0..4 {
+            uvs[k] = Self::uv_of(ns[k]);
+        }
+        if seam {
+            // The quad that straddles the seam meridian gets UVs half a world
+            // apart, and interpolating between them draws the entire map
+            // squeezed into one triangle. Carrying the low side round past 1
+            // makes the interpolation continuous, and the texture's repeat
+            // brings it back to the same texels.
+            let (mut lo, mut hi) = (1e9f32, -1e9f32);
+            for uv in uvs.iter() {
+                lo = lo.min(uv.x);
+                hi = hi.max(uv.x);
+            }
+            if hi - lo > 0.5 {
+                for uv in uvs.iter_mut() {
+                    if uv.x < 0.5 {
+                        uv.x += 1.0;
+                    }
+                }
+            }
+        }
+        self.quad_uv(ns, &uvs, org, rad, b, lit);
+    }
+
+    fn quad_uv(&mut self, ns: &[Vector3; 4], uvs: &[Vector2; 4], org: Vector2,
+            rad: f32, b: Basis, lit: Vector3) {
+        let mut vs = [Vector3::ZERO; 4];
+        let mut near = false;
+        for k in 0..4 {
+            vs[k] = b * ns[k];
+            if vs[k].z > 0.0 {
+                near = true;
+            }
+        }
+        if !near {
+            return;
+        }
+        let base = self.pts.len() as i32;
+        for k in 0..4 {
+            let v = vs[k];
+            self.pts.push(Vector2::new(org.x + v.x * rad, org.y - v.y * rad));
+            self.uvs.push(uvs[k]);
+            // Lambert against the real sun.
+            //
+            // The floor was lifted to 0.45 once, to make the night side
+            // readable -- and that washed the terminator out until the whole
+            // globe read as lit, which is the one thing this shading exists to
+            // show. The map has to agree with the ground: where it is night in
+            // the game it is night on the map. A little ambient so the dark
+            // side is a silhouette rather than a hole, and no more.
+            let sh = v.dot(lit).clamp(0.0, 1.0);
+            let g = 0.18 + 0.82 * sh;
+            self.cols.push(Color::from_rgb(g, g, g));
+        }
+        for k in [0, 1, 2, 0, 2, 3] {
+            self.idx.push(base + k);
+        }
+    }
+
+    /// Points, UVs, colours and indices, in the order
+    /// `canvas_item_add_triangle_array` takes them.
+    fn into_arrays(self) -> Array<Variant> {
+        let mut out: Array<Variant> = Array::new();
+        out.push(&PackedVector2Array::from(self.pts.as_slice()).to_variant());
+        out.push(&PackedVector2Array::from(self.uvs.as_slice()).to_variant());
+        out.push(&PackedColorArray::from(self.cols.as_slice()).to_variant());
+        out.push(&PackedInt32Array::from(self.idx.as_slice()).to_variant());
+        out
+    }
+}
+
+fn patch_job() -> &'static Mutex<PatchJob> {
+    PATCH.get_or_init(|| Mutex::new(PatchJob::default()))
+}
+
 fn segments() -> Option<&'static SegGrid> {
     *SEGS.lock().unwrap()
+}
+
+/// The colour a road is drawn on a map, and how strongly.
+const ROAD_INK: [f32; 3] = [0.72, 0.64, 0.50];
+
+/// Lay the road network over a map colour.
+///
+/// A carriageway is twelve metres wide and the finest map sheet here is a
+/// hundred and seventeen metres to a texel, so a road drawn to scale is
+/// invisible at every zoom -- which is why the planet map had no roads on it at
+/// all. Drawn about a texel and a half wide instead, the way a road is drawn on
+/// any map: the line says where it goes, not how wide it is.
+///
+/// `texel` is the ground the texel covers, so the network thins as the picture
+/// gets finer rather than staying a fixed smear.
+fn road_ink(x: f32, z: f32, texel: f32, col: [f32; 3]) -> [f32; 3] {
+    let g = match segments() {
+        Some(g) => g,
+        None => return col,
+    };
+    let far = texel * 2.0;
+    let d = g.distance(x, z, far);
+    let w = 1.0 - sphere::smoothstep_pub(texel * 0.35, texel * 1.3, d);
+    if w <= 0.0 {
+        return col;
+    }
+    let t = w * 0.85;
+    [
+        col[0] + (ROAD_INK[0] - col[0]) * t,
+        col[1] + (ROAD_INK[1] - col[1]) * t,
+        col[2] + (ROAD_INK[2] - col[2]) * t,
+    ]
 }
 
 #[derive(GodotClass)]
@@ -98,6 +256,457 @@ impl Terra {
     }
 
     // ------------------------------------------------------ finished ground
+
+    // ------------------------------------------------------------- the planet
+
+    /// Put the chart somewhere on the planet. Everything asked for in `(x, z)`
+    /// afterwards is measured east and south from here, along the ground.
+    /// Whether the world is a planet. Told to the extension because the router
+    /// and the survey ask for the ground before anything was built on it, and
+    /// which ground that is depends on the answer.
+    #[func]
+    fn set_globe(&self, on: bool) {
+        crate::world::set_globe(on);
+    }
+
+    #[func]
+    fn set_chart(&self, origin: Vector3, east: Vector3, south: Vector3,
+            radius: f64) {
+        sphere::set_chart(
+            [origin.x, origin.y, origin.z],
+            [east.x, east.y, east.z],
+            [south.x, south.y, south.z],
+            radius as f32,
+        );
+    }
+
+    /// The planet's ground at a chart coordinate, in the same world `y` the flat
+    /// field returns -- so this can stand in for `ground` wherever the world is
+    /// round rather than flat.
+    #[func]
+    fn ground_globe(&self, x: f64, z: f64) -> f64 {
+        let c = sphere::chart();
+        sphere::ground_world_y(&c, x as f32, z as f32, G_ALL) as f64
+    }
+
+    /// Planetary ground with the carving selected.
+    ///
+    /// `ground_globe` always asks for all of it, which is right for anything
+    /// standing on the world and wrong for anything siting something on it: a
+    /// field is levelled to the height of its own site, so it has to be able
+    /// to ask what that site was before the field was there. Without this the
+    /// globe had no way to leave the aerodromes out, `register_field` read back
+    /// the elevation the field already had, and re-siting the home strip was a
+    /// fixed point that never moved it anywhere.
+    #[func]
+    fn ground_globe_flags(&self, x: f64, z: f64, flags: i64) -> f64 {
+        let c = sphere::chart();
+        sphere::ground_world_y(&c, x as f32, z as f32, flags as u32) as f64
+    }
+
+    /// A square grid of it, which is what a terrain chunk asks for. Same shape
+    /// as `grounds`, and parallel for the same reason.
+    #[func]
+    fn grounds_globe(&self, x0: f64, z0: f64, cell: f64, n: i64)
+            -> PackedFloat32Array {
+        let c = sphere::chart();
+        let n = n.max(0) as usize;
+        let (x0, z0, cell) = (x0 as f32, z0 as f32, cell as f32);
+        let mut out = vec![0f32; n * n];
+        out.par_chunks_mut(n.max(1)).enumerate().for_each(|(j, row)| {
+            let z = z0 + j as f32 * cell;
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = sphere::ground_world_y(&c, x0 + i as f32 * cell, z, G_ALL);
+            }
+        });
+        PackedFloat32Array::from(out.as_slice())
+    }
+
+    /// Height above sea level for a direction from the planet's centre. The
+    /// map and the orbital body ask in directions rather than in chart pairs,
+    /// because they are looking at the whole planet rather than standing on it.
+    #[func]
+    fn planet_height(&self, dir: Vector3) -> f64 {
+        let c = sphere::chart();
+        sphere::height([dir.x, dir.y, dir.z], c.radius, G_ALL) as f64
+    }
+
+    /// A batch of those, for baking a whole planet at once.
+    #[func]
+    fn planet_heights(&self, dirs: PackedVector3Array) -> PackedFloat32Array {
+        let c = sphere::chart();
+        let src: Vec<Vector3> = dirs.to_vec();
+        let mut out = vec![0f32; src.len()];
+        out.par_iter_mut().enumerate().for_each(|(i, v)| {
+            let d = src[i];
+            *v = sphere::height([d.x, d.y, d.z], c.radius, G_ALL);
+        });
+        PackedFloat32Array::from(out.as_slice())
+    }
+
+    /// The close-in ground as the map draws it, on the planet.
+    ///
+    /// `map_relief` rasterises the flat field about the world origin, which is
+    /// the last thing in the map that still believes in an authored square: on
+    /// a planet the ground under the chart is the planetary field, and the
+    /// chart moves. This takes the same picture in chart coordinates, so it is
+    /// the country the player is actually over and it can be taken again when
+    /// the chart is put somewhere else.
+    #[func]
+    fn map_relief_globe(&self, n: i64, half: f64) -> PackedByteArray {
+        let c = sphere::chart();
+        let n = n.max(1) as usize;
+        let half = half as f32;
+        let step = half * 2.0 / n as f32;
+        // The heights first, once each, on a grid one bigger than the picture.
+        //
+        // Every texel needs its own height and its two forward neighbours' to
+        // light it off the slope, and every one of those neighbours is another
+        // texel's own height. Asked for three times over, a 2048 sheet was
+        // twelve and a half million evaluations of the full field -- generated
+        // terrain, rivers, carving and all -- for four million texels, and the
+        // map was the largest single item in the world's build.
+        let gn = n + 1;
+        let mut hs = vec![0f32; gn * gn];
+        hs.par_chunks_mut(gn).enumerate().for_each(|(j, row)| {
+            let z = -half + j as f32 * step;
+            for (i, v) in row.iter_mut().enumerate() {
+                *v = sphere::ground_world_y(&c, -half + i as f32 * step, z, G_ALL);
+            }
+        });
+        let mut out = vec![0u8; n * n * 3];
+        out.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
+            let z = -half + j as f32 * step;
+            for i in 0..n {
+                let x = -half + i as f32 * step;
+                let h = hs[j * gn + i];
+                let sea = sphere::sea_at(&c, x, z);
+                // Lit off the slope, the same way the flat sheet is: a map with
+                // no hill shading on it is a biome chart, not a map. Worked out
+                // for water too and then thrown away, because the colour rule
+                // below declines to shade a sea.
+                let dx = hs[j * gn + i + 1] - h;
+                let dz = hs[(j + 1) * gn + i] - h;
+                let shade = (0.72 + (-dx - dz) / (step * 0.55)).clamp(0.35, 1.5);
+                // The planet's own rule, not a second one written for the
+                // chart: these are two pictures of the same ground.
+                let d = sphere::dir_from_chart(&c, x, z);
+                let col = road_ink(x, z, step,
+                    sphere::surface_colour(d, h - sea, sphere::NORTH, shade));
+                let o = i * 3;
+                row[o] = (col[0].clamp(0.0, 1.0) * 255.0) as u8;
+                row[o + 1] = (col[1].clamp(0.0, 1.0) * 255.0) as u8;
+                row[o + 2] = (col[2].clamp(0.0, 1.0) * 255.0) as u8;
+            }
+        });
+        PackedByteArray::from(out.as_slice())
+    }
+
+    /// The whole planet as one equirectangular RGB8 sheet.
+    #[func]
+    fn planet_sheet(&self, w: i64, h: i64, north: Vector3) -> PackedByteArray {
+        let c = sphere::chart();
+        let buf = sphere::sheet(w.max(1) as usize, h.max(1) as usize,
+            [north.x, north.y, north.z], c.radius);
+        PackedByteArray::from(buf.as_slice())
+    }
+
+    /// The aerodrome flattening weight the extension itself uses, for when the
+    /// two sides disagree about whether a point is on a runway.
+    #[func]
+    fn field_flat(&self, x: f64, z: f64) -> f64 {
+        let w = world::world();
+        let mut best = 0.0f32;
+        for f in &w.fields {
+            let v = world::field_factor(f, x as f32, z as f32);
+            if v > best {
+                best = v;
+            }
+        }
+        best as f64
+    }
+
+    /// Where the planet is in its year, from the clock: +1 at northern
+    /// midsummer, -1 at northern midwinter. The biome rule reads it, so the
+    /// snow line and the treeline move with the season.
+    #[func]
+    fn set_season(&self, s: f64) {
+        sphere::set_season(s as f32);
+    }
+
+    /// The climate scale this side is using, so the other side can check that
+    /// the two have not drifted apart. They are one number about the planet's
+    /// tilt and they have been two copies of it more than once.
+    #[func]
+    fn climate_squeeze(&self) -> f64 {
+        sphere::CLIMATE_SQUEEZE as f64
+    }
+
+    /// Where a country is, as a direction from the planet's centre.
+    ///
+    /// Asked rather than worked out again on the other side. Written out twice
+    /// -- once here and once in GDScript -- the two copies disagreed about
+    /// which way north was, and three of the six countries were sited in the
+    /// ocean the generator had never been told to raise.
+    #[func]
+    fn homeland_dir(&self, i: i64) -> Vector3 {
+        let d = sphere::homeland(i.max(0) as usize);
+        Vector3::new(d[0], d[1], d[2])
+    }
+
+    /// The globe map's mesh: screen points, sheet UVs, shading and indices.
+    ///
+    /// Built in GDScript this was four and a half thousand quads -- eighteen
+    /// thousand corners, each a little trigonometry and a basis multiply --
+    /// every frame the map was open, and the map redraws every frame. It is a
+    /// loop over a lot of points, so it lives here.
+    ///
+    /// Quads entirely round the back of the planet are dropped.
+    #[func]
+    fn globe_mesh(&self, rings: i64, segs: i64, org: Vector2, rad: f64,
+            b: Basis, lit: Vector3) -> Array<Variant> {
+        let rings = rings.max(1) as usize;
+        let segs = segs.max(1) as usize;
+        let mut m = MeshOut::default();
+        for i in 0..rings {
+            let t0 = std::f32::consts::PI * i as f32 / rings as f32;
+            let t1 = std::f32::consts::PI * (i + 1) as f32 / rings as f32;
+            for j in 0..segs {
+                let p0 = std::f32::consts::TAU * j as f32 / segs as f32;
+                let p1 = std::f32::consts::TAU * (j + 1) as f32 / segs as f32;
+                // The sphere is walked about the world's own up, which is what
+                // the chart is a cap on; the sheet is indexed from the pole.
+                let corner = |t: f32, p: f32| -> Vector3 {
+                    Vector3::new(t.sin() * p.cos(), t.cos(), t.sin() * p.sin())
+                };
+                let ns = [corner(t0, p0), corner(t0, p1),
+                    corner(t1, p1), corner(t1, p0)];
+                m.quad(&ns, org, rad as f32, b, lit, true);
+            }
+        }
+        m.into_arrays()
+    }
+
+    /// The same, for the close-in detail patch: a grid over a window of the
+    /// sheet rather than the whole sphere.
+    #[func]
+    fn globe_patch_mesh(&self, grid: i64, u0: f64, u1: f64, v0: f64, v1: f64,
+            org: Vector2, rad: f64, b: Basis, lit: Vector3) -> Array<Variant> {
+        let g = grid.max(1) as usize;
+        let (u0, u1, v0, v1) = (u0 as f32, u1 as f32, v0 as f32, v1 as f32);
+        let mut m = MeshOut::default();
+        for i in 0..g {
+            for j in 0..g {
+                let fu0 = i as f32 / g as f32;
+                let fu1 = (i + 1) as f32 / g as f32;
+                let fv0 = j as f32 / g as f32;
+                let fv1 = (j + 1) as f32 / g as f32;
+                let at = |fu: f32, fv: f32| -> Vector3 {
+                    let d = sphere::at_lat_lon(
+                        (0.5 - (v0 + fv * (v1 - v0))) * std::f32::consts::PI,
+                        ((u0 + fu * (u1 - u0)) - 0.5) * std::f32::consts::TAU,
+                        sphere::NORTH);
+                    Vector3::new(d[0], d[1], d[2])
+                };
+                let ns = [at(fu0, fv0), at(fu1, fv0), at(fu1, fv1), at(fu0, fv1)];
+                let uvs = [Vector2::new(fu0, fv0), Vector2::new(fu1, fv0),
+                    Vector2::new(fu1, fv1), Vector2::new(fu0, fv1)];
+                m.quad_uv(&ns, &uvs, org, rad as f32, b, lit);
+            }
+        }
+        m.into_arrays()
+    }
+
+    /// Somewhere near a point with room for an aerodrome on dry land.
+    ///
+    /// A spiral outward, and at each stop the whole footprint is checked --
+    /// nine by nine over two kilometres by four -- because a field needs more
+    /// than a dry point: a headland that is dry in the middle and sea at both
+    /// ends gets a runway with its approach lights under water.
+    ///
+    /// Written in GDScript this was twenty-one thousand separate calls across
+    /// the binding for each country, and there are six of them. It is a loop
+    /// over a great many points, which is what this side is for.
+    ///
+    /// Returns an infinite vector when there is nowhere.
+    #[func]
+    fn dry_field_site(&self, cx: f64, cz: f64, r0: f64, dr: f64, da: f64,
+            tries: i64, bound: f64) -> Vector2 {
+        let c = sphere::chart();
+        let globe = world::is_globe();
+        let w = world::world();
+        let corr = world::corridor();
+        let wet = |x: f32, z: f32| -> bool {
+            if globe {
+                sphere::ground_world_y(&c, x, z, G_ALL)
+                    < sphere::sea_at(&c, x, z) + 25.0
+            } else {
+                // Both sides of the flat comparison carry the same drop, so it
+                // cancels and this is the sea level the field works in.
+                world::ground_at(w, corr, x, z, G_ALL)
+                    < crate::field::WATER_LEVEL + 25.0
+            }
+        };
+        for k in 0..tries.max(0) {
+            let a = 2.3 + k as f32 * da as f32;
+            let r = r0 as f32 + k as f32 * dr as f32;
+            let qx = cx as f32 + a.cos() * r;
+            let qz = cz as f32 + a.sin() * r;
+            if bound > 0.0 && (qx.abs() > bound as f32 || qz.abs() > bound as f32) {
+                continue;
+            }
+            let mut dry = true;
+            'foot: for i in 0..9 {
+                for j in 0..9 {
+                    let px = qx + (i as f32 - 4.0) * 700.0;
+                    let pz = qz + (j as f32 - 4.0) * 900.0;
+                    if wet(px, pz) {
+                        dry = false;
+                        break 'foot;
+                    }
+                }
+            }
+            if dry {
+                return Vector2::new(qx, qz);
+            }
+        }
+        Vector2::new(f32::INFINITY, f32::INFINITY)
+    }
+
+    /// Ask for a window of the sheet to be baked in the background.
+    ///
+    /// Returns false if one is already being baked. The bake is half a million
+    /// texels of the full height field and takes about forty milliseconds,
+    /// which is a visible hitch every time the map is zoomed. The thread is
+    /// spawned here rather than in GDScript because everything it touches is
+    /// this side's -- the noise tables, the chart, the carving -- and a script
+    /// thread reaching back in through the binding is a different question
+    /// with a worse answer.
+    #[func]
+    fn patch_request(&self, w: i64, h: i64, north: Vector3,
+            u0: f64, u1: f64, v0: f64, v1: f64) -> bool {
+        let job = patch_job();
+        {
+            let mut g = job.lock().unwrap();
+            if g.busy {
+                return false;
+            }
+            g.busy = true;
+            g.done = false;
+        }
+        let radius = sphere::chart().radius;
+        let n = [north.x, north.y, north.z];
+        let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+        let (u0, u1, v0, v1) = (u0 as f32, u1 as f32, v0 as f32, v1 as f32);
+        std::thread::spawn(move || {
+            let buf = sphere::sheet_window(w, h, n, radius, u0, u1, v0, v1);
+            let job = patch_job();
+            let mut g = job.lock().unwrap();
+            g.data = buf;
+            g.busy = false;
+            g.done = true;
+        });
+        true
+    }
+
+    /// Whether a requested bake has finished.
+    #[func]
+    fn patch_ready(&self) -> bool {
+        patch_job().lock().unwrap().done
+    }
+
+    /// The finished bake, and it is handed over: asking again returns nothing
+    /// until another has been requested.
+    #[func]
+    fn patch_take(&self) -> PackedByteArray {
+        let job = patch_job();
+        let mut g = job.lock().unwrap();
+        if !g.done {
+            return PackedByteArray::new();
+        }
+        g.done = false;
+        PackedByteArray::from(std::mem::take(&mut g.data).as_slice())
+    }
+
+    /// A window of the planet sheet, for the map's close zooms.
+    ///
+    /// `u0..u1` and `v0..v1` are the sheet's own coordinates. The map works out
+    /// which cap it is looking at and asks for that, so the picture gets finer
+    /// as it is zoomed rather than showing the same two texels magnified.
+    #[func]
+    fn planet_patch(&self, w: i64, h: i64, north: Vector3,
+            u0: f64, u1: f64, v0: f64, v1: f64) -> PackedByteArray {
+        let c = sphere::chart();
+        let buf = sphere::sheet_window(w.max(1) as usize, h.max(1) as usize,
+            [north.x, north.y, north.z], c.radius,
+            u0 as f32, u1 as f32, v0 as f32, v1 as f32);
+        PackedByteArray::from(buf.as_slice())
+    }
+
+    /// Scattered points of planetary ground, for a chunk's edge skirt.
+    #[func]
+    fn grounds_at_globe(&self, pts: PackedVector2Array) -> PackedFloat32Array {
+        let c = sphere::chart();
+        let src: Vec<Vector2> = pts.to_vec();
+        let mut out = vec![0f32; src.len()];
+        out.par_iter_mut().enumerate().for_each(|(i, v)| {
+            *v = sphere::ground_world_y(&c, src[i].x, src[i].y, G_ALL);
+        });
+        PackedFloat32Array::from(out.as_slice())
+    }
+
+    /// The same error-and-highest-point measure the quadtree splits on, taken
+    /// against the planetary field. The tree cannot be driven by one field and
+    /// meshed from another: it would refine where the flat world has a ridge and
+    /// leave the planet's own ranges as four triangles.
+    #[func]
+    fn node_stats_globe(&self, nodes: PackedFloat32Array, cells: i64)
+            -> PackedFloat32Array {
+        let ch = sphere::chart();
+        let cn = cells.max(1) as usize;
+        let n = cn + 1;
+        let src = nodes.as_slice().to_vec();
+        let out: Vec<[f32; 2]> = src
+            .par_chunks_exact(3)
+            .map(|q| {
+                let (x0, z0, span) = (q[0], q[1], q[2]);
+                let cell = span / cn as f32;
+                let mut g = vec![0f32; n * n];
+                let mut top = -1e9f32;
+                for j in 0..n {
+                    let z = z0 + j as f32 * cell;
+                    for i in 0..n {
+                        let h = sphere::ground_world_y(
+                            &ch, x0 + i as f32 * cell, z, G_ALL);
+                        g[j * n + i] = h;
+                        if h > top {
+                            top = h;
+                        }
+                    }
+                }
+                let mut e = 0.0f32;
+                for j in (0..cn).step_by(2) {
+                    for i in (0..cn).step_by(2) {
+                        let drawn = (g[j * n + i] + g[(j + 1) * n + i + 1]) * 0.5;
+                        let truth = sphere::ground_world_y(
+                            &ch,
+                            x0 + (i as f32 + 0.5) * cell,
+                            z0 + (j as f32 + 0.5) * cell,
+                            G_ALL,
+                        );
+                        e = e.max((truth - drawn).abs());
+                    }
+                }
+                [e, top]
+            })
+            .collect();
+        let mut flat = Vec::with_capacity(out.len() * 2);
+        for v in out {
+            flat.push(v[0]);
+            flat.push(v[1]);
+        }
+        PackedFloat32Array::from(flat.as_slice())
+    }
 
     /// One point of finished ground. `flags` is 1 for the made roads and 2 for
     /// the aerodromes; the town platforms are always in.
@@ -364,7 +973,30 @@ impl Terra {
         LAST_NODES.store(nodes.load(Ordering::Relaxed), Ordering::Relaxed);
         LAST_MS.store(clock.elapsed().as_millis() as usize, Ordering::Relaxed);
         let mut out: Array<PackedVector2Array> = Array::new();
-        for line in done {
+        for (line, (a, b)) in done.into_iter().zip(jobs.iter()) {
+            // A leg that walks several times the distance between its own ends
+            // is not a road anybody would build.
+            //
+            // The router will always find *a* way round, and where the way
+            // round is an airfield's approach keep-out or the far bank of a
+            // firth, what it finds is a route that leaves a place, goes eight
+            // kilometres past where it was going, and comes back -- which is
+            // the looping this was reported for. The same judgement is already
+            // made about water: past `MAX_CROSSING` the leg is abandoned "and
+            // the network is left to find another way round, or to leave that
+            // place unconnected, which is the truth about it". Two places you
+            // cannot get between in less than four times the distance are not
+            // neighbours, and the network reaches them another way.
+            let direct = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+            let mut walked = 0.0f32;
+            for pair in line.windows(2) {
+                walked += ((pair[1].0 - pair[0].0).powi(2)
+                    + (pair[1].1 - pair[0].1).powi(2)).sqrt();
+            }
+            if direct > 2000.0 && walked > direct * ROUTE_DETOUR {
+                out.push(&PackedVector2Array::new());
+                continue;
+            }
             let mut pa = PackedVector2Array::new();
             for p in line {
                 pa.push(Vector2::new(p.0, p.1));
@@ -512,6 +1144,29 @@ impl Terra {
     fn climate_map(&self, n: i64, half: f64) -> PackedByteArray {
         let buf = raster::climate_map(n.max(0) as usize, half as f32);
         PackedByteArray::from(buf.as_slice())
+    }
+
+    /// The same picture on the planet: sampled on the direction, so a place
+    /// keeps its climate when the chart moves off it.
+    #[func]
+    fn climate_map_globe(&self, n: i64, half: f64) -> PackedByteArray {
+        let c = sphere::chart();
+        let n = n.max(1) as usize;
+        let half = half as f32;
+        let span = half * 2.0;
+        let mut out = vec![0u8; n * n * 4];
+        out.par_chunks_mut(n * 4).enumerate().for_each(|(j, row)| {
+            let z = (j as f32 + 0.5) / n as f32 * span - half;
+            for i in 0..n {
+                let x = (i as f32 + 0.5) / n as f32 * span - half;
+                let (t, m) = sphere::climate(sphere::dir_from_chart(&c, x, z));
+                row[i * 4..i * 4 + 2]
+                    .copy_from_slice(&raster::f16(t).to_le_bytes());
+                row[i * 4 + 2..i * 4 + 4]
+                    .copy_from_slice(&raster::f16(m).to_le_bytes());
+            }
+        });
+        PackedByteArray::from(out.as_slice())
     }
 
     /// Carriageways and kerbs for every road and street on the map, as two

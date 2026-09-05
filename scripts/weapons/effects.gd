@@ -760,18 +760,33 @@ class Tracer extends Node3D:
 		# made the bolts sit at the wrong angle.
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.albedo_color = Color(1.0, 0.74, 0.30, 0.95)
+		# Hotter than the old orange, and over-bright so it blooms: a tracer is
+		# a burning pellet, and what the eye picks out at two kilometres is the
+		# glare rather than the colour.
+		mat.albedo_color = Color(2.4, 1.35, 0.55, 0.95)
 		mat.albedo_texture = Effects.glow_texture()
 		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		# Stretched along the way it is going, by how fast it is going.
+		#
+		# The round was a fixed nine metres of quad. A cannon shell leaves the
+		# muzzle at a kilometre a second and covers sixteen metres in a frame,
+		# so nine metres is shorter than the gap between one drawn position and
+		# the next: it reads as a dot flickering across the sky, which is why
+		# neither the gun nor the anti-aircraft cannon looked like it was firing
+		# tracer. A streak longer than the step joins up into a line, which is
+		# what tracer actually looks like.
+		var speed: float = vel.length()
+		var half: float = clampf(speed * 0.013, 4.5, 30.0)
+		var wide: float = clampf(speed * 0.0009, 0.55, 1.5)
 		var cst := MeshKit.begin()
 		for roll in [0.0, PI * 0.5]:
 			var up := Vector3(cos(roll), sin(roll), 0.0)
 			MeshKit.quad(cst,
-				up * 0.55 + Vector3(0, 0, -4.5), up * -0.55 + Vector3(0, 0, -4.5),
-				up * -0.55 + Vector3(0, 0, 4.5), up * 0.55 + Vector3(0, 0, 4.5),
-				Vector3(0, 0, 40.0))
+				up * wide + Vector3(0, 0, -half), up * -wide + Vector3(0, 0, -half),
+				up * -wide + Vector3(0, 0, half), up * wide + Vector3(0, 0, half),
+				Vector3(0, 0, half * 9.0))
 		var m := MeshKit.finish(cst, mat)
 		mi.mesh = m
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -916,7 +931,8 @@ class Debris extends Node3D:
 		rotation += spin * delta
 		var floor_y := Sim.height_at(global_position.x, global_position.z)
 		if floats:
-			floor_y = maxf(floor_y, Sim.WATER_LEVEL)
+			floor_y = maxf(floor_y, Sim.sea_surface(global_position.x,
+				global_position.z))
 		floor_y += rest_offset
 		if global_position.y <= floor_y:
 			global_position.y = floor_y

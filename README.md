@@ -607,7 +607,7 @@ with burn-through as the round closes, because jamming does not save you from
 something already on top of you. It also lights you up on every RWR for a
 hundred miles, which is the trade.
 
-**The objective marker.** Shift and click anywhere on the tactical map plants
+**The objective marker.** CTRL and click anywhere on the tactical map plants
 one. It is drawn from *every* camera — cockpit, chase, a driver's seat, a
 bridge — and when it is off the glass it becomes an arrow at the edge of the
 screen pointing round to it, with the range. The autopilot will fly to it and
@@ -717,6 +717,7 @@ ramp and you are handed back to the world with the aircraft's velocity.
 | `Y` | weapon camera — ride the round you just released |
 | `J` (in a hold) | take the gun station from inside a gunship |
 | `M` | tactical map — baked relief, roads, towns, objectives, contacts |
+| `O` | the same map drawn on the planet: drag to turn it, wheel to zoom |
 | `L` | landing lamp |
 | `TAB` | action menu — aircraft, vehicle or ship, whichever you are in; the lights and the autopilot are switched from here |
 | `F3` | air traffic: call aircraft in to land and watch them do it |
@@ -766,6 +767,856 @@ Missiles fly proportional navigation, bleed energy after motor burnout and can
 only pull their rated g while fast — a late, hard break with flares is a real
 defence rather than a formality. Warheads use a swept proximity fuse with
 damage falloff, so a near miss hurts instead of deleting you.
+
+## A round world
+
+The world is a cap of a sphere now, not a plane — and it is the simulation that
+is round, not just the picture.
+
+The trick that makes it affordable is where the centre goes. A real 6371 km
+radius written straight into 32-bit floats leaves well under a metre of
+precision, which is why curved worlds normally need a floating origin. Put the
+centre one radius *below* the origin instead and every position in the world
+stays inside a hundred kilometres, while the geometry stays honest.
+
+Everything then follows from one function — how far the surface falls below the
+tangent plane at a horizontal distance, which for small angles is exactly the
+sagitta `d²/2R`:
+
+| distance | ground falls |
+|---|---|
+| 5 km | 2 m |
+| 10 km | 7.8 m |
+| 20 km | 31 m |
+| 60 km | 283 m |
+
+Subtract it inside `Sim.height_at` and all **214** places that ask where the
+ground is get a curved world without knowing anything about it. The terrain
+shader drops by the same amount about the **world origin** — not about the
+camera, which is the cheap trick that keeps the viewer permanently on top of the
+hill and can never agree with the physics.
+
+What is genuinely round rather than drawn round:
+
+- **Gravity points at the centre.** Missiles integrate it directly; an aeroplane
+  gets the difference between it and the engine's straight-down pull as a
+  correction. Over this world the two differ by up to eight tenths of a degree.
+- **Altitude is height above the sphere**, `|p − centre| − R`, which sixty
+  kilometres out is 283 m from what `y` says. Air density uses it.
+- **The sea is a shell.** A level plate against curved ground floods the far half
+  of the map — sixty kilometres out the land has dropped 283 m and a flat sea is
+  283 m over the top of it. Hulls float on the shell at their own position, and
+  water impacts, splashes and the sensor's water test all ask the shell where it
+  is.
+- **The sky knows.** Above about 20 km it darkens, by 35 km it is 93 % black, and
+  the stars are out in daylight — an ASAT climbing to a satellite used to arrive
+  in the same blue as the airfield it left.
+
+Two harnesses had to be taught the same thing: `--fleettest` measured hull height
+against a single number and read a perfectly floating squadron as 283 m low, and
+`--splashtest` scored a fireball sitting neatly on the surface as fifty metres
+under it.
+
+### One datum, asked in two frames
+
+Bending the ground splits the world into two frames, and the bugs all live on the
+seam between them. The terrain **mesh** is authored flat and bent in the vertex
+shader, so its vertices and the raw field behind them are still flat. Everything
+else — `Sim.height_at`, and therefore every height anything else stands on — has
+the drop already taken off. Mix them up and nothing complains: you get geometry
+quietly hanging in the air, or a test comparing a curved number against a flat
+constant and reporting a world that is fine as broken.
+
+`Sim.WATER_LEVEL` is the flat datum and `Sim.sea_at(x, z)` is the shell under a
+given point. Forty-three places asked the first when they meant the second:
+
+- **Twenty-three comparisons** of a curved ground height against the flat level.
+  The worst of them sited the opposing airfield: it looked for nine by nine dry
+  samples 74 km out, where the ground has dropped 430 m, decided the whole
+  country was under water and gave up. No field meant no opposing base, which
+  meant no satellite launch — `--asattest` failed with *0 satellites in orbit*,
+  a broken ASAT round pointing at a broken sea test.
+- **Fifteen placements** at `Vector3(x, WATER_LEVEL, z)`. Hulls with flotation
+  fell to the surface on their first tick and hid it; anything without simply
+  hung there.
+- **Scatter**, which took its final height from the raw field and never dropped
+  it. The scatter field reaches 37 km from the airfield, so the bushes at the far
+  corner stood **110 m** off the ground.
+The other half of the seam is the opposite mistake — a **curved** number stored
+where a flat one was wanted. `Sim.height_at` folds two things in before it drops
+the result onto the sphere: the aerodrome levelling, which lives in the
+extension, and the carrier decks, which do not. Both are therefore in the flat
+frame, and handing either a world height has the drop taken off it twice.
+
+`register_field` did exactly that. It sited the opposing airfield with
+`height_at`, stored that curved 335 m as the pavement, and the extension levelled
+the plane to it — so `height_at` came back 471 m lower still and the runway sat
+in a crater as deep as the field is high. `--fieldtest` reported *drawn surface
+−136.12 m, pavement 335.25 m*. The elevation is now stored flat, with
+`Sim.field_elev()` for anything that wants it as a world height.
+
+The carrier's deck looked like the same bug and is not: registered flat, it comes
+out of `height_at` correctly dropped. What was wrong was `--carriertest`, which
+read the stored number straight out of the dictionary and compared it against a
+curved expectation. A test that asks `height_at` — the query an approach actually
+uses — cannot make that mistake, so that is what it asks now.
+
+A runway is not one height any more, either. Levelled flat and then dropped, a
+3000 m strip 78 km out is 37 m lower at the ends than in the middle: it is tilted
+by the same eight tenths of a degree as local gravity, which is what *level*
+means out there. The test now expects the pavement to follow the curve rather
+than hold one number, and the opposing airbase — a rigid slab two kilometres
+across — is laid on the local tangent plane instead of standing upright, which
+takes its worst corner from 24 m out to 0.3 m.
+
+### What the pit under every town did to the roads
+
+The same mistake was levelling the settlements. `register_town_pads` averaged
+the land under a footprint with `height_at` and handed that curved average to
+the extension, which stamps the platform into the flat field — so every town
+was dug in by its own drop. A town 130 km out sat at the bottom of a **1330 m
+pit**, and because the router surveys the field *after* the platforms are in, the
+trunk network then had to climb out of fifteen of them.
+
+It showed up as a road defect, three steps from the cause. `--roadtest` reported
+a worst gradient of **23.3 %** against a 15 % limit, and 147 viaducts. The road
+survey is Rust working on the flat field and could not have produced that; what
+it was doing was bridging craters nobody had dug on purpose. Levelling the pads
+flat puts the worst gradient back to **15.8 %** — the same figure, at the same
+point, as a genuinely flat planet — and the viaducts drop to **110**, because a
+third of them existed only to span the holes.
+
+Two of the road measurements were also being taken in the wrong frame. Gradient
+and cross fall are set out against local up, not world level, and read in world
+coordinates the curve alone added a systematic tilt: 2228 km of road came back
+with a **1.5 % mean cross fall** it does not have, on a carriageway that is dead
+level. `Sim.survey_height_at()` is the flat-frame ground for exactly this — what
+a surveyor works in — and measured there the cross fall is 0.1 %, matching a
+flat planet to the digit.
+
+The lesson repeated often enough to be worth stating plainly: on the seam
+between the two frames, a wrong answer does not surface where it was made. A
+curved number stored in the flat field showed up as a gradient limit, two
+subsystems downstream, in a test that was measuring the right thing.
+
+The three flat-frame uses that are correct as they stand are now commented as
+such: the sea shell mesh (curved about its own origin), the terrain mesh's own
+vertices, and the scatter loop's first water test, which is reading the raw
+field.
+
+None of this is visible at the airfield, where the drop is centimetres. That is
+what made it worth writing down: the whole class of defect is invisible at the
+origin and grows with the square of the distance.
+
+This is a *cap* — locally exact over the map, on a real planet's radius. It is
+not a whole globe you can circumnavigate; that is a cube-sphere quadtree and a
+different world layer.
+
+## The planet as a body
+
+The detailed world is a quadtree of chunks over a cap 983 km across, and from a
+cockpit it is the right thing to draw. From eighty kilometres up it is the wrong
+thing twice over: the horizon has reached as far as the cap does, so the whole
+world is in view at once, and none of the detail it is spending triangles on
+subtends a pixel. Above that band the ground is one low sphere with the map's
+own relief painted on it — the same bake, so the ground you fly over and the
+ground you see from orbit cannot disagree — and the two are crossfaded.
+
+| | body | ground | far plane | chunks |
+|---|---|---|---|---|
+| 20 km | — | full | 45 km | building |
+| 38 km | — | full | 45 km | building |
+| 55 km | 0.25 | 0.75 | 683 km | building |
+| 64 km | 0.50 | 0.50 | 1320 km | building |
+| 90 km | full | — | 1600 km | stopped |
+
+The ground does not turn transparent to get out of the way; it is dithered out
+on an interleaved gradient and stays opaque. A quadtree of chunks has no sort
+order worth the name, and making the whole world a transparent surface to fade
+it is how you find that out. Dithered it keeps writing depth and simply thins.
+
+Above the band the chunk system stops: the meshes are hidden, the scenery with
+them, and `recentre` is not called at all. Not calling it is most of the point —
+a sphere you can see the whole of costs 59k triangles and one texture fetch,
+against a quadtree that is still trying to resolve a ridge line 900 km away.
+
+Three things about it are worth writing down.
+
+**It is drawn at real scale, in its real place.** The usual trick is a scaled
+copy near the camera, which is cheaper and looks identical for a sphere. It also
+puts the body a few kilometres away as far as the depth buffer is concerned, so
+anything genuinely between you and the planet — a satellite at seventy
+kilometres, an ASAT round on the way up to one — comes out behind it. At real
+scale the depth is simply true.
+
+**Its rings are not evenly spaced.** A uniform sphere of the same triangle count
+stands 850 m off the true surface over the theatre, which is the ground it has
+to agree with as it fades in. The rings are 15 km apart over the mapped square
+and 1.9° apart everywhere else, which puts the worst standoff over the theatre
+at **17 m** while keeping the limb smooth. The first attempt coarsened at 764 km
+and the mapped square reaches 848 km *diagonally*, so the four corners were
+drawn with the ocean's triangles and stood 769 m out.
+
+**The near plane has to move with the far one.** Godot's directional shadow
+culler builds its frustum points in single precision and cannot do it past a
+near-to-far ratio of a few million: at 0.25 m against 1.2 M m it fails every
+frame, on every light, and takes the shadows with it. Measured, 400 km of far
+plane was clean and 1200 km was not. The near plane now comes out with it, to a
+metre or so, which clips nothing that is not already inside the cockpit. The far
+plane itself stops at 1600 km because that is the tangent: from outside a sphere
+there is no more of it to see, however far you push the frustum.
+
+## The camera must not take the pointer
+
+Freelook is on ALT **and CMD**, and the map plants an objective marker on CTRL
+or CMD and click. So holding CMD over the map engaged freelook, which captures
+the mouse — and a captured cursor is parked in the middle of the screen. The
+marker could only ever be dropped dead centre, wherever you actually clicked.
+
+`Sim.ui_pointer` says a screen that wants the pointer is up, the map sets it
+while it is open, and the chase camera will not take the mouse while it is set.
+`--maptest` checks the flag is claimed when the map opens and released when it
+shuts, because the failure is invisible until somebody reaches for a modifier.
+
+## Two map sheets, because one cannot do it
+
+The map is drawn over a 1200 km world from a single baked image, and that image
+was 512 pixels square — **2344 m to the texel**. The map opens framing about
+forty kilometres of ground, which is *twenty-one texels across the screen*. It
+was not showing you a map; it was showing you one smear of colour, and it looked
+exactly like a single terrain chunk.
+
+Resolution alone cannot fix it. Enough texels to read forty kilometres of ground
+in the world sheet is a 12500-pixel image and 469 MB.
+
+So there are two sheets, the same arrangement the ground mask already uses: the
+world at 2344 m a texel for looking at a continent, and the theatre — ±120 km,
+2048 pixels, **117 m a texel** — drawn over the top of it. That is 411 texels
+across the opening view instead of 21. Past the edge of the detail sheet the
+world sheet is what is left, which is also the point at which one of its texels
+is smaller than a pixel.
+
+`--maptest` gates on this directly: a map you cannot read is a map that is not
+working, so what it checks is how many texels cross the view the map opens at.
+
+## The airfield is on the equator
+
+The globe drew its graticule about the theatre, which made the airfield the
+north pole of the planet. That is wrong on its own terms: `z` has been
+north–south since the climate first had bands in it, and the airfield has always
+sat at the middle of them. Drawn about the theatre the rings read as a target
+painted on the world and told you nothing about where anything was.
+
+The graticule now runs about the planet's own axis — `Sim.PLANET_NORTH`, which
+is **−Z**, because the flat chart draws increasing z *down* the screen and
+getting that backwards puts the world's north at the bottom of the globe. The
+airfield comes out at 0.000°, the top of the chart at 5.40°N, and due east of
+the airfield at 0.000°. The equator is drawn heavier, because it is the line the
+theatre sits on.
+
+Five and a half degrees is the whole world, which is what a 1200 km world on a
+6371 km planet is. The climate still compresses a pole-to-equator range into
+that, which is a deliberate lie and a separate question from where the graticule
+goes.
+
+## Six nations, not a checkerboard
+
+The six nationalities held even shares of the map — that was fixed once already,
+by taking the *angle* of two noise fields rather than their sum. What nobody had
+measured was how big a piece any of them held. Walking lines across the world
+and counting how far one flag lasts: **22 km on average, 16 km median**. On a
+1200 km world that is not six nations, it is a checkerboard.
+
+The cause was reusing the continental field for it. That field carries three
+fractal octaves because coastlines want the detail, and an angle taken from a
+field with detail in it flips every few kilometres. The nationalities now have
+their own field — one octave, and slow enough that a feature is most of the
+width of the world. The mean run goes to **95 km** and the median to **80 km**,
+with the shares still even at 13 to 20 per cent each.
+
+## A stale bake is a wrong world
+
+The bake keys on a hash of the scripts that do the generating, so that changing
+how a road is routed discards it without anyone having to remember. The height
+field is generated in **Rust**, and the extension was not in the list.
+
+It is not a subtle failure and it is completely silent. Measured: `--roadtest`
+reported a 406 m cutting and four times the earthworks it should have, against a
+world that no longer existed — while the same test with `--nobake` gave the
+right numbers. Anything built on top of the field is baked with it, so a change
+to the coastlines or the carving kept every one of them from the last build.
+
+The extension is in the signature now, by size and modification time rather than
+by content: it is a multi-megabyte binary read on every boot, and a rebuild
+always moves both.
+
+## Clouds round the planet, not round the camera
+
+Cloud was drawn twice and neither half could do the job.
+
+A volumetric slab followed the camera and reached eight kilometres — that was
+the cloud you could fly into. Everything beyond it was raymarched in the **sky**
+shader, and a sky shader is the background: it is only ever seen where nothing
+solid was drawn, so its cloud can never appear in front of a hill however good
+it looks. Between eight kilometres and the horizon there was therefore no cloud
+in front of the terrain at all. What you saw was a clear sky with the weather
+piled up at the far edge of it, which is exactly how it was reported.
+
+`CloudShell` is one layer, geometry rather than background, wrapped round the
+planet rather than round the camera. Being geometry it composites with the
+ground at any range; being a shell about the planet's centre it is in the same
+place for everyone and does not slide when the camera moves — which is what made
+the old one swim when you turned, since the chase camera *orbits* and turning
+the view moves the eye.
+
+Density is a function of the direction from the planet's centre and the height
+within the slab, the same shape of rule the ground uses: no seams, nothing to
+repeat, and cloud over the whole world rather than over your head.
+
+Two numbers in it were badly wrong and both were found by arithmetic rather than
+by eye. Written as a hash the noise was **1280 evaluations per pixel** of sky,
+and it cost the frame rate half of itself; sampled from a 64-cube of random
+bytes, which linear filtering turns into value noise for nothing, an octave is
+one fetch and the layer costs 1.4 ms instead of 16. And the drift was written
+straight into the shader as 0.0018 texture units a second — which, at nine units
+to the radius on a 6374 km shell, is an angular rate of 2×10⁻⁴ a second and
+clouds crossing the sky at **1275 m/s**. It is derived from a wind in metres a
+second now, because the conversion involves the noise scale and the planet's
+radius and nobody can eyeball that. The fragment
+solves the two sphere crossings analytically and marches the overlap, which
+covers being under the layer, inside it and above it without caring which.
+
+Both of the old halves are off. `--cloudtest` counts the systems as well as
+measuring the one that is left, because drawing it twice again is the obvious
+way to regress this.
+
+## One clock for the sea, and hulls that start on it
+
+Two bugs that only showed under load, both real rather than flaky tests.
+
+**The sea had two clocks.** `sea_time` advanced on render frames while every
+hull floats in the physics step, so a test asking where the surface is *now*
+disagreed with a hull that settled to where it was *then*. Measured, that drift
+reached 0.1 m against a swell that moves 8 mm in a tick. The clock steps with
+the physics now — one clock, one answer.
+
+**Hulls were created at the mean sea level rather than on the sea.** Spawned at
+`sea_at`, a ship sits up to a swell's amplitude off the surface until its first
+physics tick, and anything that looks in between sees the gap. Under a busy
+machine `--wavetest` caught exactly that and read **1.65 m** of it as ships
+failing to ride the sea. Eleven spawn sites now place hulls on `sea_surface`.
+
+Together those take the worst gap between a hull and the drawn surface from
+0.02 m — and 1.65 m under load — to **0.00 m, four parallel runs out of four**.
+
+## Territory belongs to the planet
+
+Whose ground you are standing on was a function of the flat pair, which on a
+planet is a function of *where the chart happens to be*. Fly 150 km, the chart
+moves under you, and the country you are standing in changes because the map
+moved — the border is attached to the viewer instead of to the world.
+
+It is sampled on the direction now, so the same ground answers the same way
+whatever chart is looking at it. Checked directly: 200 places read from two
+charts 150 km apart, **0 changed nationality**.
+
+Everything that places anything already asks `region_faction`, `height_at`,
+`sea_at` and `normal_at`, and the last three were planetary already — so making
+territory planetary made unit placement planetary with it, without touching the
+placement code.
+
+The scale had to be measured rather than derived. A frequency on the unit sphere
+is a number of features round the planet, and my first estimate was out by three
+and a half times: 68 gave borders every 27 km, a checkerboard again on a planet
+this time. 19.5 gives **89 km**, against the 95 km the flat world was tuned to.
+
+## Two artefacts on the globe
+
+**A gap from pole to pole.** The quad that straddles the seam meridian gets UVs
+half a world apart, and interpolating between them draws the entire map squeezed
+into one triangle. I dropped it — and that is a whole *column* of quads, so it
+left a slot running from pole to pole. Carrying the low side round past 1
+instead makes the interpolation continuous, and the texture's repeat brings it
+back to the same texels.
+
+**Ice caps that looked stuck on.** A threshold on latitude alone draws a perfect
+circle, and a perfect circle of white on a round planet reads as a decal rather
+than as part of the world. The sea ice edge is broken up by the same field the
+coastlines use, shallow water near land freezes first the way it does, and the
+snow line on land is jagged too — what makes a cap look like weather is that it
+comes further down some valleys than others.
+
+## Tracer that reads as tracer
+
+Every gun in the game already fired tracer: the cannon, the tank's coax, the
+ship's close-in mount and the man on foot all go through `Effects.tracer`. It
+did not look like it, and the reason is arithmetic. The round was drawn as a
+fixed nine metres of quad, and a cannon shell leaves the muzzle at a kilometre a
+second — sixteen metres a frame. A streak shorter than the gap between one drawn
+position and the next is a dotted line of separate flecks, not a burning line.
+
+The streak is stretched by speed now, and `--tracertest` gates on the ratio that
+actually matters:
+
+| muzzle | streak | travel in a frame |
+|---|---|---|
+| 180 m/s | 9.0 m | 3.0 m |
+| 900 m/s | 23.4 m | 15.0 m |
+| 1030 m/s | 26.8 m | 17.2 m |
+| 1600 m/s | 41.6 m | 26.7 m |
+
+## Zooming on a trackpad
+
+The map only listened for wheel buttons, and a Mac trackpad does not send them —
+two fingers is a pan gesture and a pinch is a magnify. On a laptop the map
+simply could not be zoomed. Both gestures are handled now, on the chart and on
+the globe.
+
+## The planet is the world
+
+`--globe` was a flag and a second world for as long as the planet was being
+built alongside the flat one. It is the world now, and `--flat` gets the old
+1200 km height field — kept because a good deal of measurement is written
+against it and a world you can compare against is worth having.
+
+Twenty harnesses run on the planet by default. Two do not, and both are the
+harness rather than the world: `--skirttest` reads a 7.36 M m curtain, which is
+the curvature of a chunk grid it was written to measure flat, and `--boattest`
+still cannot get its periscope onto a coast that is now genuinely over the
+horizon. Both pass with `--flat`.
+
+## The chart and the globe are one picture
+
+They were drawn by two different rules. The tactical chart rasterised the flat
+field even on the planet, and the orbital sheet had its own hand-written palette
+— written there because it was quicker than plumbing the real one through — so
+the map and the view out of the window were two different worlds' worth of
+colour.
+
+There is one rule now: `raster::weights_from`, with its inputs handed in. The
+ground shader draws it, the chart is rasterised from it, the scatter picks its
+species by it and the orbital sheet is coloured by it.
+
+Making them share also made a real bug visible immediately. The climate the
+chart read and the climate the ground read had diverged: the GDScript side
+scaled its *coordinates* by forty and handed them to the flat world's noise,
+which carries a frequency of 6.2e-6 — asking for features a hundred and sixty
+thousand times too large and getting back very nearly a constant. Agreement
+between the two went from **0.0299 to 0.00005**, against 0.00081 on the flat
+world. It looked like a tolerance that wanted loosening and it was two copies of
+one rule that had come apart.
+
+### And the climate had to be sized for a planet
+
+The tempting squeeze is a large one: 1200 km is 5.4 degrees of a real planet,
+5.4 degrees of anywhere is one climate, and squeezing hard gives the ground the
+variety the flat world had. At seven and a half it does — and it makes the
+planet absurd. Snow beyond six degrees of latitude is **89 % of the surface**: a
+globe white from pole to pole with a green fleck on it.
+
+| squeeze | snow beyond | of the surface |
+|---|---|---|
+| 7.5 | 6° | 89 % |
+| 2.2 | 21° | 64 % |
+| **1.15** | **44°** | **30 %** |
+
+At 1.15 it is a cold but believable world, and the country you fly over is warm
+— its variety coming from moisture and from height, which is where a real
+place's variety comes from over 1200 km, latitude having almost nothing to say
+across five degrees of it.
+
+The continent the world stands on also had to stop being a *disc*. `max` against
+a constant flattens the field wherever the bias is strong, and a contour of a
+radially symmetric function over a flattened field is a circle. Scaled and
+lifted instead, every wiggle of the continental noise survives; and the edge of
+the bias is given a wobble a third of its own width, because otherwise the coast
+is still a rim however the land inside it is shaped.
+
+## Climate belongs to the place
+
+The last piece of the authored square was in the biome system, and it was doing
+real damage without ever being visible as a bug.
+
+Where a place sat in the climate bands was `|z|` over most of the map's half
+width — a function of the *chart*. Move the chart and a fixed piece of ground
+changes climate, and its colour, its trees and its scatter with it. The
+temperature and moisture fields were sampled on the chart pair too, so they slid
+out from under the world whenever the origin moved. And `biome_weights` took a
+world `y`, which on a planet carries the curvature drop and therefore also
+depends on where the chart is centred: a place's snow line moved because
+somebody flew a hundred and fifty kilometres.
+
+All three now answer about the place. Latitude is the planet's own, the climate
+pair is sampled on the direction, and height is measured above the sea *under
+that point*. Read the same 120 places from two charts 150 km apart:
+
+| | before | after |
+|---|---|---|
+| climate band moves by | — | **0.0000** |
+| places that changed biome | **44 of 120** | **0 of 120** |
+
+The compression is written down rather than hidden. The whole world is 5.4
+degrees of a real planet, and 5.4 degrees of anywhere is one climate; at seven
+and a half, flying north out of the world's own country takes you from temperate
+to arctic over about a thousand kilometres. It is a small planet climatically
+and it is meant to be — the equator is hot, the poles are cold, and a place
+keeps its weather whoever is looking at it.
+
+### And the world's works move with the chart
+
+The floating origin renumbers everything that is *somewhere* — and the roads,
+the towns and the aerodromes are somewhere. Stored as chart pairs they do not
+stay put when the chart moves; they move *with* it, and the airfield ends up a
+hundred and fifty kilometres from the airfield. They are carried across now.
+Only positions: a profile height is an elevation above sea level, and that is
+the same number from any chart.
+
+## Scatter that looks like country
+
+Every candidate that passed the biome test was planted, which lays an even
+carpet of trees across a whole biome — and country does not look like that from
+the air. What reads as woodland is a *pattern*: thickets, glades and edges.
+
+The densities are roughly halved and a slow field about 800 m across decides
+*where*, so a stand is the size of a wood rather than the size of a bush and the
+open ground between stands is genuinely open. The thickest part of a stand gets
+most of it back, so the clumping thins the open country rather than the world.
+**85,000 instances to 39,500**, and 5.94 M triangles of scenery to 4.55 M.
+
+## Pylons that hold their own wires up
+
+A pylon that could not stand — in water, on the airfield, inside a town, or on
+ground too steep to found one on — was dropped from the list, and the conductor
+was then strung from the tower before it to the tower after it. That is a wire
+spanning two hundred metres of open air with nothing holding it, and across a
+lake it was kilometres of it.
+
+A line that cannot be carried across something stops at the edge and starts
+again on the far side, which is what a real one does. Runs of one tower are
+dropped too: a pylon on its own in a field carries nothing. Five towers of 126
+went, and the longest span a conductor is asked to cross is now **215 m**
+against a 190 m nominal — which is recorded, because a span that runs away is
+the run-breaking having failed and it is invisible in a count of towers.
+
+## The router was surveying the wrong world
+
+`road_height` — what the A* costs its edges against and what the survey draws
+its profile from — read `natural(x, z)`, the *flat* field. On the planet that is
+a trunk network laid out for terrain that is not there: cuttings through
+nothing, embankments across hills, and a coast road under water.
+
+There is one function that decides which ground is the ground now, and the
+router, the survey and the settlement siting all go through it. The flat world
+is byte-identical afterwards; the planet gets a network routed against its own
+terrain.
+
+### Two things it then needed
+
+**A settlement is not merely somewhere dry.** On a flat world with one continent
+that distinction never comes up; on a planet it is the difference between a
+trunk network and a network that crosses an ocean, because the router will
+dutifully connect any two towns it is handed. `Sim.build_landmass()` floods out
+from the airfield across land on a coarse grid — one batched call for the
+heights and then a breadth-first walk, which is nothing once the heights are not
+fetched one at a time — and a site off that landmass is refused.
+
+**And the country the world is built on has to be country you can build on.**
+The generator draws alpine ground everywhere: ridged noise at five kilometres of
+relief. The survey solves the gradient and the earthworks limit together, and
+where neither can be met it returns a design the terrain then cuts a slot
+through — a carriageway in a 245 m cutting with vertical walls. The mountain
+weight is damped where the world's works are, so the continent they are laid out
+on is hills and plains and the mountains start where nobody has built anything.
+
+| on the planet | before | after |
+|---|---|---|
+| worst gradient | 322.9 % | **2.6 %** |
+| mean cross fall | 17.4 % | **0.4 %** |
+| finished ground vs its own design | 308 m out | **0.32 m** |
+
+`--roadtest` passes on the planet now, and the flat world is unchanged.
+
+### The two worlds were sharing a bake
+
+Same family as the extension being missing from the key, and found the same way:
+a test that had passed a minute earlier failed against a world it never built —
+503 m cuttings and ten metres of mean earthworks. A run on the planet left its
+road network on disk and the next run on the flat world loaded it. They do not
+share a network, a set of towns or a coastline, so they do not share a
+signature.
+
+## Taking the square out
+
+The planet had an authored 1200 km square blended into the middle of it, and it
+drew exactly what it was: a box of islands in an ocean, plainly a box on the
+globe. It is gone. `sphere.rs` generates one terrain everywhere and what people
+have *built* is carved into it — town platforms, aerodrome levelling, road
+earthworks. That was the only part of the flat world worth carrying over,
+because it was never terrain: it is what is done to terrain once somebody lives
+on it, and it applies to a planetary field exactly as it applied to a flat one.
+
+Splitting `ground_at` into a base and a `carve` took one frame error with it.
+The carving works in the flat world's `y`, where the sea is at −35 rather than
+at zero, so handing it an elevation-above-sea put the aerodrome thirty-five
+metres under water and the game started in the sea.
+
+**A continent, not a box.** A planet generated without regard to the airfield
+has no reason to put land there, and the first version of the world's works came
+out mid-ocean. There is a bias on the continental field itself, ramping in over
+four hundred kilometres, so the land it makes has this planet's own coastlines
+and mountains on it. Adding a constant was not enough — that leaves deep ocean
+as shallow ocean — so it lifts toward a floor instead: **79 % land out to
+260 km**, airfield at 0.00 m.
+
+**The sea is a sphere**, with the swell lifted along each point's own radius.
+Lifted along `y`, as a flat shell can be, the far side of the world has its sea
+pushed sideways and then *into* the planet.
+
+**No town is worth an island.** The platform clamped itself to at least eight
+metres above the water. On a world where every site was dry by construction that
+is a harmless floor; on a generated planet it is a licence to raise land out of
+the ocean to stand one small town on. Wet sites are dropped, and the town with
+them.
+
+### Everything that assumed a square
+
+Removing the square broke a series of things that had quietly depended on it,
+and each one is the same shape of mistake — a distance, a direction or an extent
+that was true of the authored world and of nothing else.
+
+- **Ships turned back at 600 km**, because that was the edge of the map. A
+  planet has no edge. They turn away from *ground* now — a look at where they
+  would be in a minute — which is what a ship should have been avoiding anyway.
+- **Submarines spawned in 25 m of water.** Deep enough to float, not deep
+  enough to dive: she may go down until her keel is two metres off the bottom,
+  so an order for 45 m did nothing at all.
+- **The fleet stopped sailing in company.** Each hull searched for its own deep
+  water out to 170 km, which scattered a squadron across a quarter of an ocean.
+  One anchorage is found for the group and the formation carried to it whole.
+- **Three separate searches walked due west**, because on the old world the sea
+  was west of the fleet and the coast ran north–south. They sweep bearings now.
+- **The map's close-in sheet was baked around the world origin.** It is a
+  picture of the ground under the *chart*, and the chart follows the player, so
+  it is taken in chart coordinates and taken again when the chart moves.
+
+And one that was not about geometry at all: **`--boattest` was passing for the
+wrong reason.** It ordered 45 m and waited four seconds, which is nine metres of
+a dive at the rate she answers her planes. It only ever passed because the water
+it was run in was too shallow to dive properly in, so she hit the bottom limit
+inside the window and looked as though she had obeyed.
+
+## Moving the world onto the planet
+
+The flat world is a 1200 km height field with nothing outside it. Making the
+whole planet flyable sounds like replacing that field, and replacing it sounds
+like replacing everything built on it — the roads, the towns, the airfields, the
+survey, the biome siting, and the several thousand call sites that ask the world
+for ground. It is not, and the reason is one observation:
+
+**Everything asks in `(x, z)`.** On a flat world that pair is a coordinate. It
+does not have to be. It can be *metres east and metres south of wherever the
+chart is centred*, measured along the ground — and then `height_at(x, z)` keeps
+its signature and its meaning while the ground under it becomes a planet.
+
+That is the whole hinge. `Sim.set_chart()` puts the chart somewhere on the
+globe, `chart_to_dir()` turns the pair into a direction from the planet's
+centre, and a planetary field is a function of exactly that. The aeroplane, the
+missiles, the vehicles and the AI never learn the world is round.
+
+The projection is azimuthal equidistant about the origin, chosen because
+distance along the ground from the middle of the chart is *exact* — which is
+what every range readout, weapon envelope and turn radius in the game already
+assumes. `--charttest` holds it to that before anything is founded on it: the
+round trip is out by 0.71 m at 6000 km, and ground distance from the middle by
+0.10 m over 5000 km.
+
+Two things it caught, both in the chart rather than in the world:
+
+- **East was west.** `north × origin` where it should have been `origin × north`,
+  which mirrors the map. It showed up as the same pair landing 1.2 million
+  metres from where the flat world puts it.
+- **`acos` has no digits left near the origin.** A point one kilometre out came
+  back as the origin itself, because `cos(1 km / R)` is within a float's last
+  digit of 1. It is `atan2` of the perpendicular against the parallel now. The
+  test then failed on its *own* copy of the same mistake, reporting 243 m of
+  error at 10 km that was entirely its own arithmetic.
+
+The single-precision floor is worth writing down: a unit vector resolves about
+1e-7, which at this radius is **0.64 m**. That number is the reason the chart
+exists at all — positions on a planet cannot be carried in world coordinates and
+still have centimetres in them, so they are carried as offsets from somewhere
+near you instead.
+
+### What the field became
+
+`sphere.rs` is the same character of ground as a function of a direction rather
+than of a plane. The authored theatre is blended into it — the *finished* ground,
+runway and roads and town platforms included, because that is what you are
+standing on — over a ring from 300 to 620 km.
+
+Measured, with the chart on the theatre and the same pairs read both ways:
+
+| | 2 km | 30 km | 120 km | 400 km |
+|---|---|---|---|---|
+| the ground moves by | 0.1 m | 0.1 m | 3.5 m | 1100 m |
+
+The near column is what matters: where you actually fly, the world is the world
+it always was, and the airfield is exact to the centimetre. The 400 km figure is
+the blend doing its job. The difference that remains is not error — the flat
+world reads the pair as a *projected* offset and the chart reads it as a distance
+along the ground, and those name points R(θ − sin θ) apart. Nothing stored moves,
+because everything reads through the same chart.
+
+Walking out through the join, the biggest step in 2 km is **851 m** — against
+**1469 m** for the flat world's own worst step over the same ground. The seam is
+smoother than the terrain it joins.
+
+### The ground builds there
+
+The quadtree did not need replacing either: it meshes chart coordinates, and the
+chart covers the planet. In globe mode the chunks read `grounds_globe`, the split
+metric reads `node_stats_globe`, and the vertex shader stops curving the mesh —
+the field already carries the curve, and bending it twice drops the horizon at
+double rate and closes the ground over your head at a hundred kilometres.
+
+On the far side of the planet: **433 chunks built, drawn surface within 0.01 m
+of the field.** `--seamtest`, `--culltest` and `--lodtest` all pass with
+`--globe` as well as without.
+
+### The floating origin
+
+The chart rides with the player, moving when they get 150 km from the middle of
+it. Moving it renumbers every position in the game at once, so everything that
+is somewhere has to be renumbered with it.
+
+Heights are carried across as height *above the local sea*, not as `y`. The sea
+is at a different `y` under the new chart — that is what the planet curving away
+from the middle means — so carrying `y` would put an aeroplane at 3000 ft into
+the ground the moment the chart moved. Moved 10000 km, the aeroplane kept
+**3000.0 m of 3000.0 m** above ground and stayed on the same piece of it.
+
+`--globe` flies it. It is read in the early argument scan, because the field,
+the terrain and the sea all ask which world this is as they come up.
+
+### What is not done
+
+The generated planet is wilderness. Roads, towns, airfields and the survey are
+still sited in the theatre's own flat frame, so the rest of the world has ground
+and weather and sea and nothing built on it. Siting them on the sphere is the
+next stage and it is a large one — the router and the survey are 1200 lines of
+Rust that think in a plane.
+
+## A generated planet
+
+The globe first drew the theatre as what it physically is — a 1200 km square on
+a 12742 km ball, floating in blank ocean. Accurate and useless. The next attempt
+wrapped the world over the whole sphere by mirrored tiling, which filled the
+planet and was immediately, correctly called what it was: the same chunk 33
+times over. Tiling is a texture trick, not a world.
+
+`PlanetTerrain` generates the rest of the planet. Every sample is taken from 3D
+noise evaluated on the **unit direction from the centre**, which is the whole
+trick: a function of a direction has no edges, so there are no cube-face seams,
+no poles that pinch, and nothing to wrap or repeat. Continents come from a
+warped fBm field through a shelf — land above the water, sea floor dropping away
+from the shore — with ridged noise for ranges weighted toward the thick parts of
+each continent, so mountains sit inland and the coasts stay low.
+
+Frequencies are quoted against a 3000 km reference planet and scaled from there,
+in two different ways. Mountains and roughness scale with the radius, so the
+ground keeps its character whatever size the planet is. Continents scale with
+the **square root**, so a bigger planet gets bigger landmasses rather than the
+same landmasses many more times over — scaled fully, a 6371 km planet is just a
+3000 km one with four times as many islands.
+
+The theatre is blended into it, and this is the part that matters: the world you
+fly over is a real place on this planet, not a picture laid over one. At the
+airfield the generated planet stands at **35.0 m** and the height field says
+**35.0 m** — the same number, because inside the blend radius the planet *is*
+the height field. Fly out and the ground carries on into terrain that was
+generated rather than authored, with no step at the boundary.
+
+Measured over the whole sphere: **19% land**, 3240 m of relief down to −5268 m,
+and of 48 pairs of points a quarter of the planet apart, **none** are the same
+ground.
+
+Four mistakes worth keeping:
+
+- **The abyssal plain was exactly −4600 m everywhere.** Flat, and so literally
+  indistinguishable from itself: fifteen of those 48 pairs "matched" because
+  both were the same constant. Ridges and basins are what make one piece of deep
+  ocean a different place from another.
+- **The theatre appeared twice**, once where it is and once at the antipode. The
+  blend derives the flat chart's x and z from the direction's x and z, which are
+  the same on both sides of the planet. The same near-hemisphere mistake the
+  planet body's own test made, in a different function.
+- **A 39 km texel is a coin toss over a 15 m height field.** Point-sampled, the
+  theatre came out as a disc of stipple. It is read off the map's relief sheet —
+  already averaged to 2.3 km — and box filtered the rest of the way.
+- **The blend ran out to 1500 km and the relief sheet stops at 600.** The ring
+  between had nothing to smooth it, so the stipple came back as a halo. The
+  blend now lives inside the sheet's coverage.
+
+The sun lights it, so the terminator falls where night does, and the ice caps
+are at the planet's poles — including sea ice, which was missing at first
+because I gated it on depth and the polar ocean is all deep.
+
+## The map as a planet
+
+`O` draws the tactical map on the ball instead of as a chart. The chart is the
+right thing for laying a fire mission — flat ground, and a click is a
+coordinate. What it cannot show is where any of it *is*: the world is a 1200 km
+square on a 12742 km planet, which is a patch a seventh of the disc across, and
+a chart that draws it as a full-screen rectangle says nothing about that.
+
+The theatre is the pole, because that is how the world was built — a cap centred
+on the origin, so the airfield is the one point on this planet with a name.
+Everything is projected through one function, overlays included, so contacts and
+satellites land on the ground they belong to and go round the back when they
+should. Satellites are lifted off the surface by their own altitude and tethered
+to the ground under them, or an orbit reads as another contact.
+
+The ball is lit by the real sun — `solar_angles` at the current time of day — so
+the terminator falls where night does.
+
+## Waves
+
+The sea is a spectrum, not a sine. Two long swells cross at 454 m and 401 m and
+carry the heave; a 70 m chop rides on top of them, and that short one is what a
+small hull actually pitches to — without it a 47 m boat and a 257 m assault ship
+both simply follow a 500 m swell and the size of the hull stops meaning
+anything.
+
+The frequencies are not free either: in deep water `ω = √(gk)`, so the long
+swell has a 17 second period and the chop a 6.7 second one. Set by eye you get a
+sea where the big swell hurries and the chop crawls, which reads as wrong even
+if you cannot say why.
+
+A hull used to bob on `sin(t)` — a timer unrelated to the water under it and
+identical for every ship, so a squadron in company all rose and fell together
+whatever the sea was doing. Now the swell is a **field**, defined once in `Sim`
+and handed to the water shader as the same constants and the same clock, so what
+a hull rides is exactly what you can see it riding. Three samples along the hull
+give the heave, the pitch and the roll:
+
+| | length | worst pitch |
+|---|---|---|
+| patrol boat | 38 m | 2.3° |
+| Kaman missile boat | 47 m | 2.1° |
+| corvette | 105 m | 1.2° |
+| Wasp assault ship | 257 m | 1.0° |
+
+Measured over twenty-six seconds with four hulls left on the swell, the worst
+gap between a ship and the surface drawn under her is **0.04 m**.
+
+The carrier is not a `Ship` and was missing both halves of this. Her height was
+set once, at build time, and never touched again — so steaming five kilometres
+further out left her thirty metres above her own water, because the sea falls
+away as she goes and she did not. She also sat glassy while everything around
+her rode the swell. She now floats where she is and heaves with it, about a
+metre on a 454 m sea at 333 m long, and the registered deck heaves with her:
+an approach is flown to the deck the ship is actually holding, not the one she
+was holding when she was built.
 
 ## Two countries that did not exist
 
@@ -1133,6 +1984,15 @@ godot --headless --path . --quit-after 9000 -- --preset=landing --auto=land --du
 | `--adtest` | a battery and an anti-aircraft gun against an aeroplane flown at them: do the rails come up, does anything leave them, does it hurt |
 | `--asattest` | a launcher on the ground against something in orbit: how high the round gets and how close it passes |
 | `--manpadstest` | a shoulder-launched team against an aeroplane in the weeds and then against one that has climbed out of reach |
+| `--wavetest` | four hulls of different lengths left on the swell: do they sit on the drawn surface, and does a short hull feel it more than a long one |
+| `--planettest` | the planet body against the ground it replaces: how far the sphere stands off sea level over the theatre, and where the crossfade hands over |
+| `--globetest` | the map's globe projection: the theatre under the middle, the antipode facing away, and nothing escaping the disc |
+| `--planetgen` (part of `--planettest`) | the generated planet: land fraction, relief, that no two points a quarter of the world apart are the same ground, and that the theatre appears on it once |
+| `--cloudtest` | that the cloud layer is a shell about the planet, that the eye is under it from the ground, and that it is the only cloud system drawing |
+| `--tracertest` | that every gun fires tracer, and that the streak is longer than the round's travel in a frame |
+| `--charttest` | the surface chart: round trip, exactness of ground distance, and that it reproduces the flat world it replaces |
+| `--globeworld` | the world moved onto the planet: the theatre survives, there is ground everywhere else, the join has no step, chunks build off the theatre, and the floating origin keeps an aeroplane's height |
+| `--maptest` | what the map has to draw and what it can resolve: land by distance, texels across the opening view, and how big a piece of ground one nation holds |
 | `--hoverhold` | throw a helicopter sideways at 18 m/s with 20 degrees of bank on, engage the hover, and measure where it ends up |
 | `--slopetest` | park a tracked vehicle across a side slope with the brakes on and see whether it stays there |
 | `--svctest` | the support systems: what the side can see with its own radar, with a satellite and with an E-3; taking fuel from a tanker; and being rearmed on the ground |
