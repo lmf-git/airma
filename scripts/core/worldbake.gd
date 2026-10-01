@@ -131,17 +131,26 @@ static func put(key: String, value: Variant) -> void:
 	_data[key] = value
 	_dirty = true
 
-## For a table that only ever grows -- the terrain's node errors, which pick up
-## new entries as you fly somewhere the tree has not had to think about. Writing
-## four megabytes back on every launch to record that nothing changed is not
-## worth the ninety milliseconds, so the count decides.
-static func put_grown(key: String, value: Dictionary) -> void:
+## For a table that only ever grows -- the terrain's node measurements, which
+## pick up new entries as you fly somewhere the tree has not had to think about.
+## Writing four megabytes back on every launch to record that nothing changed is
+## not worth the ninety milliseconds, so the size decides.
+static func put_grown(key: String, value: Variant) -> void:
 	if not enabled:
 		return
 	var had: Variant = _data.get(key)
 	_data[key] = value
-	if not (had is Dictionary) or (had as Dictionary).size() != value.size():
+	if had == null or _sizeof(had) != _sizeof(value):
 		_dirty = true
+
+## How big a bake entry is, for the growth test above. Dictionaries and packed
+## buffers both answer to `size()`; anything else is taken as changed.
+static func _sizeof(v: Variant) -> int:
+	if v is Dictionary:
+		return (v as Dictionary).size()
+	if v is PackedByteArray:
+		return (v as PackedByteArray).size()
+	return -1
 
 ## Write the bake out, if anything in it is new. Called once the world is up,
 ## so a first run pays the generation cost and no run after it does.

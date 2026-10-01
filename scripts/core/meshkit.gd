@@ -251,3 +251,13 @@ static func mi(mesh: Mesh, name := "Mesh") -> MeshInstance3D:
 	n.name = name
 	n.mesh = mesh
 	return n
+
+## Filling a multimesh from a packed buffer was tried and is much worse.
+##
+## `set_instance_transform` is a call across the Variant boundary per instance,
+## and `MultiMesh.buffer` takes the whole lot in one -- twelve floats an
+## instance, the same data. It reads like the obvious batching win and it is a
+## large regression: measured, the nature scatter went from 22 ms to 333 and the
+## street props from 225 to 287. Assembling the packed array element by element
+## in script costs more than the calls it saves. Left written down so it is not
+## tried again.

@@ -94,8 +94,13 @@ func plan_finish() -> void:
 	if not _plan_cached:
 		Sim.finish_roads()
 	var t1 := Time.get_ticks_msec()
+	# Which trunk road each town runs out to meet, for all of them at once.
+	var centres := PackedVector2Array()
 	for t in sites:
-		_plan_town_streets(t["c"], t["r"])
+		centres.append(t["c"] as Vector2)
+	var trunks: PackedVector2Array = Sim.nearest_trunk_many(centres)
+	for i in sites.size():
+		_plan_town_streets(sites[i]["c"], float(sites[i]["r"]), trunks[i])
 	var t2 := Time.get_ticks_msec()
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
 	var t3 := t2
@@ -198,9 +203,13 @@ static func find_regions() -> Array:
 
 func _site_towns() -> void:
 	sites.clear()
+	var _t_lm := Time.get_ticks_msec()
 	# Which ground is reachable ground. A town across a strait is a town the
 	# trunk network has to swim to.
 	Sim.build_landmass()
+	if Sim.debug_roads:
+		print("[plan]   build_landmass: %d ms" % (Time.get_ticks_msec() - _t_lm))
+	var _t_named := Time.get_ticks_msec()
 	var pads: Array = []
 	for t in TOWNS:
 		var want := Vector2(float(t[0].x), float(t[0].z))
@@ -238,6 +247,8 @@ func _site_towns() -> void:
 			"tallest": float(t[3]), "name": String(t[4]), "region": 0,
 			"was": want, "rough": best_rough})
 		pads.append({"c": best, "r": r})
+	if Sim.debug_roads:
+		print("[plan]   the named towns: %d ms" % (Time.get_ticks_msec() - _t_named))
 	# and the clusters elsewhere on the map, each with its own towns
 	var t_fr := Time.get_ticks_msec()
 	var regions := find_regions()
@@ -564,7 +575,7 @@ func _spanning(nodes: Array, group: Array, loops: int) -> Array:
 	return out
 
 
-func _plan_town_streets(centre: Vector2, radius: float) -> void:
+func _plan_town_streets(centre: Vector2, radius: float, trunk: Vector2) -> void:
 	var block := 128.0
 	var lines := int(radius / block)
 	for i in range(-lines, lines + 1):
@@ -576,7 +587,7 @@ func _plan_town_streets(centre: Vector2, radius: float) -> void:
 			Vector2(centre.x + off, centre.y + half)])
 		_streets.append([Vector2(centre.x - half, centre.y + off),
 			Vector2(centre.x + half, centre.y + off)])
-	_streets.append([centre, _nearest_trunk(centre)])
+	_streets.append([centre, trunk])
 
 func build() -> void:
 	_rng.seed = 20260821
@@ -641,6 +652,19 @@ func _town_detail() -> void:
 		var seat: Array = []
 		var kiosk: Array = []
 		var planter: Array = []
+		# Where every prop in this town would stand, before any of them is
+		# placed.
+		#
+		# Standing one on the ground means knowing where the *drawn* surface is,
+		# which is four heights interpolated over a terrain cell -- and asked one
+		# prop at a time that is four crossings of the extension boundary each,
+		# a hundred and eighty thousand of them for the world's thirty-six
+		# thousand street props. Measured, 232 ms of the boot. Gathered first and
+		# asked for in one call a town, it is forty-eight crossings and the
+		# interpolation runs across every core.
+		var at := PackedVector2Array()
+		var yaw := PackedFloat32Array()
+		var which := PackedInt32Array()
 		for seg in _streets:
 			var a: Vector2 = seg[0]
 			var b: Vector2 = seg[1]
@@ -653,23 +677,31 @@ func _town_detail() -> void:
 			var side := Vector2(-dir.y, dir.x)
 			var step := 38.0
 			var n := int(run / step)
+			var facing: float = atan2(dir.x, -dir.y)
 			for i in range(1, n):
 				var along: float = float(i) * step
 				for sx in [-1.0, 1.0]:
-					var q: Vector2 = a + dir * along + side * (sx * 9.5)
-					var gy: float = Terrain.surface_height(q.x, q.y)
-					if gy < Sim.sea_at(q.x, q.y) + 1.0:
-						continue
-					var xf := Transform3D(Basis(Vector3.UP,
-						atan2(dir.x, -dir.y)), Vector3(q.x, gy, q.y))
-					if i % 2 == 0:
-						lamp.append(xf)
-					elif i % 5 == 1:
-						seat.append(xf)
-					elif i % 7 == 3:
-						planter.append(xf)
-					elif i % 11 == 5:
-						kiosk.append(xf)
+					at.append(a + dir * along + side * (sx * 9.5))
+					yaw.append(facing)
+					which.append(i)
+		var gys: PackedFloat32Array = Sim.native.surfaces_at(at,
+			Terrain.BASE_CELL)
+		for k in at.size():
+			var q: Vector2 = at[k]
+			var gy: float = gys[k]
+			if gy < Sim.sea_at(q.x, q.y) + 1.0:
+				continue
+			var xf := Transform3D(Basis(Vector3.UP, yaw[k]),
+				Vector3(q.x, gy, q.y))
+			var i2: int = which[k]
+			if i2 % 2 == 0:
+				lamp.append(xf)
+			elif i2 % 5 == 1:
+				seat.append(xf)
+			elif i2 % 7 == 3:
+				planter.append(xf)
+			elif i2 % 11 == 5:
+				kiosk.append(xf)
 		var tone: Color = Sim.faction_colour(faction)
 		made += _detail_batch(_lamp_mesh(tone), lamp, "Lamps_%s" % String(t["name"]))
 		made += _detail_batch(_seat_mesh(tone, biome), seat, "Seats_%s" % String(t["name"]))
@@ -1129,21 +1161,6 @@ func _inside_town(p: Vector2) -> bool:
 			return true
 	return false
 
-func _nearest_trunk(p: Vector2) -> Vector2:
-	var best := p
-	var bd := 1e9
-	for r in Sim.ROADS:
-		var ra: Vector2 = r[0]
-		var rb: Vector2 = r[1]
-		var ab := rb - ra
-		var t: float = clampf((p - ra).dot(ab) / maxf(ab.length_squared(), 0.001), 0.0, 1.0)
-		var q := ra + ab * t
-		var d := p.distance_to(q)
-		if d < bd:
-			bd = d
-			best = q
-	return best
-
 # ---------------------------------------------------------------- military
 func _military(centre: Vector3) -> void:
 	var hangar := _hangar_mesh()
@@ -1222,6 +1239,13 @@ func _farms() -> void:
 # the draw calls; instance count sets how much is actually on the ground. Going
 # up on both at once is what lets the ground read as ground at low level, which
 # is most of what makes a fast jet feel fast.
+## How big a piece of the road network is drawn as one mesh.
+##
+## Small enough that only a few are ever on screen, large enough that the extra
+## draw calls do not cost more than the culling saves. At 32 km a bucket is
+## comfortably inside the camera's far plane.
+const ROAD_BUCKET := 32000.0
+
 const SCAT_CELL := 2200.0
 const SCAT_HALF := 9                       # cells either side of the field
 const SCAT_RANGE := {"tree": 6200.0, "pine": 7000.0, "rock": 4600.0, "bush": 2800.0}
@@ -1380,12 +1404,10 @@ func _scat_slice(t: int) -> void:
 		# get coarse, and a tree standing on the analytic height then hangs in
 		# the air above the triangles -- which is what you see looking up at the
 		# underside of the ground.
+		# In the world frame already: `surfaces_at` answers what `Sim.height_at`
+		# answers, so the drop is under the interpolation rather than taken off
+		# after it.
 		y = _scat_surf[base + i]
-		# The field and the mesh both work in the flat frame; the ground is bent
-		# down onto the planet in the terrain shader. Nothing else is, so every
-		# thing we stand on it has to be dropped here or it hangs in the air --
-		# a hundred metres of it by thirty kilometres out.
-		y -= Sim.planet_drop(x, z)
 		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
 			continue
 		var slope: float = _scat_slope[base + i]
@@ -1517,10 +1539,19 @@ func _build_roads() -> void:
 		var b: Vector2 = r[1]
 		legs.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y,
 			5.0, 0.0, 0.0, 0.0]))
-	var out: Array = Sim.native.road_ribbons(legs)
-	var surf: PackedVector3Array = out[0]
-	var kerb: PackedVector3Array = out[1]
-	_stats["road_tris"] = int((surf.size() + kerb.size()) / 3.0)
+	# Cut into square buckets, not laid down as two meshes.
+	#
+	# A mesh is culled as one object, so a single mesh spanning the whole road
+	# network submits all of it the moment any part of it is on screen.
+	# Measured, those two meshes were 4.15 ms of the 6.20 ms the frame spent
+	# drawing -- two thirds of it, from two objects out of eighteen hundred,
+	# most of which was behind the camera or over the horizon. At this size a
+	# bucket is comfortably inside the far plane, so a few are drawn and the
+	# rest are dropped before they cost anything.
+	var t_rib := Time.get_ticks_msec()
+	var out: Array = Sim.native.road_ribbons_bucketed(legs, ROAD_BUCKET)
+	_stats["ms_ribbons"] = Time.get_ticks_msec() - t_rib
+	var tris := 0
 	# Neither casts a shadow, and the saving is not small.
 	#
 	# A road is a ribbon lying on the ground: its shadow is cast onto the very
@@ -1531,14 +1562,31 @@ func _build_roads() -> void:
 	# can see. A shadow-casting mesh is drawn again for every split of the
 	# directional light, so this is four passes over a million and a half
 	# triangles, every frame.
-	var kerb_mi := MeshKit.mi(_flat_mesh(kerb,
-		MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)), "Kerbs")
-	kerb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(kerb_mi)
-	var road_mi := MeshKit.mi(_flat_mesh(surf,
-		MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)), "Roads")
-	road_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(road_mi)
+	# One material for all the buckets, so they still batch: what is being
+	# bought here is culling, and paying for it in draw calls would be a poor
+	# trade.
+	var kerb_mat := MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)
+	var road_mat := MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)
+	var cells := 0
+	for i in range(0, out.size(), 4):
+		var cx: int = int(out[i])
+		var cz: int = int(out[i + 1])
+		var surf: PackedVector3Array = out[i + 2]
+		var kerb: PackedVector3Array = out[i + 3]
+		tris += int((surf.size() + kerb.size()) / 3.0)
+		cells += 1
+		if not surf.is_empty():
+			var rm := MeshKit.mi(_flat_mesh(surf, road_mat),
+				"Roads %d,%d" % [cx, cz])
+			rm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(rm)
+		if not kerb.is_empty():
+			var km := MeshKit.mi(_flat_mesh(kerb, kerb_mat),
+				"Kerbs %d,%d" % [cx, cz])
+			km.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(km)
+	_stats["road_tris"] = tris
+	_stats["road_cells"] = cells
 
 ## Viaducts and tunnel portals.
 ##

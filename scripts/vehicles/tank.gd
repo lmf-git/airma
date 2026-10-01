@@ -297,6 +297,7 @@ var _muzzle: Node3D
 signal store_released(node)
 
 var _road_wheels: Array = []
+
 # ---------------------------------------------------------------- running gear
 # Set from the vehicle's class in setup(). These were constants tuned for a
 # tracked hull, which is why a launcher on lorry tyres arrived on the ground and
@@ -358,6 +359,46 @@ var map_target := Vector3.INF
 ## a tenth of a degree is a kilometre of range.
 var arty_range := 4000.0
 var _coax_cd := 0.0
+
+
+## The running gear again, as flat arrays.
+##
+## `_road_wheels` is how the body was built -- a dictionary a wheel, with the
+## node and the geometry in it. The suspension walks the whole set 120 times a
+## second on every vehicle in the sector, and a dictionary lookup on a string
+## key is not what that loop should be spending itself on: eight of them a wheel
+## is sixty thousand a frame with a garrison on the move. Everything the loop
+## needs is laid out here once instead, indexed alongside.
+var _w_node: Array[Node3D] = []      # the wheel to move
+var _w_lp := PackedVector3Array()    # wheel centre in body space, at rest
+var _w_wp := PackedVector3Array()    # and in the world, this step
+var _w_r := PackedFloat64Array()     # wheel radius
+var _w_side := PackedFloat32Array()  # -1 for the left track, +1 for the right
+var _w_steer := PackedByteArray()    # does this one turn with the wheel
+var _w_comp := PackedFloat32Array()  # travel used, which is what the visuals ride
+
+## Lay that out. Cheap, and done from whichever of the two loops notices first:
+## the builders append to `_road_wheels` from four different places and there is
+## no one moment afterwards that belongs to all of them.
+func _plan_wheels() -> void:
+	var n := _road_wheels.size()
+	_w_node.resize(n)
+	_w_lp.resize(n)
+	_w_wp.resize(n)
+	_w_r.resize(n)
+	_w_side.resize(n)
+	_w_steer.resize(n)
+	_w_comp.resize(n)
+	for i in n:
+		var w: Dictionary = _road_wheels[i]
+		var side := float(w["side"])
+		_w_node[i] = w["node"]
+		_w_side[i] = side
+		_w_lp[i] = Vector3(float(w.get("lat", side * TRACK_HALF)),
+			float(w["rest_y"]), float(w["z"]))
+		_w_r[i] = float(w.get("r", WHEEL_R))
+		_w_steer[i] = 1 if bool(w.get("steer", false)) else 0
+		_w_comp[i] = 0.0
 
 func setup(t := 0, k := "m1a2") -> void:
 	team = t
@@ -868,6 +909,11 @@ var _ai_target: Node3D = null
 var _ai_scan := 0.0
 
 func _physics_process(delta: float) -> void:
+	var _pt := Sim.prof_at()
+	_tick_tank_p(delta)
+	Sim.prof_end(&"tank.tick", _pt)
+
+func _tick_tank_p(delta: float) -> void:
 	if _wrecked:
 		# It burns hard for half a minute, then sits there smoking. Leaving the
 		# flames on for the rest of the match makes a battlefield look like a
@@ -959,15 +1005,17 @@ func _physics_process(delta: float) -> void:
 		_steer = move_toward(_steer, -clampf(in_steer, -1.0, 1.0) * _max_steer,
 			_max_steer * 3.0 * delta)
 	_wheel_spin += speed / maxf(_wheel_r, 0.05) * delta
-	for w in _road_wheels:
-		var n: Node3D = w["node"]
-		n.position.y = lerpf(n.position.y, float(w["rest_y"]) + float(w["comp"]),
-			clampf(delta * 14.0, 0, 1))
-		var turn := Basis()
-		if bool(w.get("steer", false)) and absf(_steer) > 0.0001:
-			turn = Basis(Vector3(0, 1, 0), _steer)
-		n.transform.basis = turn * Basis(Vector3(1, 0, 0), _wheel_spin) \
-			* Basis(Vector3(0, 0, 1), PI * 0.5)
+	if _w_node.size() != _road_wheels.size():
+		_plan_wheels()
+	var lift := clampf(delta * 14.0, 0, 1)
+	var spin := Basis(Vector3(1, 0, 0), _wheel_spin) \
+		* Basis(Vector3(0, 0, 1), PI * 0.5)
+	var turn := Basis(Vector3(0, 1, 0), _steer) if absf(_steer) > 0.0001 \
+		else Basis()
+	for i in _w_node.size():
+		var n := _w_node[i]
+		n.position.y = lerpf(n.position.y, _w_lp[i].y + _w_comp[i], lift)
+		n.transform.basis = (turn * spin) if _w_steer[i] != 0 else spin
 
 ## Hull half-width, for the obstacle test. A launcher on six axles is longer
 ## than a tank but no wider, and this only has to keep it out of a wall.
@@ -1041,6 +1089,11 @@ func rest_height() -> float:
 	return lift - _travel / 5.2
 
 func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
+	var _pt := Sim.prof_at()
+	_forces_tank(state)
+	Sim.prof_end(&"tank.forces", _pt)
+
+func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 	# A knocked out tank keeps its suspension. Skipping the whole physics step
 	# because the crew is dead leaves nothing holding the hull up and the hulk
 	# sinks through the terrain for ever: there is no world collision mesh, the
@@ -1083,23 +1136,31 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# Shared out over the wheels this vehicle has, not over the seven-a-side
 	# running gear of a tank. A launcher on six axles a side was having its
 	# weight held up by fourteen imaginary wheels, four of which were not there.
-	var per: float = 2.0 / maxf(float(_road_wheels.size()), 1.0)
-	for w in _road_wheels:
-		var lat: float = float(w.get("lat", float(w["side"]) * TRACK_HALF))
-		var lp := Vector3(lat, float(w["rest_y"]), float(w["z"]))
-		var wp: Vector3 = xf * lp
-		var ground := Sim.height_at(wp.x, wp.z)
+	if _w_lp.size() != _road_wheels.size():
+		_plan_wheels()
+	var nw := _w_lp.size()
+	var per: float = 2.0 / maxf(float(nw), 1.0)
+	# Where the running gear is this step, and then the ground under all of it
+	# in one ask. Separately that was a height, a normal and a surface per wheel
+	# -- six crossings of the extension boundary apiece, eighty-four for a tank,
+	# forty-five thousand a frame for a sector's garrison at 120 Hz.
+	for i in nw:
+		_w_wp[i] = xf * _w_lp[i]
+	var gnd := Sim.wheel_ground(_w_wp, _w_r)
+	for i in nw:
+		var wp: Vector3 = _w_wp[i]
+		var ground: float = gnd[i * 5]
 		# and its own radius: a lorry tyre is not a road wheel, and testing a
 		# 0.72 m wheel as though it were 0.42 m buried a third of every tyre in
 		# the ground and dropped the chassis with it.
-		var wr: float = float(w.get("r", WHEEL_R))
+		var wr: float = _w_r[i]
 		var comp: float = (ground + wr) - wp.y
-		w["comp"] = clampf(comp, -_travel, _travel * 0.6)
+		_w_comp[i] = clampf(comp, -_travel, _travel * 0.6)
 		if comp <= 0.0:
 			continue
 		contacts += 1
 		comp = minf(comp, _travel)
-		var n := Sim.normal_at(wp.x, wp.z)
+		var n := Vector3(gnd[i * 5 + 1], gnd[i * 5 + 2], gnd[i * 5 + 3])
 		var arm := wp - xf.origin
 		var pv := state.linear_velocity + state.angular_velocity.cross(arm)
 		var fn: float = maxf(k * comp - c * pv.dot(n), 0.0) * per
@@ -1109,15 +1170,15 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		# A wheeled vehicle points its front axle where it is going; only tracks
 		# steer by dragging one side. Turning a lorry with a skid-steer command
 		# is what made the launchers slew about like armour.
-		if not _skid and bool(w.get("steer", false)) and absf(_steer) > 0.0001:
+		if not _skid and _w_steer[i] != 0 and absf(_steer) > 0.0001:
 			roll_dir = roll_dir.rotated(n, _steer)
 		var lat_dir := n.cross(roll_dir).normalized()
-		var grip: float = Sim.surface_grip(wp.x, wp.z)
+		var grip: float = gnd[i * 5 + 4]
 		var mu_lat: float = _mu_lat * grip
 		f += lat_dir * clampf(-pv.dot(lat_dir) * mass * 1.6, -mu_lat * fn, mu_lat * fn)
 		var side_cmd: float = in_throttle
 		if _skid:
-			side_cmd += in_steer * float(w["side"]) * 0.85
+			side_cmd += in_steer * _w_side[i] * 0.85
 		side_cmd = clampf(side_cmd, -1.0, 1.0)
 		var v_roll := pv.dot(roll_dir)
 		# power limited tractive effort: strong off the mark, tailing off with

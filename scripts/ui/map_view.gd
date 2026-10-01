@@ -95,7 +95,17 @@ func bake() -> void:
 			sea += 1
 		else:
 			land += 1
-	_detail_tex = _bake_sheet("map_detail", DETAIL_RES, DETAIL_HALF)
+	# The close-in sheet is asked for rather than waited on.
+	#
+	# Four million texels of relief is half a second of the two and a half the
+	# whole world takes to build, and nobody opens the tactical map in the first
+	# second of a sortie. The map draws the coarse sheet until this lands, and
+	# anything that genuinely needs it -- a harness saving it to a file -- waits
+	# for it in `detail`.
+	if Sim.globe:
+		_ask_sheet()
+	else:
+		_detail_tex = _bake_sheet("map_detail", DETAIL_RES, DETAIL_HALF)
 	map_stats = {"res": RES, "ms": Time.get_ticks_msec() - t0, "land": land,
 		"sea": sea, "detail_res": DETAIL_RES, "detail_half": DETAIL_HALF,
 		"world_m_per_texel": HALF * 2.0 / float(RES),
@@ -130,15 +140,74 @@ func _bake_sheet(key: String, n: int, half: float) -> ImageTexture:
 	return ImageTexture.create_from_image(
 		Image.create_from_data(n, n, false, Image.FORMAT_RGB8, buf))
 
+## Asked for and not yet arrived, and whether the chart moved again while it
+## was being drawn.
+var _sheet_want := false
+var _sheet_again := false
+
 ## The chart has moved: the close-in sheet is of somewhere else now.
+##
+## Asked for, not waited on. Four million texels of relief is a fifth of a
+## second on eight cores and it used to happen on the frame the chart moved --
+## measured, a chart move was a 1352 ms freeze in flight and 1183 ms of it was
+## this one call. The map goes on drawing the sheet it has until the new one
+## lands, which is a picture a few seconds out of date rather than a second and
+## a third of nothing at all.
 func rechart() -> void:
 	if not Sim.globe:
 		return
-	_detail_tex = _bake_sheet("map_detail", DETAIL_RES, DETAIL_HALF)
+	# The world sheet as well, and this one in line.
+	#
+	# Both sheets are pictures of the ground under the *chart*, and only the
+	# close-in one was being redrawn -- so after a chart move the map had six
+	# hundred kilometres of the country it had just left with the new country's
+	# hundred and twenty painted in the middle of it. It does not read as a
+	# stale picture, it reads as the map jumping. A quarter of a million texels
+	# against the close-in sheet's four million, so it is quick enough to do
+	# where it is noticed rather than a few seconds later.
+	_tex = _bake_sheet("map_relief", RES, HALF)
+	if not _ask_sheet():
+		# The last one is still being drawn. It is of the chart before this one
+		# and is already wrong, but cancelling a thread is worse than letting it
+		# finish; this asks again the moment it does.
+		_sheet_again = true
 	queue_redraw()
 
+func _ask_sheet() -> bool:
+	if not Sim.native.sheet_request(DETAIL_RES, DETAIL_HALF):
+		return false
+	_sheet_want = true
+	_sheet_again = false
+	return true
+
+## Take a finished sheet, if there is one.
+##
+## Pumped every frame by the world rather than from `_process` here, which only
+## runs while the map is open: the sheet is wanted whenever the map is *next*
+## opened, and one left sitting in the slot until then would be a picture of
+## somewhere the chart has since left.
+func pump_sheet() -> void:
+	if _sheet_want and Sim.native.sheet_ready():
+		var buf: PackedByteArray = Sim.native.sheet_take()
+		if buf.size() == DETAIL_RES * DETAIL_RES * 3:
+			_detail_tex = ImageTexture.create_from_image(
+				Image.create_from_data(DETAIL_RES, DETAIL_RES, false,
+					Image.FORMAT_RGB8, buf))
+			queue_redraw()
+		_sheet_want = false
+	if _sheet_again and not _sheet_want:
+		_ask_sheet()
+
 ## The close-in sheet, for anything that wants the ground under the chart.
+##
+## Waits for a bake in flight if there is nothing to hand back yet. The map
+## itself never comes through here -- it draws whatever sheet it has and takes
+## the new one when it arrives -- but a harness that saves the sheet to a file
+## wants the real thing rather than whatever had turned up by then.
 func detail() -> ImageTexture:
+	while _sheet_want and _detail_tex == null:
+		OS.delay_msec(2)
+		pump_sheet()
 	return _detail_tex
 
 func toggle() -> void:
@@ -729,6 +798,15 @@ var _patch_tex: ImageTexture = null
 var _patch_win := PackedFloat32Array()
 ## The window a bake is in flight for, empty when nothing is being baked.
 var _patch_asked := PackedFloat32Array()
+## And the window wanted since that one went out, empty when there is none.
+##
+## Two of these, not one. The view asks for a window every frame it moves and
+## only one bake runs at a time, so while a drag is under way there is a window
+## being drawn and a newer one waiting -- and they were the same variable. The
+## picture that came back was of the window that had been asked for, and it was
+## hung on the window asked for *since*: the detailed cap landed somewhere it
+## was not a picture of and slid about the globe as you zoomed.
+var _patch_next := PackedFloat32Array()
 var _patch_t0 := 0
 var _patch_ms := 0.0
 
@@ -940,15 +1018,16 @@ func _want_patch(win: PackedFloat32Array) -> void:
 				and absf(win[2] - _patch_win[2]) < wv * PATCH_SLACK:
 			return
 	# One in flight at a time, and it is the newest window that is wanted: if
-	# the view is still moving, the request that lands is the one made after it
-	# stopped.
+	# the view is still moving, what goes out next is whatever was being asked
+	# for when the one in flight finished.
 	if _patch_asked.size() == 4:
-		_patch_asked = win.duplicate()
+		_patch_next = win.duplicate()
 		return
 	_patch_t0 = Time.get_ticks_usec()
 	if Sim.native.patch_request(PATCH_RES, PATCH_RES, Sim.PLANET_NORTH,
 			win[0], win[1], win[2], win[3]):
 		_patch_asked = win.duplicate()
+		_patch_next = PackedFloat32Array()
 
 ## Take delivery of a finished bake.
 func _collect_patch() -> void:
@@ -959,9 +1038,16 @@ func _collect_patch() -> void:
 		var img := Image.create_from_data(PATCH_RES, PATCH_RES, false,
 			Image.FORMAT_RGB8, buf)
 		_patch_tex = ImageTexture.create_from_image(img)
+		# The window this picture is *of*, which is the one that went out with
+		# the request and not whatever the view has moved on to since.
 		_patch_win = _patch_asked.duplicate()
 		_patch_ms = float(Time.get_ticks_usec() - _patch_t0) * 0.001
 	_patch_asked = PackedFloat32Array()
+	# Whatever was wanted while that one was running goes out now.
+	if _patch_next.size() == 4:
+		var again := _patch_next
+		_patch_next = PackedFloat32Array()
+		_want_patch(again)
 	queue_redraw()
 
 ## The detailed cap, drawn over the base globe.

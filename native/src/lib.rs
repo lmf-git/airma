@@ -11,19 +11,30 @@
 //! rather than arithmetic: where a town goes, what a road is for, what a chunk
 //! of terrain is called. Anything that is a loop over a lot of points is here.
 //!
-//! - `field`  the land before anything is built on it
+//! - `field`  the land before anything is built on it, on the flat world
+//! - `sphere` the same on the planet, and the chart laid over it
 //! - `world`  what has been built on it: platforms, aerodromes, the corridor
 //! - `router` where a road goes
 //! - `survey` what height it was built to
-//! - `raster` the mask, the climate, the ribbons and the map
-//! - `index`  cell keys and the segment grid they index
+//! - `raster` the mask, the ribbons, the road ink and the map
+//! - `tree`   which leaves of the terrain quadtree should exist
+//! - `chunk`  one leaf of the terrain quadtree, meshed
+//! - `cloud`  the noise the weather layer is drawn from
+//! - `index`  cell keys, and the segment grid the world is indexed on
+//!
+//! What is left in this file is the boundary itself: the class the game calls
+//! through, the marshalling either side of it, and the slots a raster is baked
+//! in while the frame goes on without it. Nothing here decides anything.
 
+mod chunk;
+mod cloud;
 mod field;
-mod sphere;
 mod index;
 mod raster;
 mod router;
+mod sphere;
 mod survey;
+mod tree;
 mod world;
 
 use godot::prelude::*;
@@ -32,7 +43,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use field::natural;
-use index::SegGrid;
 use world::{
     corridor, ground_at, publish_corridor, publish_world, road_surface, world, Airfield, Leg,
     Pad, World, G_ALL, G_FIELDS, G_ROADS,
@@ -48,25 +58,69 @@ unsafe impl ExtensionLibrary for FlightNative {}
 static LAST_NODES: AtomicUsize = AtomicUsize::new(0);
 static LAST_MS: AtomicUsize = AtomicUsize::new(0);
 
-/// Every road and street on the map, indexed for "how far is the nearest one".
-/// Rebuilt whenever the network changes and read from every core after that.
-static SEGS: Mutex<Option<&'static SegGrid>> = Mutex::new(None);
-
 /// How far a road may wander before the connection is not worth making, as a
 /// multiple of the distance between the two places it joins.
 const ROUTE_DETOUR: f32 = 4.0;
 
-/// A sheet window being baked off the main thread. One at a time: the map only
-/// ever wants the newest one, and a queue of stale windows is work nobody is
-/// waiting for.
+/// A raster being baked off the main thread. One at a time per slot: the map
+/// only ever wants the newest one, and a queue of stale windows is work nobody
+/// is waiting for.
 #[derive(Default)]
-struct PatchJob {
+struct Bake {
     busy: bool,
     done: bool,
     data: Vec<u8>,
 }
 
-static PATCH: std::sync::OnceLock<Mutex<PatchJob>> = std::sync::OnceLock::new();
+/// The globe's zoomed-in window, the chart's own close-in sheet, and the
+/// climate the ground shader reads. A slot each, because they are asked for by
+/// different things at different times and one would cancel another.
+static PATCH: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
+static SHEET: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
+static CLIMATE: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
+
+fn slot(cell: &'static std::sync::OnceLock<Mutex<Bake>>) -> &'static Mutex<Bake> {
+    cell.get_or_init(|| Mutex::new(Bake::default()))
+}
+
+/// Start a bake if the slot is free, and say whether it was. The work runs on a
+/// thread of its own; nothing waits for it.
+fn bake_start<F>(cell: &'static std::sync::OnceLock<Mutex<Bake>>, f: F) -> bool
+where
+    F: FnOnce() -> Vec<u8> + Send + 'static,
+{
+    {
+        let mut g = slot(cell).lock().unwrap();
+        if g.busy {
+            return false;
+        }
+        g.busy = true;
+        g.done = false;
+    }
+    std::thread::spawn(move || {
+        let buf = f();
+        let mut g = slot(cell).lock().unwrap();
+        g.data = buf;
+        g.busy = false;
+        g.done = true;
+    });
+    true
+}
+
+fn bake_ready(cell: &'static std::sync::OnceLock<Mutex<Bake>>) -> bool {
+    slot(cell).lock().unwrap().done
+}
+
+/// The finished bake, handed over: asking again returns nothing until another
+/// has been requested.
+fn bake_take(cell: &'static std::sync::OnceLock<Mutex<Bake>>) -> Vec<u8> {
+    let mut g = slot(cell).lock().unwrap();
+    if !g.done {
+        return Vec::new();
+    }
+    g.done = false;
+    std::mem::take(&mut g.data)
+}
 
 /// A canvas triangle array under construction: the four parallel arrays
 /// `canvas_item_add_triangle_array` wants.
@@ -173,44 +227,20 @@ impl MeshOut {
     }
 }
 
-fn patch_job() -> &'static Mutex<PatchJob> {
-    PATCH.get_or_init(|| Mutex::new(PatchJob::default()))
-}
-
-fn segments() -> Option<&'static SegGrid> {
-    *SEGS.lock().unwrap()
-}
-
-/// The colour a road is drawn on a map, and how strongly.
-const ROAD_INK: [f32; 3] = [0.72, 0.64, 0.50];
-
-/// Lay the road network over a map colour.
-///
-/// A carriageway is twelve metres wide and the finest map sheet here is a
-/// hundred and seventeen metres to a texel, so a road drawn to scale is
-/// invisible at every zoom -- which is why the planet map had no roads on it at
-/// all. Drawn about a texel and a half wide instead, the way a road is drawn on
-/// any map: the line says where it goes, not how wide it is.
-///
-/// `texel` is the ground the texel covers, so the network thins as the picture
-/// gets finer rather than staying a fixed smear.
-fn road_ink(x: f32, z: f32, texel: f32, col: [f32; 3]) -> [f32; 3] {
-    let g = match segments() {
-        Some(g) => g,
-        None => return col,
-    };
-    let far = texel * 2.0;
-    let d = g.distance(x, z, far);
-    let w = 1.0 - sphere::smoothstep_pub(texel * 0.35, texel * 1.3, d);
-    if w <= 0.0 {
-        return col;
-    }
-    let t = w * 0.85;
-    [
-        col[0] + (ROAD_INK[0] - col[0]) * t,
-        col[1] + (ROAD_INK[1] - col[1]) * t,
-        col[2] + (ROAD_INK[2] - col[2]) * t,
-    ]
+/// One meshed leaf, as the five arrays the script turns into a mesh: vertices,
+/// normals, the seam the stitching left, the morph and the coarse normal.
+fn push_chunk(out: &mut Array<Variant>, c: &chunk::Chunk) {
+    let verts: Vec<Vector3> = c.verts.iter()
+        .map(|v| Vector3::new(v[0], v[1], v[2])).collect();
+    let nrms: Vec<Vector3> = c.nrms.iter()
+        .map(|v| Vector3::new(v[0], v[1], v[2])).collect();
+    let morph: Vec<Vector2> = c.morph.iter()
+        .map(|v| Vector2::new(v[0], v[1])).collect();
+    out.push(&PackedVector3Array::from(verts.as_slice()).to_variant());
+    out.push(&PackedVector3Array::from(nrms.as_slice()).to_variant());
+    out.push(&(c.residual as f64).to_variant());
+    out.push(&PackedVector2Array::from(morph.as_slice()).to_variant());
+    out.push(&PackedFloat32Array::from(c.cnrm.as_slice()).to_variant());
 }
 
 #[derive(GodotClass)]
@@ -344,62 +374,13 @@ impl Terra {
         PackedFloat32Array::from(out.as_slice())
     }
 
-    /// The close-in ground as the map draws it, on the planet.
-    ///
-    /// `map_relief` rasterises the flat field about the world origin, which is
-    /// the last thing in the map that still believes in an authored square: on
-    /// a planet the ground under the chart is the planetary field, and the
-    /// chart moves. This takes the same picture in chart coordinates, so it is
-    /// the country the player is actually over and it can be taken again when
-    /// the chart is put somewhere else.
+    /// The close-in ground as the map draws it, on the planet. Blocking; the
+    /// off-thread form is `sheet_request`.
     #[func]
     fn map_relief_globe(&self, n: i64, half: f64) -> PackedByteArray {
         let c = sphere::chart();
-        let n = n.max(1) as usize;
-        let half = half as f32;
-        let step = half * 2.0 / n as f32;
-        // The heights first, once each, on a grid one bigger than the picture.
-        //
-        // Every texel needs its own height and its two forward neighbours' to
-        // light it off the slope, and every one of those neighbours is another
-        // texel's own height. Asked for three times over, a 2048 sheet was
-        // twelve and a half million evaluations of the full field -- generated
-        // terrain, rivers, carving and all -- for four million texels, and the
-        // map was the largest single item in the world's build.
-        let gn = n + 1;
-        let mut hs = vec![0f32; gn * gn];
-        hs.par_chunks_mut(gn).enumerate().for_each(|(j, row)| {
-            let z = -half + j as f32 * step;
-            for (i, v) in row.iter_mut().enumerate() {
-                *v = sphere::ground_world_y(&c, -half + i as f32 * step, z, G_ALL);
-            }
-        });
-        let mut out = vec![0u8; n * n * 3];
-        out.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
-            let z = -half + j as f32 * step;
-            for i in 0..n {
-                let x = -half + i as f32 * step;
-                let h = hs[j * gn + i];
-                let sea = sphere::sea_at(&c, x, z);
-                // Lit off the slope, the same way the flat sheet is: a map with
-                // no hill shading on it is a biome chart, not a map. Worked out
-                // for water too and then thrown away, because the colour rule
-                // below declines to shade a sea.
-                let dx = hs[j * gn + i + 1] - h;
-                let dz = hs[(j + 1) * gn + i] - h;
-                let shade = (0.72 + (-dx - dz) / (step * 0.55)).clamp(0.35, 1.5);
-                // The planet's own rule, not a second one written for the
-                // chart: these are two pictures of the same ground.
-                let d = sphere::dir_from_chart(&c, x, z);
-                let col = road_ink(x, z, step,
-                    sphere::surface_colour(d, h - sea, sphere::NORTH, shade));
-                let o = i * 3;
-                row[o] = (col[0].clamp(0.0, 1.0) * 255.0) as u8;
-                row[o + 1] = (col[1].clamp(0.0, 1.0) * 255.0) as u8;
-                row[o + 2] = (col[2].clamp(0.0, 1.0) * 255.0) as u8;
-            }
-        });
-        PackedByteArray::from(out.as_slice())
+        PackedByteArray::from(
+            sphere::relief_globe(&c, n.max(1) as usize, half as f32).as_slice())
     }
 
     /// The whole planet as one equirectangular RGB8 sheet.
@@ -585,47 +566,54 @@ impl Terra {
     #[func]
     fn patch_request(&self, w: i64, h: i64, north: Vector3,
             u0: f64, u1: f64, v0: f64, v1: f64) -> bool {
-        let job = patch_job();
-        {
-            let mut g = job.lock().unwrap();
-            if g.busy {
-                return false;
-            }
-            g.busy = true;
-            g.done = false;
-        }
         let radius = sphere::chart().radius;
         let n = [north.x, north.y, north.z];
         let (w, h) = (w.max(1) as usize, h.max(1) as usize);
         let (u0, u1, v0, v1) = (u0 as f32, u1 as f32, v0 as f32, v1 as f32);
-        std::thread::spawn(move || {
-            let buf = sphere::sheet_window(w, h, n, radius, u0, u1, v0, v1);
-            let job = patch_job();
-            let mut g = job.lock().unwrap();
-            g.data = buf;
-            g.busy = false;
-            g.done = true;
-        });
-        true
+        bake_start(&PATCH, move || {
+            sphere::sheet_window(w, h, n, radius, u0, u1, v0, v1)
+        })
     }
 
     /// Whether a requested bake has finished.
     #[func]
     fn patch_ready(&self) -> bool {
-        patch_job().lock().unwrap().done
+        bake_ready(&PATCH)
     }
 
     /// The finished bake, and it is handed over: asking again returns nothing
     /// until another has been requested.
     #[func]
     fn patch_take(&self) -> PackedByteArray {
-        let job = patch_job();
-        let mut g = job.lock().unwrap();
-        if !g.done {
-            return PackedByteArray::new();
-        }
-        g.done = false;
-        PackedByteArray::from(std::mem::take(&mut g.data).as_slice())
+        PackedByteArray::from(bake_take(&PATCH).as_slice())
+    }
+
+    /// The close-in sheet, baked off the main thread.
+    ///
+    /// This is the same picture `map_relief_globe` draws, asked for rather than
+    /// waited on. The chart moves whenever the player gets 150 km from the
+    /// middle of it, and everything laid out on it is renumbered at once --
+    /// which used to include rasterising four million texels of relief on the
+    /// frame the move happened. Measured, a chart move was a 1352 ms freeze in
+    /// flight and 1183 ms of it was this. The map draws the sheet it has until
+    /// the new one lands, which is a picture a few seconds stale rather than a
+    /// second and a third of nothing at all.
+    #[func]
+    fn sheet_request(&self, n: i64, half: f64) -> bool {
+        let c = sphere::chart();
+        let n = n.max(1) as usize;
+        let half = half as f32;
+        bake_start(&SHEET, move || sphere::relief_globe(&c, n, half))
+    }
+
+    #[func]
+    fn sheet_ready(&self) -> bool {
+        bake_ready(&SHEET)
+    }
+
+    #[func]
+    fn sheet_take(&self) -> PackedByteArray {
+        PackedByteArray::from(bake_take(&SHEET).as_slice())
     }
 
     /// A window of the planet sheet, for the map's close zooms.
@@ -708,6 +696,149 @@ impl Terra {
         PackedFloat32Array::from(flat.as_slice())
     }
 
+    // ---------------------------------------------------------- the clouds
+
+    /// The cloud layer's noise volume: an `n` cube of two channels, the weather
+    /// system and the clouds within it, with the octaves already summed.
+    ///
+    /// The layer used to sum four samples of a cube of random bytes for each of
+    /// them, per march step, per pixel -- and the finest octave of the result
+    /// was 47 m of sky against a march that steps 571 m. Summed once here, into
+    /// a field whose finest content is about a kilometre, the shader fetches
+    /// each channel once and the detail is a size it can actually see.
+    #[func]
+    fn cloud_volume(&self, n: i64) -> PackedByteArray {
+        PackedByteArray::from(cloud::volume(n.max(2) as usize).as_slice())
+    }
+
+    // ----------------------------------------------------------- the tree
+
+    /// The leaves that should exist for this eye position.
+    ///
+    /// Twelve numbers a leaf: depth, the two grid indices, what each of the
+    /// four edges meets, a bit per edge that faces a *finer* neighbour, and the
+    /// four unclamped lookups the harness checks against a full descent.
+    ///
+    /// The descent, the error measure and the neighbour lookups are all here.
+    /// In script it was 4.1 ms every time the eye moved 120 m -- a dropped
+    /// frame twice a second at cruise -- and every node the tree had not seen
+    /// before paid 353 height samples for its error one node at a time, on the
+    /// thread walking the tree. Here a level is measured in one parallel pass.
+    #[func]
+    fn terrain_tree(&self, eye: Vector3) -> PackedInt32Array {
+        let leaves = tree::wanted([eye.x, eye.y, eye.z]);
+        let mut out = Vec::with_capacity(leaves.len() * 12);
+        for l in &leaves {
+            out.extend_from_slice(&[l.depth, l.ix, l.iz, l.nb[0], l.nb[1],
+                l.nb[2], l.nb[3], l.fine as i32, l.raw[0], l.raw[1], l.raw[2],
+                l.raw[3]]);
+        }
+        PackedInt32Array::from(out.as_slice())
+    }
+
+    /// What depth the tree draws a point at, by descent from the root. The
+    /// harness's second opinion about every neighbour lookup.
+    #[func]
+    fn terrain_depth_at(&self, x: f64, z: f64, eye: Vector3) -> i64 {
+        tree::depth_at(x as f32, z as f32, [eye.x, eye.y, eye.z]) as i64
+    }
+
+    /// The highest ground in a node, measured if nobody has asked yet.
+    #[func]
+    fn terrain_node_top(&self, depth: i64, ix: i64, iz: i64) -> f64 {
+        tree::node_top(depth as i32, ix as i32, iz as i32) as f64
+    }
+
+    /// What the tree has measured, for the bake, and back again.
+    ///
+    /// A node's error and high point are a property of the height field alone,
+    /// so what one run learned is what the next one starts with -- and the two
+    /// travel together, which they did not when the table lived in script: the
+    /// errors went to disk and the high points did not, so a run off a bake
+    /// read every node's high ground as zero.
+    #[func]
+    fn terrain_stats_take(&self) -> PackedByteArray {
+        PackedByteArray::from(tree::export().as_slice())
+    }
+
+    #[func]
+    fn terrain_stats_put(&self, data: PackedByteArray) {
+        tree::import(data.as_slice());
+    }
+
+    // --------------------------------------------------------- the chunks
+
+    /// The landable platforms, which are the one part of the world that moves.
+    ///
+    /// Pushed in before a batch of chunks goes out rather than published once
+    /// with the roads and the aerodromes: a carrier under way carries her deck
+    /// with her. Seven numbers each -- origin x and z, cos and sin of the
+    /// negated yaw, the two half extents, and the deck height.
+    #[func]
+    fn set_decks(&self, data: PackedFloat32Array) {
+        world::set_decks(data.as_slice());
+    }
+
+    /// Every queued leaf in one call.
+    ///
+    /// `jobs` is a flat run of eight numbers a chunk -- depth, the two grid
+    /// indices, what each of the four edges meets, and the finer-neighbour bits
+    /// -- and what comes back is five entries a chunk in the same order, the
+    /// same five `chunk_build` hands back for one.
+    ///
+    /// One call because the engine's worker pool was not parallelising these:
+    /// three hundred and forty chunks measure 95 ms built one after another on
+    /// a single thread, and took about 120 ms of wall clock spread over eight
+    /// of the pool's. Here the arithmetic goes out across the cores and only
+    /// the marshalling is left on the calling thread.
+    #[func]
+    fn chunk_build_many(&self, jobs: PackedInt32Array) -> Array<Variant> {
+        let src = jobs.as_slice();
+        // Gathered once for the whole batch rather than once a chunk: it is a
+        // lock and a list read, and three hundred threads taking it to learn
+        // the same answer is contention for nothing.
+        let g = world::Ground::now();
+        let built: Vec<chunk::Chunk> = src
+            .par_chunks_exact(8)
+            .map(|q| {
+                chunk::build(&g, q[0], q[1], q[2], [q[3], q[4], q[5], q[6]],
+                    q[7] as u32)
+            })
+            .collect();
+        let mut out: Array<Variant> = Array::new();
+        for c in &built {
+            push_chunk(&mut out, c);
+        }
+        out
+    }
+
+    /// One leaf of the terrain quadtree, meshed.
+    ///
+    /// Everything from the height field to the vertex arrays: the grid, the
+    /// edges conformed to a coarser neighbour, the morph target the level above
+    /// draws, both sets of normals and the skirt. This was a four hundred line
+    /// loop in script running on a worker, and it was the largest single item
+    /// in world generation.
+    ///
+    /// Comes back as the script left it: vertices, normals, the seam the
+    /// stitching left, the morph, and the coarse normal as a tangent array.
+    #[func]
+    fn chunk_build(&self, depth: i64, ix: i64, iz: i64, nb: PackedInt32Array,
+            fine: i64) -> Array<Variant> {
+        let n = nb.as_slice();
+        let nbs = [
+            n.first().copied().unwrap_or(0),
+            n.get(1).copied().unwrap_or(0),
+            n.get(2).copied().unwrap_or(0),
+            n.get(3).copied().unwrap_or(0),
+        ];
+        let c = chunk::build(&world::Ground::now(), depth as i32, ix as i32,
+            iz as i32, nbs, fine as u32);
+        let mut out: Array<Variant> = Array::new();
+        push_chunk(&mut out, &c);
+        out
+    }
+
     /// One point of finished ground. `flags` is 1 for the made roads and 2 for
     /// the aerodromes; the town platforms are always in.
     #[func]
@@ -752,6 +883,153 @@ impl Terra {
         PackedFloat32Array::from(out.as_slice())
     }
 
+    /// Which ground is the ground the aerodrome stands on, as one byte a cell:
+    /// the grid thresholded against the sea under each point, then flood filled
+    /// from the middle. Empty when the middle is not on land at all.
+    #[func]
+    fn landmass(&self, half: f64, n: i64) -> PackedByteArray {
+        PackedByteArray::from(
+            world::landmass(half as f32, n.max(1) as usize).as_slice())
+    }
+
+    /// Is there ground in the way, for each of a list of sight lines?
+    ///
+    /// One byte a line. The head-up display's radar scope asks this of every
+    /// contact on it, every frame -- a contact behind a ridge is not a return,
+    /// and painting it and then refusing to lock it is worse than not painting
+    /// it -- and each ask is up to forty-eight height queries. Fourteen
+    /// aircraft in a fight is seven hundred crossings of the boundary a frame,
+    /// and measured that panel alone was 1.0 ms of a 13 ms frame.
+    #[func]
+    fn sight_lines(&self, from: PackedVector3Array, to: PackedVector3Array,
+            skip: f64) -> PackedByteArray {
+        let g = world::Ground::now();
+        let a = from.as_slice();
+        let b = to.as_slice();
+        let n = a.len().min(b.len());
+        let mut out = vec![0u8; n];
+        out.par_iter_mut().enumerate().for_each(|(k, v)| {
+            *v = world::line_of_sight(&g, [a[k].x, a[k].y, a[k].z],
+                [b[k].x, b[k].y, b[k].z], skip) as u8;
+        });
+        PackedByteArray::from(out.as_slice())
+    }
+
+    /// The ground under a set of wheels: five numbers each -- the height, the
+    /// three of the ground normal, and the grip -- in the order they came in.
+    ///
+    /// A tank has fourteen road wheels and every one of them used to ask for
+    /// itself: a height, four more for the normal and one for the surface, so
+    /// eighty-four crossings of this boundary per vehicle per physics step. A
+    /// sector's garrison on the move is forty-five vehicles at 120 Hz, and
+    /// measured that was 87 ms of a hundred millisecond frame -- a frame the
+    /// physics then needs twelve steps to catch up on, which makes the next one
+    /// worse. The suspension is the same arithmetic either way; this is only
+    /// where the asking happens.
+    ///
+    /// A wheel in the air gets its height and nothing else, which is the short
+    /// circuit the script already made: without a contact there is no normal to
+    /// stand on and no surface to grip.
+    ///
+    /// Deliberately serial. The work is fourteen points and the answer is
+    /// wanted inside the physics step that asked for it; handing that to a
+    /// thread pool costs more to dispatch than the arithmetic costs to do.
+    #[func]
+    fn wheel_ground(&self, pts: PackedVector3Array, radii: PackedFloat64Array)
+            -> PackedFloat64Array {
+        const E: f32 = 3.0;
+        let g = world::Ground::now();
+        let p = pts.as_slice();
+        let r = radii.as_slice();
+        let mut out = vec![0f64; p.len() * 5];
+        for (k, w) in p.iter().enumerate() {
+            let h = g.height(w.x, w.z);
+            out[k * 5] = h;
+            if h + r.get(k).copied().unwrap_or(0.0) <= w.y as f64 {
+                continue;
+            }
+            // `Sim.normal_at`: the field's gradient over six metres, narrowed
+            // into a `Vector3` and normalised there, because that is what the
+            // script does with it.
+            let dx = (g.height(w.x - E, w.z) - g.height(w.x + E, w.z)) as f32;
+            let dz = (g.height(w.x, w.z - E) - g.height(w.x, w.z + E)) as f32;
+            let dy = 2.0 * E;
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            let inv = if len > 0.0 { 1.0 / len } else { 0.0 };
+            out[k * 5 + 1] = (dx * inv) as f64;
+            out[k * 5 + 2] = (dy * inv) as f64;
+            out[k * 5 + 3] = (dz * inv) as f64;
+            out[k * 5 + 4] = g.grip(w.x, w.z) as f64;
+        }
+        PackedFloat64Array::from(out.as_slice())
+    }
+
+    /// The nearest point on any of a set of lines, for each of a set of points.
+    ///
+    /// `lines` is a flat run of ax, az, bx, bz. Which trunk road a town's own
+    /// street runs out to meet is this question, asked once per town against
+    /// the whole network -- twenty-nine thousand legs times forty-eight towns,
+    /// a million and a half segment tests, and in script that was 156 ms of
+    /// every launch whether the network came off disk or not.
+    ///
+    /// Worked out the way the script did, down to which parts are single and
+    /// which double: a `Vector2` holds singles and `maxf` is a double, so the
+    /// projection divides in double and narrows once. These land the end of a
+    /// street, and a street is drawn where its end is.
+    #[func]
+    fn nearest_on_lines(&self, lines: PackedFloat32Array, pts: PackedVector2Array)
+            -> PackedVector2Array {
+        let lines = lines.as_slice();
+        let src = pts.as_slice();
+        let mut out = vec![Vector2::ZERO; src.len()];
+        out.par_iter_mut().enumerate().for_each(|(k, v)| {
+            let p = src[k];
+            let mut best = f32::INFINITY;
+            *v = p;
+            for l in lines.chunks_exact(4) {
+                let (abx, abz) = (l[2] - l[0], l[3] - l[1]);
+                let dot = (p.x - l[0]) * abx + (p.y - l[1]) * abz;
+                let len2 = abx * abx + abz * abz;
+                let t = ((dot as f64) / (len2 as f64).max(0.001)).clamp(0.0, 1.0)
+                    as f32;
+                let q = Vector2::new(l[0] + abx * t, l[1] + abz * t);
+                let d = (p - q).length();
+                if d < best {
+                    best = d;
+                    *v = q;
+                }
+            }
+        });
+        PackedVector2Array::from(out.as_slice())
+    }
+
+    /// How rough the ground is over a disc, for every site being considered.
+    ///
+    /// The mean of `1 - normal.y` over a seven by seven grid inside the circle:
+    /// what a town is chosen by. Asked for a point at a time it is 49 normals,
+    /// each of them four heights, each of those its own crossing of the
+    /// extension boundary -- 196 crossings a candidate, and siting the world's
+    /// forty-eight settlements tries forty-nine candidates apiece. That is four
+    /// hundred and sixty thousand crossings, and measured it was 550 ms of a
+    /// four second cold start: the largest single thing in laying out the road
+    /// network, and none of it arithmetic that had to be done in script.
+    ///
+    /// The rule is unchanged, down to the order the sum is accumulated in --
+    /// this picks *where a town goes*, and a different rounding puts it
+    /// somewhere else.
+    #[func]
+    fn roughness_at(&self, centres: PackedVector2Array, radii: PackedFloat64Array)
+            -> PackedFloat64Array {
+        let g = world::Ground::now();
+        let c = centres.as_slice();
+        let r = radii.as_slice();
+        let mut out = vec![0f64; c.len()];
+        out.par_iter_mut().enumerate().for_each(|(k, v)| {
+            *v = world::roughness(&g, [c[k].x, c[k].y], *r.get(k).unwrap_or(&1.0));
+        });
+        PackedFloat64Array::from(out.as_slice())
+    }
+
     /// The upward component of the ground normal at each point -- how flat it
     /// is there. Four ground samples apiece, which is why it is worth asking
     /// for a whole scatter's worth at once rather than one tree at a time.
@@ -784,8 +1062,12 @@ impl Terra {
     /// hangs above the triangles as soon as the cells get coarse.
     #[func]
     fn surfaces_at(&self, pts: PackedVector2Array, cell: f64) -> PackedFloat32Array {
-        let w = world();
-        let c = corridor();
+        // In the frame the game measures heights in -- what `Sim.height_at`
+        // answers, drop and all. It used to answer in the flat field's own
+        // frame and leave every caller to take the drop off afterwards, which
+        // is a footgun with two callers and would have been a bug with three:
+        // the drop belongs under the interpolation, not over it.
+        let g = world::Ground::now();
         let cell = cell as f32;
         let src: Vec<Vector2> = pts.as_slice().to_vec();
         let out: Vec<f32> = src
@@ -795,10 +1077,10 @@ impl Terra {
                 let z0 = (p.y / cell).floor() * cell;
                 let tx = (p.x - x0) / cell;
                 let tz = (p.y - z0) / cell;
-                let h00 = ground_at(w, c, x0, z0, G_ALL);
-                let h10 = ground_at(w, c, x0 + cell, z0, G_ALL);
-                let h11 = ground_at(w, c, x0 + cell, z0 + cell, G_ALL);
-                let h01 = ground_at(w, c, x0, z0 + cell, G_ALL);
+                let h00 = g.world_y(x0, z0);
+                let h10 = g.world_y(x0 + cell, z0);
+                let h11 = g.world_y(x0 + cell, z0 + cell);
+                let h01 = g.world_y(x0, z0 + cell);
                 // the chunk splits each cell as (a,b,c) then (a,c,d), so the
                 // diagonal runs from (0,0) to (1,1)
                 if tz <= tx {
@@ -907,9 +1189,7 @@ impl Terra {
     /// handful of segments rather than at all nine thousand.
     #[func]
     fn set_segments(&self, data: PackedFloat32Array) {
-        let g: &'static SegGrid =
-            Box::leak(Box::new(SegGrid::build(data.as_slice(), 256.0)));
-        *SEGS.lock().unwrap() = Some(g);
+        index::publish_segments(data.as_slice(), 256.0);
     }
 
     /// The made surface at a point, as (height, how much of it applies, the
@@ -924,7 +1204,7 @@ impl Terra {
     /// wide the search spreads before it gives up and answers that.
     #[func]
     fn road_distance_at(&self, x: f64, z: f64, far: f64) -> f64 {
-        match segments() {
+        match index::segments() {
             Some(g) => g.distance(x as f32, z as f32, far as f32) as f64,
             None => far,
         }
@@ -936,7 +1216,7 @@ impl Terra {
             -> PackedFloat32Array {
         let far = far as f32;
         let src: Vec<Vector2> = pts.as_slice().to_vec();
-        let out: Vec<f32> = match segments() {
+        let out: Vec<f32> = match index::segments() {
             Some(g) => src.par_iter().map(|p| g.distance(p.x, p.y, far)).collect(),
             None => vec![far; src.len()],
         };
@@ -1151,22 +1431,29 @@ impl Terra {
     #[func]
     fn climate_map_globe(&self, n: i64, half: f64) -> PackedByteArray {
         let c = sphere::chart();
+        PackedByteArray::from(
+            sphere::climate_globe(&c, n.max(1) as usize, half as f32).as_slice())
+    }
+
+    /// The same, off the main thread. The ground keeps the climate it has until
+    /// this lands, which after a chart move is a few frames of colour drawn for
+    /// the country next door rather than half a second of nothing at all.
+    #[func]
+    fn climate_request(&self, n: i64, half: f64) -> bool {
+        let c = sphere::chart();
         let n = n.max(1) as usize;
         let half = half as f32;
-        let span = half * 2.0;
-        let mut out = vec![0u8; n * n * 4];
-        out.par_chunks_mut(n * 4).enumerate().for_each(|(j, row)| {
-            let z = (j as f32 + 0.5) / n as f32 * span - half;
-            for i in 0..n {
-                let x = (i as f32 + 0.5) / n as f32 * span - half;
-                let (t, m) = sphere::climate(sphere::dir_from_chart(&c, x, z));
-                row[i * 4..i * 4 + 2]
-                    .copy_from_slice(&raster::f16(t).to_le_bytes());
-                row[i * 4 + 2..i * 4 + 4]
-                    .copy_from_slice(&raster::f16(m).to_le_bytes());
-            }
-        });
-        PackedByteArray::from(out.as_slice())
+        bake_start(&CLIMATE, move || sphere::climate_globe(&c, n, half))
+    }
+
+    #[func]
+    fn climate_ready(&self) -> bool {
+        bake_ready(&CLIMATE)
+    }
+
+    #[func]
+    fn climate_take(&self) -> PackedByteArray {
+        PackedByteArray::from(bake_take(&CLIMATE).as_slice())
     }
 
     /// Carriageways and kerbs for every road and street on the map, as two
@@ -1185,13 +1472,89 @@ impl Terra {
         out
     }
 
+    /// The same ribbons, cut into square buckets so the frustum can drop them.
+    ///
+    /// `road_ribbons` returns the whole network as two meshes, and a mesh is
+    /// culled as one object: any part of the road network on screen submits all
+    /// of it. Measured, those two meshes cost 4.15 ms of the 6.20 ms the frame
+    /// spends drawing -- two thirds of it, for two objects out of eighteen
+    /// hundred, most of which is behind the camera or over the horizon.
+    ///
+    /// Cut here rather than in GDScript because a packed array taken out of a
+    /// dictionary and put back is copied both ways, so bucketing a million
+    /// triangles a triangle at a time is quadratic.
+    ///
+    #[func]
+    fn road_ribbons_bucketed(&self, legs: PackedFloat32Array, cell: f64)
+            -> Array<Variant> {
+        type Cells = index::Map<i64, (Vec<Vector3>, Vec<Vector3>)>;
+        let parts = raster::ribbon_parts(legs.as_slice());
+        let cell = (cell as f32).max(1.0);
+        // Sorted straight out of the per-leg ribbons, across every core.
+        //
+        // Joined into one pair of lists first and then sorted -- which is what
+        // this did -- a million triangles are copied twice over on one thread
+        // before any of them reaches a bucket. Each core sorts a run of legs
+        // into a map of its own and the maps are merged in order afterwards, so
+        // the answer does not depend on which core finished first.
+        let sort = |src: &[[f32; 3]], kerb: bool, b: &mut Cells| {
+            for tri in src.chunks_exact(3) {
+                let cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0;
+                let cz = (tri[0][2] + tri[1][2] + tri[2][2]) / 3.0;
+                // Keyed on the triangle's own centre, so a triangle belongs to
+                // one bucket and no seam can open between two.
+                let key = index::key((cx / cell).floor() as i32,
+                    (cz / cell).floor() as i32);
+                let e = b.entry(key).or_default();
+                let dst = if kerb { &mut e.1 } else { &mut e.0 };
+                for q in tri {
+                    dst.push(Vector3::new(q[0], q[1], q[2]));
+                }
+            }
+        };
+        let runs: Vec<Cells> = parts
+            .par_chunks(256)
+            .map(|run| {
+                let mut b = Cells::default();
+                for r in run {
+                    sort(&r.surf, false, &mut b);
+                    sort(&r.kerb, true, &mut b);
+                }
+                b
+            })
+            .collect();
+        let mut buckets = Cells::default();
+        for run in runs {
+            for (k, (surf, kerb)) in run {
+                let e = buckets.entry(k).or_default();
+                e.0.extend_from_slice(&surf);
+                e.1.extend_from_slice(&kerb);
+            }
+        }
+        // Comes back flat: cell x, cell z, surface, kerb, for each non-empty
+        // cell. In a settled order, because the meshes are named after the
+        // cell and a harness finds them by name.
+        let mut keys: Vec<i64> = buckets.keys().copied().collect();
+        keys.sort_unstable();
+        let mut out: Array<Variant> = Array::new();
+        for k in keys {
+            let (surf, kerb) = &buckets[&k];
+            out.push(&((k >> 32) as i32 as i64).to_variant());
+            out.push(&((k & 0xffff_ffff) as u32 as i32 as i64).to_variant());
+            out.push(&PackedVector3Array::from(surf.as_slice()).to_variant());
+            out.push(&PackedVector3Array::from(kerb.as_slice()).to_variant());
+        }
+        out
+    }
+
     /// The tactical map's background: hill-shaded relief in biome colour with
     /// the road network over it, as RGB8.
     #[func]
     fn map_relief(&self, n: i64, half: f64) -> PackedByteArray {
-        static EMPTY: std::sync::OnceLock<SegGrid> = std::sync::OnceLock::new();
-        let segs = segments()
-            .unwrap_or_else(|| EMPTY.get_or_init(|| SegGrid::build(&[], 256.0)));
+        static EMPTY: std::sync::OnceLock<index::SegGrid> =
+            std::sync::OnceLock::new();
+        let segs = index::segments()
+            .unwrap_or_else(|| EMPTY.get_or_init(|| index::SegGrid::build(&[], 256.0)));
         let buf = raster::relief(n.max(0) as usize, half as f32, segs);
         PackedByteArray::from(buf.as_slice())
     }

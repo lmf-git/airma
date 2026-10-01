@@ -322,6 +322,17 @@ func cockpit_offset() -> Vector3:
 
 # --------------------------------------------------------------------------
 func _physics_process(delta: float) -> void:
+	var _pa := Sim.prof_at()
+	_tick_physics(delta)
+	Sim.prof_end(&"air.total", _pa)
+
+## Everything the airframe does at the physics rate.
+##
+## Split out so the whole of it can be timed at once. The step runs at 120 Hz
+## against a frame rate around 75, so a millisecond in here is nearer two on the
+## frame -- and none of it showed up in the breakdown, which only ever wrapped
+## `_process`.
+func _tick_physics(delta: float) -> void:
 	if ghost:
 		# remote aircraft still animate their moving parts, they just do not fly
 		_animate(delta)
@@ -336,8 +347,12 @@ func _physics_process(delta: float) -> void:
 	if not alive:
 		return
 	_life_t += delta
+	var _pp := Sim.prof_at()
 	_pilot(delta)
+	Sim.prof_end(&"air.pilot", _pp)
+	var _pn := Sim.prof_at()
 	_animate(delta)
+	Sim.prof_end(&"air.animate", _pn)
 	# a shot held up by the doors goes as soon as they are open
 	if _pending_fire and alive:
 		var w := current_weapon()
@@ -360,7 +375,9 @@ func _physics_process(delta: float) -> void:
 		_gun_audio.stop()
 	fire_cd = maxf(fire_cd - delta, 0.0)
 	missile_warn = maxf(missile_warn - delta, 0.0)
+	var _pl := Sim.prof_at()
 	_update_lock(delta)
+	Sim.prof_end(&"air.lock", _pl)
 
 ## Override in subclasses to drive the stick.
 func _pilot(_delta: float) -> void:
@@ -982,6 +999,12 @@ func _deflect(node: Node3D, angle: float) -> void:
 func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	if ghost or not alive:
 		return
+	var _pf := Sim.prof_at()
+	_forces(state)
+	Sim.prof_end(&"air.forces", _pf)
+
+## The flight model itself.
+func _forces(state: PhysicsDirectBodyState3D) -> void:
 	var xf := state.transform
 	var b := xf.basis
 	var pos := xf.origin

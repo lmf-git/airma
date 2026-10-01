@@ -1,4 +1,7 @@
-//! Integer cell keys and the hash they are looked up with.
+//! Integer cell keys, the hash they are looked up with, and the segment grid
+//! the whole game asks "how far is the nearest road" of.
+
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// A cheap hash for integer cell keys.
 ///
@@ -143,4 +146,35 @@ impl SegGrid {
         }
         best2.sqrt().min(far)
     }
+}
+
+// ------------------------------------------------------- the published grid
+
+/// Every road and street on the map, indexed for "how far is the nearest one".
+/// Rebuilt whenever the network changes and read from every core after that.
+///
+/// Published as a pointer, not held behind a lock, for the same reason the
+/// world is (see `world::WORLD_P`). `road_ink` asks for this once per texel and
+/// the map sheet is four million of them across eight threads: behind a mutex
+/// that is four million contended round trips on one cache line, and measured
+/// it was most of what the sheet cost -- 925 ms of colouring against 435 ms for
+/// the heights underneath it, which are the expensive part of the arithmetic.
+/// A load of a pointer that nothing writes to costs nothing and scales.
+static SEGS: AtomicPtr<SegGrid> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Index a network and publish it. The old one is leaked: it lives as long as
+/// the process and a reader only has to load a pointer.
+pub fn publish_segments(pairs: &[f32], cell: f32) {
+    let g = Box::into_raw(Box::new(SegGrid::build(pairs, cell)));
+    SEGS.store(g, Ordering::Release);
+}
+
+/// The network, or nothing if none has been laid yet.
+pub fn segments() -> Option<&'static SegGrid> {
+    let p = SEGS.load(Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // Sound: the grid is leaked at publication and never mutated or freed.
+    Some(unsafe { &*p })
 }

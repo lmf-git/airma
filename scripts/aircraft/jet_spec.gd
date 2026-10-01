@@ -42,9 +42,21 @@ static func bloc_of(id: String) -> String:
 	var f := String(get_spec(id).get("faction", "usa"))
 	return String(FACTIONS.get(f, {}).get("bloc", "nato"))
 
+## The table, built once.
+##
+## `_db` is a dictionary literal several hundred lines long, and it was
+## evaluated afresh on every lookup -- every nested dictionary, every colour,
+## every string, allocated and thrown away to read one field out of one entry.
+## The radar lock asks for a airframe spec at a hundred and twenty hertz per
+## aircraft and asks twice each time, so a fight rebuilt the whole table fifty
+## times a frame: measured, 1.59 ms of a 13 ms frame. Nothing writes to a spec
+## -- they are read-only tables -- so one copy serves everybody.
+static var _table: Dictionary = {}
+
 static func get_spec(id: String) -> Dictionary:
-	var all := _db()
-	return all.get(id, all["f22"])
+	if _table.is_empty():
+		_table = _db()
+	return _table.get(id, _table["f22"])
 
 static func _db() -> Dictionary:
 	return {

@@ -39,6 +39,14 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	Sim.mission_event.connect(_on_event)
+	# The key card draws itself, on its own schedule. A child, so it comes out
+	# over the symbology the way it did when it was drawn last.
+	_card = KeyCard.new()
+	_card.name = "KeyCard"
+	_card.font = _font
+	_card.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_card)
 
 func _on_event(text: String, kind: int) -> void:
 	log_lines.push_front({"t": text, "k": kind, "age": 0.0})
@@ -57,6 +65,16 @@ const CONTACT_EVERY := 0.1
 var _seen: Array = []
 var _seen_zones: Array = []
 var _seen_t := 0.0
+## What each contact *is*, settled when the list is built.
+##
+## Whether a node answers `is_alive` and whether it is in `no_lock` are facts
+## about its class, not about this frame -- and every panel asked the engine
+## both questions about every contact, every frame. `has_method` and
+## `is_in_group` are string lookups into the engine; four loops over the
+## hittables at seventy-nine frames a second is tens of thousands of them.
+const SEEN_MORTAL := 1
+const SEEN_NO_LOCK := 2
+var _seen_what := PackedByteArray()
 
 func _refresh_seen(delta: float) -> void:
 	_seen_t -= delta
@@ -65,6 +83,38 @@ func _refresh_seen(delta: float) -> void:
 	_seen_t = CONTACT_EVERY
 	_seen = get_tree().get_nodes_in_group("hittable")
 	_seen_zones = get_tree().get_nodes_in_group("zones")
+	_seen_what.resize(_seen.size())
+	for k in _seen.size():
+		var n: Node = _seen[k]
+		_seen_what[k] = (SEEN_MORTAL if n.has_method("is_alive") else 0) \
+			| (SEEN_NO_LOCK if n.is_in_group("no_lock") else 0)
+	_refresh_masking()
+
+## Whether the terrain is in the way of each contact.
+##
+## A sight line is a march of up to forty-eight height samples, and the scope
+## wants one per contact. Asked every frame -- even batched into a single call
+## across every core -- that was 0.23 ms of a 12.8 ms frame, the largest single
+## thing left in the head-up display. Whether a ridge is between you and a
+## bandit does not change in a hundredth of a second, so it is settled here at
+## ten hertz with the rest of the list. At five hundred knots the eye moves
+## twenty-five metres between refreshes, against a march that steps a hundred
+## and eighty.
+var _seen_clear := PackedByteArray()
+
+func _refresh_masking() -> void:
+	if _seen.is_empty():
+		_seen_clear = PackedByteArray()
+		return
+	var eye := _scope_origin() + Vector3(0, 4, 0)
+	var from := PackedVector3Array()
+	var to := PackedVector3Array()
+	from.resize(_seen.size())
+	to.resize(_seen.size())
+	for k in _seen.size():
+		from[k] = eye
+		to[k] = (_seen[k] as Node3D).global_position + Vector3(0, 4, 0)
+	_seen_clear = Sim.lines_of_sight(from, to, 250.0)
 
 func _process(delta: float) -> void:
 	var _pp := Sim.prof_at()
@@ -76,8 +126,17 @@ func _tick(delta: float) -> void:
 	_t += delta
 	for l in log_lines:
 		l["age"] += delta
+	_refresh_help()
 	queue_redraw()
 
+## Caching the shaped text was tried and buys nothing.
+##
+## `draw_string` looked like it must be re-laying out every string on every
+## call, and the head-up display makes about ninety of those a frame, half of
+## them labels that never change. Holding the finished layout in a `TextLine`
+## and drawing that instead measured 1.500 ms against 1.477 -- no change at all,
+## which says the text server already keeps what it needs. Left written down so
+## it is not tried again.
 func _txt(pos: Vector2, s: String, pt := 15, col := GREEN, align := HORIZONTAL_ALIGNMENT_LEFT, w := -1.0) -> void:
 	draw_string(_font, pos, s, align, w, pt, col)
 
@@ -85,9 +144,14 @@ func _box(r: Rect2, col := GREEN, width := 1.0) -> void:
 	draw_rect(r, col, false, width)
 
 func _draw() -> void:
+	# `.total`, because it wraps every other hud tag. The breakdown adds up
+	# every tag that is not marked as containing others, and named `hud.draw`
+	# this one was counted twice over -- once itself and once in its children --
+	# which put a millisecond and a half of script on the report that was not
+	# there.
 	var _ph := Sim.prof_at()
 	_draw_all()
-	Sim.prof_end(&"hud.draw", _ph)
+	Sim.prof_end(&"hud.total", _ph)
 
 func _draw_all() -> void:
 	# The objective marker belongs on every page too, and before anything
@@ -102,23 +166,15 @@ func _draw_all() -> void:
 	# only place the keys appeared was the event log.
 	if carrier != null and is_instance_valid(carrier):
 		_draw_conn()
-		if show_help:
-			_draw_help()
 		return
 	if ship != null and is_instance_valid(ship):
 		_draw_bridge()
-		if show_help:
-			_draw_help()
 		return
 	if tank != null and is_instance_valid(tank):
 		_draw_driver()
-		if show_help:
-			_draw_help()
 		return
 	if walker != null and is_instance_valid(walker):
 		_draw_on_foot()
-		if show_help:
-			_draw_help()
 		return
 	if aircraft == null or not is_instance_valid(aircraft) or cam == null:
 		return
@@ -135,10 +191,12 @@ func _draw_all() -> void:
 	var c := vp * 0.5
 	var alive := aircraft.alive
 
+	var _p13 := Sim.prof_at()
 	_setup_hud_box()
 	if alive:
 		if _hud_clip:
 			_draw_hud_glass()
+		Sim.prof_end(&"hud.glass", _p13)
 		var _p0 := Sim.prof_at()
 		_draw_ladder()
 		Sim.prof_end(&"hud.ladder", _p0)
@@ -176,9 +234,10 @@ func _draw_all() -> void:
 	_draw_log(vp)
 	Sim.prof_end(&"hud.log", _p11)
 	if mode != null and is_instance_valid(mode):
+		var _p14 := Sim.prof_at()
 		_draw_mode(vp)
-	if show_help:
-		_draw_help()
+		Sim.prof_end(&"hud.mode", _p14)
+
 
 ## Driver and gunner readout.
 ## Bridge page: what the officer of the watch needs and nothing else.
@@ -270,12 +329,13 @@ func _draw_world_contacts(src: Node3D, eye: Camera3D) -> void:
 			held = raw
 	var reach: float = maxf(Sim.coverage(my_team), 26000.0)
 	var vp := get_viewport_rect().size
-	for n in _seen:
+	for k in _seen.size():
+		var n: Node = _seen[k]
 		if not is_instance_valid(n) or n == src or not (n is Node3D):
 			continue
-		if n.has_method("is_alive") and not n.is_alive():
+		if _seen_what[k] & SEEN_NO_LOCK != 0:
 			continue
-		if n.is_in_group("no_lock"):
+		if _seen_what[k] & SEEN_MORTAL != 0 and not n.is_alive():
 			continue
 		var p: Vector3 = (n as Node3D).global_position
 		var d: float = src.global_position.distance_to(p)
@@ -686,10 +746,11 @@ func _draw_fpm() -> void:
 		draw_line(g - Vector2(0, 14), g - Vector2(0, 5), WHITE, 1.4)
 
 func _draw_targets() -> void:
-	for n in _seen:
+	for k in _seen.size():
+		var n: Node3D = _seen[k]
 		if not is_instance_valid(n) or n == aircraft:
 			continue
-		if n.has_method("is_alive") and not n.is_alive():
+		if _seen_what[k] & SEEN_MORTAL != 0 and not n.is_alive():
 			continue
 		var hostile: bool = ("team" in n) and int(n.team) != aircraft.team
 		var p: Vector3 = n.global_position
@@ -978,9 +1039,13 @@ func _draw_panels(vp: Vector2) -> void:
 	for slot in slots:
 		match int(slot[0]):
 			2:
+				var _p := Sim.prof_at()
 				_draw_radar_at(slot[1], 78.0)
+				Sim.prof_end(&"hud.radar", _p)
 			3:
+				var _p2 := Sim.prof_at()
 				_draw_minimap_at(slot[1], 82.0)
+				Sim.prof_end(&"hud.minimap", _p2)
 			1:
 				_draw_sensor_stub(slot[1], 82.0)
 
@@ -1012,10 +1077,11 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 			RED if z.owner_team == 1 else Color(0.8, 0.8, 0.8))
 		var zp: Vector2 = to_screen.call(Vector2(z.global_position.x, z.global_position.z))
 		draw_circle(zp, 3.0, col)
-	for n in _seen:
+	for k in _seen.size():
+		var n: Node3D = _seen[k]
 		if not is_instance_valid(n) or n == aircraft:
 			continue
-		if n.has_method("is_alive") and not n.is_alive():
+		if _seen_what[k] & SEEN_MORTAL != 0 and not n.is_alive():
 			continue
 		var p: Vector2 = to_screen.call(Vector2(n.global_position.x, n.global_position.z))
 		if (p - c).length() > r:
@@ -1087,12 +1153,13 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 	var my_target := _scope_target()
 	var fwd := -b.z
 	var hdg := atan2(fwd.x, -fwd.z)
-	for n in _seen:
+	for k in _seen.size():
+		var n: Node3D = _seen[k]
 		if not is_instance_valid(n) or n == _scope_src or n == aircraft:
 			continue
-		if n.has_method("is_alive") and not n.is_alive():
+		if _seen_what[k] & SEEN_NO_LOCK != 0:
 			continue
-		if n.is_in_group("no_lock"):
+		if _seen_what[k] & SEEN_MORTAL != 0 and not n.is_alive():
 			continue
 		var rel: Vector3 = n.global_position - origin
 		var d := rel.length()
@@ -1107,9 +1174,9 @@ func _draw_radar_at(c: Vector2, r: float) -> void:
 		# a ridge is not a return; painting it solid and then refusing to lock
 		# it is worse than not painting it, because the pilot can see it and
 		# cannot understand why the radar will not take it.
-		var masked := d > 2000.0 and not Sim.line_of_sight(
-			origin + Vector3(0, 4, 0),
-			(n as Node3D).global_position + Vector3(0, 4, 0), 250.0)
+		# Settled at ten hertz with the rest of the list -- see `_refresh_masking`.
+		var masked: bool = d > 2000.0 and k < _seen_clear.size() \
+			and _seen_clear[k] == 0
 		if masked:
 			# a faded memory trace where it was last seen, and nothing more
 			if _held.has(n) and _t - float(_held[n]) < 8.0:
@@ -1321,19 +1388,6 @@ func _draw_mode(vp: Vector2) -> void:
 			GREEN if str(st["result"]).begins_with("VICTORY") else RED,
 			HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 
-func _draw_help() -> void:
-	# what the keys do depends on what you are sitting in
-	if ship != null and is_instance_valid(ship):
-		_help_body(_ship_keys())
-		return
-	if tank != null and is_instance_valid(tank):
-		_help_body(_tank_keys())
-		return
-	if walker != null and is_instance_valid(walker):
-		_help_body(_foot_keys())
-		return
-	_help_body(_air_keys())
-
 func _ship_keys() -> Array:
 	var conn := [
 		["A / D", "wheel: port / starboard"],
@@ -1462,20 +1516,75 @@ func _air_keys() -> Array:
 	]
 	return groups
 
-## The card itself. Split out so every page can draw its own list through it.
-func _help_body(groups: Array) -> void:
-	var x := 26.0
-	var y := 118.0
-	var panel_h := 0.0
-	for g in groups:
-		panel_h += 26.0 + float(g[1].size()) * 19.0
-	draw_rect(Rect2(x - 14, y - 30, 330, panel_h + 24), Color(0.02, 0.04, 0.06, 0.55), true)
-	_box(Rect2(x - 14, y - 30, 330, panel_h + 24), Color(0.4, 0.9, 0.6, 0.35), 1.0)
-	for g in groups:
-		_txt(Vector2(x, y), str(g[0]), 15, Color(0.45, 0.95, 0.65))
-		y += 22.0
-		for row in g[1]:
-			_txt(Vector2(x + 6, y), str(row[0]), 14, Color(1.0, 0.95, 0.7))
-			_txt(Vector2(x + 116, y), str(row[1]), 14, Color(0.82, 0.9, 0.95))
-			y += 19.0
-		y += 4.0
+## The key card, on a canvas of its own.
+##
+## It is a page of static text -- eighty-odd strings laid out and measured --
+## and it was drawn again on every frame of the game. Measured, 0.68 ms of a
+## 14 ms frame for a picture that changes only when you climb into something
+## else or press F2. A control of its own draws it once and is told to redraw
+## only when the list it shows has actually changed.
+class KeyCard extends Control:
+	var font: Font
+	var groups: Array = []
+
+	func show_keys(g: Array) -> void:
+		groups = g
+		queue_redraw()
+
+	func _draw() -> void:
+		if font == null or groups.is_empty():
+			return
+		var x := 26.0
+		var y := 118.0
+		var panel_h := 0.0
+		for g in groups:
+			panel_h += 26.0 + float(g[1].size()) * 19.0
+		var box := Rect2(x - 14, y - 30, 330, panel_h + 24)
+		draw_rect(box, Color(0.02, 0.04, 0.06, 0.55), true)
+		draw_rect(box, Color(0.4, 0.9, 0.6, 0.35), false, 1.0)
+		for g in groups:
+			draw_string(font, Vector2(x, y), str(g[0]),
+				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 15, Color(0.45, 0.95, 0.65))
+			y += 22.0
+			for row in g[1]:
+				draw_string(font, Vector2(x + 6, y), str(row[0]),
+					HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(1.0, 0.95, 0.7))
+				draw_string(font, Vector2(x + 116, y), str(row[1]),
+					HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(0.82, 0.9, 0.95))
+				y += 19.0
+			y += 4.0
+
+var _card: KeyCard = null
+## What the card is currently showing, as one integer: which seat, and the two
+## things a ship's list depends on. Compared every frame, which costs nothing;
+## the list is only rebuilt and redrawn when it differs.
+var _card_sig := -1
+
+## Which keys apply where you are sitting, and whether that has changed.
+func _refresh_help() -> void:
+	if _card == null:
+		return
+	var sig := 0
+	if show_help:
+		if ship != null and is_instance_valid(ship):
+			sig = 1 | (2 if ship.can_dive() else 0) | (4 if ship.can_launch() else 0)
+		elif tank != null and is_instance_valid(tank):
+			sig = 8
+		elif walker != null and is_instance_valid(walker):
+			sig = 16
+		else:
+			sig = 32
+	if sig == _card_sig:
+		return
+	_card_sig = sig
+	_card.visible = show_help
+	if not show_help:
+		return
+	if sig & 1 != 0:
+		_card.show_keys(_ship_keys())
+	elif sig == 8:
+		_card.show_keys(_tank_keys())
+	elif sig == 16:
+		_card.show_keys(_foot_keys())
+	else:
+		_card.show_keys(_air_keys())

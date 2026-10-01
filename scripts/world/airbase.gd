@@ -14,6 +14,20 @@ var papi: Array[MeshInstance3D] = []
 var _papi_mats: Array[StandardMaterial3D] = []
 var watcher: Node3D = null
 
+## Every aerodrome is the same aerodrome.
+##
+## The pavement, the markings, the lighting and the buildings are laid out from
+## constants -- there is nothing per-instance anywhere in them -- and the world
+## has six of them, each building the identical geometry from scratch.
+## Measured, 137 ms of the boot spent arriving six times at the same answer. A
+## mesh is a resource and a resource can hang in six places at once, so each is
+## built the first time it is asked for and shared after that.
+##
+## What is *not* shared is what actually differs between one field and the next:
+## the PAPI's materials, which change colour with whoever is on the approach,
+## and the hangars, which burn.
+static var _shared: Dictionary = {}
+
 func build() -> void:
 	_pavement()
 	_markings()
@@ -30,18 +44,29 @@ func _tri_quad(st: SurfaceTool, cx: float, cz: float, hw: float, hl: float, y: f
 		st.add_vertex(v)
 
 func _pavement() -> void:
-	var st := MeshKit.begin()
-	_tri_quad(st, 0, 0, W, HALF, 0.06)                       # runway
-	_tri_quad(st, 0, 0, W + 8.0, HALF + 60.0, 0.02)          # shoulders / overrun
-	for s in [-1.0, 1.0]:
-		_tri_quad(st, s * 76.0, 0, 11.0, HALF - 40.0, 0.05)  # parallel taxiways
-		_tri_quad(st, s * 44.0, HALF - 60.0, 33.0, 11.0, 0.05)
-		_tri_quad(st, s * 44.0, -HALF + 60.0, 33.0, 11.0, 0.05)
-		_tri_quad(st, s * 44.0, 0.0, 33.0, 11.0, 0.05)
-	_tri_quad(st, 150.0, -420.0, 62.0, 150.0, 0.05)          # apron
-	add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.115, 0.12, 0.128), 0.92, 0.0)), "Pavement"))
+	if not _shared.has("pavement"):
+		var st := MeshKit.begin()
+		_tri_quad(st, 0, 0, W, HALF, 0.06)                       # runway
+		_tri_quad(st, 0, 0, W + 8.0, HALF + 60.0, 0.02)          # shoulders / overrun
+		for s in [-1.0, 1.0]:
+			_tri_quad(st, s * 76.0, 0, 11.0, HALF - 40.0, 0.05)  # parallel taxiways
+			_tri_quad(st, s * 44.0, HALF - 60.0, 33.0, 11.0, 0.05)
+			_tri_quad(st, s * 44.0, -HALF + 60.0, 33.0, 11.0, 0.05)
+			_tri_quad(st, s * 44.0, 0.0, 33.0, 11.0, 0.05)
+		_tri_quad(st, 150.0, -420.0, 62.0, 150.0, 0.05)          # apron
+		_shared["pavement"] = MeshKit.finish(st,
+			MeshKit.mat(Color(0.115, 0.12, 0.128), 0.92, 0.0))
+	add_child(MeshKit.mi(_shared["pavement"], "Pavement"))
 
 func _markings() -> void:
+	if _shared.has("markings"):
+		add_child(MeshKit.mi(_shared["markings"], "Markings"))
+		for k in [0, 1]:
+			var num := MeshKit.mi(_shared["number%d" % k], "Number")
+			num.material_override = _shared["number_mat"]
+			num.transform = _shared["number_at%d" % k]
+			add_child(num)
+		return
 	var st := MeshKit.begin()
 	var y := 0.09
 	for s in [-1.0, 1.0]:
@@ -58,7 +83,15 @@ func _markings() -> void:
 		for pair in [[150.0, 22.0], [300.0, 15.0], [450.0, 15.0], [600.0, 15.0], [750.0, 15.0]]:
 			for s in [-1.0, 1.0]:
 				_tri_quad(st, float(s) * 10.5, thr - float(end) * float(pair[0]), 1.6, float(pair[1]), y)
-	add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.86, 0.87, 0.86), 0.85, 0.0)), "Markings"))
+	_shared["markings"] = MeshKit.finish(st,
+		MeshKit.mat(Color(0.86, 0.87, 0.86), 0.85, 0.0))
+	add_child(MeshKit.mi(_shared["markings"], "Markings"))
+	# The two runway numbers are text turned into geometry, which means a font
+	# outline tessellated -- and that is nearly the whole of what an aerodrome
+	# costs to build: 135 ms of the 140 for the world's six, arriving six times
+	# at the same two numbers. Kept with the rest.
+	_shared["number_mat"] = MeshKit.mat(Color(0.88, 0.89, 0.88), 0.85, 0.0)
+	var made := 0
 
 	for pair in [[HALF - 40.0, "36", 0.0], [-HALF + 40.0, "18", 180.0]]:
 		var t := TextMesh.new()
@@ -67,10 +100,13 @@ func _markings() -> void:
 		t.depth = 0.02
 		t.pixel_size = 0.16
 		var mi := MeshKit.mi(t, "Number")
-		mi.material_override = MeshKit.mat(Color(0.88, 0.89, 0.88), 0.85, 0.0)
-		mi.position = Vector3(0, 0.1, pair[0])
-		mi.rotation_degrees = Vector3(-90, pair[2], 0)
+		mi.material_override = _shared["number_mat"]
+		mi.position = Vector3(0, 0.1, float(pair[0]))
+		mi.rotation_degrees = Vector3(-90, float(pair[2]), 0)
 		add_child(mi)
+		_shared["number%d" % made] = t
+		_shared["number_at%d" % made] = mi.transform
+		made += 1
 
 func _lights() -> void:
 	var white := MeshKit.mat(Color.BLACK, 0.4, 0.0, Color(1.0, 0.97, 0.9))
@@ -83,13 +119,15 @@ func _lights() -> void:
 	bulb.rings = 3
 	var mm := func(mat: Material, positions: Array, nm: String) -> void:
 		var multi := MultiMeshInstance3D.new()
-		var m := MultiMesh.new()
-		m.transform_format = MultiMesh.TRANSFORM_3D
-		m.mesh = bulb
-		m.instance_count = positions.size()
-		for i in positions.size():
-			m.set_instance_transform(i, Transform3D(Basis(), positions[i]))
-		multi.multimesh = m
+		if not _shared.has(nm):
+			var m := MultiMesh.new()
+			m.transform_format = MultiMesh.TRANSFORM_3D
+			m.mesh = bulb
+			m.instance_count = positions.size()
+			for i in positions.size():
+				m.set_instance_transform(i, Transform3D(Basis(), positions[i]))
+			_shared[nm] = m
+		multi.multimesh = _shared[nm]
 		multi.material_override = mat
 		multi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		multi.name = nm
@@ -131,15 +169,19 @@ func _lights() -> void:
 		_papi_mats.append(mat)
 
 func _buildings() -> void:
-	var st := MeshKit.begin()
-	var conc := MeshKit.mat(Color(0.52, 0.52, 0.50), 0.85, 0.0)
-	# control tower
-	MeshKit.box(st, Vector3(11, 26, 11), Vector3(150, 13, -600))
-	MeshKit.box(st, Vector3(17, 5.5, 17), Vector3(150, 28, -600))
-	add_child(MeshKit.mi(MeshKit.finish(st, conc), "Tower"))
-	var g := MeshKit.begin()
-	MeshKit.box(g, Vector3(16, 4.4, 16), Vector3(150, 30.6, -600))
-	add_child(MeshKit.mi(MeshKit.finish(g, MeshKit.mat(Color(0.20, 0.28, 0.32), 0.15, 0.8)), "TowerGlass"))
+	if not _shared.has("tower"):
+		var st := MeshKit.begin()
+		var conc := MeshKit.mat(Color(0.52, 0.52, 0.50), 0.85, 0.0)
+		# control tower
+		MeshKit.box(st, Vector3(11, 26, 11), Vector3(150, 13, -600))
+		MeshKit.box(st, Vector3(17, 5.5, 17), Vector3(150, 28, -600))
+		_shared["tower"] = MeshKit.finish(st, conc)
+		var g := MeshKit.begin()
+		MeshKit.box(g, Vector3(16, 4.4, 16), Vector3(150, 30.6, -600))
+		_shared["glass"] = MeshKit.finish(g,
+			MeshKit.mat(Color(0.20, 0.28, 0.32), 0.15, 0.8))
+	add_child(MeshKit.mi(_shared["tower"], "Tower"))
+	add_child(MeshKit.mi(_shared["glass"], "TowerGlass"))
 	for i in 4:
 		var t := GroundTarget.new()
 		t.team = 0

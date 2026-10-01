@@ -8,7 +8,8 @@
 
 use crate::field::{climate, lerp, smoothstep, WATER_LEVEL};
 use crate::index::SegGrid;
-use crate::world::{corridor, ground_at, road_surface, world, Corridor, G_ALL, ROAD_FILL_MAX};
+use crate::world::{base, carve_road, corridor, ground_at, world, Corridor, G_ALL,
+    ROAD_FILL_MAX};
 use rayon::prelude::*;
 
 // ------------------------------------------------------------- ground mask
@@ -214,19 +215,25 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
                 // is continuous whatever the country under it does, so this is
                 // the one stretch that follows it and nothing else.
                 y = lerp(ya, yb, t);
+            } else if trunk {
+                // A trunk road on an embankment rides on the design surface,
+                // not on whatever is underneath it -- but only as far as the
+                // ground was actually raised to meet it. Drawn on the design
+                // whatever the fill limit did, the carriageway hung in the air
+                // over an untouched hillside.
+                //
+                // Both out of one walk of the corridor: the ground here *is*
+                // the design surface applied to the land, so working it out and
+                // then asking for it again separately is the same grid walked
+                // twice, and that was most of what this cost.
+                let (h, (ry, rw, rg)) =
+                    carve_road(w, c, base(qx, qz), qx, qz, G_ALL);
+                y = h;
+                if rw > 0.35 && ry - rg <= ROAD_FILL_MAX * 1.25 {
+                    y = y.max(ry);
+                }
             } else {
                 y = ground_at(w, c, qx, qz, G_ALL);
-                if trunk {
-                    // A trunk road on an embankment rides on the design
-                    // surface, not on whatever is underneath it -- but only as
-                    // far as the ground was actually raised to meet it. Drawn
-                    // on the design whatever the fill limit did, the
-                    // carriageway hung in the air over an untouched hillside.
-                    let (ry, rw, rg) = road_surface(c, qx, qz);
-                    if rw > 0.35 && ry - rg <= ROAD_FILL_MAX * 1.25 {
-                        y = y.max(ry);
-                    }
-                }
             }
             row[k] = [qx, y + 0.16, qz];
         }
@@ -246,15 +253,24 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
     out
 }
 
+/// One ribbon per leg, before they are put together.
+///
+/// Split out because the bucketed form wants them *apart*: joined into one pair
+/// of lists and then sorted into cells, a million triangles are copied twice
+/// over -- forty megabytes each way -- to arrive somewhere they could have been
+/// put in the first place.
+pub fn ribbon_parts(legs: &[f32]) -> Vec<Ribbon> {
+    let c = corridor();
+    legs.par_chunks_exact(8)
+        .map(|q| ribbon(c, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7] > 0.5))
+        .collect()
+}
+
 /// Every road and street on the map, as two vertex lists. `legs` is a flat run
 /// of ax, az, bx, bz, half, design a, design b, and whether it is a structure
 /// approach.
 pub fn ribbons(legs: &[f32]) -> Ribbon {
-    let c = corridor();
-    let parts: Vec<Ribbon> = legs
-        .par_chunks_exact(8)
-        .map(|q| ribbon(c, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7] > 0.5))
-        .collect();
+    let parts = ribbon_parts(legs);
     let ns: usize = parts.iter().map(|p| p.surf.len()).sum();
     let nk: usize = parts.iter().map(|p| p.kerb.len()).sum();
     let mut all = Ribbon {
@@ -266,6 +282,40 @@ pub fn ribbons(legs: &[f32]) -> Ribbon {
         all.kerb.extend_from_slice(&p.kerb);
     }
     all
+}
+
+// ------------------------------------------------------------- road ink
+
+/// The colour a road is drawn on a map, and how strongly.
+const ROAD_INK: [f32; 3] = [0.72, 0.64, 0.50];
+
+/// Lay the road network over a map colour.
+///
+/// A carriageway is twelve metres wide and the finest map sheet here is a
+/// hundred and seventeen metres to a texel, so a road drawn to scale is
+/// invisible at every zoom -- which is why the planet map had no roads on it at
+/// all. Drawn about a texel and a half wide instead, the way a road is drawn on
+/// any map: the line says where it goes, not how wide it is.
+///
+/// `texel` is the ground the texel covers, so the network thins as the picture
+/// gets finer rather than staying a fixed smear.
+pub fn road_ink(x: f32, z: f32, texel: f32, col: [f32; 3]) -> [f32; 3] {
+    let g = match crate::index::segments() {
+        Some(g) => g,
+        None => return col,
+    };
+    let far = texel * 2.0;
+    let d = g.distance(x, z, far);
+    let w = 1.0 - crate::sphere::smoothstep_pub(texel * 0.35, texel * 1.3, d);
+    if w <= 0.0 {
+        return col;
+    }
+    let t = w * 0.85;
+    [
+        col[0] + (ROAD_INK[0] - col[0]) * t,
+        col[1] + (ROAD_INK[1] - col[1]) * t,
+        col[2] + (ROAD_INK[2] - col[2]) * t,
+    ]
 }
 
 // ------------------------------------------------------------- map relief
@@ -280,12 +330,28 @@ pub fn relief(n: usize, half: f32, segs: &SegGrid) -> Vec<u8> {
     let w = world();
     let c = corridor();
     let step = half * 2.0 / n as f32;
+    // The heights first, once each, on a grid one bigger than the picture.
+    //
+    // Every texel needs its own height and its two forward neighbours' to light
+    // it off the slope, and every one of those neighbours is another texel's own
+    // height. Asked for three times over -- which is what this did -- a sheet is
+    // three evaluations of the whole field, rivers, carving and all, for each
+    // texel of it. The planetary sheet was fixed this way; this is the flat
+    // world's, and it was the last of the three-times-over rasterisers.
+    let gn = n + 1;
+    let mut hs = vec![0f32; gn * gn];
+    hs.par_chunks_mut(gn).enumerate().for_each(|(j, row)| {
+        let z = -half + j as f32 * step;
+        for (i, v) in row.iter_mut().enumerate() {
+            *v = ground_at(w, c, -half + i as f32 * step, z, G_ALL);
+        }
+    });
     let mut out = vec![0u8; n * n * 3];
     out.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
         let z = -half + j as f32 * step;
         for i in 0..n {
             let x = -half + i as f32 * step;
-            let h = ground_at(w, c, x, z, G_ALL);
+            let h = hs[j * gn + i];
             let (r, g, b);
             if h < WATER_LEVEL {
                 let t = ((h + 400.0) / 400.0).clamp(0.0, 1.0);
@@ -294,8 +360,8 @@ pub fn relief(n: usize, half: f32, segs: &SegGrid) -> Vec<u8> {
                 b = lerp(0.26, 0.34, t);
             } else {
                 let (mut cr, mut cg, mut cb) = biome_colour(x, z, h, 1.0);
-                let dx = ground_at(w, c, x + step, z, G_ALL) - h;
-                let dz = ground_at(w, c, x, z + step, G_ALL) - h;
+                let dx = hs[j * gn + i + 1] - h;
+                let dz = hs[(j + 1) * gn + i] - h;
                 let shade = (0.72 + (-dx - dz) / (step * 0.55)).clamp(0.35, 1.5);
                 cr *= shade;
                 cg *= shade;

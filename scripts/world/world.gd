@@ -371,6 +371,12 @@ var _cloud_test := false
 var _faction_test := false
 var _fps_test := 0.0
 var _fps_clock := 0.0
+## The engine's own two clocks, sampled every frame of the run alongside the
+## frame time so the report can quote a median rather than whatever the last
+## instant happened to hold.
+var _fps_proc: Array = []
+var _fps_phys: Array = []
+var _fps_nodes: Array = []
 var _fps_times: PackedFloat32Array = PackedFloat32Array()
 var _locktime_test := false
 var _lt_t := 0.0
@@ -674,10 +680,18 @@ func _ready() -> void:
 	terrain.name = "Terrain"
 	add_child(terrain)
 	terrain.prepare()
-	# Pumped rather than built in one go: a few dozen chunks a frame keeps the
-	# window alive and gives the bar something true to show.
+	# The whole queue to the pool at once, then collected as it lands.
+	#
+	# Sixty-four at a time was chosen when a chunk was assembled in script and
+	# the queue was what took the time. The assembly is in the extension now and
+	# all three hundred and forty of them cost fourteen milliseconds of *this*
+	# thread; what was left was the round trip -- dispatch, paint, collect, paint
+	# -- four frames a batch and twenty-one frames to drain the queue. Measured,
+	# 238 ms of waiting for 14 ms of work. Handed over in one go the pool builds
+	# them all while the screen keeps painting, which is what the pumping was
+	# for in the first place.
 	while terrain.pending_count() > 0:
-		terrain.flush_pending(64)
+		terrain.build_queued(terrain.pending_count())
 		await _paint("Building the ground", lerpf(0.30, 0.50,
 			terrain.build_progress()),
 			"%d of %d chunks" % [terrain.stats["chunks"],
@@ -840,7 +854,7 @@ func _ready() -> void:
 	# world is still being built. Built here it stood there through the rest of
 	# the loading screen.
 	# Everything generated this run that will be the same the next one.
-	WorldBake.put_grown("node_err", Terrain._err)
+	WorldBake.put_grown("node_stats", Sim.native.terrain_stats_take())
 	WorldBake.finish()
 	# One line for the whole start-up, and the breakdown only when asked for.
 	print("[boot] ready in %.1f s (%s bake)" % [
@@ -1172,6 +1186,13 @@ func _tick_world(delta: float) -> void:
 	# On the planet the chart rides with the player, which is what turns the
 	# rest of the world from scenery into somewhere you can go.
 	_follow_chart()
+	# ...and the two pictures a chart move asked for, whenever they land. Here
+	# rather than in the map's own `_process`, which only runs while the map is
+	# open.
+	if is_instance_valid(map):
+		map.pump_sheet()
+	if is_instance_valid(terrain):
+		terrain.pump_climate()
 	Sim.prof_end(&"chart", _pf)
 	if is_instance_valid(terrain):
 		var eye3 := get_viewport().get_camera_3d()
@@ -1381,9 +1402,11 @@ func _tick_world(delta: float) -> void:
 				names.append("tgt=" + tn + " w=" + player.current_weapon()
 					+ " jet=" + str(player.spec["name"]) + " [" + load_s.strip_edges() + "]")
 			if not net.is_host:
-				print("[net] %s  id=%d  roster=%d  ghosts=%d  ai=%d %s  tx=%d rx=%d  %s" % [
+				var wire: Vector2 = net.wire_rate()
+				print("[net] %s  id=%d  roster=%d  ghosts=%d  ai=%d %s  tx=%d rx=%d (%.1f/%.1f kB/s, rtt %.0f ms)  %s" % [
 					net.status, net.my_id, net.roster.size(), net.ghosts.size(),
-					ai_n, ai_where, net.tx, net.rx, ", ".join(PackedStringArray(names))])
+					ai_n, ai_where, net.tx, net.rx, wire.x / 1024.0, wire.y / 1024.0, net.round_trip_ms(),
+					", ".join(PackedStringArray(names))])
 			else:
 				var host_ai := 0
 				var lowest := 1e9
@@ -1400,9 +1423,11 @@ func _tick_world(delta: float) -> void:
 						lowest, worst.get("agl"), str(worst.get("alive")),
 						str(worst.get("wrecked")), str(worst.get("freeze")),
 						str(worst.get("sleeping"))])
-				print("[net] %s  id=%d  roster=%d  ghosts=%d  ai(sim)=%d  tx=%d rx=%d  %s" % [
+				var wire2: Vector2 = net.wire_rate()
+				print("[net] %s  id=%d  roster=%d  ghosts=%d  ai(sim)=%d  tx=%d rx=%d (%.1f/%.1f kB/s, rtt %.0f ms)  %s" % [
 					net.status, net.my_id, net.roster.size(), net.ghosts.size(),
-					host_ai, net.tx, net.rx, ", ".join(PackedStringArray(names))])
+					host_ai, net.tx, net.rx, wire2.x / 1024.0, wire2.y / 1024.0, net.round_trip_ms(),
+					", ".join(PackedStringArray(names))])
 	if _wtest != "":
 		# the checks must outlive the shooter: a bomb keeps guiding after the
 		# aircraft that dropped it has been shot down
@@ -2608,12 +2633,34 @@ func _tick_world(delta: float) -> void:
 				_mav_t = 0.0
 		return
 	# Where the frame goes.
-	if _fps_test > 0.0 and running:
+	# Once it has started, it finishes.
+	#
+	# This read `and running`, and the mission it measures is a battle: when the
+	# player is shot down `running` goes false, the clock stops where it is and
+	# the report is never printed. The run then sits there until it is killed,
+	# which is what happened twice while measuring the road change -- one run
+	# reported 30 ms and the next two reported nothing at all.
+	if _fps_test > 0.0 and (running or _fps_clock > 0.0):
 		_fps_clock += delta
 		# The first second is thrown away: shaders are still compiling, chunks
 		# are still arriving, and the worst frame in a game's life is its first.
 		if _fps_clock > 1.0:
 			_fps_times.append(delta)
+			# Sampled with the frame time, not read once when the report is
+			# printed. Read at the end they are whatever the engine happened to
+			# be doing at that instant -- and it showed: a run whose frames
+			# measured 11.4 ms reported a 19.5 ms process time and a 5.1 ms
+			# physics step, which cannot both be true of the same frame.
+			_fps_proc.append(
+				Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
+			_fps_phys.append(Performance.get_monitor(
+				Performance.TIME_PHYSICS_PROCESS) * 1000.0)
+			# The cheapest witness to what a frame was doing. A stall in a
+			# battle is nearly always something *arriving* -- an aeroplane
+			# built, a wreck made, an effect spawned -- and without this
+			# "worst 96.83 ms" is a number with nobody's name on it.
+			_fps_nodes.append(
+				Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
 		if _fps_clock > _fps_test + 1.0:
 			_fps_test = 0.0
 			_run_fps_test()
@@ -5998,6 +6045,21 @@ func _tick_world(delta: float) -> void:
 				if a.length() > 1.0 and b.length() > 1.0 \
 						and a.normalized().dot(b.normalized()) < -0.5:
 					lp_reversals += 1
+		# Cutting the ribbons into buckets must not lose any of them. Both
+		# forms are built from the same legs and the totals compared: a
+		# triangle that falls between two cells is a hole in the road.
+		var legs2 := PackedFloat32Array(Sim.road_draw)
+		var whole: Array = Sim.native.road_ribbons(legs2)
+		var whole_n: int = int(((whole[0] as PackedVector3Array).size()
+			+ (whole[1] as PackedVector3Array).size()) / 3.0)
+		var cut: Array = Sim.native.road_ribbons_bucketed(legs2,
+			Scenery.ROAD_BUCKET)
+		var bucket_n := 0
+		for ci in range(0, cut.size(), 4):
+			bucket_n += int(((cut[ci + 2] as PackedVector3Array).size()
+				+ (cut[ci + 3] as PackedVector3Array).size()) / 3.0)
+		print("[roads] the ribbons are %d triangles whole and %d cut into %d buckets" % [
+			whole_n, bucket_n, int(cut.size() / 4.0)])
 		print("[roads] %d routes; the worst walks %.2fx the distance between its ends (from %s); %d walk more than twice it" % [
 			lp_lines.size(), lp_detour, str(lp_at.round()), lp_loops])
 		print("[roads] %d of %d bends turn back on themselves by more than 120 deg" % [
@@ -10202,6 +10264,8 @@ func _site_flat_opfor() -> void:
 ## six, and which one you took off from is the only thing that makes it yours.
 func _build_country_bases() -> void:
 	bases.clear()
+	var _t_build := 0
+	var _t_dress := 0
 	for fd in Sim.fields:
 		var f: Dictionary = fd
 		var who := String(f.get("who", ""))
@@ -10219,14 +10283,21 @@ func _build_country_bases() -> void:
 		var tilt := Basis() if ax.length() < 1e-6 else Basis(ax.normalized(), lean)
 		ab.transform = Transform3D(tilt * Basis(Vector3.UP, float(f["yaw"])), pos)
 		add_child(ab)
+		var _tb := Time.get_ticks_msec()
 		ab.build()
+		_t_build += Time.get_ticks_msec() - _tb
 		bases.append(ab)
 		if who == Sim.home_faction or (who == "" and f == Sim.fields[0]):
 			base = ab
 		else:
+			var _td := Time.get_ticks_msec()
 			_dress_base(ab, spot)
+			_t_dress += Time.get_ticks_msec() - _td
 			if f == opfor_field:
 				opfor_base = ab
+	if _boot_verbose:
+		print("[bases] %d fields: the aerodromes %d ms, what is parked on them %d ms"
+			% [Sim.fields.size(), _t_build, _t_dress])
 	_launch_constellation()
 
 ## What makes a strip of concrete read as somebody's base: aircraft on the
@@ -10235,17 +10306,15 @@ func _dress_base(ab: Airbase, spot: Vector2) -> void:
 	var park := [["su57", Vector3(96, 0, -300), 90.0], ["su35", Vector3(96, 0, -350), 90.0],
 		["mig29", Vector3(96, 0, -400), 90.0], ["j20", Vector3(200, 0, -470), -90.0]]
 	for pk in park:
-		var m := JetFactory.build(JetSpec.get_spec(String(pk[0])))
-		var node: Node3D = m["root"]
-		var spec := JetSpec.get_spec(String(pk[0]))
+		var id := String(pk[0])
+		var spec := JetSpec.get_spec(id)
 		var gh := 0.0
 		for g in spec["gear"]:
 			gh = maxf(gh, absf(g["pos"].y) + g["r"])
+		var node := _parked_jet(id)
 		# In the base's own frame, so it rides the pavement wherever that is.
 		node.position = (pk[1] as Vector3) + Vector3(0, gh, 0)
 		node.rotation_degrees = Vector3(0, float(pk[2]), 0)
-		for h in m["stores"].values():
-			h.visible = false
 		ab.add_child(node)
 	# a couple of launchers on the dispersal, which is what they are for
 	for i in 2:
@@ -10259,6 +10328,31 @@ func _dress_base(ab: Airbase, spot: Vector2) -> void:
 		var pv := _spawn_tank(Vector3(at2.x, 0, at2.y), deg_to_rad(-62.0), 1,
 			Tank.pick_kind("lav", 1, i))
 		pv.ai = true
+
+## The first of each type is built; the rest are copies of it.
+##
+## Four aircraft are parked on every dispersal and they are the same four on
+## every one -- five bases, twenty airframes, four distinct shapes. Each is a
+## few hundred surfaces of procedural geometry, and building all twenty from
+## scratch was 117 ms of the boot. A duplicate shares the meshes and the
+## materials, which is exactly what something that sits there wants; nothing
+## tints a parked aeroplane or opens its bays.
+##
+## Copied from one already standing on a dispersal rather than from a spare kept
+## to one side: a node held outside the tree is an orphan, and the engine counts
+## those out loud when the game quits.
+var _parked: Dictionary = {}
+
+func _parked_jet(id: String) -> Node3D:
+	var src: Node3D = _parked.get(id)
+	if src != null and is_instance_valid(src):
+		return src.duplicate() as Node3D
+	var m := JetFactory.build(JetSpec.get_spec(id))
+	var node: Node3D = m["root"]
+	for h in m["stores"].values():
+		h.visible = false
+	_parked[id] = node
+	return node
 
 ## Both sides keep something in orbit. They are not decoration: an ASAT
 ## launcher has nothing else it can shoot at, and shooting one down is the only
@@ -11782,6 +11876,11 @@ func _parse_cmdline() -> void:
 			_gunner_test = true
 		elif a.begins_with("--fpslog"):
 			_fps_log = true
+		elif a.begins_with("--physhz="):
+			# The physics rate, for asking what it is worth. The flight model
+			# integrates at it, so this is a measuring knob and not a setting:
+			# what it answers is how much of a frame the physics step is.
+			Engine.physics_ticks_per_second = maxi(int(a.substr(9)), 5)
 		elif a == "--novsync":
 			# Frame rate is pinned to the refresh rate otherwise, which makes
 			# every measurement read "the same as every other" right up until
@@ -12287,12 +12386,19 @@ func _run_cost_test() -> void:
 	if DisplayServer.get_name() == "headless":
 		print("[cost] RESULT: FAILED — needs a window; run without --headless")
 		return
-	_start("f16", "free")
-	await get_tree().process_frame
-	await get_tree().physics_frame
-	if is_instance_valid(player):
-		player.global_transform = Transform3D(Basis(),
-			Vector3(0.0, _apron_y(0.0, 0.0) + 2000.0, 0.0))
+	# Whatever is already running, if something is.
+	#
+	# This always started its own free flight two kilometres up, so the one
+	# situation it could measure was the one situation. On foot the frame is a
+	# hundred milliseconds against twelve in the air, and there was no way to
+	# point this at it. With a `--preset` the mission it names is left alone.
+	if not running:
+		_start("f16", "free")
+		await get_tree().process_frame
+		await get_tree().physics_frame
+		if is_instance_valid(player):
+			player.global_transform = Transform3D(Basis(),
+				Vector3(0.0, _apron_y(0.0, 0.0) + 2000.0, 0.0))
 	for _i in 40:
 		await get_tree().process_frame
 	# Everything worth asking about, by name.
@@ -12358,9 +12464,21 @@ func _run_cost_test() -> void:
 	var base_ms: float = await _time_frames()
 	var base_calls: int = RenderingServer.get_rendering_info(
 		RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
-	print("[cost] baseline %.2f ms, %d draw calls, %.2f M triangles" % [
+	print("[cost] baseline %.2f ms, %d draw calls, %.2f M triangles, %.0f MB video, %d objects" % [
 		base_ms, base_calls, float(RenderingServer.get_rendering_info(
-			RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)) / 1e6])
+			RenderingServer.RENDERING_INFO_TOTAL_PRIMITIVES_IN_FRAME)) / 1e6,
+		float(RenderingServer.get_rendering_info(
+			RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)) / 1048576.0,
+		Performance.get_monitor(Performance.OBJECT_COUNT)])
+	# What is in the floor. The frame with nothing drawn is most of the frame,
+	# and these are the engine-side counters that could account for it.
+	print("[cost] engine: process %.2f ms, physics %.2f ms, %d nodes, %d bodies, %d pairs, %d islands" % [
+		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+		Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+		Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS),
+		Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS),
+		Performance.get_monitor(Performance.PHYSICS_3D_ISLAND_COUNT)])
 	# Checked before it is typed: the list was gathered a second ago and the
 	# world frees things constantly -- a spent round, an effect, a wreck -- and
 	# assigning a freed instance to a typed variable is itself the error.
@@ -12416,11 +12534,189 @@ func _run_cost_test() -> void:
 		named += maxf(float(rr[1]), 0.0)
 		print("[cost]   %-26s %6.2f ms   %5d fewer draw calls" % [
 			String(rr[0]), float(rr[1]), int(rr[2])])
-	print("[cost] named: %.2f ms of %.2f — %d%% of the frame" % [
-		named, base_ms, int(round(100.0 * named / maxf(base_ms, 0.01)))])
-	print("[cost] RESULT: %s" % ("ok" if named * 2.0 > base_ms
-		else "FAILED — only %d%% of the frame is attributed"
-			% int(round(100.0 * named / maxf(base_ms, 0.01)))))
+	# Against what the world is worth, not against the whole frame.
+	#
+	# This used to be gated on the census accounting for half the *frame*, and
+	# it cannot: half the frame is there with every object hidden, and the floor
+	# census below shows that none of that half is anything the game switches on.
+	# What this test can honestly ask is whether the things it named add up to
+	# what the world costs, which is the number it exists to apportion.
+	var drawn: float = maxf(base_ms - empty_ms, 0.01)
+	print("[cost] named: %.2f ms of the %.2f the world is worth — %d%% of it, and %d%% of the whole frame" % [
+		named, drawn, int(round(100.0 * named / drawn)),
+		int(round(100.0 * named / maxf(base_ms, 0.01)))])
+	await _floor_census(everything)
+	print("[cost] RESULT: %s" % ("ok" if named * 2.0 > drawn
+		else "FAILED — only %d%% of what the world costs is attributed"
+			% int(round(100.0 * named / drawn))))
+
+## What the frame costs with nothing in the world drawn at all.
+##
+## Half the frame was in here and there was no way to say what any of it was:
+## the census above walks the tree, and none of this is in the tree. A sky is a
+## shader over every background pixel and a radiance cubemap behind that; the
+## glow is a pyramid of the whole screen; the shadow map is drawn whether or not
+## anything casts into it; and multisampling multiplies every one of those by
+## the samples. Each is switched off on its own against a baseline taken beside
+## it, because the machine drifts over the couple of minutes this run takes.
+##
+## What it found is that none of them is it: see the note at the end.
+func _floor_census(everything: Array) -> void:
+	for nd in everything:
+		if is_instance_valid(nd):
+			(nd as Node3D).visible = false
+	var vp := get_viewport()
+	var floor_ms: float = await _time_frames()
+	var rows: Array = []
+	# Between two baselines, not against one.
+	#
+	# The numbers here are tenths of a millisecond and the machine drifts by
+	# more than that over the couple of minutes this run takes; measured against
+	# a single baseline from the start, four of six probes came back negative --
+	# switching a thing off made the frame slower. Taken as the mean of a
+	# baseline either side of the probe, the drift cancels instead of landing on
+	# whichever probe ran last.
+	var probe := func(what: String, before: Callable, after: Callable) -> void:
+		var lo: float = await _time_frames()
+		before.call()
+		var got: float = await _time_frames()
+		after.call()
+		var hi: float = await _time_frames()
+		rows.append([what, (lo + hi) * 0.5 - got])
+	# The sky, which is a shader run over every pixel the world does not cover
+	# -- and, being a realtime sky, six faces of a radiance cubemap and their
+	# mips re-rendered behind it every frame. The background mode alone does not
+	# stop that: the Sky resource is still attached and still processing, which
+	# is why switching only the background off measured nothing.
+	var was_bg: int = _env.background_mode
+	var was_sky: Sky = _env.sky
+	await probe.call("the sky",
+		func() -> void:
+			_env.background_mode = Environment.BG_COLOR
+			_env.sky = null,
+		func() -> void:
+			_env.sky = was_sky
+			_env.background_mode = was_bg as Environment.BGMode)
+	if was_sky != null and was_sky.process_mode == Sky.PROCESS_MODE_REALTIME:
+		# ...and how much of that is the cubemap rather than the pixels: the
+		# radiance is what the sky costs when you are not looking at it.
+		await probe.call("  its radiance, alone",
+			func() -> void: was_sky.process_mode = Sky.PROCESS_MODE_QUALITY,
+			func() -> void: was_sky.process_mode = Sky.PROCESS_MODE_REALTIME)
+	# The instruments, which are not in the tree this walked and are a few
+	# hundred canvas items redrawn over the whole screen.
+	var layer: CanvasLayer = null
+	if is_instance_valid(hud):
+		layer = hud.get_parent() as CanvasLayer
+	if layer != null:
+		await probe.call("the UI",
+			func() -> void: layer.visible = false,
+			func() -> void: layer.visible = true)
+	if _env.glow_enabled:
+		await probe.call("glow",
+			func() -> void: _env.glow_enabled = false,
+			func() -> void: _env.glow_enabled = true)
+	if _env.fog_enabled:
+		await probe.call("fog",
+			func() -> void: _env.fog_enabled = false,
+			func() -> void: _env.fog_enabled = true)
+	if is_instance_valid(_sun) and _sun.shadow_enabled:
+		await probe.call("the shadow map",
+			func() -> void: _sun.shadow_enabled = false,
+			func() -> void: _sun.shadow_enabled = true)
+	var was_msaa: int = vp.msaa_3d
+	if was_msaa != Viewport.MSAA_DISABLED:
+		await probe.call("multisampling",
+			func() -> void: vp.msaa_3d = Viewport.MSAA_DISABLED,
+			func() -> void: vp.msaa_3d = was_msaa as Viewport.MSAA)
+	var was_ssaa: int = vp.screen_space_aa
+	if was_ssaa != Viewport.SCREEN_SPACE_AA_DISABLED:
+		await probe.call("screen space AA",
+			func() -> void: vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED,
+			func() -> void: vp.screen_space_aa = was_ssaa as Viewport.ScreenSpaceAA)
+	# Hidden is not gone.
+	#
+	# Everything above is switched off and none of it moves the floor, and the
+	# world above is *hidden* rather than taken out -- so a hidden instance is
+	# still an instance the renderer holds, still in its acceleration structure
+	# and still visited by the cull, once for the camera and again for every
+	# split of the directional light. With twelve thousand of them that is the
+	# one thing left that could be in here, and taking the largest branch out of
+	# the tree entirely is the way to ask.
+	var biggest: Node3D = null
+	var most := 0
+	for c in get_children():
+		if c is Node3D and c.get_child_count() > most:
+			most = c.get_child_count()
+			biggest = c as Node3D
+	if biggest != null and most > 100:
+		var at := biggest.get_index()
+		await probe.call("%s out of the tree, not hidden (%d children)"
+			% [String(biggest.name), most],
+			func() -> void: remove_child(biggest),
+			func() -> void:
+				add_child(biggest)
+				move_child(biggest, at))
+	# The physics step, which is not drawn at all and is a fifth of the frame.
+	# A hundred and twenty ticks a second over five thousand nodes is a real
+	# cost whether or not anything is moving, and none of it is in the tree the
+	# census above walks.
+	var was_hz: int = Engine.physics_ticks_per_second
+	await probe.call("physics, at 10 Hz not %d" % was_hz,
+		func() -> void: Engine.physics_ticks_per_second = 10,
+		func() -> void: Engine.physics_ticks_per_second = was_hz)
+	# ...and everything the tree does per frame, which is the last thing left
+	# if none of the above is it.
+	await probe.call("the whole tree, paused",
+		func() -> void: get_tree().paused = true,
+		func() -> void: get_tree().paused = false)
+	# And if it *is* it, which branch. Pausing tells you the tree is the frame;
+	# it does not tell you whose script. Each branch is stopped in turn -- only
+	# worth the minutes it takes when the tree is most of the frame, which in
+	# the air it is not and on foot it is.
+	if rows.size() > 0 and float((rows[rows.size() - 1] as Array)[1]) > floor_ms * 0.5:
+		for c in get_children():
+			if not (c is Node) or c.get_child_count() < 1:
+				continue
+			var was_mode: int = (c as Node).process_mode
+			await probe.call("  %s, not processing" % String(c.name),
+				func() -> void:
+					(c as Node).process_mode = Node.PROCESS_MODE_DISABLED,
+				func() -> void:
+					(c as Node).process_mode = was_mode as Node.ProcessMode)
+	# And how much of the floor is simply pixels. Everything above is per pixel
+	# or per screen; if half resolution halves it, the answer is fill rate and
+	# no amount of taking things out of the tree will touch it.
+	await probe.call("three quarters of the pixels",
+		func() -> void: vp.scaling_3d_scale = 0.5,
+		func() -> void: vp.scaling_3d_scale = 1.0)
+	for nd in everything:
+		if is_instance_valid(nd):
+			(nd as Node3D).visible = true
+	rows.sort_custom(func(a, b): return float(a[1]) > float(b[1]))
+	var acc := 0.0
+	print("[cost] and what is in the %.2f ms floor, with the world hidden:" % floor_ms)
+	for r in rows:
+		var rr: Array = r
+		if absf(float(rr[1])) < 0.05:
+			continue
+		# The resolution probe is not a thing that can be removed; it says how
+		# much of the floor is fill rate, which overlaps everything above it.
+		if String(rr[0]) != "three quarters of the pixels":
+			acc += maxf(float(rr[1]), 0.0)
+		print("[cost]   %-26s %6.2f ms" % [String(rr[0]), float(rr[1])])
+	if acc * 4.0 < floor_ms:
+		# Every one of them measured nothing, and that is the finding.
+		#
+		# The sky, its radiance, the glow, the fog, the shadow map,
+		# multisampling, screen space AA, the instruments, physics, the whole
+		# tree paused, and the largest branch of the world taken out of the tree
+		# rather than merely hidden: none of it moves this. Three quarters of
+		# the pixels is the only probe that ever does, and only by about a
+		# sixth. Whatever the floor is, it is not something switched on in here
+		# -- so there is nothing in the game to take out of it, and a change
+		# that wants to be seen has to be bigger than it.
+		print("[cost]   nothing above accounts for it: the floor is not the game's")
 
 ## Median frame time over a short run, in milliseconds.
 ##
@@ -12433,12 +12729,24 @@ func _time_frames(n := 64) -> float:
 	# happens in is not representative of anything.
 	for _s in 8:
 		await get_tree().process_frame
+	# The clock, not the delta the frame was handed.
+	#
+	# `get_process_delta_time` is what the engine tells `_process` a frame took,
+	# and it is not the same number as the time between two frames: it is
+	# smoothed, and on a machine holding a steady rate it reads steady whatever
+	# is switched on or off. Measured through it, every probe in the floor
+	# census came back under a twentieth of a millisecond -- the sky, the glow,
+	# the shadow map, physics, even pausing the whole tree -- which is not a
+	# result, it is an instrument reading zero.
 	var got: Array = []
+	var last := Time.get_ticks_usec()
 	for _i in n:
 		await get_tree().process_frame
-		got.append(get_process_delta_time())
+		var now := Time.get_ticks_usec()
+		got.append(float(now - last) * 0.001)
+		last = now
 	got.sort()
-	return float(got[int(got.size() / 2.0)]) * 1000.0
+	return float(got[int(got.size() / 2.0)])
 
 ## What the map actually looks like.
 ##
@@ -13808,6 +14116,10 @@ const RECHART_AT := 150_000.0
 func rechart(dir: Vector3) -> void:
 	if not Sim.globe:
 		return
+	# Timed, because it all happens in one frame and it is the largest single
+	# thing the game ever does while you are flying: every position in the world
+	# renumbered, every terrain chunk rebuilt, and two sheets rasterised.
+	var _rc := Time.get_ticks_msec()
 	var movers: Array = []
 	for g in ["hittable", "vehicles", "ships", "satellites", "walkers"]:
 		for n in get_tree().get_nodes_in_group(g):
@@ -13839,14 +14151,23 @@ func rechart(dir: Vector3) -> void:
 	# The ground is numbered in the same coordinates, so all of it is stale.
 	if is_instance_valid(terrain):
 		terrain.recentre(Vector3.ZERO, true)
+	var _rc_ground := Time.get_ticks_msec()
 	# ...and so is the map's close-in sheet, which is a picture of the country
 	# under the chart rather than of a fixed square of world.
+	var _rc_sheet := 0
 	if is_instance_valid(map):
+		var t_s := Time.get_ticks_msec()
 		map.rechart()
+		_rc_sheet = Time.get_ticks_msec() - t_s
 	# The ground works its climate out from where it is on the planet, and it
 	# has just been told the chart is somewhere else.
+	var _rc_clim := 0
 	if is_instance_valid(terrain):
+		var t_c := Time.get_ticks_msec()
 		terrain.rechart()
+		_rc_clim = Time.get_ticks_msec() - t_c
+	print("[rechart] %d ms: renumbering and the ground %d, the map sheet %d, the climate %d — the last two are asked for, not waited on" % [
+		Time.get_ticks_msec() - _rc, _rc_ground - _rc, _rc_sheet, _rc_clim])
 
 ## Keep the chart under the player. Called every frame; does nothing almost
 ## every frame, which is the point of the threshold.
@@ -13957,14 +14278,15 @@ func _run_cloud_test() -> void:
 	# an aeroplane entering the layer was inside one cloud for the rest of the
 	# flight, and a ray marched along the layer never left it. Everything that
 	# looked through cloud -- the windscreen, a seeker, an ASAT -- saw white.
-	var coarse_m: float = Sim.PLANET_R / (8.07 * CloudShell.NOISE_SCALE)
+	var coarse_m: float = Sim.PLANET_R / (CloudShell.NOISE_SCALE * CloudShell.SHAPE_COARSE)
 	var finest: float = CloudShell.FINEST_M
 	# ...and how finely the march samples the near field, because a cloud the
 	# ray steps straight over is a cloud that is not there. Geometric steps, so
 	# this is the first one.
 	var span := 52000.0
 	var g := 1.14
-	var first_step: float = span * (g - 1.0) / (pow(g, 28.0) - 1.0)
+	var first_step: float = span * (g - 1.0) \
+		/ (pow(g, float(CloudShell.STEPS)) - 1.0)
 	print("[cloud] a weather system is %.0f km across and a cloud in it %.1f km; the march's first step is %.0f m" % [
 		coarse_m * 0.001, finest * 0.001, first_step])
 	# How much of the sky is open, and whether there is anything above the top
@@ -13977,9 +14299,11 @@ func _run_cloud_test() -> void:
 	# it is only a test; the numbers it must agree with are the uniforms.
 	var vol := _cloud_volume()
 	# What the noise actually looks like, because everything above is a
-	# threshold on it. A sum of trilinear samples of uniform bytes has the mean
-	# you would expect and almost none of the spread: interpolation averages
-	# eight neighbours and four octaves average again.
+	# threshold on it. The octaves are summed at the bake and the result
+	# stretched there too, so this is the field the shader reads rather than a
+	# second copy of it -- and it should now fill its range instead of clustering
+	# about its own mean, which is what it did when the stretch was a division
+	# in the shader over a field of uniform bytes.
 	var nlo := 1e9
 	var nhi := -1e9
 	var nsum := 0.0
@@ -13989,7 +14313,7 @@ func _run_cloud_test() -> void:
 		var c0: float = 1.0 - 2.0 * (float(i) + 0.5) / 4000.0
 		var s0: float = sqrt(maxf(1.0 - c0 * c0, 0.0))
 		var u := Vector3(s0 * cos(t0b), c0, s0 * sin(t0b))
-		var v: float = _cloud_fbm(vol, u * CloudShell.NOISE_SCALE)
+		var v: float = _cloud_tex(vol, u * CloudShell.NOISE_SCALE, 0)
 		nlo = minf(nlo, v)
 		nhi = maxf(nhi, v)
 		nsum += v
@@ -14102,21 +14426,21 @@ func _run_cloud_test() -> void:
 		and clear_open * 5 > RAYS * 4 and overcast_open * 3 < RAYS
 		else "FAILED"))
 
-## The shader's noise volume, rebuilt from the same seed.
+## The shader's noise volume, which is the very one the shader gets.
+##
+## Rebuilt from the same seed, it used to be; the octaves are baked into it now
+## and rebuilding it here would be a second copy of the rule, which is how a
+## harness comes to measure a layer nobody is looking at.
 func _cloud_volume() -> PackedByteArray:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 20260904
-	var buf := PackedByteArray()
-	buf.resize(64 * 64 * 64)
-	for i in 64 * 64 * 64:
-		buf[i] = rng.randi() & 255
-	return buf
+	return Sim.native.cloud_volume(CloudShell.VOL_N)
 
 ## One trilinear sample of it, repeating, as `filter_linear, repeat_enable`.
-func _cloud_tex(vol: PackedByteArray, p: Vector3) -> float:
-	var fx: float = p.x * 64.0 - 0.5
-	var fy: float = p.y * 64.0 - 0.5
-	var fz: float = p.z * 64.0 - 0.5
+## `ch` picks the channel: 0 is the weather system, 1 the clouds within it.
+func _cloud_tex(vol: PackedByteArray, p: Vector3, ch: int) -> float:
+	var n: int = CloudShell.VOL_N
+	var fx: float = p.x * float(n) - 0.5
+	var fy: float = p.y * float(n) - 0.5
+	var fz: float = p.z * float(n) - 0.5
 	var ix := int(floor(fx))
 	var iy := int(floor(fy))
 	var iz := int(floor(fz))
@@ -14127,22 +14451,14 @@ func _cloud_tex(vol: PackedByteArray, p: Vector3) -> float:
 	for dz in 2:
 		for dy in 2:
 			for dx in 2:
-				var gx: int = posmod(ix + dx, 64)
-				var gy: int = posmod(iy + dy, 64)
-				var gz: int = posmod(iz + dz, 64)
+				var gx: int = posmod(ix + dx, n)
+				var gy: int = posmod(iy + dy, n)
+				var gz: int = posmod(iz + dz, n)
 				var wgt: float = (tx if dx == 1 else 1.0 - tx) \
 					* (ty if dy == 1 else 1.0 - ty) \
 					* (tz if dz == 1 else 1.0 - tz)
-				acc += wgt * float(vol[(gz * 64 + gy) * 64 + gx]) / 255.0
+				acc += wgt * float(vol[((gz * n + gy) * n + gx) * 2 + ch]) / 255.0
 	return acc
-
-## Mirrors `spread` in the shader; the constant is shared.
-func _cloud_spread(v: float) -> float:
-	return clampf((v - 0.5) / CloudShell.SPREAD_K + 0.5, 0.0, 1.0)
-
-func _cloud_fbm(vol: PackedByteArray, p: Vector3) -> float:
-	return _cloud_tex(vol, p) * 0.5 + _cloud_tex(vol, p * 2.03) * 0.25 \
-		+ _cloud_tex(vol, p * 4.11) * 0.15 + _cloud_tex(vol, p * 8.07) * 0.10
 
 func _cloud_density(vol: PackedByteArray, p: Vector3, cover: float,
 		dens: float) -> float:
@@ -14153,12 +14469,13 @@ func _cloud_density(vol: PackedByteArray, p: Vector3, cover: float,
 	var up: Vector3 = rel / maxf(r, 1.0)
 	var h: float = clampf((r - r_base) / maxf(r_top - r_base, 1.0), 0.0, 1.0)
 	var profile: float = smoothstep(0.0, 0.16, h) * (1.0 - smoothstep(0.42, 1.0, h))
-	var shape: float = _cloud_spread(
-		_cloud_fbm(vol, up * CloudShell.NOISE_SCALE)) * profile - (1.0 - cover)
+	var shape: float = _cloud_tex(vol, up * CloudShell.NOISE_SCALE, 0) \
+		* profile - (1.0 - cover)
 	if shape <= 0.0:
 		return 0.0
-	var qd: Vector3 = up * CloudShell.DETAIL_SCALE + Vector3.ONE * (shape * 0.7)
-	var detail: float = _cloud_spread(_cloud_fbm(vol, qd))
+	var qd: Vector3 = up * CloudShell.DETAIL_SCALE \
+		+ Vector3.ONE * (shape * CloudShell.DETAIL_WARP)
+	var detail: float = _cloud_tex(vol, qd, 1)
 	return maxf(shape - (1.0 - detail) * CloudShell.ERODE, 0.0) * dens * CloudShell.DENSITY_K
 
 ## What the layer does to one ray, as the shader marches it.
@@ -14192,12 +14509,13 @@ func _cloud_alpha(vol: PackedByteArray, alt: float, dir: Vector3) -> float:
 	var cover: float = weather.cloud_cover()
 	var dens: float = weather.cloud_density()
 	var span: float = t1 - t0
-	var g: float = 1.14 if span > 28.0 * 220.0 else 1.0
-	var dt: float = span * (g - 1.0) / (pow(g, 28.0) - 1.0) if g > 1.0 \
-		else span / 28.0
+	var steps: float = float(CloudShell.STEPS)
+	var g: float = 1.14 if span > steps * 220.0 else 1.0
+	var dt: float = span * (g - 1.0) / (pow(g, steps) - 1.0) if g > 1.0 \
+		else span / steps
 	var t: float = t0
 	var alpha := 0.0
-	for i in 28:
+	for i in CloudShell.STEPS:
 		if alpha > 0.985:
 			break
 		var p: Vector3 = eye + dir * (t + dt * 0.5)
@@ -14267,15 +14585,43 @@ func _run_fps_test() -> void:
 	print("[fps] %d frames (%.1f%%) over 1.5x the median, %d (%.1f%%) over 3x — stutter and stalls, which are not slowness" % [
 		dropped, 100.0 * float(dropped) / float(n),
 		hitch, 100.0 * float(hitch) / float(n)])
+	# ...and what the worst of them was doing.
+	if _fps_nodes.size() == n and n > 2:
+		var at := 0
+		for i in n:
+			if float(_fps_times[i]) > float(_fps_times[at]):
+				at = i
+		var was := int(_fps_nodes[maxi(at - 1, 0)])
+		var now := int(_fps_nodes[mini(at + 1, n - 1)])
+		var grew := 0
+		var grew_at := 0
+		for i in range(1, n):
+			var d := int(_fps_nodes[i]) - int(_fps_nodes[i - 1])
+			if d > grew:
+				grew = d
+				grew_at = i
+		print("[fps] the worst frame was %.1f ms, %.0f%% of the way through; the tree went %d -> %d nodes across it" % [
+			float(_fps_times[at]) * 1000.0, 100.0 * float(at) / float(n),
+			was, now])
+		print("[fps] the biggest arrival was %+d nodes in one frame, and that frame took %.1f ms" % [
+			grew, float(_fps_times[grew_at]) * 1000.0])
 	# What the renderer was asked to do.
 	print("[fps] draw calls %d, primitives %d, video memory %.0f MB, objects %d" % [
 		int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
 		int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)),
 		Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0,
 		int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))])
-	print("[fps] engine says: process %.2f ms, physics %.2f ms" % [
-		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
-		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0])
+	# Physics is per *step*, and the step runs at its own rate: at 120 Hz
+	# against a frame around 90 that is 1.3 steps a frame, so a millisecond here
+	# is nearer one and a third on the frame. The bodies and pairs are printed
+	# with it because that is what decides it, and neither is visible anywhere
+	# else in this report.
+	print("[fps] engine says: process %.2f ms, physics %.2f ms a step at %d Hz over %d bodies, %d pairs, %d islands" % [
+		_median(_fps_proc), _median(_fps_phys),
+		Engine.physics_ticks_per_second,
+		int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS)),
+		int(Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS)),
+		int(Performance.get_monitor(Performance.PHYSICS_3D_ISLAND_COUNT))])
 	# And what the renderer was handed, with an address on it.
 	var census: Array = _geometry_census()
 	var all_tri := 0
@@ -14325,6 +14671,14 @@ func _run_fps_test() -> void:
 	# which is what says the measurement is honest rather than double counting.
 	print("[fps] RESULT: %s" % ("ok" if n > 60 and acc * 0.001 <= p50 * 1000.0 * 1.05
 		else "FAILED — the breakdown does not fit inside the frame"))
+
+## The middle of a sample, for the engine clocks gathered beside the frame time.
+func _median(a: Array) -> float:
+	if a.is_empty():
+		return 0.0
+	var srt: Array = a.duplicate()
+	srt.sort()
+	return float(srt[int(srt.size() / 2.0)])
 
 ## What the renderer is being asked to draw, and by whom.
 ##

@@ -162,6 +162,49 @@ func local_ip() -> String:
 	return ""
 
 ## What the hangar shows while a session is up.
+## Bytes a second on the wire, sent and received.
+##
+## The log counted *packets*, and a packet is anything from twenty bytes to a
+## kilobyte -- so "tx=412" says nothing about whether a session survives a real
+## connection, which for a multiplayer game is the question. ENet keeps the byte
+## totals on the host connection, and popping them is what resets them, so this
+## is genuinely the traffic since it was last asked.
+var _wire_t := 0.0
+
+func wire_rate() -> Vector2:
+	var peer := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if peer == null or not active:
+		return Vector2.ZERO
+	var conn := peer.get_host()
+	if conn == null:
+		return Vector2.ZERO
+	var sent := float(conn.pop_statistic(
+		ENetConnection.HOST_TOTAL_SENT_DATA))
+	var got := float(conn.pop_statistic(
+		ENetConnection.HOST_TOTAL_RECEIVED_DATA))
+	var now := float(Time.get_ticks_msec()) * 0.001
+	var span := now - _wire_t
+	_wire_t = now
+	if span < 0.05 or span > 30.0:
+		return Vector2.ZERO
+	return Vector2(sent, got) / span
+
+## What the link is doing, in milliseconds, as ENet last measured it.
+func round_trip_ms() -> float:
+	var peer := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if peer == null or not active:
+		return 0.0
+	var worst := 0.0
+	for id in roster:
+		var pid := int(id)
+		if pid == my_id:
+			continue
+		var pp := peer.get_peer(pid)
+		if pp != null:
+			worst = maxf(worst, pp.get_statistic(
+				ENetPacketPeer.PEER_LAST_ROUND_TRIP_TIME))
+	return worst
+
 func status_line() -> String:
 	if not active:
 		return status
@@ -1029,17 +1072,21 @@ func report_damage(g: Node, amount: float) -> void:
 func _physics_process(delta: float) -> void:
 	if not active or world == null:
 		return
+	# Wrapped so the whole of it can be timed at once, and so the tags below
+	# survive the several early returns in it.
+	var _pn := Sim.prof_at()
+	_tick_net(delta)
+	Sim.prof_end(&"net.total", _pn)
+
+func _tick_net(delta: float) -> void:
+	var _pp := Sim.prof_at()
 	# prune anything that went away before touching it: a typed read of a freed
 	# object aborts the whole function
-	for id in ghosts.keys():
-		if not is_instance_valid(ghosts[id]):
-			ghosts.erase(id)
-	for id in veh_ghosts.keys():
-		if not is_instance_valid(veh_ghosts[id]):
-			veh_ghosts.erase(id)
-	for id in ai_ghosts.keys():
-		if not is_instance_valid(ai_ghosts[id]):
-			ai_ghosts.erase(id)
+	_prune(ghosts)
+	_prune(veh_ghosts)
+	_prune(ai_ghosts)
+	Sim.prof_end(&"net.prune", _pp)
+	var _pz := Sim.prof_at()
 	if not is_host:
 		for z in world.get_tree().get_nodes_in_group("zones"):
 			if not is_instance_valid(z):
@@ -1052,6 +1099,8 @@ func _physics_process(delta: float) -> void:
 					a.get_meta("gnd_pos") as Vector3, gk)
 				a.rotation.y = lerp_angle(a.rotation.y,
 					a.get_meta("gnd_rot") as float, gk)
+	Sim.prof_end(&"net.zones", _pz)
+	var _pg := Sim.prof_at()
 	# Ghosts are kinematic bodies moved on the physics tick: dead reckon along
 	# the last reported velocity and ease onto the last reported pose, then let
 	# Godot's physics interpolation smooth it out for the renderer.
@@ -1100,10 +1149,47 @@ func _physics_process(delta: float) -> void:
 		g.global_transform = Transform3D(
 			Basis(xf.basis.get_rotation_quaternion().slerp(want_rot, k)),
 			xf.origin.lerp(tp, k))
+	Sim.prof_end(&"net.ghosts", _pg)
 	_acc += delta
 	if _acc < RATE:
 		return
 	_acc = 0.0
+	var _ps := Sim.prof_at()
+	_send(delta)
+	Sim.prof_end(&"net.send", _ps)
+
+## Drop anything that went away.
+##
+## A dictionary may not be erased from while it is being walked, so the removal
+## has to go through `keys()` -- and that builds a fresh array every call, at
+## the physics rate, for a list that changes when somebody leaves. The walk that
+## finds out whether there *is* anything to drop allocates nothing, and almost
+## always there is not.
+static func _prune(d: Dictionary) -> void:
+	var any := false
+	for id in d:
+		if not is_instance_valid(d[id]):
+			any = true
+			break
+	if not any:
+		return
+	for id in d.keys():
+		if not is_instance_valid(d[id]):
+			d.erase(id)
+
+## What goes out on the wire, at `RATE`.
+##
+## Nothing at all when nobody is listening. ENet already drops it -- measured, a
+## host with an empty lobby puts 0.0 kB/s on the wire -- but the state is still
+## gathered and serialised first: eight aircraft into packed arrays, twenty
+## times a second, for nobody. A lobby waiting for players is exactly when the
+## frame wants to be smooth.
+func _send(_delta: float) -> void:
+	# The host only. A client always has somebody to talk to -- the host -- and
+	# a freshly joined one whose roster has not arrived yet must still send its
+	# own state or the handshake never completes.
+	if is_host and roster.size() <= 1:
+		return
 	# the host publishes the AI and objective state a few times a second
 	if is_host:
 		_ai_acc += RATE

@@ -55,18 +55,13 @@ const SPLIT_K := 2.0
 ## the whole world came out as four chunks.
 const ERR_ABS := 0.4
 
-## How far the drawn surface of a node stands off the real height field, in
-## metres. This is what makes the quadtree worth having over the rings: sea and
-## plains have almost none of it and stop subdividing early, while a ridge line
-## keeps splitting until it is resolved. It is a property of the height field
-## alone -- no eye, no frame -- so it is computed once per node and kept.
-static var _err: Dictionary = {}
-## The highest ground in each node, so the seabed can be told from the land.
-static var _top: Dictionary = {}
 ## How much less a node that is entirely under water is worth subdividing. The
 ## error metric measures the seabed as faithfully as it measures a mountain
 ## range, and spent the same triangles on it -- for relief that is under a
 ## couple of hundred metres of water and, from a submarine, in the dark.
+##
+## Read by the extension, which is where the tree is walked; here so that the
+## rule is written down once, next to the other constants that shape it.
 const SEABED_DETAIL := 0.12
 
 ## Every ground material, so the season can be pushed to all of them. The
@@ -76,39 +71,13 @@ var _ground_mats: Array = []
 static func span_at(depth: int) -> float:
 	return ROOT_SPAN / float(1 << depth)
 
-## The deviation and the high point of one node.
-##
-## Both come back from the extension in one call. Worked out here this was 289
-## height queries for the grid and another 64 for the cell centres, each of them
-## its own crossing of the boundary -- and the tree measures a node the first
-## time it ever looks at one, so a flight into new country paid 353 of them per
-## node, on the main thread, in the middle of a frame.
-static func node_error(depth: int, ix: int, iz: int) -> float:
-	var k := _node_key(depth, ix, iz)
-	if _err.has(k):
-		return float(_err[k])
-	var span := span_at(depth)
-	var q := PackedFloat32Array([float(ix) * span, float(iz) * span, span])
-	var st: PackedFloat32Array = Sim.native.node_stats_globe(q, CELLS) \
-		if Sim.globe else Sim.native.node_stats(q, CELLS)
-	_err[k] = st[0]
-	_top[k] = st[1]
-	return st[0]
-
-## The highest ground in a node. Asked after `node_error`, which is what fills
-## it in.
+## The highest ground in a node, measured if nobody has asked yet.
 static func node_top(depth: int, ix: int, iz: int) -> float:
-	var k := _node_key(depth, ix, iz)
-	if not _top.has(k):
-		node_error(depth, ix, iz)
-	return float(_top.get(k, 0.0))
+	return Sim.native.terrain_node_top(depth, ix, iz)
 
 ## A node that is already subdivided has to be got clearly further away before
 ## it merges again, and one that is not has to be got clearly closer before it
-## splits. Without this the tree re-decides on exactly the same threshold every
-## time the viewer moves, so anything sitting near one flips back and forth --
-## measured, a helicopter orbiting a 900 m circle rebuilt three thousand chunks
-## in two minutes and the ground visibly churned the whole time.
+## splits.
 ##
 ## One, now: no hysteresis at all.
 ##
@@ -133,79 +102,6 @@ const HYST := 1.0
 ## 191 of 1518 arrived mid-blend, more than twice as many. The limit is the
 ## queue's throughput, not when it is asked.
 
-## Which nodes were subdivided last time the tree was walked. Read during a walk
-## and only replaced at the end of it, so every decision inside one walk -- the
-## descent itself and every neighbour probe -- is made against the same state.
-var _was_split: Dictionary = {}
-## Split decisions for the walk in progress. Cleared at the start of each one,
-## so it can never carry a stale answer across a change of eye position.
-var _split_memo: Dictionary = {}
-
-## Does this node hand its ground to four children?
-func splits(depth: int, ix: int, iz: int, eye: Vector3) -> bool:
-	if depth >= MAX_DEPTH:
-		return false
-	var span := span_at(depth)
-	var x0 := float(ix) * span
-	var z0 := float(iz) * span
-	# Distance from the eye to the node, zero inside it -- and in three
-	# dimensions, not two.
-	#
-	# Measured flat, the ground directly beneath an aeroplane is zero away
-	# however high the aeroplane is, so at nine hundred metres the country
-	# underneath was subdivided all the way to fifteen metre cells. That patch
-	# of maximum detail then swept along under the aircraft as it flew, being
-	# built and thrown away continuously -- which is the terrain "constantly
-	# regenerating" and "changing too much too close". Height is distance: from
-	# nine hundred metres up you can no more resolve a fifteen metre cell than
-	# you can from nine hundred metres away.
-	var dx := maxf(maxf(x0 - eye.x, eye.x - (x0 + span)), 0.0)
-	var dz := maxf(maxf(z0 - eye.z, eye.z - (z0 + span)), 0.0)
-	var nk := _node_key(depth, ix, iz)
-	# Worked out once per node per walk. The descent decides this for every node
-	# it visits, and then every leaf asks about its four neighbours, which walks
-	# the same nodes again -- thirty-one thousand repeats of a known answer.
-	if _split_memo.has(nk):
-		return bool(_split_memo[nk])
-	var k := SPLIT_K
-	if _was_split.has(nk):
-		k *= HYST
-	# Flat first, and only then in three dimensions. Height can only push a node
-	# further away, so anything already out of range on the flat is out of range
-	# full stop -- and asking for its height means measuring its terrain error,
-	# which is 289 height samples for a node that was going to be rejected on
-	# distance alone. Tested the other way round, one look at the tree went from
-	# 5.7 ms to 16.3.
-	if dx * dx + dz * dz >= k * span * k * span:
-		_split_memo[nk] = false
-		return false
-	var dy: float = maxf(eye.y - node_top(depth, ix, iz), 0.0)
-	var dist := sqrt(dx * dx + dz * dz + dy * dy)
-	if dist >= k * span:
-		_split_memo[nk] = false
-		return false
-	# The error decides *whether* a node is worth subdividing, not how close you
-	# have to get before it is.
-	#
-	# Scaling the split distance by the error read well and quietly wrecked the
-	# geomorph: a node whose ground is gentle handed over to its children at a
-	# fraction of the distance rule, so they arrived barely blended and the
-	# switch was plainly visible -- measured, the morph was only 61% finished on
-	# average and 4% at worst. Made a yes-or-no test, every hand-over that
-	# happens at all happens at exactly SPLIT_K spans, which is the distance the
-	# blend is built around, so it is always complete.
-	# Straight out of the tables where they already hold the answer, which on a
-	# warm tree is every time.
-	var e: float = float(_err[nk]) if _err.has(nk) else node_error(depth, ix, iz)
-	# Nothing above the surface anywhere in it: this is seabed, and it does not
-	# earn the triangles that the same relief above water would.
-	var top: float = float(_top[nk]) if _top.has(nk) else node_top(depth, ix, iz)
-	if top < Sim.WATER_LEVEL - 1.0:
-		e *= SEABED_DETAIL
-	var yes: bool = e > ERR_ABS
-	_split_memo[nk] = yes
-	return yes
-
 ## A node's identity as one integer.
 ##
 ## This was a formatted string, and every split test built three of them -- one
@@ -214,6 +110,9 @@ func splits(depth: int, ix: int, iz: int, eye: Vector3) -> bool:
 ## whole tree therefore cost 29 ms: a visible hitch every time the ground was
 ## reconsidered. Depth needs four bits and the index twenty-seven each, which
 ## fits an int with room to spare.
+##
+## The walk is in the extension now and keys its own tables the same way; this
+## is what the harness checks it against.
 static func _node_key(depth: int, ix: int, iz: int) -> int:
 	return (depth << 54) | ((ix & 0x7FFFFFF) << 27) | (iz & 0x7FFFFFF)
 
@@ -566,14 +465,47 @@ func _climate_frame(m: ShaderMaterial) -> void:
 	m.set_shader_parameter("planet_north", Sim.PLANET_NORTH)
 
 ## The chart has moved: the ground's idea of where it is has moved with it.
+## Asked for and not yet arrived, and whether the chart moved again meanwhile.
+var _clim_want := false
+var _clim_again := false
+
 func rechart() -> void:
 	if _mat == null:
 		return
 	_climate_frame(_mat)
 	# and the climate picture itself, which is drawn over the ground the chart
 	# is on rather than over a fixed square of world
-	if Sim.globe:
-		_mat.set_shader_parameter("climate", _bake_climate())
+	#
+	# Asked for, not waited on. A million texels of two noise fields is a
+	# twentieth of a second on its own and half a second while the map sheet is
+	# being drawn beside it, and both used to land on the frame the chart moved.
+	# The ground keeps the climate it has until this arrives, which is a few
+	# frames of colour drawn for the country next door.
+	if Sim.globe and not _ask_climate():
+		_clim_again = true
+
+func _ask_climate() -> bool:
+	if not Sim.native.climate_request(CLIMATE_N, Sim.WORLD_HALF):
+		return false
+	_clim_want = true
+	_clim_again = false
+	return true
+
+## Take a finished climate picture, if there is one. Pumped every frame by the
+## world.
+func pump_climate() -> void:
+	if _clim_want and Sim.native.climate_ready():
+		var buf: PackedByteArray = Sim.native.climate_take()
+		if buf.size() == CLIMATE_N * CLIMATE_N * 4 and _mat != null:
+			var img := Image.create_from_data(CLIMATE_N, CLIMATE_N, false,
+				Image.FORMAT_RGH, buf)
+			if OS.has_feature("headless") or OS.is_debug_build():
+				climate_img = img.duplicate()   # for the harness to sample
+			_mat.set_shader_parameter("climate",
+				ImageTexture.create_from_image(img))
+		_clim_want = false
+	if _clim_again and not _clim_want:
+		_ask_climate()
 
 ## How much of the ground to draw, against the planet body fading in behind it.
 ## Both surfaces are told, or the sea stays behind after the land has gone.
@@ -689,9 +621,15 @@ func _mask_texture(buf: PackedByteArray, n: int, t0: int) -> ImageTexture:
 func set_mask_centre(c: Vector2) -> void:
 	if mask_centre.distance_to(c) < 1.0 or _mat == null:
 		return
+	# Timed for the same reason the chart move is: it happens while you are
+	# flying, it is sixteen million texels, and nothing was watching it.
+	var t0 := Time.get_ticks_msec()
 	mask_centre = c
 	_mat.set_shader_parameter("mask_centre", mask_centre)
 	_mat.set_shader_parameter("ground_mask", _bake_ground_mask())
+	print("[mask] the painted ground moved to %s: %d ms (%d of it rasterising)" % [
+		str(c.round()), Time.get_ticks_msec() - t0,
+		int(stats.get("mask_ms", 0))])
 
 ## What the ground actually shows at a world point: red tarmac, green made
 ## ground, straight out of the baked mask.
@@ -765,13 +703,21 @@ func build() -> void:
 ## from there so the window keeps painting; `build` is the same thing in one
 ## blocking go, for the harnesses.
 func prepare() -> void:
-	# The error table is a property of the height field and of nothing else, so
-	# it survives between runs. It keeps growing as you fly somewhere the tree
-	# has not had to think about before, and whatever it has learned by the end
-	# of the session goes back to disk.
-	var cached: Variant = WorldBake.get_baked("node_err")
-	if cached is Dictionary and not (cached as Dictionary).is_empty():
-		_err = cached
+	# What the tree has measured is a property of the height field and of
+	# nothing else, so it survives between runs. It keeps growing as you fly
+	# somewhere the tree has not had to think about before, and whatever it has
+	# learned by the end of the session goes back to disk.
+	#
+	# Error and high point together, sixteen bytes a node. They used to be two
+	# tables and only the errors were written: a run off a bake found the error
+	# already known, never filled the high point in, and read every node's high
+	# ground as zero. Nothing in the world is seabed on that reading, and the
+	# eye's height above a mountain is measured from the sea -- so a warm start
+	# and a cold one built the country at different levels of detail, which is
+	# not a failure anything was looking for.
+	var cached: Variant = WorldBake.get_baked("node_stats")
+	if cached is PackedByteArray and not (cached as PackedByteArray).is_empty():
+		Sim.native.terrain_stats_put(cached)
 	_mat = _ground_material()
 	recentre(Vector3.ZERO)
 	_water()
@@ -791,151 +737,89 @@ static func in_root(x: float, z: float) -> bool:
 	return absf(x) < h and absf(z) < h
 
 ## What depth the tree draws a point at, by descent from the root. Zero when the
-## point is outside the root entirely.
+## point is outside the root entirely. The harness's second opinion about every
+## neighbour lookup the walk makes.
 func depth_at(x: float, z: float, eye: Vector3) -> int:
-	if not in_root(x, z):
-		return 0
-	var d := 1
-	var s := span_at(1)
-	var ix: int = clampi(int(floor(x / s)), -1, 0)
-	var iz: int = clampi(int(floor(z / s)), -1, 0)
-	while splits(d, ix, iz, eye):
-		d += 1
-		s = span_at(d)
-		ix = int(floor(x / s))
-		iz = int(floor(z / s))
-	return d
+	return Sim.native.terrain_depth_at(x, z, eye)
 
-## The leaves that should exist for this eye position, by descent from the four
-## root quadrants.
-## What a leaf's neighbour across an edge is drawn at, looked up in the leaves
-## already collected rather than worked out again from the root.
+## The leaves that should exist for this eye position.
 ##
-## `depth_at` descended the whole tree for every one of the four probes every
-## leaf makes -- thirty-one thousand descents per walk, and 5.5 ms of the 9.9 ms
-## a walk cost. A neighbour is almost always the same depth or one either side,
-## so this tries those first and only sweeps if it has to.
-func _neighbour_depth(px: float, pz: float, own: int, leaves: Dictionary) -> int:
-	# Off the edge of the world there is no neighbour. Answering with our own
-	# depth is what says "nothing to conform to here"; the sweep below would
-	# otherwise find whichever leaf happens to share a cell index with a point
-	# the tree does not cover, and the outermost chunks would stitch themselves
-	# to the far side of the map.
-	if not in_root(px, pz):
-		return own
-	for probe in [own, own + 1, own - 1, own + 2, own - 2]:
-		if probe < 1 or probe > MAX_DEPTH:
-			continue
-		var sp := span_at(probe)
-		if leaves.has(_node_key(probe, int(floor(px / sp)), int(floor(pz / sp)))):
-			return probe
-	for d in range(MAX_DEPTH, 0, -1):
-		var sp2 := span_at(d)
-		if leaves.has(_node_key(d, int(floor(px / sp2)), int(floor(pz / sp2)))):
-			return d
-	return own
-
-## The leaves that should exist for this eye position, by descent from the four
-## root quadrants.
+## The descent, the error measure and the neighbour lookups are all in the
+## extension. It walks about ninety thousand nodes and every leaf then probes
+## its four neighbours, and in script that was 4.1 ms every time the eye moved
+## 120 m -- a dropped frame twice a second at cruise, which is the kind of
+## stutter no frame-rate average shows. Worse, a node the tree had not seen
+## before paid 353 height samples for its error one node at a time, on the
+## thread walking the tree, so flying into new country cost more than flying
+## over old. Over there a whole level of new nodes is measured in one pass
+## across every core.
+##
+## What comes back is twelve numbers a leaf: depth, the two grid indices, what
+## each of the four edges meets, which edges face a finer neighbour, and the
+## four unclamped lookups the harness checks. Turning them into keys is all
+## that is left here, and there are only a few hundred.
 func _wanted(eye: Vector3) -> Dictionary:
+	var flat: PackedInt32Array = Sim.native.terrain_tree(eye)
 	var out: Dictionary = {}
-	var opened: Dictionary = {}
-	_split_memo = {}
-	# First pass: which nodes are leaves. Nothing about edges can be settled
-	# until they all are, because an edge is a question about a neighbour.
-	var leaf_list: Array = []
 	var leaves: Dictionary = {}
-	var stack: Array = [[1, -1, -1], [1, 0, -1], [1, -1, 0], [1, 0, 0]]
-	while not stack.is_empty():
-		var nd: Array = stack.pop_back()
-		var d: int = nd[0]
-		var ix: int = nd[1]
-		var iz: int = nd[2]
-		if splits(d, ix, iz, eye):
-			opened[_node_key(d, ix, iz)] = true
-			for c in 4:
-				stack.append([d + 1, ix * 2 + (c & 1), iz * 2 + (c >> 1)])
-			continue
-		leaf_list.append(nd)
-		leaves[_node_key(d, ix, iz)] = d
 	if debug_count:
-		# A leaf may not contain another leaf. If one does, the descent has both
-		# split a node and kept it, and everything downstream of that -- seams,
-		# conforming, the lot -- is measuring a shape that cannot exist.
-		for chk in leaf_list:
-			var cd: int = chk[0]
-			var cx: int = chk[1]
-			var cz: int = chk[2]
-			var ax: int = cx
-			var az: int = cz
-			for up in range(cd - 1, 0, -1):
-				ax = ax >> 1 if ax >= 0 else -((-ax + 1) >> 1)
-				az = az >> 1 if az >= 0 else -((-az + 1) >> 1)
-				if leaves.has(_node_key(up, ax, az)):
-					debug_nb_bad += 1
-					if debug_nb_bad <= 3:
-						print("[nb] leaf d%d %d,%d sits inside leaf d%d %d,%d" % [
-							cd, cx, cz, up, ax, az])
-					break
-	# Second pass: what each leaf meets along its four edges.
-	for nd2 in leaf_list:
-		var d2: int = nd2[0]
-		var ix2: int = nd2[1]
-		var iz2: int = nd2[2]
-		var span := span_at(d2)
-		var cell := span / float(CELLS)
-		var x0 := float(ix2) * span
-		var z0 := float(iz2) * span
-		var half := span * 0.5
-		var step := cell * 0.5
-		# A coarser neighbour spans this whole edge, so one probe just outside
-		# the middle of it settles the question.
-		var raw := [
-			_neighbour_depth(x0 - step, z0 + half, d2, leaves),
-			_neighbour_depth(x0 + span + step, z0 + half, d2, leaves),
-			_neighbour_depth(x0 + half, z0 - step, d2, leaves),
-			_neighbour_depth(x0 + half, z0 + span + step, d2, leaves),
-		]
+		for i in range(0, flat.size(), 12):
+			leaves[_node_key(flat[i], flat[i + 1], flat[i + 2])] = flat[i]
+	for i in range(0, flat.size(), 12):
+		var d2: int = flat[i]
+		var ix2: int = flat[i + 1]
+		var iz2: int = flat[i + 2]
+		var nb: Array = [flat[i + 3], flat[i + 4], flat[i + 5], flat[i + 6]]
+		var fine: int = flat[i + 7]
 		if debug_count:
-			var probes := [
-				Vector2(x0 - step, z0 + half),
-				Vector2(x0 + span + step, z0 + half),
-				Vector2(x0 + half, z0 - step),
-				Vector2(x0 + half, z0 + span + step),
-			]
-			var chk: Array = []
-			for pv in probes:
-				chk.append(depth_at((pv as Vector2).x, (pv as Vector2).y, eye))
-			for ci in 4:
-				# A probe off the edge of the world has no neighbour to
-				# disagree about, and both sides say so in their own way.
-				if not in_root((probes[ci] as Vector2).x,
-						(probes[ci] as Vector2).y):
-					continue
-				if int(chk[ci]) != int(raw[ci]):
-					debug_nb_bad += 1
-					if debug_nb_bad <= 4:
-						print("[nb] leaf d%d at %d,%d side %d: lookup says %d, descent says %d" % [
-							d2, ix2, iz2, ci, int(raw[ci]), int(chk[ci])])
-		# Clamped to our own depth. Only a *coarser* neighbour changes this
-		# chunk's geometry -- a finer one conforms to us and we do nothing about
-		# it -- so recording its exact depth in the key meant a leaf next to a
-		# detailed region was rebuilt every time any of that region shifted a
-		# level, for a mesh that came out identical.
-		var nb: Array = []
-		# Which edges face a *finer* neighbour. That neighbour conforms its edge
-		# to ours as we draw it, so ours may not move: if this chunk morphs an
-		# edge the fine side has already matched itself to, the two part company
-		# and the seam opens by as much as the morph -- measured, a kilometre.
-		var fine := 0
-		for e in 4:
-			nb.append(mini(int(raw[e]), d2))
-			if int(raw[e]) > d2:
-				fine |= 1 << e
+			_check_leaf(d2, ix2, iz2, flat, i, leaves, eye)
 		out["%d:%d:%d:%d,%d,%d,%d:%d" % [d2, ix2, iz2, nb[0], nb[1], nb[2],
 			nb[3], fine]] = [d2, ix2, iz2, nb, fine]
-	_was_split = opened
 	return out
+
+## Both halves of what `--lodtest` gates on, for one leaf.
+##
+## A leaf may not contain another leaf: if one does, the descent has both split
+## a node and kept it, and everything downstream of that -- seams, conforming,
+## the lot -- is measuring a shape that cannot exist. And every neighbour lookup
+## has to agree with a full descent from the root, which is the slow answer to
+## the same question.
+func _check_leaf(cd: int, cx: int, cz: int, flat: PackedInt32Array, at: int,
+		leaves: Dictionary, eye: Vector3) -> void:
+	var ax := cx
+	var az := cz
+	for up in range(cd - 1, 0, -1):
+		ax = ax >> 1 if ax >= 0 else -((-ax + 1) >> 1)
+		az = az >> 1 if az >= 0 else -((-az + 1) >> 1)
+		if leaves.has(_node_key(up, ax, az)):
+			debug_nb_bad += 1
+			if debug_nb_bad <= 3:
+				print("[nb] leaf d%d %d,%d sits inside leaf d%d %d,%d" % [
+					cd, cx, cz, up, ax, az])
+			break
+	var span := span_at(cd)
+	var x0 := float(cx) * span
+	var z0 := float(cz) * span
+	var half := span * 0.5
+	var step := span / float(CELLS) * 0.5
+	var probes := [
+		Vector2(x0 - step, z0 + half),
+		Vector2(x0 + span + step, z0 + half),
+		Vector2(x0 + half, z0 - step),
+		Vector2(x0 + half, z0 + span + step),
+	]
+	for ci in 4:
+		var pv: Vector2 = probes[ci]
+		# A probe off the edge of the world has no neighbour to disagree about,
+		# and both sides say so in their own way.
+		if not in_root(pv.x, pv.y):
+			continue
+		var descent := depth_at(pv.x, pv.y, eye)
+		if descent != flat[at + 8 + ci]:
+			debug_nb_bad += 1
+			if debug_nb_bad <= 4:
+				print("[nb] leaf d%d at %d,%d side %d: lookup says %d, descent says %d" % [
+					cd, cx, cz, ci, flat[at + 8 + ci], descent])
 
 ## Move the viewer. Cheap when nothing has changed: the wanted set is compared
 ## against what is live and only the difference is touched. Because the tree is
@@ -1074,12 +958,14 @@ func flush_pending(budget := -1) -> int:
 func _flush_inner(budget: int) -> int:
 	var made := _collect()
 	if budget < 0:
-		while not _pending.is_empty() or _batch_id != -1:
-			_dispatch(_pending.size())
-			if _batch_id != -1:
-				WorkerThreadPool.wait_for_group_task_completion(_batch_id)
-				_batch_done = true
+		# Everything, now, in one call -- see `build_queued`. Anything already
+		# out with the pool is taken back first, or it would land on top of what
+		# this builds.
+		if _batch_id != -1:
+			WorkerThreadPool.wait_for_group_task_completion(_batch_id)
+			_batch_done = true
 			made += _collect()
+		made += build_queued(_pending.size())
 		stats["chunks"] = _live.size()
 		# The world is now standing: everything wanted is up. Anything that
 		# arrives after this is replacing something, which is the only kind of
@@ -1088,6 +974,58 @@ func _flush_inner(budget: int) -> int:
 		return made
 	if _batch_id == -1:
 		_dispatch(budget)
+	stats["chunks"] = _live.size()
+	return made
+
+## Build everything queued, here and now, in one call.
+##
+## The engine's worker pool gave nothing on this. Measured, three hundred and
+## forty chunks cost 95 ms built one after another on a single thread and about
+## 120 ms of wall clock spread over eight of the pool's -- no parallelism at all,
+## plus a four frame round trip a batch to dispatch and collect. The work is
+## pure arithmetic in the extension, where the cores are already used; what has
+## to happen on this thread is turning the arrays into meshes, and that is the
+## same however the arrays arrived.
+##
+## Used where blocking is the right answer: the loading screen, and a harness.
+## In flight the queue is still metered a few chunks at a time.
+func build_queued(n: int) -> int:
+	if _pending.is_empty() or n <= 0:
+		return 0
+	Sim.push_decks()
+	var take := mini(n, _pending.size())
+	var jobs := PackedInt32Array()
+	jobs.resize(take * 8)
+	var batch: Array = []
+	var w := 0
+	for i in take:
+		var job: Array = _pending.pop_front()
+		batch.append(job)
+		var a: Array = job[1]
+		var nb: Array = a[3]
+		jobs[w] = int(a[0])
+		jobs[w + 1] = int(a[1])
+		jobs[w + 2] = int(a[2])
+		jobs[w + 3] = int(nb[0])
+		jobs[w + 4] = int(nb[1])
+		jobs[w + 5] = int(nb[2])
+		jobs[w + 6] = int(nb[3])
+		jobs[w + 7] = int(a[4])
+		w += 8
+	var out: Array = Sim.native.chunk_build_many(jobs)
+	var made := 0
+	for i in batch.size():
+		var key: String = (batch[i] as Array)[0]
+		made += 1
+		if not _want_keys.has(key):
+			continue
+		var mi := _commit(batch[i], [out[i * 5], out[i * 5 + 1],
+			out[i * 5 + 2], out[i * 5 + 3], out[i * 5 + 4]])
+		if mi != null:
+			_live[key] = mi
+			var b := _base_key(key)
+			if _retire.has(b):
+				_stash(b)
 	stats["chunks"] = _live.size()
 	return made
 
@@ -1102,6 +1040,11 @@ func _dispatch(n: int) -> void:
 	_batch_out = []
 	_batch_out.resize(_batch.size())
 	_batch_done = false
+	# The decks, as they are right now. A carrier under way carries her deck
+	# with her, so this is the one part of the world the extension cannot hold
+	# once and forget; it is handed over here, on the main thread, before the
+	# batch that will read it goes out.
+	Sim.push_decks()
 	_batch_id = WorkerThreadPool.add_group_task(_build_one, _batch.size(), -1,
 		false, "terrain chunks")
 
@@ -1126,7 +1069,15 @@ func _collect() -> int:
 	return made
 
 func _take_batch() -> int:
-	WorkerThreadPool.wait_for_group_task_completion(_batch_id)
+	# Waited on exactly once.
+	#
+	# A group task may be waited on once and once only -- the wait is what frees
+	# it -- and `_flush_inner` waits itself when it runs the queue to the end.
+	# Waiting again here is the "Invalid Group ID" the console has printed on
+	# every launch: harmless, and exactly the kind of noise that hides a real
+	# error the next time one turns up.
+	if not _batch_done:
+		WorkerThreadPool.wait_for_group_task_completion(_batch_id)
 	_batch_id = -1
 	_batch_done = false
 	var made := 0
@@ -1272,164 +1223,20 @@ func _commit(job: Array, built: Variant) -> MeshInstance3D:
 func pending_count() -> int:
 	return _pending.size() + _batch.size()
 
-## Everything a chunk is, as plain arrays: vertices, normals, colours, and the
-## seam the stitching left. Called on a worker thread, so it may read the height
-## and biome fields and nothing else.
+## Everything a chunk is, as plain arrays: vertices, normals, the seam the
+## stitching left, the morph and the coarse normal.
+##
+## The whole of it is in the extension. It was four hundred lines here -- the
+## grid, the conformed edges, the parent surface, two sets of vertex normals,
+## the faces and the skirt -- walking packed arrays a Vector3 at a time on a
+## worker thread, and it was the largest single item in world generation. What
+## is left on this side is turning the arrays into a mesh, which is the part
+## that has to happen on the main thread anyway.
+##
+## Called on a worker, so it may read the height field and nothing else.
 func _chunk_arrays(depth: int, ix: int, iz: int, nb: Array, fine: int) -> Array:
-	var span := span_at(depth)
-	var cell := span / float(CELLS)
-	var x0 := float(ix) * span
-	var z0 := float(iz) * span
-	var n := CELLS + 1
-	# The whole grid in one call. A chunk is 289 points and the game builds
-	# hundreds of them; asked for as a block they come back off every core at
-	# once, and what is left to do here is only the part that depends on what
-	# has been built on the land.
-	# On the planet the grid is read off the planetary field, which already
-	# carries the curve; on the flat world it is the flat field with the drop
-	# taken off below. Same grid, same chunk, different ground under it.
-	var h: PackedFloat32Array = Sim.native.grounds_globe(x0, z0, cell, n) \
-		if Sim.globe else Sim.native.grounds(x0, z0, cell, n, Sim.G_ALL)
-	if not Sim.decks.is_empty():
-		# A landable platform is the one part of the world the extension does
-		# not hold, because it moves. Only worth walking the grid for when
-		# there is one.
-		for j in n:
-			var zz: float = z0 + float(j) * cell
-			for i in n:
-				h[j * n + i] = Sim._deck_top(h[j * n + i],
-					x0 + float(i) * cell, zz)
-	# Every height the border needs, in one call.
-	#
-	# Conforming an edge to a coarser neighbour, measuring the residual that
-	# leaves, and reading the field either side of every border vertex for its
-	# normal are between them six hundred separate height queries per chunk --
-	# each one its own crossing of the extension boundary, on the thread
-	# building the chunk. Asked for as a block they are one crossing and come
-	# back off every core.
-	var edge := _edge_probe(n, x0, z0, cell, depth, nb)
-	var eh: PackedFloat32Array = Sim.native.grounds_at_globe(edge) \
-		if Sim.globe else Sim.native.grounds_at(edge, Sim.G_ALL)
-	if not Sim.decks.is_empty():
-		for k in eh.size():
-			eh[k] = Sim._deck_top(eh[k], edge[k].x, edge[k].y)
-	_stitch(h, n, x0, z0, cell, depth, nb, eh)
-	# What the level above this one draws at each of our grid points. Even
-	# indices sit on the parent's grid, so they read the same height and their
-	# difference is zero; the odd ones in between are where the two surfaces
-	# part company, and that difference is what gets morphed away. Computed from
-	# the grid we already have -- the parent's vertices are our even ones -- so
-	# it costs no height samples at all.
-	var hc := PackedFloat32Array()
-	hc.resize(n * n)
-	for j in n:
-		var pj: int = mini(j >> 1, HALF_CELLS - 1)
-		var tz: float = (float(j) - float(pj * 2)) * 0.5
-		for i in n:
-			var pi: int = mini(i >> 1, HALF_CELLS - 1)
-			var tx: float = (float(i) - float(pi * 2)) * 0.5
-			var a0 := 2 * pi
-			var b0 := 2 * pj
-			var h00: float = h[b0 * n + a0]
-			var h10: float = h[b0 * n + a0 + 2]
-			var h11: float = h[(b0 + 2) * n + a0 + 2]
-			var h01: float = h[(b0 + 2) * n + a0]
-			# the same diagonal the chunks are triangulated on
-			hc[j * n + i] = (h00 + (h10 - h00) * tx + (h11 - h10) * tz) if tz <= tx \
-				else (h00 + (h11 - h01) * tx + (h01 - h00) * tz)
-	# Pin the edges a finer neighbour has conformed itself to.
-	for e in 4:
-		if (fine & (1 << e)) == 0:
-			continue
-		for t in n:
-			var at: int = t * n if e == 0 else (t * n + n - 1 if e == 1
-				else (t if e == 2 else (n - 1) * n + t))
-			hc[at] = h[at]
-	# Per vertex normals, taken from the height field rather than from the
-	# triangle. A face normal handed to all three of its corners is flat
-	# shading: every facet is lit uniformly, the shading changes in steps at
-	# each triangle edge, and the ground reads as faceted however fine the mesh
-	# gets. The gradient of the field at the vertex is the normal the surface
-	# actually has there, and neighbouring triangles then agree along the edge
-	# they share.
-	var vn := PackedVector3Array()
-	vn.resize(n * n)
-	# and the same for the surface the level above draws, which the morph
-	# blends towards -- sampled two of our cells apart, because two of ours is
-	# one of its
-	var cvn := PackedVector3Array()
-	cvn.resize(n * n)
-	var big := cell * 2.0
-	var nrm_base := 0
-	for side0 in 4:
-		if int(nb[side0]) < depth:
-			nrm_base += (n - 2) * 2
-	var nrm_at := 0
-	for j in n:
-		for i in n:
-			var gx: float
-			var gz: float
-			var cx: float
-			var cz: float
-			if i == 0 or j == 0 or i == n - 1 or j == n - 1:
-				# Off the field, not off this chunk's grid. The grid stops at
-				# the border, so a one sided difference there gives a different
-				# answer from the one the chunk next door works out for the very
-				# same vertex -- and the ground picks up a shading seam along
-				# every chunk edge in the world. Both sides read the field.
-				var b: int = nrm_base + nrm_at * 8
-				nrm_at += 1
-				gx = (eh[b] - eh[b + 1]) / (2.0 * cell)
-				gz = (eh[b + 2] - eh[b + 3]) / (2.0 * cell)
-				cx = (eh[b + 4] - eh[b + 5]) / (2.0 * big)
-				cz = (eh[b + 6] - eh[b + 7]) / (2.0 * big)
-			else:
-				gx = (h[j * n + i + 1] - h[j * n + i - 1]) / (2.0 * cell)
-				gz = (h[(j + 1) * n + i] - h[(j - 1) * n + i]) / (2.0 * cell)
-				var l2: int = maxi(i - 2, 0)
-				var r2: int = mini(i + 2, n - 1)
-				var f2: int = maxi(j - 2, 0)
-				var b2: int = mini(j + 2, n - 1)
-				cx = (hc[j * n + r2] - hc[j * n + l2]) / (float(r2 - l2) * cell)
-				cz = (hc[b2 * n + i] - hc[f2 * n + i]) / (float(b2 - f2) * cell)
-			vn[j * n + i] = Vector3(-gx, 1.0, -gz).normalized()
-			cvn[j * n + i] = Vector3(-cx, 1.0, -cz).normalized()
-	var count := CELLS * CELLS * 6 + CELLS * 24
-	var verts := PackedVector3Array()
-	var nrms := PackedVector3Array()
-	var morph := PackedVector2Array()
-	# the normal the level above draws, per vertex, so the shading can be
-	# blended along with the shape
-	var cnrm := PackedFloat32Array()
-	verts.resize(count)
-	nrms.resize(count)
-	morph.resize(count)
-	cnrm.resize(count * 4)
-	var w := [0]
-	for j in CELLS:
-		for i in CELLS:
-			var a := Vector3(x0 + i * cell, h[j * n + i], z0 + j * cell)
-			var b := Vector3(x0 + (i + 1) * cell, h[j * n + i + 1], z0 + j * cell)
-			var c := Vector3(x0 + (i + 1) * cell, h[(j + 1) * n + i + 1], z0 + (j + 1) * cell)
-			var d := Vector3(x0 + i * cell, h[(j + 1) * n + i], z0 + (j + 1) * cell)
-			var ma := hc[j * n + i] - h[j * n + i]
-			var mb := hc[j * n + i + 1] - h[j * n + i + 1]
-			var mc := hc[(j + 1) * n + i + 1] - h[(j + 1) * n + i + 1]
-			var md := hc[(j + 1) * n + i] - h[(j + 1) * n + i]
-			var q00: int = j * n + i
-			var q10: int = j * n + i + 1
-			var q11: int = (j + 1) * n + i + 1
-			var q01: int = (j + 1) * n + i
-			_face(verts, nrms, morph, cnrm, w, a, b, c, ma, mb, mc,
-				vn[q00], vn[q10], vn[q11], cvn[q00], cvn[q10], cvn[q11])
-			_face(verts, nrms, morph, cnrm, w, a, c, d, ma, mc, md,
-				vn[q00], vn[q11], vn[q01], cvn[q00], cvn[q11], cvn[q01])
-	_skirt(verts, nrms, morph, cnrm, w, x0, z0, cell, h, n)
-	# every vertex carries how wide its chunk is, which is the band it blends over
-	for mv in count:
-		morph[mv] = Vector2(morph[mv].x, span)
-	return [verts, nrms,
-		_conform_residual(h, n, x0, z0, cell, depth, nb, eh), morph, cnrm]
+	return Sim.native.chunk_build(depth, ix, iz,
+		PackedInt32Array([int(nb[0]), int(nb[1]), int(nb[2]), int(nb[3])]), fine)
 
 ## A leaf's identity without its neighbour state, so a rebuild triggered only by
 ## a change next door can be matched to the chunk it supersedes.
@@ -1440,191 +1247,6 @@ func _base_key(k: String) -> String:
 ## Where a conformed edge vertex sits, and which of the chunk's grid points it
 ## is. Written once and read by the probe, the stitching and the residual, so
 ## the three cannot walk the border in different orders.
-static func _edge_point(side: int, t: float, x0: float, z0: float,
-		span: float) -> Vector2:
-	if side == 0:
-		return Vector2(x0, z0 + t)
-	if side == 1:
-		return Vector2(x0 + span, z0 + t)
-	if side == 2:
-		return Vector2(x0 + t, z0)
-	return Vector2(x0 + t, z0 + span)
-
-static func _edge_index(side: int, i: int, n: int) -> int:
-	if side == 0:
-		return i * n
-	if side == 1:
-		return i * n + n - 1
-	if side == 2:
-		return i
-	return (n - 1) * n + i
-
-## Every point on a chunk's border whose height has to come from the field
-## rather than from the chunk's own grid: first the pairs a coarser neighbour
-## interpolates between, then eight points around each border vertex -- four for
-## its normal and four for the normal of the surface the level above draws.
-static func _edge_probe(n: int, x0: float, z0: float, cell: float, depth: int,
-		nb: Array) -> PackedVector2Array:
-	var span := cell * float(CELLS)
-	var big2 := cell * 2.0
-	var out := PackedVector2Array()
-	for side in 4:
-		var nd: int = int(nb[side])
-		if nd >= depth:
-			continue
-		var big := span_at(nd) / float(CELLS)
-		for i in range(1, n - 1):
-			var p := _edge_point(side, float(i) * cell, x0, z0, span)
-			if side >= 2:
-				var lo: float = floor(p.x / big) * big
-				out.append(Vector2(lo, p.y))
-				out.append(Vector2(lo + big, p.y))
-			else:
-				var lo2: float = floor(p.y / big) * big
-				out.append(Vector2(p.x, lo2))
-				out.append(Vector2(p.x, lo2 + big))
-	for j in n:
-		for i in n:
-			if not (i == 0 or j == 0 or i == n - 1 or j == n - 1):
-				continue
-			var px: float = x0 + float(i) * cell
-			var pz: float = z0 + float(j) * cell
-			out.append(Vector2(px + cell, pz))
-			out.append(Vector2(px - cell, pz))
-			out.append(Vector2(px, pz + cell))
-			out.append(Vector2(px, pz - cell))
-			out.append(Vector2(px + big2, pz))
-			out.append(Vector2(px - big2, pz))
-			out.append(Vector2(px, pz + big2))
-			out.append(Vector2(px, pz - big2))
-	return out
-
-## The height the coarser neighbour draws at one of our edge vertices: its two
-## nearest vertices on that edge, linearly interpolated, which is what its
-## triangles do between them. The two heights are the pair `_edge_probe` put at
-## `at`; this is only the interpolation between them.
-static func _coarse_from(eh: PackedFloat32Array, at: int, p: Vector2,
-		big: float, along_x: bool) -> float:
-	var v: float = p.x if along_x else p.y
-	return lerpf(eh[at], eh[at + 1], (v - floor(v / big) * big) / big)
-
-## What the stitching left behind: how far each conformed edge vertex still sits
-## off the straight line its coarse neighbour draws through that span. Zero by
-## construction if `_stitch` did its job, and the number the seam harnesses gate
-## on -- so it is measured rather than assumed.
-func _conform_residual(h: PackedFloat32Array, n: int, x0: float, z0: float,
-		cell: float, depth: int, nb: Array, eh: PackedFloat32Array) -> float:
-	var span := cell * float(CELLS)
-	var worst := 0.0
-	var at := 0
-	for side in 4:
-		var nd: int = int(nb[side])
-		if nd >= depth:
-			continue
-		var big := span_at(nd) / float(CELLS)
-		for i in range(1, n - 1):
-			var p := _edge_point(side, float(i) * cell, x0, z0, span)
-			worst = maxf(worst, absf(h[_edge_index(side, i, n)]
-				- _coarse_from(eh, at, p, big, side >= 2)))
-			at += 2
-	return worst
-
-## Stitch the edges that face a coarser neighbour.
-##
-## A coarser node has cells twice as wide (or four times, or eight), so along a
-## shared boundary it has a vertex only at every second, fourth, eighth one of
-## ours. Its edge runs straight past the rest of ours, and wherever the ground
-## is not flat the two surfaces part company: measured across this map, ten
-## metres on average and two hundred and fifty at worst. Skirts were hiding that
-## rather than fixing it. Reading the height the coarse neighbour would read
-## puts our edge exactly on its edge, and the gap becomes zero by construction
-## rather than by being covered up.
-##
-## Only the coarse side of a boundary is deferred to, so exactly one of the two
-## chunks moves and they cannot both chase each other.
-func _stitch(h: PackedFloat32Array, n: int, x0: float, z0: float,
-		cell: float, depth: int, nb: Array, eh: PackedFloat32Array) -> void:
-	var span := cell * float(CELLS)
-	var at := 0
-	for side in 4:
-		var nd: int = int(nb[side])
-		if nd >= depth:
-			continue
-		# the neighbour's cell, which its edge is straight across
-		var big := span_at(nd) / float(CELLS)
-		for i in range(1, n - 1):
-			var p := _edge_point(side, float(i) * cell, x0, z0, span)
-			h[_edge_index(side, i, n)] = _coarse_from(eh, at, p, big, side >= 2)
-			at += 2
-	# The corners belong to both edges at once. A corner that is an endpoint of
-	# a coarse span on one axis has to sit on that span, and since the two
-	# meeting edges share it, doing them in sequence would let the second undo
-	# the first. They are left on the raw field: every node's grid is a whole
-	# number of BASE_CELL steps from the origin, so a coarse neighbour has a
-	# vertex at our corner whatever its depth, and both read the same height.
-
-## A vertical curtain around the chunk edge so a coarser neighbour cannot show
-## daylight through the seam.
-func _skirt(verts: PackedVector3Array, nrms: PackedVector3Array,
-		morph: PackedVector2Array, cnrm: PackedFloat32Array, w: Array,
-		x0: float, z0: float, cell: float,
-		h: PackedFloat32Array, n: int) -> void:
-	# Clamped, and hard. This was `cell * 3`, which on the coarsest leaves is a
-	# cell size of kilometres and therefore a curtain hanging kilometres under
-	# every chunk -- visible from anywhere at or below sea level, which is
-	# exactly where a submarine is. The skirt only has to cover the crack where
-	# two levels meet, and the boundary stitching already pulls that to a
-	# fraction of a millimetre, so a few centimetres is ample.
-	var drop: float = clampf(cell * 0.004, 0.15, 0.6)
-	for i in CELLS:
-		var edges := [
-			[Vector3(x0 + i * cell, h[i], z0), Vector3(x0 + (i + 1) * cell, h[i + 1], z0)],
-			[Vector3(x0 + (i + 1) * cell, h[CELLS * n + i + 1], z0 + CELLS * cell),
-			 Vector3(x0 + i * cell, h[CELLS * n + i], z0 + CELLS * cell)],
-			[Vector3(x0, h[(i + 1) * n], z0 + (i + 1) * cell), Vector3(x0, h[i * n], z0 + i * cell)],
-			[Vector3(x0 + CELLS * cell, h[i * n + CELLS], z0 + i * cell),
-			 Vector3(x0 + CELLS * cell, h[(i + 1) * n + CELLS], z0 + (i + 1) * cell)],
-		]
-		for e in edges:
-			var a: Vector3 = e[0]
-			var b: Vector3 = e[1]
-			var a2 := a - Vector3(0, drop, 0)
-			var b2 := b - Vector3(0, drop, 0)
-			for v in [a, b, b2, a, b2, a2]:
-				var k: int = w[0]
-				verts[k] = v
-				nrms[k] = Vector3.UP
-				# the curtain hangs from the edge, which is conformed and so
-				# never morphs; giving it a morph of its own would peel it away
-				morph[k] = Vector2.ZERO
-				cnrm[k * 4] = 0.0
-				cnrm[k * 4 + 1] = 1.0
-				cnrm[k * 4 + 2] = 0.0
-				cnrm[k * 4 + 3] = 1.0
-				w[0] = k + 1
-
-func _face(verts: PackedVector3Array, nrms: PackedVector3Array,
-		morph: PackedVector2Array, cnrm: PackedFloat32Array, w: Array,
-		a: Vector3, b: Vector3, c: Vector3,
-		ma: float, mb: float, mc: float,
-		na: Vector3, nb: Vector3, nc: Vector3,
-		ka: Vector3, kb: Vector3, kc: Vector3) -> void:
-	var vs := [a, b, c]
-	var ms := [ma, mb, mc]
-	var ns := [na, nb, nc]
-	var ks := [ka, kb, kc]
-	for i in 3:
-		var k: int = w[0]
-		verts[k] = vs[i]
-		nrms[k] = ns[i]
-		morph[k] = Vector2(ms[i], 0.0)
-		var co: Vector3 = ks[i]
-		cnrm[k * 4] = co.x
-		cnrm[k * 4 + 1] = co.y
-		cnrm[k * 4 + 2] = co.z
-		cnrm[k * 4 + 3] = 1.0
-		w[0] = k + 1
-
 ## The sea. Curvature is already in the mesh; this puts the swell on top of it
 ## and gives the surface some life.
 const SEA_SHADER := """

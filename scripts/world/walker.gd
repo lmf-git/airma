@@ -198,6 +198,11 @@ var _chute_at := -1.0
 const BODY_R := 0.42
 
 func _physics_process(delta: float) -> void:
+	var _pt := Sim.prof_at()
+	_tick_walk_p(delta)
+	Sim.prof_end(&"walk.tick", _pt)
+
+func _tick_walk_p(delta: float) -> void:
 	if not cam.current or dead:
 		return
 	if frame != null:

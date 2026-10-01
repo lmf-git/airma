@@ -28,29 +28,87 @@ const TOP := 3600.0
 ## has to do is cover the sky without the quads showing.
 const SEGS := 128
 const RINGS := 64
-## How big a cloud is: the noise is sampled this many units to the unit sphere,
-## so a feature is about a ninth of a radian across -- a few hundred kilometres
-## of weather system.
-const NOISE_SCALE := 9.0
-## How big one cloud within a system is. The field's finest octave is 8.07
-## times this, so the smallest feature in the layer is the planet's radius over
-## `8.07 * scale` -- about three kilometres, which is a cloud an aeroplane can
-## fly between. On `NOISE_SCALE` alone it was eighty-eight kilometres.
-const DETAIL_SCALE := 260.0
+## How big a weather system is: the shape channel is tiled this many times to
+## the radian, so a tile is the planet's radius over this -- 354 km -- and the
+## octaves baked into it run from a quarter of that down to a sixty-fourth.
+## Eighty-eight kilometres of system down to five and a half, which is where the
+## detail channel picks the scale up.
+##
+## Eighteen, not nine. At nine a tile was 708 km and the finest thing the shape
+## field could say was eleven, so whether a patch of sky had any cloud in it at
+## all was decided in eleven kilometre lumps -- and the sky over one aerodrome
+## was then all cloud or none of it. The detail channel cannot help there: it
+## erodes cloud the shape field has already put somewhere.
+const NOISE_SCALE := 18.0
+## Cells across the volume at the shape channel's coarsest and finest baked
+## octaves. Mirror `SHAPE_F` and `SHAPE_F * 2^(SHAPE_OCT - 1)` in `cloud.rs`;
+## a tile over the coarsest is the size of a weather system, and over the finest
+## is the smallest patch of sky that can be cloudy while its neighbour is clear.
+const SHAPE_COARSE := 4.0
+const SHAPE_CELLS := 64.0
+## How big one cloud within a system is: the detail channel is tiled this many
+## times to the radian, so a tile is the planet's radius over this -- 77 km --
+## and the octaves baked into it run from a quarter of that down to a
+## sixty-fourth.
+##
+## Eighty-three, not two hundred and sixty.
+##
+## At 260 a tile was 24.5 km, and with 64 texels across it the field's own
+## lattice was 383 m and its finest octave 47 m. The march's *first* step is
+## 571 m and its last is kilometres, so none of that detail was ever sampled --
+## it was aliased, and it moved with the camera rather than with the sky. That
+## is what a fizzing grey sheet with no shape in it is. Here the finest thing in
+## the layer is `FINEST_M`, which the march can see, and a tile is wider than
+## the march is long so the sky does not repeat within one view of it.
+const DETAIL_SCALE := 83.0
+## Cells across the volume at the detail channel's finest baked octave. Written
+## down because `FINEST_M` is worked out from it.
+const DETAIL_CELLS := 64.0
+## How far the shape field drags the detail lookup about.
+##
+## This was 0.7 -- most of a whole tile -- so how the detail was read depended
+## far more on the gradient of the weather system than on where in the sky it
+## was, and the clouds within a system came out smeared along it. Enough to stop
+## the two fields lining up and no more; they are different lattices with
+## different seeds and do not need help beyond that.
+const DETAIL_WARP := 0.05
 ## How hard that detail cuts into the weather system. At zero the layer is an
 ## unbroken sheet again.
-const ERODE := 0.45
-## How far the noise is stretched before it is thresholded. See `spread` in the
-## shader: the field's own spread is 0.093, so this is a little over three of
-## them and `coverage` covers the whole range.
+const ERODE := 0.35
+## How far the noise is stretched before it is thresholded.
+##
+## The raw field clusters hard about its own mean, and `coverage` is a threshold
+## on it: unstretched, a hundredth either way is the difference between an
+## unbroken overcast and no cloud at all, and this layer has been both.
+## Stretched to fill 0..1, half cover means half the sky.
+##
+## Applied at the bake now rather than in the shader, so it costs nothing per
+## sample and the stored byte has its whole range to work in. The number lives
+## in `cloud.rs` as `OUT_SPREAD`, which is this divided into the raw field'"'"'s own
+## spread; it is written down here because it is the layer'"'"'s constant, not the
+## rasteriser'"'"'s.
 const SPREAD_K := 0.30
 ## How fast cloud puts out the light behind it, per metre.
+## How many samples the march takes.
+##
+## Thirty-two. It was twenty-eight, cut to twenty because the layer was the
+## largest single item in the frame at 2.30 ms; both of those were paying eight
+## texture fetches a step, because `fbm` summed four octaves for the shape and
+## four more for the detail at every sample. The octaves are baked into the
+## volume now and a step fetches twice, so thirty-two steps cost less than
+## twenty did and the banding a coarse march leaves goes with them.
+const STEPS := 32
+## Texels across the noise volume. Big enough that the finest octave baked into
+## it still has two texels to itself, which is what stops the volume being its
+## own aliasing source.
+const VOL_N := 128
 const EXTINCTION := 0.0045
 ## What a full-strength cloud is worth. See `density_k`.
 const DENSITY_K := 6.5
 ## The finest thing in the layer, in metres. Written down because it is what
-## the white-out was: it has to stay a size you can fly between.
-const FINEST_M := 6371000.0 / (8.07 * DETAIL_SCALE)
+## the white-out was: it has to stay a size you can fly between -- and, since
+## the march is what has to see it, no smaller than a step.
+const FINEST_M := 6371000.0 / (DETAIL_SCALE * DETAIL_CELLS)
 ## The wind that carries it, in metres a second. A brisk day.
 const WIND := 14.0
 const WIND_DIR := Vector3(1.0, 0.0, 0.38)
@@ -80,6 +138,8 @@ uniform float noise_scale = 9.0;
 // ...and how big one cloud in it is. See `density`.
 uniform float detail_scale = 260.0;
 uniform float erode = 0.62;
+// How far the shape field drags the detail lookup about. See `density`.
+uniform float detail_warp = 0.05;
 // How fast cloud puts out the light behind it, per metre of it.
 //
 // The layer is fourteen hundred metres thick, so at the 0.0016 this had, a
@@ -98,40 +158,32 @@ uniform vec3 wind_uv = vec3(0.0);
 uniform vec3 sun_dir = vec3(0.0, 1.0, 0.0);
 uniform vec3 tint : source_color = vec3(0.92, 0.94, 0.97);
 uniform vec3 shade : source_color = vec3(0.48, 0.52, 0.60);
-uniform int steps = 28;
+uniform int steps = 20;
 
 varying vec3 wpos;
 
-// Noise out of a texture, not out of arithmetic.
+// Noise out of a texture, not out of arithmetic -- and the octaves out of the
+// texture too.
 //
-// Written as a hash this cost the frame rate half of itself: a trilinear value
-// noise is eight hashes, four octaves is thirty-two, and two samples a step over
-// twenty steps is thirteen hundred hash evaluations for every pixel of sky. A
-// 64-cube of random bytes sampled with linear filtering *is* value noise -- the
-// hardware does the interpolation for free -- so an octave becomes one fetch.
+// Written as a hash this cost the frame rate half of itself, so it became a
+// volume sampled with linear filtering, which is value noise the hardware
+// interpolates for free. But the volume held *random bytes*, so its lattice was
+// one texel and every octave was that same one-texel lattice read at a
+// different rate: four fetches for the shape and four for the detail, eight a
+// step, and the finest of them 47 m of sky against a march that steps 571 m.
+// None of that detail was ever sampled -- it was aliased, and it moved with the
+// camera instead of with the weather.
+//
+// So the octaves are summed once, in the extension, into a volume whose finest
+// content is about a kilometre: red is the weather system, green the clouds
+// within it. A step fetches twice instead of eight times, which is what pays
+// for the march being thirty-two steps again rather than twenty.
+//
+// Both channels arrive already stretched to fill 0..1 about a half, which is
+// what `spread` in here used to do to a field that clustered hard about its
+// mean -- done at the bake it costs nothing and the byte has its whole range to
+// say it in. `coverage` and `erode` mean what they always meant.
 uniform sampler3D vol : filter_linear, repeat_enable;
-
-// The noise, stretched so a threshold on it means something.
-//
-// `fbm` is a sum of trilinear samples of a volume of random bytes: the
-// interpolation averages eight neighbours and the octaves average again, so it
-// clusters hard about a half. Measured, it runs 0.214 to 0.810 with a spread of
-// 0.093 -- and `coverage` is a threshold on it. At 0.5 that threshold sits on
-// the mean, where a hundredth either way is the difference between an unbroken
-// overcast and no cloud at all, and this layer has been both. Stretched to fill
-// 0..1, half cover means half the sky.
-uniform float spread_k = 0.30;
-
-float spread(float v) {
-	return clamp((v - 0.5) / spread_k + 0.5, 0.0, 1.0);
-}
-
-float fbm(vec3 p) {
-	return texture(vol, p).r * 0.5
-		+ texture(vol, p * 2.03).r * 0.25
-		+ texture(vol, p * 4.11).r * 0.15
-		+ texture(vol, p * 8.07).r * 0.10;
-}
 
 // How much cloud there is at a point, from the direction it lies in and how far
 // it is up the slab. A direction has no edges, so the field wraps the planet
@@ -145,24 +197,26 @@ float density(vec3 p) {
 	// The weather system: a few hundred kilometres of it, which is what
 	// `noise_scale` is for.
 	vec3 q = up * noise_scale + wind_uv * wind_time;
-	float shape = spread(fbm(q)) * profile - (1.0 - coverage);
+	float shape = texture(vol, q).r * profile - (1.0 - coverage);
 	if (shape <= 0.0) {
 		return 0.0;
 	}
 	// ...and the clouds in it, which this had none of.
 	//
-	// The finest octave of the shape field is 8.07 times `noise_scale`, so at
-	// nine units to the radian the smallest thing in the layer was the radius
-	// over seventy-three -- eighty-eight kilometres. That is not a cloud, it is
-	// an overcast: fly into one and you are inside it for as long as you care
-	// to fly, and a ray marched sideways through the layer never leaves it.
-	// Every windscreen was white, and so was every seeker looking through one.
+	// The shape field is the weather: hundreds of kilometres down to about
+	// eleven. On its own that is an overcast rather than cloud -- fly into one
+	// and you are inside it for as long as you care to fly, and a ray marched
+	// sideways through the layer never leaves it. Every windscreen was white,
+	// and so was every seeker looking through one.
 	//
 	// This erodes the system into cloud a few kilometres across, which is a
-	// size an aeroplane can fly between. The lookup is warped by the shape
-	// field so the detail does not repeat with the texture's own period.
-	vec3 qd = up * detail_scale + vec3(shape * 0.7) + wind_uv * wind_time * 3.0;
-	float detail = spread(fbm(qd));
+	// size an aeroplane can fly between. The lookup is nudged by the shape
+	// field so the two do not line up; only nudged, because at the whole tile
+	// this used the detail was read by the *gradient of the weather* rather
+	// than by where in the sky it was, and came out smeared along it.
+	vec3 qd = up * detail_scale + vec3(shape * detail_warp)
+		+ wind_uv * wind_time * 3.0;
+	float detail = texture(vol, qd).g;
 	return max(shape - (1.0 - detail) * erode, 0.0) * density_mul * density_k;
 }
 
@@ -235,6 +289,17 @@ void fragment() {
 	float dt = g > 1.0
 		? span * (g - 1.0) / (pow(g, float(steps)) - 1.0)
 		: span / float(steps);
+	// Where in its own step each sample is taken, per pixel.
+	//
+	// Taken at the middle of every step, the samples of neighbouring pixels lie
+	// on the same shells about the eye, and a march this coarse then draws those
+	// shells: concentric bands across the sky that slide as you move. Offsetting
+	// the sample within its step by a per-pixel amount turns the band into
+	// grain, which is what the eye forgives. Interleaved gradient noise rather
+	// than a hash, because it is designed to look even in a small neighbourhood
+	// instead of merely random.
+	float jitter = fract(52.9829189
+		* fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
 	float t = t0;
 	float alpha = 0.0;
 	float lit = 0.0;
@@ -242,7 +307,7 @@ void fragment() {
 		if (alpha > 0.985) {
 			break;
 		}
-		vec3 p = eye + dir * (t + dt * 0.5);
+		vec3 p = eye + dir * (t + dt * jitter);
 		float step_len = dt;
 		t += dt;
 		dt *= g;
@@ -288,9 +353,10 @@ func build() -> void:
 	_mat.set_shader_parameter("noise_scale", NOISE_SCALE)
 	_mat.set_shader_parameter("detail_scale", DETAIL_SCALE)
 	_mat.set_shader_parameter("erode", ERODE)
-	_mat.set_shader_parameter("spread_k", SPREAD_K)
+	_mat.set_shader_parameter("detail_warp", DETAIL_WARP)
 	_mat.set_shader_parameter("extinction", EXTINCTION)
 	_mat.set_shader_parameter("density_k", DENSITY_K)
+	_mat.set_shader_parameter("steps", STEPS)
 	# metres a second -> radians a second -> the texture space the noise is in
 	_mat.set_shader_parameter("wind_uv",
 		WIND_DIR.normalized() * (WIND / (Sim.PLANET_R + TOP) * NOISE_SCALE))
@@ -353,20 +419,37 @@ func _process(delta: float) -> void:
 	_t += delta
 	_mat.set_shader_parameter("wind_time", _t)
 
-## A 64-cube of random bytes. Sampled with linear filtering and repeat it is
-## tiling value noise, and the interpolation the hardware does for nothing is
-## the part that used to cost eight hashes a sample.
+## The layer'"'"'s noise, baked in the extension: red is the weather system, green
+## the clouds within it, with the octaves already summed into each.
+##
+## This used to be a cube of random bytes, and the four-octave sum was done per
+## sample in the shader. Trilinear filtering of uncorrelated bytes is value
+## noise whose lattice is one texel, so the octaves were that same one-texel
+## lattice read at four rates -- and at the detail scale the finest of them was
+## 47 m of sky, against a march whose first step is 571 m. It could not be
+## sampled and it was not: it aliased, and it moved with the camera instead of
+## with the weather. Summed at the bake, over a proper lattice, the finest thing
+## in the volume is `FINEST_M` and the shader fetches once instead of four times.
+##
+## Two million voxels of gradient and cellular noise is not a GDScript loop.
 func _noise_volume() -> ImageTexture3D:
-	const N := 64
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 20260904
+	# Two million voxels of gradient and cellular noise is a fifth of a second,
+	# and it is the same fifth of a second every launch: the layer's noise is a
+	# function of the code and of nothing else. It keeps with the rest of the
+	# bake.
+	var want := VOL_N * VOL_N * VOL_N * 2
+	var buf: PackedByteArray
+	var cached: Variant = WorldBake.get_baked("cloud_vol")
+	if cached is PackedByteArray and (cached as PackedByteArray).size() == want:
+		buf = cached
+	else:
+		buf = Sim.native.cloud_volume(VOL_N)
+		WorldBake.put("cloud_vol", buf)
 	var slices: Array[Image] = []
-	for z in N:
-		var buf := PackedByteArray()
-		buf.resize(N * N)
-		for i in N * N:
-			buf[i] = rng.randi() & 255
-		slices.append(Image.create_from_data(N, N, false, Image.FORMAT_R8, buf))
+	var plane := VOL_N * VOL_N * 2
+	for z in VOL_N:
+		slices.append(Image.create_from_data(VOL_N, VOL_N, false,
+			Image.FORMAT_RG8, buf.slice(z * plane, (z + 1) * plane)))
 	var t := ImageTexture3D.new()
-	t.create(Image.FORMAT_R8, N, N, N, false, slices)
+	t.create(Image.FORMAT_RG8, VOL_N, VOL_N, VOL_N, false, slices)
 	return t

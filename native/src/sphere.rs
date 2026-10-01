@@ -21,7 +21,8 @@ use crate::field::{lerp, smoothstep};
 use crate::world::{carve, corridor, world};
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 use rayon::prelude::*;
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::OnceLock;
 
 /// Where the flat pair is measured from, and how big the planet is.
 #[derive(Clone, Copy)]
@@ -44,24 +45,35 @@ impl Default for Chart {
     }
 }
 
-static CHART: OnceLock<RwLock<Chart>> = OnceLock::new();
-
-fn chart_cell() -> &'static RwLock<Chart> {
-    CHART.get_or_init(|| RwLock::new(Chart::default()))
-}
+/// Published as a pointer rather than held behind a lock.
+///
+/// A read lock is still a write to a shared cache line, and this is read once
+/// per height sample -- four million times over a map sheet, from every core at
+/// once. The chart moves perhaps twice in a sortie, so the new one is put
+/// somewhere fresh and the pointer swung at it; readers only load. The old
+/// chart is leaked, which costs forty bytes a move and lets a reader that is
+/// mid-sample keep the one it has.
+static CHART: AtomicPtr<Chart> = AtomicPtr::new(std::ptr::null_mut());
 
 pub fn set_chart(origin: [f32; 3], east: [f32; 3], south: [f32; 3], radius: f32) {
-    let mut c = chart_cell().write().unwrap();
-    c.origin = norm(origin);
-    c.east = norm(east);
-    c.south = norm(south);
-    c.radius = radius;
+    let c = Chart {
+        origin: norm(origin),
+        east: norm(east),
+        south: norm(south),
+        radius,
+    };
+    CHART.store(Box::into_raw(Box::new(c)), Ordering::Release);
 }
 
-/// Read once per entry point, not once per sample: this is a hot path and the
-/// chart only moves between frames.
+/// Read once per entry point where it can be: this is a hot path, and even a
+/// pointer load is worth hoisting out of a four million texel loop.
 pub fn chart() -> Chart {
-    *chart_cell().read().unwrap()
+    let p = CHART.load(Ordering::Acquire);
+    if p.is_null() {
+        return Chart::default();
+    }
+    // Sound: every chart ever published is leaked and never mutated.
+    unsafe { *p }
 }
 
 #[inline]
@@ -112,6 +124,11 @@ struct Planet {
     // has of how far inside a continent a point is.
     cont1: FastNoiseLite,
     mount: FastNoiseLite,
+    // The land's own relief, and the grain over it. Both are read in *metres
+    // over the surface* rather than in radians over the unit ball -- see
+    // `generated` -- so their frequencies are the flat world's own and do not
+    // scale with the radius.
+    hills: FastNoiseLite,
     detail: FastNoiseLite,
     warp: FastNoiseLite,
     moist: FastNoiseLite,
@@ -128,6 +145,9 @@ struct Planet {
     river2: FastNoiseLite,
     // Which stretches of coast are drowned ones.
     ria: FastNoiseLite,
+    // The radius the metre-space fields are read against, settled once with
+    // the rest of the generator rather than looked up per sample.
+    surf: f32,
 }
 
 static PLANET: OnceLock<Planet> = OnceLock::new();
@@ -162,19 +182,47 @@ fn planet() -> &'static Planet {
             // country.
             cont1: mk3(20260903, 0.85 * cs, 3, FractalType::FBm),
             mount: mk3(20260904, 2.6 * ts, 5, FractalType::Ridged),
-            detail: mk3(20260905, 7.5 * ts, 4, FractalType::FBm),
-            warp: mk3(20260906, 1.9 * cs, 2, FractalType::FBm),
+            // Relief below the range scale, which this planet had none of.
+            //
+            // `mount` is a ridged field at 5200 km over five octaves, so the
+            // finest thing in it is three hundred kilometres across, and the
+            // old detail field was 1800 km over four, so the finest thing in
+            // *that* was two hundred and twenty-five. Between those and the
+            // rivers at twenty-five kilometres there was nothing whatever --
+            // so the ground a sortie actually flies over was a smooth ramp
+            // with channels cut in it, which is exactly what it looked like.
+            //
+            // These two are read in metres over the surface, so they carry the
+            // flat world's own spectrum: hills from a hundred and thirty
+            // kilometres down to eight, and grain from four kilometres down to
+            // five hundred metres. With `mount` above them the land now has
+            // something at every scale it can be seen at.
+            hills: mk3(20260907, 0.0000075, 5, FractalType::FBm),
+            detail: mk3(20260905, 0.00025, 4, FractalType::FBm),
+            // One octave. This is a distortion, not a field anybody looks at:
+            // the second octave of it went into three lookups a sample once
+            // the warp was done properly, and what it bought was detail in
+            // something whose whole job is to be smooth.
+            warp: mk3(20260906, 1.9 * cs, 1, FractalType::FBm),
             moist: mk3(20260908, 1.3 * cs, 3, FractalType::FBm),
             ctemp: mk3(515, 40.0, 2, FractalType::FBm),
             cmoist: mk3(811, 29.0, 3, FractalType::FBm),
-            // A zero crossing every four hundredths of a radian or so, which
-            // on this planet is a river about every twenty-five kilometres.
-            river: mk3(20260910, 260.0 * ts, 2, FractalType::FBm),
-            river2: mk3(20260911, 197.0 * ts, 2, FractalType::FBm),
+            // A drainage every eighty kilometres in one system and every
+            // hundred and twenty in the other.
+            //
+            // It used to be every twenty-five from each. Measured along a
+            // great circle, sixty per cent of the land was inside a river
+            // valley and fifty-five per cent of it had a channel cut through
+            // it: the planet was not land with rivers on it, it was corduroy,
+            // and the two systems crossing read at map scale as a swirl.
+            // Three octaves rather than two, so that what is left meanders.
+            river: mk3(20260910, 66.0 * ts, 3, FractalType::FBm),
+            river2: mk3(20260911, 50.0 * ts, 3, FractalType::FBm),
             // Features about two hundred kilometres across, so a drowned
             // coast is a region of the map rather than one river or a whole
             // continent.
             ria: mk3(20260912, 34.0 * ts, 2, FractalType::FBm),
+            surf: chart().radius.max(1.0),
         }
     })
 }
@@ -341,9 +389,39 @@ pub const OCEAN: f32 = 4600.0;
 /// Height above sea level for a direction, in metres, before anything built.
 pub fn generated(d: [f32; 3]) -> f32 {
     let p = planet();
-    let w = p.warp.get_noise_3d(d[0] * 1.7, d[1] * 1.7, d[2] * 1.7) * 0.22;
-    let q = norm([d[0] + w, d[1] + w * 0.6, d[2] - w]);
+    // The continental warp: three decorrelated samples, not one.
+    //
+    // This used to take a single scalar and add it to all three axes at once,
+    // which is not a domain warp at all -- it displaces every point along the
+    // same fixed direction and only varies how far. What that draws is a
+    // shear: coastlines and sea floor smeared along one axis of the planet,
+    // read on the orbital view as swirls that all lean the same way. Offsetting
+    // the field three different ways costs two more lookups and displaces each
+    // point somewhere of its own.
+    //
+    // And by less. A fifth of a radian is thirteen hundred kilometres -- wider
+    // than the feature it is warping, so the field was not being distorted so
+    // much as stirred.
+    const WA: f32 = 0.11;
+    let (wx, wy, wz) = (d[0] * 1.7, d[1] * 1.7, d[2] * 1.7);
+    let w = [
+        p.warp.get_noise_3d(wx, wy, wz) * WA,
+        p.warp.get_noise_3d(wy + 31.0, wz - 17.0, wx + 5.0) * WA,
+        p.warp.get_noise_3d(wz + 71.0, wx + 43.0, wy - 61.0) * WA,
+    ];
+    let q = norm([d[0] + w[0], d[1] + w[1], d[2] + w[2]]);
     let c = p.cont.get_noise_3d(q[0], q[1], q[2]);
+    // Where this point is in metres over the surface, for the relief fields.
+    //
+    // A unit direction times the radius. Noise read in radians cannot go below
+    // about a couple of hundred kilometres before the frequency it needs runs
+    // the lattice coordinate past what a single can hold; read in metres the
+    // coordinate is the same magnitude the flat world's always was, and the
+    // flat world draws ground down to a few hundred metres with it. The warp
+    // is deliberately not applied here: it is a continental distortion, and
+    // dragging the fine grain through it by a thousand kilometres would smear
+    // exactly the detail this is for.
+    let pm = [d[0] * p.surf, d[1] * p.surf, d[2] * p.surf];
     // One rule, everywhere.
     //
     // There used to be a bias here: a lift toward land wherever one of the six
@@ -358,14 +436,20 @@ pub fn generated(d: [f32; 3]) -> f32 {
     let mut h = -OCEAN * (1.0 - land) * (0.35 + 0.65 * (1.0 - land));
     if land < 1.0 {
         // The sea floor is not a table: ridges and basins are what make one
-        // piece of deep ocean a different place from another.
-        let fl = p.mount.get_noise_3d(q[0] * 1.3, q[1] * 1.3, q[2] * 1.3);
-        let fd = p.detail.get_noise_3d(q[0] * 0.7, q[1] * 0.7, q[2] * 0.7);
+        // piece of deep ocean a different place from another. Swells, though,
+        // not ridges -- `mount` is a ridged field, and a ridged field is
+        // filaments. Taken at nine hundred metres under an ocean whose colour
+        // ramps over four and a half kilometres it painted the whole sea floor
+        // with pale threads, which from orbit was the one thing the planet was
+        // covered in. The continental field at its own scale gives deep and
+        // shallow without drawing a web over it.
+        let fl = p.cont.get_noise_3d(q[0] * 2.3, q[1] * 2.3, q[2] * 2.3);
+        let fd = p.hills.get_noise_3d(pm[0] * 0.7, pm[1] * 0.7, pm[2] * 0.7);
         h += (1.0 - land) * (fl * 900.0 + fd * 420.0);
     }
     if land > 0.0 {
         let m = p.mount.get_noise_3d(q[0], q[1], q[2]).abs();
-        let det = p.detail.get_noise_3d(q[0], q[1], q[2]);
+        let hill = p.hills.get_noise_3d(pm[0], pm[1], pm[2]);
         // Ranges inland, where the continent is thickest, and low coasts.
         let mass = ((c + 0.12) / 0.5).clamp(0.0, 1.0);
         // The mountains are left where the generator puts them.
@@ -376,31 +460,27 @@ pub fn generated(d: [f32; 3]) -> f32 {
         // road survey still cannot build in five kilometres of ridged relief;
         // the answer is to put the country somewhere the planet is already
         // gentle, which is what `homelands` searches for.
-        // The land's own relief, bounded before it is weighted in.
         //
-        // Land ought to be above the water and is not: what is left after the
-        // ocean term is a ridged field times a signed detail field, and where
-        // the ridge is quiet and the detail negative it sums below sea level.
-        // Four of the six countries came out drowned, one with its aerodrome
-        // 136 m under, on ground the continent field called land.
+        // How mountainous this stretch of continent is: nothing on a margin,
+        // everything in the middle of a range. One number, so the relief
+        // beneath it can be weighted by the same thing the ranges are.
+        let belt = (0.10 + 0.90 * mass * mass) * m;
+        // The ranges, then the country between them, then the grain on that.
         //
-        // Bounded *here* rather than on the total, because on the total it
-        // lifts the ocean: a point whose land weight is a thousandth is 4600 m
-        // down, and a floor applied to the sum brings it to the surface --
-        // forty-seven per cent of the planet turned to land that way. The
-        // land's own shape is what is bounded; the shore still fades into deep
-        // water on the weight.
-        //
-        // And by a softplus, not by a maximum. A hard floor is a crease -- a
-        // first-derivative discontinuity along every contour it bites on -- and
-        // the road survey, the river carving and the aerodrome levelling all
-        // broke on it. A soft maximum is smooth and is not a bound: it dips
-        // below its own floor by half the smoothing width, which put the
-        // countries straight back under. This is above the floor for every
-        // input and tends to the height itself once clear of it.
-        let mut lh = RELIEF * (0.10 + 0.90 * mass * mass) * (m * 0.82 + det * 0.18)
-            + 140.0 * det
+        // The middle term is what the planet was missing. `belt` varies over
+        // three hundred kilometres at its finest, so on its own the land is a
+        // ramp two hundred kilometres long however high it gets -- you can fly
+        // a sortie across it and never see the ground change. `hill` runs from
+        // a hundred and thirty kilometres down to eight, which is the band a
+        // valley, a ridge and a saddle live in, and it is scaled by the belt
+        // so that lowland rolls by a hundred metres and an alpine stretch
+        // throws up a kilometre of it.
+        let mut lh = RELIEF * belt * 0.82
+            + (300.0 + RELIEF * belt * 0.55) * hill
             + 210.0;
+        // And the grain over that: a few metres on a plain, a few tens on a
+        // hillside, the same weighting the flat world gives its own detail.
+        lh += p.detail.get_noise_3d(pm[0], pm[1], pm[2]) * (14.0 + 120.0 * m);
         // Coastal plains.
         //
         // Measured, this planet went from the shore to a 410 m tableland in
@@ -416,6 +496,28 @@ pub fn generated(d: [f32; 3]) -> f32 {
         let inner = p.cont1.get_noise_3d(q[0], q[1], q[2]);
         let plain = smoothstep(-0.02, 0.16, inner);
         lh *= 0.18 + 0.82 * plain;
+        // And a floor under the lot of it.
+        //
+        // Land ought to be above the water and is not: what is left of the sum
+        // above is a ridged field plus a signed one, and where the ridge is
+        // quiet and the signed field negative it comes out below sea level.
+        // Four of the six countries came out drowned that way, one with its
+        // aerodrome 136 m under, on ground the continent field called land.
+        //
+        // Bounded *here* rather than on the total, because on the total it
+        // lifts the ocean: a point whose land weight is a thousandth is 4600 m
+        // down, and a floor applied to the sum brings it to the surface --
+        // forty-seven per cent of the planet turned to land that way. The
+        // land's own shape is what is bounded; the shore still fades into deep
+        // water on the weight.
+        //
+        // And by a softplus, not by a maximum. A hard floor is a crease -- a
+        // first-derivative discontinuity along every contour it bites on -- and
+        // the road survey, the river carving and the aerodrome levelling all
+        // broke on it. A soft maximum is smooth and is not a bound: it dips
+        // below its own floor by half the smoothing width, which put the
+        // countries straight back under. This is above the floor for every
+        // input and tends to the height itself once clear of it.
         let floor = 30.0f32;
         let k = 60.0f32;
         let dh = lh - floor;
@@ -458,7 +560,7 @@ fn river_cut(h: f32, rv: f32, land: f32, ria: f32) -> f32 {
     // The valley the channel sits in: broad, and deeper through high ground --
     // a gorge in the mountains and barely a dip on a coastal plain, which is
     // the difference between a river that has had to cut and one that has not.
-    let vale = 1.0 - smoothstep(0.020, 0.200, rv);
+    let vale = 1.0 - smoothstep(0.004, 0.030, rv);
     if vale > 0.0 {
         let bite = ((out - 120.0) / 900.0).clamp(0.0, 1.0);
         out -= lerp(26.0, 260.0, bite) * vale * vale * land;
@@ -484,7 +586,7 @@ fn river_cut(h: f32, rv: f32, land: f32, ria: f32) -> f32 {
     // water but has to get down to the bridge -- came back with a leg at 16.5 %
     // against its own 15 % limit. Over a kilometre and a half the same channel
     // has banks a road can climb.
-    let chan = 1.0 - smoothstep(0.030, 0.150, rv);
+    let chan = 1.0 - smoothstep(0.0025, 0.014, rv);
     if chan > 0.0 {
         // How far up a channel the sea comes.
         //
@@ -768,6 +870,9 @@ pub fn sheet(w: usize, h: usize, north: [f32; 3], radius: f32) -> Vec<u8> {
 pub fn sheet_window(w: usize, h: usize, north: [f32; 3], radius: f32,
         u0: f32, u1: f32, v0: f32, v1: f32) -> Vec<u8> {
     let p = planet();
+    // Once, not once a texel. `height` and `road_ink` both want it, and at four
+    // million texels across every core the read was the sheet's own bottleneck.
+    let ch = chart();
     let mut out = vec![0u8; w * h * 3];
     let du = u1 - u0;
     let dv = v1 - v0;
@@ -779,7 +884,7 @@ pub fn sheet_window(w: usize, h: usize, north: [f32; 3], radius: f32,
         for i in 0..w {
             let u = u0 + (i as f32 + 0.5) / w as f32 * du;
             let d = sheet_dir(u, v, north);
-            let hh = height(d, radius, crate::G_ALL);
+            let hh = height_on(&ch, d, radius, crate::G_ALL);
             let mo = p.moist.get_noise_3d(d[0], d[1], d[2]);
             let mut c = colour(d, hh, north, mo);
             // The roads, where the picture is fine enough to be worth drawing
@@ -787,9 +892,8 @@ pub fn sheet_window(w: usize, h: usize, north: [f32; 3], radius: f32,
             // frame: the network is fifty thousand legs and the map redraws
             // every frame it is open.
             if texel < 4000.0 && hh > 0.0 {
-                let ch = chart();
                 let (rx, rz) = chart_xz(&ch, d);
-                c = crate::road_ink(rx, rz, texel, c);
+                c = crate::raster::road_ink(rx, rz, texel, c);
             }
             let o = i * 3;
             row[o] = (c[0].clamp(0.0, 1.0) * 255.0) as u8;
@@ -817,3 +921,81 @@ pub fn climate(d: [f32; 3]) -> (f32, f32) {
     )
 }
 
+// ---------------------------------------------- the chart's own rasters
+
+/// The close-in ground as the map draws it, on the planet.
+///
+/// `map_relief` rasterises the flat field about the world origin, which is the
+/// last thing in the map that still believes in an authored square: on a planet
+/// the ground under the chart is the planetary field, and the chart moves. This
+/// takes the same picture in chart coordinates, so it is the country the player
+/// is actually over and it can be taken again when the chart is put somewhere
+/// else.
+///
+/// A free function rather than a method, because it is wanted from two places:
+/// the blocking call the loading screen pumps, and the off-thread bake a chart
+/// move asks for.
+pub fn relief_globe(c: &Chart, n: usize, half: f32) -> Vec<u8> {
+    let step = half * 2.0 / n as f32;
+    // The heights first, once each, on a grid one bigger than the picture.
+    //
+    // Every texel needs its own height and its two forward neighbours' to
+    // light it off the slope, and every one of those neighbours is another
+    // texel's own height. Asked for three times over, a 2048 sheet was
+    // twelve and a half million evaluations of the full field -- generated
+    // terrain, rivers, carving and all -- for four million texels, and the
+    // map was the largest single item in the world's build.
+    let gn = n + 1;
+    let mut hs = vec![0f32; gn * gn];
+    hs.par_chunks_mut(gn).enumerate().for_each(|(j, row)| {
+        let z = -half + j as f32 * step;
+        for (i, v) in row.iter_mut().enumerate() {
+            *v = ground_world_y(&c, -half + i as f32 * step, z, crate::G_ALL);
+        }
+    });
+    let mut out = vec![0u8; n * n * 3];
+    out.par_chunks_mut(n * 3).enumerate().for_each(|(j, row)| {
+        let z = -half + j as f32 * step;
+        for i in 0..n {
+            let x = -half + i as f32 * step;
+            let h = hs[j * gn + i];
+            let sea = sea_at(&c, x, z);
+            // Lit off the slope, the same way the flat sheet is: a map with
+            // no hill shading on it is a biome chart, not a map. Worked out
+            // for water too and then thrown away, because the colour rule
+            // below declines to shade a sea.
+            let dx = hs[j * gn + i + 1] - h;
+            let dz = hs[(j + 1) * gn + i] - h;
+            let shade = (0.72 + (-dx - dz) / (step * 0.55)).clamp(0.35, 1.5);
+            // The planet's own rule, not a second one written for the
+            // chart: these are two pictures of the same ground.
+            let d = dir_from_chart(&c, x, z);
+            let col = crate::raster::road_ink(x, z, step,
+                surface_colour(d, h - sea, NORTH, shade));
+            let o = i * 3;
+            row[o] = (col[0].clamp(0.0, 1.0) * 255.0) as u8;
+            row[o + 1] = (col[1].clamp(0.0, 1.0) * 255.0) as u8;
+            row[o + 2] = (col[2].clamp(0.0, 1.0) * 255.0) as u8;
+        }
+    });
+    out
+}
+
+/// Temperature and moisture over the chart, as the two half float channels the
+/// ground shader samples. A free function because it is wanted from the main
+/// thread at boot and from a worker after a chart move.
+pub fn climate_globe(c: &Chart, n: usize, half: f32) -> Vec<u8> {
+    let span = half * 2.0;
+    let mut out = vec![0u8; n * n * 4];
+    out.par_chunks_mut(n * 4).enumerate().for_each(|(j, row)| {
+        let z = (j as f32 + 0.5) / n as f32 * span - half;
+        for i in 0..n {
+            let x = (i as f32 + 0.5) / n as f32 * span - half;
+            let (t, m) = climate(dir_from_chart(c, x, z));
+            row[i * 4..i * 4 + 2].copy_from_slice(&crate::raster::f16(t).to_le_bytes());
+            row[i * 4 + 2..i * 4 + 4]
+                .copy_from_slice(&crate::raster::f16(m).to_le_bytes());
+        }
+    });
+    out
+}

@@ -19,8 +19,21 @@ class_name WeaponSpec
 ## gives it any turn at all. A HARM fired at a battery at its rated 48 km
 ## arrived at 196 m/s. The rounds that go a long way were the ones it ruined.
 
+## The table, built once.
+##
+## `_db` is a dictionary literal several hundred lines long, and it was
+## evaluated afresh on every lookup -- every nested dictionary, every colour,
+## every string, allocated and thrown away to read one field out of one entry.
+## The radar lock asks for a weapon spec at a hundred and twenty hertz per
+## aircraft and asks twice each time, so a fight rebuilt the whole table fifty
+## times a frame: measured, 1.59 ms of a 13 ms frame. Nothing writes to a spec
+## -- they are read-only tables -- so one copy serves everybody.
+static var _table: Dictionary = {}
+
 static func get_spec(id: String) -> Dictionary:
-	return _db().get(id, _db()["aim9"])
+	if _table.is_empty():
+		_table = _db()
+	return _table.get(id, _table["aim9"])
 
 static func _db() -> Dictionary:
 	return {

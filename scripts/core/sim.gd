@@ -808,49 +808,15 @@ const LAND_HALF := 768_000.0
 var _land_mask := PackedByteArray()
 
 func build_landmass() -> void:
-	var n := LAND_N
-	var cell: float = LAND_HALF * 2.0 / float(n)
-	var x0: float = -LAND_HALF
-	var h: PackedFloat32Array = native.grounds_globe(x0, x0, cell, n) if globe \
-		else native.grounds(x0, x0, cell, n, G_ALL)
-	var wet := PackedByteArray()
-	wet.resize(n * n)
-	for j in n:
-		var z: float = x0 + float(j) * cell
-		for i in n:
-			var x: float = x0 + float(i) * cell
-			# The flat field comes back without the drop on it; the planetary
-			# one already carries it. Either way the test is against the sea
-			# under that point.
-			var g: float = h[j * n + i] - (planet_drop(x, z) if not globe else 0.0)
-			wet[j * n + i] = 1 if g > sea_at(x, z) else 0
-	_land_mask = PackedByteArray()
-	_land_mask.resize(n * n)
-	var mid := int(n / 2.0)
-	var start := mid * n + mid
-	if wet[start] == 0:
-		# The airfield is not on land, which should not happen and is worth
-		# saying rather than silently marking the whole world unbuildable.
+	# The grid, the waterline and the fill, in one call.
+	#
+	# It was a quarter of a million cells thresholded here and then a flood fill
+	# over the same quarter million that built a fresh array of the four
+	# neighbour offsets for every cell it visited. Measured, 334 ms of a four
+	# second cold start, and not one decision in any of it.
+	_land_mask = native.landmass(LAND_HALF, LAND_N)
+	if _land_mask.is_empty():
 		push_warning("the airfield is not on land: no landmass to build on")
-		return
-	var queue := PackedInt32Array([start])
-	_land_mask[start] = 1
-	var head := 0
-	while head < queue.size():
-		var c: int = queue[head]
-		head += 1
-		var ci: int = c % n
-		var cj: int = int(c / float(n))
-		for d in [[1, 0], [-1, 0], [0, 1], [0, -1]]:
-			var ni: int = ci + int(d[0])
-			var nj: int = cj + int(d[1])
-			if ni < 0 or nj < 0 or ni >= n or nj >= n:
-				continue
-			var k: int = nj * n + ni
-			if _land_mask[k] == 1 or wet[k] == 0:
-				continue
-			_land_mask[k] = 1
-			queue.append(k)
 
 ## Is this point on the same land as the airfield? True everywhere if the fill
 ## has not been run, so nothing is refused a site for want of an answer.
@@ -1014,6 +980,21 @@ func surface_grip(x: float, z: float) -> float:
 		if absf(l.y) <= 1560.0 and absf(l.x) <= 95.0:
 			return 1.0
 	return 0.45
+
+## Ground, slope and grip under a set of wheels at once: five numbers each --
+## the height, the three of the normal, and the grip -- in the order they came
+## in. `radii` says how big each wheel is, which is what decides whether it is
+## touching: one in the air is given its height and nothing else.
+##
+## This is `height_at`, `normal_at` and `surface_grip` asked together, because
+## asked apart they are six crossings of the extension boundary per wheel. A
+## tank has fourteen road wheels and a sector holds forty-five vehicles, all of
+## them integrating at 120 Hz: measured, forty-five thousand crossings a frame
+## and 87 ms of a hundred millisecond frame, which the physics then spends
+## twelve steps catching up on. One crossing a vehicle a step instead.
+func wheel_ground(pts: PackedVector3Array,
+		radii: PackedFloat64Array) -> PackedFloat64Array:
+	return native.wheel_ground(pts, radii)
 
 ## Road network, shared by the terrain painter and the placement rules. It is
 ## rebuilt once the towns have been sited, because the towns move: a trunk road
@@ -1498,6 +1479,30 @@ func register_deck(origin: Vector3, yaw: float, half: Vector2, deck_y: float) ->
 	decks.append(d)
 	return d
 
+## Hand the decks to the extension, which is where the terrain mesh is built.
+##
+## A deck is the one part of the world that moves, so it cannot be published
+## once with the roads and the aerodromes: it is pushed over just before the
+## work that reads it goes out. Cheap -- there are never more than a handful --
+## and the alternative is the mesher crossing back into script for every one of
+## the nine hundred heights a chunk asks for.
+func push_decks() -> void:
+	var flat := PackedFloat32Array()
+	flat.resize(decks.size() * 7)
+	var at := 0
+	for d in decks:
+		var o: Vector3 = d["origin"]
+		var hf: Vector2 = d["half"]
+		flat[at] = o.x
+		flat[at + 1] = o.z
+		flat[at + 2] = d["cos"]
+		flat[at + 3] = d["sin"]
+		flat[at + 4] = hf.x
+		flat[at + 5] = hf.y
+		flat[at + 6] = d["y"]
+		at += 7
+	native.set_decks(flat)
+
 ## Deck-local coordinates of a world point, or INF when it is not over the deck.
 func deck_local(d: Dictionary, x: float, z: float) -> Vector2:
 	var dx: float = x - d["origin"].x
@@ -1592,16 +1597,39 @@ func register_town_pads(sites: Array) -> Array:
 	return kept
 
 func site_roughness(c: Vector2, r: float) -> float:
-	var total := 0.0
-	var n := 0
-	for i in 7:
-		for j in 7:
-			var q := c + Vector2(float(i - 3), float(j - 3)) * (r * 0.30)
-			if q.distance_to(c) > r:
-				continue
-			total += 1.0 - normal_at(q.x, q.y).y
-			n += 1
-	return total / maxf(float(n), 1.0)
+	return site_roughness_many(PackedVector2Array([c]),
+		PackedFloat64Array([r]))[0]
+
+## The same for a whole list of candidates, which is how it is actually asked.
+##
+## The measure is 49 stations, each a normal, each of those four heights: 196
+## crossings of the extension boundary for one candidate, and siting the world's
+## settlements tries forty-nine candidates for each of forty-eight of them.
+## Measured, four hundred and sixty thousand crossings and 550 ms of a four
+## second cold start -- the largest single thing in laying out the road network.
+## Asked as a list it is one crossing and the stations run across every core.
+func site_roughness_many(centres: PackedVector2Array,
+		radii: PackedFloat64Array) -> PackedFloat64Array:
+	return native.roughness_at(centres, radii)
+
+## Which trunk road each of these points would run out to meet.
+##
+## The whole network against every point, which is what it has to be -- but the
+## network is twenty-nine thousand legs and walking it in script once per town
+## was 156 ms of every launch, cached network or not.
+func nearest_trunk_many(pts: PackedVector2Array) -> PackedVector2Array:
+	var flat := PackedFloat32Array()
+	flat.resize(ROADS.size() * 4)
+	var w := 0
+	for r in ROADS:
+		var a: Vector2 = r[0]
+		var b: Vector2 = r[1]
+		flat[w] = a.x
+		flat[w + 1] = a.y
+		flat[w + 2] = b.x
+		flat[w + 3] = b.y
+		w += 4
+	return native.nearest_on_lines(flat, pts)
 
 func register_segments(segs: Array) -> void:
 	_segments = segs
@@ -1949,28 +1977,20 @@ func faction_colour(faction: String) -> Color:
 			return Color(0.72, 0.68, 0.56)
 
 func line_of_sight(from: Vector3, to: Vector3, skip := 0.0) -> bool:
-	var span := from.distance_to(to)
-	if span < 1.0:
-		return true
-	var t0: float = clampf(skip / span, 0.0, 0.9)
-	var steps := clampi(int(span / 180.0), 6, 48)
-	for i in range(1, steps):
-		var f := float(i) / float(steps)
-		if f < t0:
-			continue
-		var q: Vector3 = from.lerp(to, f)
-		var g := height_at(q.x, q.z)
-		# Ground under the sea masks nothing. Everything afloat sits at the
-		# water line, so a sight line between two ships runs *below* it — and
-		# the seabed is terrain, so a shoal a few metres proud of the ray
-		# blocked two ships looking at each other across open water. What is
-		# under the sea is under the sea; only what stands above it is in the
-		# way.
-		if g <= WATER_LEVEL:
-			continue
-		if q.y < g - 2.0:
-			return false
-	return true
+	return native.sight_lines(PackedVector3Array([from]),
+		PackedVector3Array([to]), skip)[0] != 0
+
+## The same for a whole list of sight lines at once.
+##
+## The march is up to forty-eight height queries, and asked one line at a time
+## each of those is its own crossing of the extension boundary. The head-up
+## display's radar scope asks it of every contact on the scope every frame:
+## fourteen aircraft in a fight is seven hundred crossings a frame, and measured
+## that one panel was 1.0 ms of a 13 ms frame. Asked as a list it is one
+## crossing and the marches run across every core.
+func lines_of_sight(from: PackedVector3Array, to: PackedVector3Array,
+		skip := 0.0) -> PackedByteArray:
+	return native.sight_lines(from, to, skip)
 
 ## How far down a contact would have to go to break the line. Negative when it
 ## is already masked. Used by the AI to decide whether the terrain is worth

@@ -1171,6 +1171,11 @@ func display_name() -> String:
 	return String(KINDS[kind]["name"])
 
 func _physics_process(delta: float) -> void:
+	var _pt := Sim.prof_at()
+	_tick_ship_p(delta)
+	Sim.prof_end(&"ship.tick", _pt)
+
+func _tick_ship_p(delta: float) -> void:
 	_t += delta
 	# A ship somebody else is simulating is a picture: the host does the moving
 	# and the fighting. The conn still runs, because that is what draws the
