@@ -38,8 +38,12 @@ var _diag_prev := Vector3.INF
 var shake_worst := 0.0
 var shake_sum := 0.0
 var shake_n := 0
-var _marker: Node3D
+var _marker: LaserSpot
 var lasing := false
+## Set when the laser comes on, so the spot is selected once rather than forced
+## on the aeroplane every frame -- which is what stopped T reaching anything
+## else for as long as the laser was lit.
+var _select_spot := false
 var _beam: MeshInstance3D
 
 func _ready() -> void:
@@ -312,6 +316,7 @@ func designate() -> void:
 		best = friend
 	if best:
 		tracked = best
+		_track_last = best.global_position
 		mode = POINT
 		_hand_over(best)
 		Sim.report("pod tracking %s" % Sim.label_of(best), Sim.Ev.GOOD)
@@ -323,7 +328,7 @@ func designate() -> void:
 			tracked = null
 			# hand the spot to the weapons as a real target so a bomb can use it
 			if _marker == null or not is_instance_valid(_marker):
-				_marker = Node3D.new()
+				_marker = LaserSpot.new()
 				_marker.name = "Designated point"
 				get_tree().current_scene.add_child(_marker)
 			_marker.global_position = hit
@@ -336,14 +341,32 @@ func designate() -> void:
 func toggle_laser() -> void:
 	lasing = not lasing
 	if lasing:
+		_select_spot = true
 		Sim.report("laser on — designating", Sim.Ev.GOOD)
 	else:
 		Sim.report("laser off", Sim.Ev.INFO)
 		if _beam:
 			_beam.visible = false
 
+## Keep the spot's own idea of itself current: whose it is, whether the laser
+## is on it, and what it is riding when the track is on a moving thing.
+func _refresh_spot() -> void:
+	if _marker == null or not is_instance_valid(_marker):
+		return
+	var lit: bool = lasing and active and _beam != null and _beam.visible
+	_marker.lasing = lit
+	_marker.on = lit or (active and mode == AREA)
+	_marker.follow = tracked if (mode == POINT and is_instance_valid(tracked)) else null
+	if is_instance_valid(platform) and "team" in platform:
+		_marker.team = int(platform.get("team"))
+
 ## Put the laser away: nothing of it should be visible with the page closed.
 func _stow() -> void:
+	if _marker != null and is_instance_valid(_marker):
+		# An area track is still held with the page shut -- the main view marks
+		# it -- so it stays a mark the aeroplane can be locked on.
+		_marker.on = mode == AREA
+		_marker.lasing = false
 	if _beam != null and is_instance_valid(_beam):
 		_beam.visible = false
 	if _marker != null and is_instance_valid(_marker):
@@ -356,7 +379,7 @@ func _stow() -> void:
 		# laser spot, which is a place rather than a thing, is let go.
 		if mode == POINT and is_instance_valid(tracked):
 			plane().target = tracked
-		elif _marker != null and plane() != null \
+		elif mode != AREA and _marker != null and plane() != null \
 				and plane().target == _marker:
 			plane().target = null
 
@@ -388,13 +411,16 @@ func _update_laser() -> void:
 	_beam.look_at(p, Vector3.UP)
 	_beam.scale = Vector3(1, 1, reach)
 	if _marker == null or not is_instance_valid(_marker):
-		_marker = Node3D.new()
+		_marker = LaserSpot.new()
 		_marker.name = "Laser spot"
 		get_tree().current_scene.add_child(_marker)
 	_marker.visible = true
 	_marker.global_position = p
-	if plane() != null:
+	# Selected when the laser comes on, and from then on it is one contact among
+	# the others: T walks off it and back onto it like anything else.
+	if _select_spot and plane() != null:
 		plane().target = _marker
+		_select_spot = false
 
 func break_lock() -> void:
 	mode = SLEW
@@ -493,7 +519,47 @@ func _aim_dir() -> Vector3:
 	var b := _mount_xf(c).basis
 	return (b * (Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) * Vector3(0, 0, -1))).normalized()
 
+## Where the point track's target was last seen, so the sensor can hold the
+## place when the thing is gone.
+var _track_last := Vector3.INF
+
+## The thing being tracked has been destroyed, or has gone: hold the ground it
+## was on. Dropping back to slew put the head wherever its gimbal happened to
+## rest and left you hunting for the spot you had just hit -- with a column
+## half killed and the rest of it still there.
+func _hold_area(p: Vector3) -> void:
+	tracked = null
+	if p == Vector3.INF:
+		break_lock()
+		return
+	var g := Vector3(p.x, maxf(Sim.height_at(p.x, p.z), Sim.sea_at(p.x, p.z)), p.z)
+	area_point = g
+	mode = AREA
+	if _marker == null or not is_instance_valid(_marker):
+		_marker = LaserSpot.new()
+		_marker.name = "Designated point"
+		get_tree().current_scene.add_child(_marker)
+	_marker.global_position = g
+	_marker.on = true
+	# The aeroplane's lock comes with it onto the place, if it was on the thing
+	# that has gone; a lock on something else is left alone.
+	var pl := plane()
+	if pl != null:
+		if pl.target == null or not is_instance_valid(pl.target):
+			pl.target = _marker
+	elif platform != null:
+		_hand_over(_marker)
+	Sim.report("target down — sensor holding the area", Sim.Ev.INFO)
+
 func _process(delta: float) -> void:
+	# Watched whether the page is up or not: a target killed with the page
+	# closed is a target killed all the same.
+	if mode == POINT:
+		if is_instance_valid(tracked) and not (tracked.has_method("is_alive")
+				and not tracked.is_alive()):
+			_track_last = tracked.global_position
+		else:
+			_hold_area(_track_last)
 	if not active or platform == null:
 		# The beam lives in the world, not on the page. Without this it kept
 		# whatever state it had when the pod was closed -- visible from the
@@ -502,9 +568,6 @@ func _process(delta: float) -> void:
 		_stow()
 		return
 	_t += delta
-	if mode == POINT and (not is_instance_valid(tracked)
-			or (tracked.has_method("is_alive") and not tracked.is_alive())):
-		break_lock()
 	var origin := _head_origin()
 	var dir := _aim_dir()
 	_cam.fov = lerpf(_cam.fov, ZOOMS[zoom_step], clampf(delta * 8.0, 0.0, 1.0))
@@ -527,6 +590,7 @@ func _process(delta: float) -> void:
 			shake_n += 1
 		_diag_prev = rel
 	_update_laser()
+	_refresh_spot()
 	# hand the aim point to the aeroplane so a guided bomb can follow it
 	# Hand the spot to whoever is holding the sensor. On a ship there is no
 	# `designated` to write to — the mark goes to the hull as the thing its
@@ -591,7 +655,7 @@ func _draw() -> void:
 			w = plane().weapon_label(plane().current_weapon())
 			var n: int = plane().weapon_count(plane().current_weapon())
 			count = "belt" if n < 0 else str(n)
-		elif holder.has_method("weapon_label"):
+		elif holder.has_method("weapon_label") and _armed(holder):
 			w = String(holder.call("weapon_label"))
 			if holder.has_method("weapon_state"):
 				count = String(holder.call("weapon_state"))
@@ -602,6 +666,12 @@ func _draw() -> void:
 		if plane() != null:
 			draw_string(_font, Vector2(frame.x * 0.5 - 200, frame.y - 30),
 				"1-4 weapon   SPACE fire   CTRL+T track   L laser   N channel   wheel zoom   ALT+RMB close",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
+		elif not _armed(holder):
+			# Nothing aboard to shoot with -- the carrier, a merchant hull --
+			# so the page is a sensor and says only what a sensor does.
+			draw_string(_font, Vector2(frame.x * 0.5 - 150, frame.y - 30),
+				"CTRL+T track   L laser   N channel   wheel zoom   O close",
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
 		elif holder.has_method("weapons"):
 			# The hull's own selector, spelled out with what is chosen marked.
@@ -636,6 +706,19 @@ func _draw() -> void:
 	if fmod(_t, 1.0) < 0.5:
 		draw_string(_font, Vector2(frame.x - 66, 22), "REC", HORIZONTAL_ALIGNMENT_LEFT, -1, 13,
 			Color(1.0, 0.35, 0.3))
+
+## Whether whatever is carrying the sensor has anything to shoot with. Asked of
+## the host rather than assumed: the page used to print a selector and a FIRE
+## line for anything that answered `weapons`, and a hull that answered with an
+## empty list still got "SPACE fire".
+func _armed(holder: Node) -> bool:
+	if holder == null or not is_instance_valid(holder):
+		return false
+	if holder.has_method("armed"):
+		return bool(holder.call("armed"))
+	if holder.has_method("weapons"):
+		return not (holder.call("weapons") as PackedStringArray).is_empty()
+	return holder.has_method("weapon_label")
 
 ## Everything the radar is holding, boxed on the sensor picture. The pod has its
 ## own camera, so contacts are projected through that rather than the cockpit
@@ -740,3 +823,41 @@ func _draw_pointing(frame: Vector2, g: Color) -> void:
 	draw_string(_font, c + Vector2(-46, rad + 18),
 		"AZ %+04d  EL %+03d" % [int(rad_to_deg(yaw)), int(rad_to_deg(pitch))],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 13, g)
+
+
+## The pod's mark, as a contact the rest of the aeroplane can see.
+##
+## It was a bare node, so it was nothing to anything that looks for contacts:
+## not on the radar, not in the T cycle, and the only way a weapon learned of it
+## was by being handed it. A laser-guided rocket is fired *at* the spot, so the
+## spot has to be something you can pick. Not in "hittable" -- rounds would
+## burst on it and the opposition would shoot at it -- but in a group of its
+## own that the radar and the target cycle read.
+class LaserSpot extends Node3D:
+	var team := 0
+	## Whether it is a mark at all just now: the laser is on it, or the pod is
+	## holding it as an area track.
+	var on := false
+	var lasing := false
+	## What it is riding, when the track is on a thing rather than a place.
+	var follow: Node3D = null
+
+	func _ready() -> void:
+		add_to_group("laser_spots")
+
+	func display_name() -> String:
+		return "LASER SPOT" if lasing else "DESIGNATED POINT"
+
+	func is_alive() -> bool:
+		return true
+
+	func hit_radius() -> float:
+		return 2.0
+
+	func get_velocity() -> Vector3:
+		if is_instance_valid(follow):
+			if "linear_velocity" in follow:
+				return follow.get("linear_velocity")
+			if follow.has_method("get_velocity"):
+				return follow.call("get_velocity")
+		return Vector3.ZERO

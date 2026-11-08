@@ -349,6 +349,11 @@ var net: Node = null              # the live NetLink, or null offline
 ## than through the GUI, so without this a click on the map also pulled the
 ## trigger.
 var ui_modal := false
+## A range with no air threat on it. Set by the STRIKE mission: the vehicles,
+## shipping and helicopters on it are there to be attacked from the air, and
+## none of them shoots at an aeroplane -- not the batteries, not a tank's main
+## gun at a low pass, not a ship's tubes, not a gunship's missiles.
+var no_air_threat := false
 ## True while the chat line is open. Held keys keep reporting through
 ## `Input.is_action_pressed` no matter what consumes the event, so typing "d"
 ## in the chat rolled the aeroplane right. Every control surface reads through
@@ -1230,10 +1235,69 @@ func _survey_roads() -> void:
 			road_draw.append_array(PackedFloat32Array([
 				pl[i].x, pl[i].y, pl[i + 1].x, pl[i + 1].y, ROAD_HALF,
 				pf[i], pf[i + 1], 1.0 if (sa or sb) else 0.0]))
+	road_draw = _one_carriageway(road_draw)
 	if debug_roads:
 		print("[survey] %d lines, %d stations, worst neighbour disagreement %.1f m"
 			% [_road_lines.size(), op.size(), native.worst_tie(op, oy, of, os)])
 	_in_survey = false
+
+## Two roads on one stretch are one road, and it is drawn once.
+##
+## Where the weld has pulled two routes onto the same line each of them still
+## brought its own legs, so the carriageway was laid twice within a metre or two
+## of itself and the two surfaces fought over every pixel -- a shimmer along
+## every shared stretch, and over a viaduct a second deck's worth of road. A leg
+## whose two ends and middle all lie on a road already drawn, at the same
+## height, is dropped. Height matters: a road passing under another is not a
+## duplicate of it.
+const CARRIAGEWAY_NEAR := 3.5     # metres across, centreline to centreline
+const CARRIAGEWAY_SAME := 2.5     # metres of height
+const CARRIAGEWAY_CELL := 48.0
+
+func _one_carriageway(legs: PackedFloat32Array) -> PackedFloat32Array:
+	var grid: Dictionary = {}
+	var out := PackedFloat32Array()
+	var dropped := 0
+	for i in range(0, legs.size(), 8):
+		var a := Vector2(legs[i], legs[i + 1])
+		var b := Vector2(legs[i + 2], legs[i + 3])
+		var ya: float = legs[i + 5]
+		var yb: float = legs[i + 6]
+		if _on_drawn(out, grid, a, ya) and _on_drawn(out, grid, b, yb) \
+				and _on_drawn(out, grid, (a + b) * 0.5, (ya + yb) * 0.5):
+			dropped += 1
+			continue
+		var at := out.size()
+		out.append_array(legs.slice(i, i + 8))
+		# into every cell the leg's box touches, grown by the tolerance
+		var lo := Vector2i(floori((minf(a.x, b.x) - CARRIAGEWAY_NEAR) / CARRIAGEWAY_CELL),
+			floori((minf(a.y, b.y) - CARRIAGEWAY_NEAR) / CARRIAGEWAY_CELL))
+		var hi := Vector2i(floori((maxf(a.x, b.x) + CARRIAGEWAY_NEAR) / CARRIAGEWAY_CELL),
+			floori((maxf(a.y, b.y) + CARRIAGEWAY_NEAR) / CARRIAGEWAY_CELL))
+		for cx in range(lo.x, hi.x + 1):
+			for cz in range(lo.y, hi.y + 1):
+				var k2 := Vector2i(cx, cz)
+				if not grid.has(k2):
+					grid[k2] = []
+				(grid[k2] as Array).append(at)
+	if debug_roads:
+		print("[roads] %d of %d drawn legs were a second carriageway on a road already drawn" % [
+			dropped, int(legs.size() / 8.0)])
+	return out
+
+## Whether a point at a height lies on a leg already in `drawn`.
+func _on_drawn(drawn: PackedFloat32Array, grid: Dictionary, p: Vector2, y: float) -> bool:
+	var k := Vector2i(floori(p.x / CARRIAGEWAY_CELL), floori(p.y / CARRIAGEWAY_CELL))
+	for li in grid.get(k, []):
+		var o: int = li
+		var a := Vector2(drawn[o], drawn[o + 1])
+		var b := Vector2(drawn[o + 2], drawn[o + 3])
+		var ab := b - a
+		var t: float = clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1e-6), 0.0, 1.0)
+		if p.distance_to(a + ab * t) < CARRIAGEWAY_NEAR \
+				and absf(y - lerpf(drawn[o + 5], drawn[o + 6], t)) < CARRIAGEWAY_SAME:
+			return true
+	return false
 
 ## Throw away any road that leads nowhere.
 ##
@@ -1400,7 +1464,12 @@ func _index_corridor() -> void:
 			# the ground or the bore is inside the hill, and either way the
 			# country under it is untouched.
 			#
-			if _in_structure(li, i) or _in_structure(li, i + 1):
+			# The leg *onto* one does. That is the abutment -- the embankment
+			# carried up to meet the deck, or the cutting down to the portal --
+			# and leaving it out stopped the earthworks a whole station short:
+			# the road ended on a bank twenty metres up and the deck began in
+			# mid air beyond it.
+			if _in_structure(li, i) and _in_structure(li, i + 1):
 				continue
 			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1],
 				nat[i], nat[i + 1]])
@@ -2019,11 +2088,22 @@ func label_of(n: Node) -> String:
 	var nm := String(n.name)
 	return "contact" if nm.begins_with("@") else nm
 
+## True while the TAB menu is up. It is worked from the keyboard -- W/S and the
+## arrows to move through it, 1 to 9 to pick -- and every one of those is also
+## the stick or the weapon select, which the vehicles poll straight from the
+## input actions. Picking "all stop" off a ship's menu with S rang down astern
+## on the way, and choosing the third item selected weapon three.
+var menu_keys := false
+const MENU_ACTIONS := [&"pitch_up", &"pitch_down", &"weapon_1", &"weapon_2",
+	&"weapon_3", &"weapon_4", &"weapon_5", &"weapon_6", &"weapon_7", &"weapon_8"]
+
 func strength(action: StringName) -> float:
-	return 0.0 if typing else Input.get_action_strength(action)
+	if typing or (menu_keys and MENU_ACTIONS.has(action)):
+		return 0.0
+	return Input.get_action_strength(action)
 
 func held(action: StringName) -> bool:
-	if _blocked.has(action):
+	if _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
 		return false
 	return not typing and Input.is_action_pressed(action)
 
@@ -2078,7 +2158,7 @@ func _input(e: InputEvent) -> void:
 			_taps[a] = Time.get_ticks_msec()
 
 func tapped(action: StringName) -> bool:
-	if typing or _blocked.has(action):
+	if typing or _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
 		return false
 	var at: int = _taps.get(action, 0)
 	if at == 0:
@@ -2292,10 +2372,6 @@ func _setup_input() -> void:
 	_add(&"chaff",        [_key(KEY_V), _btn(JOY_BUTTON_DPAD_DOWN)])
 	_add(&"mouse_fly",    [_key(KEY_SEMICOLON)])
 	_add(&"map",          [_key(KEY_M), _key(KEY_F1)])
-	# The same map drawn on the planet. Not on a modifier and not on M twice:
-	# it is a mode you sit in, and cycling through it to close the map would
-	# mean pressing M three times to put the chart away.
-	_add(&"map_globe",    [_key(KEY_O), _key(KEY_F2)])
 	# Not backslash: `cycle_weapon` is already there, and `tapped` erases the
 	# press when it is read, so whichever of the two was polled first that frame
 	# ate the other. Cycling the weapon and slowing time fought over one key.

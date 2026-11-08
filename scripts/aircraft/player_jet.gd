@@ -221,7 +221,7 @@ func cycle_target() -> void:
 				continue
 			if not cand.has(n):
 				cand.append(n)
-	if cand.is_empty():
+	if cand.is_empty() and _own_spots(INF).is_empty():
 		say("no targets")
 		target = null
 		return
@@ -251,6 +251,13 @@ func cycle_target() -> void:
 	if not visible_now.is_empty():
 		cand = visible_now
 	else:
+		cand = []
+	# And our own laser spot, which is a mark rather than a contact: it is on
+	# our side, so the hostile test above throws it out, and the pod is what is
+	# looking at it, so terrain between it and the radar is beside the point.
+	for sp in _own_spots(reach):
+		cand.append(sp)
+	if cand.is_empty():
 		say("no radar contacts — terrain masked")
 		target = null
 		return
@@ -280,6 +287,15 @@ func cycle_target() -> void:
 	lock_time = 0.0
 	var d := global_position.distance_to(target.global_position) * 0.001
 	say("target %s  %.1f km" % [Sim.label_of(target).left(18), d])
+
+## The marks our own sensor is holding, inside `reach`.
+func _own_spots(reach: float) -> Array:
+	var out: Array = []
+	for sp in get_tree().get_nodes_in_group("laser_spots"):
+		if is_instance_valid(sp) and bool(sp.get("on")) and int(sp.get("team")) == team \
+				and global_position.distance_to((sp as Node3D).global_position) < reach:
+			out.append(sp)
+	return out
 
 func on_weapon_hit(what: Node, _wid: String) -> void:
 	if what.has_method("is_alive") and not what.is_alive():
@@ -421,6 +437,14 @@ func _auto_pilot(delta: float) -> void:
 			var b := global_transform.basis
 			var bank := atan2(-b.x.y, b.y.y)
 			var want_bank := deg_to_rad(-24.0)
+			# Round the mark, when the sensor is holding one. A fixed bank
+			# circles wherever the aeroplane happened to be, so the mark swept
+			# through the battery's arc once a lap and sat outside it the rest
+			# of the time -- the guns can only train forty-five degrees either
+			# side of the port beam.
+			var mark := _orbit_mark()
+			if mark != Vector3.INF:
+				want_bank = _pylon_bank(mark)
 			in_roll = clampf((want_bank - bank) * 1.6, -1.0, 1.0)
 			var err := orbit_alt - global_position.y
 			var want_vs := clampf(err * 0.16, -12.0, 12.0)
@@ -436,6 +460,54 @@ func _auto_pilot(delta: float) -> void:
 		_:
 			throttle = 0.75
 			_hold(2000.0, 0.0, 240.0)
+
+## The point the gunner is working, if there is one: an area or a point track.
+## Slewing is not a mark -- the sight is being moved, and an orbit chasing it
+## would chase the gunner's hand.
+func _orbit_mark() -> Vector3:
+	if pod == null or not is_instance_valid(pod) or not bool(pod.get("active")):
+		return Vector3.INF
+	if int(pod.get("mode")) == SensorPod.SLEW:
+		return Vector3.INF
+	return pod.call("aim_point")
+
+## Bank for a left-hand pylon turn about `mark`: whatever holds this range at
+## this speed, tightened while the mark is falling behind the port beam -- too
+## little bank, the circle is wider than the range -- and eased off while it is
+## drawing ahead, so it settles abeam, where the battery points.
+func _pylon_bank(mark: Vector3) -> float:
+	var to := mark - global_position
+	to.y = 0.0
+	var r: float = maxf(to.length(), 1.0)
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	var port := -global_transform.basis.x
+	port.y = 0.0
+	if fwd.length() < 0.01 or port.length() < 0.01:
+		return deg_to_rad(-24.0)
+	# zero with the mark on the port beam, positive ahead of it, negative behind
+	var ahead: float = atan2(to.dot(fwd.normalized()), to.dot(port.normalized()))
+	var v: float = maxf(Vector2(linear_velocity.x, linear_velocity.z).length(), 30.0)
+	var hold: float = atan(v * v / (9.81 * r))
+	# And at a range the guns can work. Held at whatever range it started, a
+	# mark designated nine kilometres out stayed nine kilometres out, where the
+	# 105 has to be laid seventeen degrees above the horizon to reach it and
+	# the mount stops at five. A gunship works from about as far out as it is
+	# high: too far, and the mark is carried ahead of the beam so the circle
+	# spirals in; too close, behind it so the circle opens out.
+	var above: float = maxf(global_position.y - Sim.height_at(mark.x, mark.z), 300.0)
+	# ...but never tighter than the aeroplane can actually fly at this speed
+	# with bank left over to steer with. Asked for a circle it could not hold,
+	# it sat at the stop, overshot, and swung wide for half a lap at a time.
+	var r_fly: float = v * v / (9.81 * tan(deg_to_rad(28.0)))
+	var r0: float = maxf(clampf(above * 1.2, 1500.0, 4500.0), r_fly)
+	var want_ahead: float = clampf((r - r0) / r0, -0.5, 1.0) * deg_to_rad(60.0)
+	# Right bank allowed too, a little: with the mark dead ahead the way round
+	# to having it on the port bow is a turn to starboard, and a left-only
+	# orbit flew straight over it and took a whole lap to come back.
+	var want: float = clampf(hold - (ahead - want_ahead) * 0.9,
+		deg_to_rad(-25.0), deg_to_rad(35.0))
+	return -want
 
 func _pitch_deg() -> float:
 	return rad_to_deg(asin(clampf(-global_transform.basis.z.y, -1.0, 1.0)))

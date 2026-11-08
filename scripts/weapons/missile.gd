@@ -18,7 +18,19 @@ var age := 0.0
 const FIN_STOWED := 0.06
 const FIN_OUT_AT := 0.30
 const FIN_OUT_OVER := 0.45
-var _fins: MeshInstance3D = null
+## The four fold-out tail fins and four canards, each a hinge that turns about
+## its own spar. The parent of each hinge is the fold: it is squashed flat
+## against the body in the tube and opens out once the round is clear.
+var _fins: Node3D = null
+var _folds: Array[Node3D] = []
+var _tails: Array[Node3D] = []
+var _canards: Array[Node3D] = []
+## What the round is asking its surfaces for, in its own frame: sideways (x)
+## and up (y), as a fraction of the most it can pull.
+var _demand := Vector2.ZERO
+var _prev_vel := Vector3.INF
+## Full throw of a surface.
+const FIN_THROW := 0.38
 ## Fired out of a canister rather than off an aeroplane: straight up, then over.
 ##
 ## And under its own booster. The `boost` in the weapon table is the sustainer
@@ -60,9 +72,19 @@ var _clutter_t := 0.0
 var _min_d := 1e9        # closest the round ever got to the aircraft it was aimed at
 var _min_age := 0.0
 
+## Set before `launch` when the round is going after a laser designation. A
+## round with a semi-active laser kit steers to the limits of the kit rather
+## than of the airframe it was born as -- the Hydra being the case in point.
+var laser_guided := false
+
 func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: Node3D) -> void:
 	wid = id
 	ws = WeaponSpec.get_spec(id)
+	if laser_guided and ws.has("laser_g"):
+		# a copy: the table is shared by every round of this type in the air
+		ws = ws.duplicate()
+		ws["max_g"] = float(ws["laser_g"])
+		ws["seeker_fov"] = float(ws.get("laser_fov", ws["seeker_fov"]))
 	_start_xf = xf
 	vel = carrier_vel
 	shooter = from
@@ -172,6 +194,63 @@ var _deck := 0.0
 ## Aiming points programmed before launch, one per warhead as the bus opens.
 ## Empty for an ordinary shot, which spreads its load over the footprint.
 var programmed: Array = []
+## The last flare and chaff salvo this round has been shown, by the target's
+## own count, so each salvo is judged once.
+var _flare_judged := -1
+var _chaff_judged := -1
+## How convincing a decoy still is to this seeker. Every salvo it has seen
+## through takes some of that away.
+var _decoy_wary := 1.0
+
+## The chance one salvo of decoys breaks a seeker's track.
+##
+## `bait` is the weapon's own susceptibility at the best geometry for the
+## decoy. An infrared seeker chasing a tail sees the flares come out of the
+## heat it is locked on; from ahead they fall away behind the target, and a
+## seeker with any discrimination watches them separate. Chaff is a cloud that
+## stops dead in the air, so against a doppler radar it only works when the
+## target has no closing speed of its own to tell it from the cloud -- when it
+## is beaming the seeker. And both are end-game measures: a salvo dropped with
+## ten seconds to run has burnt out or blown away before the round arrives.
+static func decoy_chance(bait: float, ir: bool, mpos: Vector3, mvel: Vector3,
+		tpos: Vector3, tvel: Vector3, wary := 1.0) -> float:
+	var to_m: Vector3 = mpos - tpos
+	var dist: float = to_m.length()
+	if dist < 1.0 or bait <= 0.0:
+		return 0.0
+	var los: Vector3 = to_m / dist
+	var fwd: Vector3 = tvel.normalized() if tvel.length() > 5.0 else Vector3.FORWARD
+	var geo: float
+	if ir:
+		var behind: float = clampf((1.0 - fwd.dot(los)) * 0.5, 0.0, 1.0)
+		geo = lerpf(0.45, 1.0, behind)
+	else:
+		var beam: float = 1.0 - absf(fwd.dot(los))
+		geo = lerpf(0.30, 1.0, beam * beam)
+	var closing: float = maxf((mvel - tvel).dot(-los), 50.0)
+	var to_go: float = dist / closing
+	var timing: float = clampf(1.0 - (to_go - 2.5) / 6.0, 0.2, 1.0)
+	return clampf(bait * geo * timing * wary, 0.0, 0.95)
+
+## The whole load this round came off a bus with, itself included: the one
+## Array, shared by every warhead from the same opening, so the map and the
+## weapon camera can show all of them rather than only the one being ridden.
+var siblings: Array = []
+
+## Everything still flying from this round's load, or just this round when it
+## never was part of one.
+func salvo() -> Array:
+	var out: Array = []
+	for k in siblings:
+		if is_instance_valid(k) and not (k as Missile).dead:
+			out.append(k)
+	if out.is_empty() and not dead:
+		out.append(self)
+	return out
+
+## Steering for a unit of its own, rather than for a patch of ground.
+func locked_on_unit() -> bool:
+	return is_instance_valid(target) and not target.is_in_group("no_lock")
 ## Its turn radius at cruising speed, which is what decides both that height and
 ## how early the descent has to begin.
 var _turn_r := 0.0
@@ -182,6 +261,48 @@ var _turn_r := 0.0
 ## to eight and was fine, and for a hypersonic round cruising at kilometres
 ## came to two thousand: a floor two kilometres up, held until nine hundred
 ## metres from the target, which at Mach 8 is a third of a second to lose it in.
+## Move the surfaces with what the round is doing.
+##
+## The demand is the round's own sideways acceleration, less gravity -- what
+## the air (or the motor's nozzle, up where there is no air) is being asked to
+## provide -- turned into its own frame and scaled by the most it can pull. A
+## round coasting a ballistic arc is falling, not turning, and its fins sit
+## still; one pitching over off the rail or chasing a moving mark works them.
+##
+## Mixed for an X: each surface lifts across its own spar, so it takes the part
+## of the demand that lies across it. The canards are ahead of the centre of
+## gravity and push the nose the way it is to go; the tail is behind it and
+## pushes the tail the other way, so the two throw opposite ways.
+func _steer_fins(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	var want := Vector2.ZERO
+	if _prev_vel != Vector3.INF and age > FIN_OUT_AT + FIN_OUT_OVER:
+		var acc: Vector3 = (vel - _prev_vel) / delta - Sim.gravity_at(global_position)
+		var fwd: Vector3 = -global_transform.basis.z
+		var side: Vector3 = acc - fwd * acc.dot(fwd)
+		var loc: Vector3 = global_transform.basis.transposed() * side
+		var most: float = maxf(float(ws.get("max_g", 10.0)), 1.0) * 9.81
+		want = Vector2(loc.x, loc.y) / most
+		if want.length() > 1.0:
+			want = want.normalized()
+	_prev_vel = vel
+	# A real actuator has a rate and the measured demand is a frame-to-frame
+	# difference; both want smoothing before they reach a surface.
+	_demand = _demand.lerp(want, clampf(delta * 7.0, 0.0, 1.0))
+	# and in air it never sits dead still: the autopilot is always trimming
+	var air: float = exp(-maxf(Sim.altitude(global_position), 0.0) / 9000.0) \
+		* clampf((age - FIN_OUT_AT) / FIN_OUT_OVER, 0.0, 1.0)
+	for i in 4:
+		var a: float = TAU * (float(i) + 0.5) / 4.0
+		var across: float = _demand.dot(Vector2(-sin(a), cos(a)))
+		var dither: float = sin(age * 6.3 + float(i) * 1.7) * 0.025 * air
+		if i < _tails.size():
+			_tails[i].rotation.x = clampf(-across * FIN_THROW + dither, -FIN_THROW, FIN_THROW)
+		if i < _canards.size():
+			_canards[i].rotation.x = clampf(across * FIN_THROW * 0.8 - dither,
+				-FIN_THROW, FIN_THROW)
+
 ## Not hitting the ridge and choosing a cruising height are different jobs.
 func _crest(deck: float) -> float:
 	return minf(deck * 0.35, 150.0)
@@ -196,12 +317,31 @@ func _ready() -> void:
 	# through the walls of it.
 	var folds: bool = bool(ws.get("folding", false))
 	_vls = folds
-	var mi := MeshKit.mi(WeaponSpec.build_mesh(wid, not folds), "Body")
+	var mi := MeshKit.mi(WeaponSpec.build_mesh(wid, not folds, not folds), "Body")
 	add_child(mi)
 	if folds:
-		_fins = MeshKit.mi(WeaponSpec.build_fins(wid), "Fins")
-		_fins.scale = Vector3(FIN_STOWED, FIN_STOWED, 1.0)
+		_fins = Node3D.new()
+		_fins.name = "Fins"
 		add_child(_fins)
+		var canards: bool = String(ws["kind"]) != "bomb"
+		for canard in ([false, true] if canards else [false]):
+			var mesh := WeaponSpec.build_fin(wid, canard)
+			var hz := WeaponSpec.fin_hinge(wid, canard)
+			for i in 4:
+				var fold := Node3D.new()
+				fold.rotation.z = TAU * (float(i) + 0.5) / 4.0
+				fold.scale = Vector3(FIN_STOWED, FIN_STOWED, 1.0)
+				_fins.add_child(fold)
+				var hinge := Node3D.new()
+				hinge.position = Vector3(0.0, 0.0, hz)
+				fold.add_child(hinge)
+				var surf := MeshKit.mi(mesh, "Canard" if canard else "Fin")
+				hinge.add_child(surf)
+				_folds.append(fold)
+				if canard:
+					_canards.append(hinge)
+				else:
+					_tails.append(hinge)
 	# The smoke follows the round's own girth rather than being one width for
 	# everything. A naval round is a foot and a half across and four and three
 	# quarter metres long — it should not leave the same thread behind it as a
@@ -222,6 +362,11 @@ func _ready() -> void:
 		fm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		fm.cull_mode = BaseMaterial3D.CULL_DISABLED
 		fm.albedo_color = Color(1.0, 0.85, 0.55, 0.75)
+		# After the air and the cloud deck, which are transparent shells drawn
+		# at 0 to 2 by priority rather than by distance: at the default 0 the
+		# motor was painted over by every cloud and by the air above the deck,
+		# while its own smoke -- already at 6 -- was drawn over them.
+		fm.render_priority = 6
 		_flame = MeshKit.mi(MeshKit.finish(st, fm), "Flame")
 		_flame.position = Vector3(0, 0, ws["length"] * 0.5)
 		_flame.visible = false
@@ -269,7 +414,8 @@ func _physics_process(delta: float) -> void:
 	if _fins != null:
 		var fo: float = clampf((age - FIN_OUT_AT) / FIN_OUT_OVER, 0.0, 1.0)
 		var k: float = lerpf(FIN_STOWED, 1.0, fo * fo * (3.0 - 2.0 * fo))
-		_fins.scale = Vector3(k, k, 1.0)
+		for f in _folds:
+			f.scale = Vector3(k, k, 1.0)
 	if age > ws["life"]:
 		_die(false)
 		return
@@ -369,14 +515,22 @@ func _physics_process(delta: float) -> void:
 		if boosting:
 			vel += dir * ws["boost"] * delta
 			motor = 1.0
-			if _glow:
-				# guttering a little, the way a solid motor does
-				_glow.light_energy = 5.5 + sin(age * 47.0) * 0.8
 		else:
 			motor = 0.0
-			if _flame:
-				_flame.visible = false
-			if _glow and _glow.light_energy > 0.0:
+		# The flame is the motor being alight, not the motor pushing this frame.
+		# A cruise round's sustainer throttles to hold its speed, so it pushes
+		# on some frames and not others -- and the flame was hidden on the first
+		# frame it did not and never shown again, so a Zircon's motor went out
+		# a few seconds after launch and stayed out for the remaining six
+		# minutes it was burning.
+		var lit: bool = age - 0.28 < float(ws["burn"]) and not _burnt
+		if _flame:
+			_flame.visible = lit
+		if _glow:
+			if lit:
+				# guttering a little, the way a solid motor does
+				_glow.light_energy = 5.5 + sin(age * 47.0) * 0.8
+			elif _glow.light_energy > 0.0:
 				# it does not switch off: the nozzle stays hot for a moment
 				_glow.light_energy = maxf(_glow.light_energy - delta * 9.0, 0.0)
 		var sp := vel.length()
@@ -395,6 +549,8 @@ func _physics_process(delta: float) -> void:
 		var fwd := vel.normalized()
 		var up := Vector3.UP if absf(fwd.y) < 0.98 else Vector3.FORWARD
 		global_transform.basis = Basis.looking_at(fwd, up)
+	if _fins != null:
+		_steer_fins(delta)
 
 	# --- terminal checks --------------------------------------------------
 	# Some rounds do not arrive as one thing. A bus carrying re-entry vehicles,
@@ -678,11 +834,27 @@ func _guide(delta: float) -> void:
 	# Not every entry carries one: the hypersonics and the re-entry vehicles
 	# have no infrared seeker to spoof, and reading the key straight threw on
 	# every guidance tick the moment one of them was in the air.
+	#
+	# Judged once per salvo, when it goes. This was a chance per frame for as
+	# long as any flare was burning -- 0.70 x 2 a second over a 3.4 second
+	# window is a ninety-nine per cent kill of the track from one press of the
+	# button, and the button could be pressed again every half second. A salvo
+	# now has one chance against each seeker, from the geometry at that moment,
+	# and each one the seeker has already seen through makes the next less
+	# convincing.
 	var bait: float = float(ws.get("flare_bait", 0.0))
-	if bait > 0.0 and target.has_method("flare_active") and target.flare_active():
-		if randf() < bait * delta * 2.0:
-			target = null
-			return
+	if bait > 0.0 and ("flare_salvo" in target) and target.flare_active():
+		var fs: int = int(target.get("flare_salvo"))
+		if fs != _flare_judged:
+			_flare_judged = fs
+			var pf: float = decoy_chance(bait, true, global_position, vel, tpos, tvel,
+				_decoy_wary)
+			_decoy_wary *= 0.6
+			if randf() < pf:
+				if Sim.debug_weapons:
+					print("[msl] %s decoyed by flares at age %.1f (%.0f%%)" % [wid, age, pf * 100.0])
+				target = null
+				return
 	# and radar seekers by chaff, which until now nothing carried: a radar round
 	# had no counter at all, so a SAM site that got a shot off was unbeatable
 	# except by outrunning it.
@@ -739,12 +911,18 @@ func _guide(delta: float) -> void:
 		else:
 			_jam_t = maxf(_jam_t - delta, 0.0)
 	var cb: float = float(ws.get("chaff_bait", 0.0))
-	if cb > 0.0 and target.has_method("chaff_active") and target.chaff_active():
-		if randf() < cb * delta * 2.0:
-			if Sim.debug_weapons:
-				print("[msl] %s decoyed by chaff at age %.1f" % [wid, age])
-			target = null
-			return
+	if cb > 0.0 and ("chaff_salvo" in target) and target.chaff_active():
+		var cs: int = int(target.get("chaff_salvo"))
+		if cs != _chaff_judged:
+			_chaff_judged = cs
+			var pc: float = decoy_chance(cb, false, global_position, vel, tpos, tvel,
+				_decoy_wary)
+			_decoy_wary *= 0.6
+			if randf() < pc:
+				if Sim.debug_weapons:
+					print("[msl] %s decoyed by chaff at age %.1f (%.0f%%)" % [wid, age, pc * 100.0])
+				target = null
+				return
 	# A lofted midcourse, applied before the line of sight is taken — putting it
 	# after was the same as not having it at all, since proportional navigation
 	# steers on `los` and never looks at the target position again.
@@ -1219,12 +1397,42 @@ func _open_up() -> void:
 	# Programmed points first, where somebody has laid them. This is the whole
 	# difference between a cluster and a MIRV: one scatters over a footprint,
 	# the other is aimed, warhead by warhead.
-	if not programmed.is_empty():
+	#
+	# A programmed mark is a patch of ground or a unit. A unit is handed to the
+	# warhead as its target -- locked on and followed -- rather than the point
+	# it was standing on when it was picked.
+	var aimed := not programmed.is_empty()
+	if aimed:
 		for i2 in count:
+			var pm: Variant = programmed[i2 % programmed.size()]
+			var live: bool = is_instance_valid(pm) and pm is Node3D \
+				and (not pm.has_method("is_alive") or pm.is_alive())
+			# A spare warhead -- more of them than marks -- looks round its
+			# mark for something nobody has yet, so one click on a vehicle in
+			# a column spreads the load down the column rather than putting
+			# all of it on the one hull.
+			if live and i2 >= programmed.size():
+				var spare: Node3D = _acquire_near((pm as Node3D).global_position,
+					maxf(spread, 1500.0), marks)
+				marks.append(spare if spare != null else pm)
+				continue
+			if live:
+				marks.append(pm)
+				continue
+			var spot: Vector3 = pm if pm is Vector3 else centre
+			# A point laid next to something is a point laid *on* it: the click
+			# that was meant for a ship and landed a few hundred metres off it
+			# put the warhead in the water beside her. The warhead's seeker
+			# takes the nearest enemy close to its point, one each where there
+			# are enough to go round.
+			var near: Node3D = _acquire_near(spot, maxf(spread, 1500.0), marks)
+			if near != null:
+				marks.append(near)
+				continue
 			var pt2 := _Submark.new()
 			pt2.team = 1 if team == 0 else 0
 			get_tree().current_scene.add_child(pt2)
-			pt2.global_position = programmed[i2 % programmed.size()]
+			pt2.global_position = spot
 			marks.append(pt2)
 	for n in (get_tree().get_nodes_in_group("hittable") if marks.is_empty() else []):
 		if not is_instance_valid(n) or n.is_in_group("no_lock") or not (n is Node3D):
@@ -1235,9 +1443,12 @@ func _open_up() -> void:
 			continue
 		if (n as Node3D).global_position.distance_to(centre) < spread * 1.6:
 			marks.append(n)
-	marks.sort_custom(func(x: Node3D, y: Node3D) -> bool:
-		return x.global_position.distance_to(centre) \
-			< y.global_position.distance_to(centre))
+	# nearest first when the bus picked them itself; in the order laid when
+	# somebody laid them, so RV1 is the first warhead out
+	if not aimed:
+		marks.sort_custom(func(x: Node3D, y: Node3D) -> bool:
+			return x.global_position.distance_to(centre) \
+				< y.global_position.distance_to(centre))
 	for i in count:
 		var a := TAU * float(i) / float(count) + randf() * 0.3
 		var rad: float = lerpf(0.35, 1.0, randf())
@@ -1264,6 +1475,9 @@ func _open_up() -> void:
 		m.team = team
 		get_tree().current_scene.add_child(m)
 		_kids.append(m)
+	for k in _kids:
+		(k as Missile).siblings = _kids
+	_report_split(_kids)
 	# Hand the camera on. The bus frees itself here, so anything riding it lost
 	# its subject the moment the load went — the view cut back to the launcher
 	# and you never saw the warheads arrive, which reads as the round simply
@@ -1281,6 +1495,71 @@ func _open_up() -> void:
 
 ## A patch of ground for one warhead of a cluster, when there is nothing there
 ## worth naming. Deliberately not lockable and not a radar return.
+## The enemy unit nearest a point, within `reach`, preferring one that none of
+## `taken` is already going for.
+func _acquire_near(spot: Vector3, reach: float, taken: Array) -> Node3D:
+	var best: Node3D = null
+	var best_d := INF
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or n.is_in_group("no_lock") or not (n is Node3D):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if ("team" in n) and int(n.team) == team:
+			continue
+		# neutral shipping is not an enemy
+		if ("team" in n) and int(n.team) != 0 and int(n.team) != 1:
+			continue
+		var p: Vector3 = (n as Node3D).global_position
+		var d: float = Vector2(p.x - spot.x, p.z - spot.z).length()
+		if d > reach:
+			continue
+		# one already spoken for counts as twice as far, so the load spreads
+		# over what is there before it doubles up
+		if taken.has(n):
+			d = d * 2.0 + reach
+		if d < best_d:
+			best_d = d
+			best = n
+	return best
+
+## Say where the load has gone, in the event log, when it is the player's.
+##
+## The log said the round was away and how far, and nothing after it: once
+## the bus opened there was no telling whether its warheads had found the
+## vehicles they were given or were coming down on empty ground. One line for
+## the opening and one per unit locked on, naming the warheads going for it.
+func _report_split(kids: Array) -> void:
+	if not is_instance_valid(shooter) or not ("occupied" in shooter) \
+			or not bool(shooter.get("occupied")):
+		return
+	var by_unit := {}
+	var order: Array = []
+	var ground := PackedStringArray()
+	for i in kids.size():
+		var k: Missile = kids[i]
+		var tag := "RV%d" % (i + 1)
+		if k.locked_on_unit():
+			var key: int = k.target.get_instance_id()
+			if not by_unit.has(key):
+				by_unit[key] = []
+				order.append(k.target)
+			# an Array, not a PackedStringArray: those are values, and appending
+			# to one taken out of a dictionary appends to a copy
+			(by_unit[key] as Array).append(tag)
+		else:
+			ground.append(tag)
+	Sim.report("%s opened: %d warheads — %d locked on %d unit(s), %d on ground points" % [
+		String(ws["short"]), kids.size(), kids.size() - ground.size(), order.size(),
+		ground.size()], Sim.Ev.INFO)
+	for u in order:
+		var tags := PackedStringArray(by_unit[(u as Node).get_instance_id()])
+		Sim.report("%s locked on %s — %.1f km" % [", ".join(tags), Sim.label_of(u),
+			global_position.distance_to((u as Node3D).global_position) * 0.001],
+			Sim.Ev.GOOD)
+	if not ground.is_empty() and not order.is_empty():
+		Sim.report("%s on ground points" % ", ".join(ground), Sim.Ev.INFO)
+
 class _Submark extends Node3D:
 	var team := 1
 	func _ready() -> void:

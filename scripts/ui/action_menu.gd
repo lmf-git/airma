@@ -13,6 +13,16 @@ var items: Array = []          # [{id, label, note}]
 var index := 0
 var _font: Font
 
+## The menu's keys are the vehicle's keys too, so whoever is driving is told
+## to leave them alone for as long as it is up -- however it came to be shown
+## or hidden.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_VISIBILITY_CHANGED:
+		Sim.menu_keys = is_visible_in_tree()
+
+func _exit_tree() -> void:
+	Sim.menu_keys = false
+
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -80,6 +90,18 @@ func _build_vehicle() -> Array:
 			"note": "%.0f%%" % (sh.telegraph * 100.0)})
 		out.append({"id": "amidships", "label": "Helm amidships",
 			"note": "%+0.2f" % sh.helm})
+		out.append({"id": "dismount", "label": "Hand over the conn", "note": "U"})
+		return out
+	# The carrier's bridge. Nothing to shoot, so the page is her sensor and the
+	# ship handling -- it used to be the aeroplane's page, stores and all, for
+	# a jet parked two hundred kilometres away.
+	if vehicle is Carrier:
+		var cv := vehicle as Carrier
+		out.append({"id": "sensor", "label": "Sensor page", "note": "RMB"})
+		out.append({"id": "allstop", "label": "All stop",
+			"note": "%.0f%%" % (cv.telegraph * 100.0)})
+		out.append({"id": "amidships", "label": "Helm amidships",
+			"note": "%+0.2f" % cv.helm})
 		out.append({"id": "dismount", "label": "Hand over the conn", "note": "U"})
 		return out
 	var tk := vehicle as Tank

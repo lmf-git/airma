@@ -9,6 +9,28 @@ var subject: Aircraft = null
 var orbit := Vector2(0.6, 0.3)
 var orbit_dist := 45.0
 var _pos := Vector3.ZERO
+## How much bigger than a fighter the subject is. The boom was a fixed seventeen
+## metres back and three up whatever was on the end of it, which frames an F-16
+## and puts the camera inside the tailplane of a Hercules, under the wing of a
+## B-2. Worked out from the airframe's own extents, once per subject.
+const REF_SIZE := 16.0
+var orbit_fixed := false
+var _scaled_for: Aircraft = null
+var _size_k := 1.0
+
+func size_scale() -> float:
+	if subject != _scaled_for:
+		_scaled_for = subject
+		_size_k = 1.0
+		if is_instance_valid(subject):
+			var b: AABB = subject.bounds
+			var span: float = maxf(b.size.x, b.size.z)
+			_size_k = clampf(span / REF_SIZE, 1.0, 5.0)
+		# the orbit starts as far out as the aeroplane needs, too -- unless a
+		# distance was asked for outright
+		if not orbit_fixed:
+			orbit_dist = 45.0 * _size_k
+	return _size_k
 var _boom := Vector3.ZERO
 var _aim := Vector3.ZERO
 var _shake := 0.0
@@ -50,6 +72,13 @@ func _ready() -> void:
 	near = 0.25
 	fov = 65.0
 
+## Held on the right mouse button: the view narrows to a third, the way a
+## pilot leans in to look at something.
+var zoom := false
+
+func _zoom_mul() -> float:
+	return 0.32 if zoom else 1.0
+
 func cycle() -> void:
 	mode = ((mode + 1) % 3) as Mode
 	_pos = Vector3.ZERO
@@ -73,9 +102,28 @@ func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventMouseButton and mode == Mode.ORBIT:
 		var mb := e as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP:
-			orbit_dist = maxf(orbit_dist * 0.88, 12.0)
+			orbit_dist = maxf(orbit_dist * 0.88, 12.0 * size_scale())
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			orbit_dist = minf(orbit_dist * 1.14, 400.0)
+			orbit_dist = minf(orbit_dist * 1.14, 400.0 * size_scale())
+
+## Hold ALT to look around; the view eases back to boresight on release.
+## Not while a screen that wants the pointer is up: see `Sim.ui_pointer`.
+## Returns the head turn, yaw then pitch.
+func _free_look(delta: float) -> Basis:
+	var want_free := Input.is_action_pressed(&"freelook") and not pod_slew \
+		and not Sim.ui_pointer
+	if want_free != _free:
+		_free = want_free
+		if _free:
+			_mouse_was = Input.mouse_mode
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		else:
+			Input.mouse_mode = _mouse_was
+	if not _free:
+		var back_k := 1.0 - exp(-7.0 * delta)
+		free_yaw = lerpf(free_yaw, 0.0, back_k)
+		free_pitch = lerpf(free_pitch, 0.0, back_k)
+	return Basis(Vector3.UP, free_yaw) * Basis(Vector3.RIGHT, free_pitch)
 
 func _process(delta: float) -> void:
 	# Weapon cam: ride whatever was last let go, until it goes off.
@@ -150,10 +198,23 @@ func _process(delta: float) -> void:
 				_wcam_off = _wcam_off.lerp(off, k)
 				_wcam_look = _wcam_look.slerp(wdir, k).normalized()
 			_wcam_prev = weapon_cam
-			global_position = wp + _wcam_off
-			var up_ref := Vector3.UP if absf(_wcam_look.y) < 0.985 else Vector3.FORWARD
-			look_at(wp + _wcam_look * 40.0, up_ref)
-			fov = lerpf(fov, 58.0, delta * 4.0)
+			# Free look rides with it: ALT swings the view round the round --
+			# the boom and the line of sight together, about the round itself
+			# -- so you can look back at the launcher, down at the target or
+			# across at the rest of the load, and it eases back when let go.
+			# The ride used to return before free look was ever read.
+			_free_look(delta)
+			var turn := Basis.IDENTITY
+			if absf(free_yaw) > 0.0005 or absf(free_pitch) > 0.0005:
+				var across := _wcam_look.cross(Vector3.UP)
+				if across.length_squared() < 0.0001:
+					across = Vector3.RIGHT
+				turn = Basis(Vector3.UP, free_yaw) * Basis(across.normalized(), free_pitch)
+			var look: Vector3 = (turn * _wcam_look).normalized()
+			global_position = wp + turn * _wcam_off
+			var up_ref := Vector3.UP if absf(look.y) < 0.985 else Vector3.FORWARD
+			look_at(wp + look * 40.0, up_ref)
+			fov = lerpf(fov, (58.0) * _zoom_mul(), delta * 4.0)
 			if diag:
 				var d := global_position - wp
 				if _wcam_diag != Vector3.ZERO:
@@ -174,22 +235,7 @@ func _process(delta: float) -> void:
 	var buffet := 0.55 if subject.stalling else 0.0
 	var look_back := Input.is_action_pressed(&"look_back")
 
-	# hold ALT to look around; the view eases back to boresight on release
-	# Not while a screen that wants the pointer is up: see `Sim.ui_pointer`.
-	var want_free := Input.is_action_pressed(&"freelook") and not pod_slew \
-		and not Sim.ui_pointer
-	if want_free != _free:
-		_free = want_free
-		if _free:
-			_mouse_was = Input.mouse_mode
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		else:
-			Input.mouse_mode = _mouse_was
-	if not _free:
-		var back_k := 1.0 - exp(-7.0 * delta)
-		free_yaw = lerpf(free_yaw, 0.0, back_k)
-		free_pitch = lerpf(free_pitch, 0.0, back_k)
-	var free_b := Basis(Vector3.UP, free_yaw) * Basis(Vector3.RIGHT, free_pitch)
+	var free_b := _free_look(delta)
 
 	match mode:
 		Mode.COCKPIT:
@@ -198,20 +244,22 @@ func _process(delta: float) -> void:
 			if look_back:
 				head = head * Basis(Vector3.UP, PI)
 			global_transform = Transform3D(head, seat)
-			fov = lerpf(fov, 78.0, delta * 4.0)
+			fov = lerpf(fov, (78.0) * _zoom_mul(), delta * 4.0)
 		Mode.ORBIT:
+			size_scale()
 			var c := xf.origin
 			var off := Vector3(
 				cos(orbit.x) * cos(orbit.y), sin(orbit.y), sin(orbit.x) * cos(orbit.y)) * orbit_dist
 			global_position = c + off
 			look_at(c, Vector3.UP)
-			fov = lerpf(fov, 60.0, delta * 4.0)
+			fov = lerpf(fov, (60.0) * _zoom_mul(), delta * 4.0)
 		_:
 			var back := 1.0 if not look_back else -1.0
 			# The boom swings about a pivot on the aircraft itself, not about the
 			# point the camera happens to be aimed at. Free look then reads as
 			# walking round the jet rather than the whole rig slewing away.
-			var pivot := xf.origin + xf.basis.y * 1.5
+			var k_size := size_scale()
+			var pivot := xf.origin + xf.basis.y * 1.5 * k_size
 			var look_lead: float = clampf((absf(free_yaw) + absf(free_pitch)) / 0.35, 0.0, 1.0)
 			var look_amt := look_lead
 			# The boom is smoothed in the aircraft's own frame, not in world
@@ -220,7 +268,8 @@ func _process(delta: float) -> void:
 			# easing the local boom keeps the rig rigidly attached and still lags
 			# naturally through a turn.
 			var lead := (xf.basis.inverse() * subject.linear_velocity) * 0.010 * (1.0 - look_lead)
-			var want_boom := free_b * Vector3(0, 2.9, 17.0 * back) + Vector3(0, 0, lead.z * -1.0)
+			var want_boom := free_b * Vector3(0, 2.9 * k_size, 17.0 * k_size * back) \
+				+ Vector3(0, 0, lead.z * -1.0)
 			var rate: float = lerpf(6.0, 22.0, look_amt)
 			var k := 1.0 - exp(-rate * delta)
 			_boom = _boom.lerp(want_boom, k) if _boom != Vector3.ZERO else want_boom
@@ -234,7 +283,7 @@ func _process(delta: float) -> void:
 			_pos = want
 			# Normally the view leads the nose; as soon as you look around it
 			# locks onto the aircraft so it stays centred while you orbit.
-			var lead_pt := pivot + (-xf.basis.z * back) * 40.0 + xf.basis.y * 0.5
+			var lead_pt := pivot + (-xf.basis.z * back) * 40.0 * k_size + xf.basis.y * 0.5
 			var aim: Vector3 = lead_pt.lerp(pivot, look_amt)
 			if look_amt > 0.99:
 				_aim = aim
@@ -294,7 +343,7 @@ func _process(delta: float) -> void:
 			up = _up_smooth
 			look_at(_aim, up)
 			_roll_now = up
-			fov = lerpf(fov, 62.0 + clampf(speed * 0.055, 0.0, 22.0), delta * 3.0)
+			fov = lerpf(fov, (62.0 + clampf(speed * 0.055, 0.0, 22.0)) * _zoom_mul(), delta * 3.0)
 			if diag:
 				_diag_t += delta
 				if _roll_prev != Vector3.ZERO:

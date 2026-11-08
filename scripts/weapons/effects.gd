@@ -267,6 +267,7 @@ uniform vec3 tint : source_color = vec3(0.46, 0.42, 0.38);
 uniform vec3 lit : source_color = vec3(1.0, 0.94, 0.86);
 uniform vec3 sun_dir = vec3(0.4, 0.8, 0.35);
 uniform float opacity : hint_range(0.0, 1.0) = 0.9;
+uniform vec3 haze_col : source_color = vec3(0.70, 0.78, 0.90);
 uniform float t = 0.0;
 // The shape, in fractions of the box: where the cap sits, how wide and how
 // thick it is, and how fat the column is.
@@ -316,12 +317,20 @@ float density(vec3 p) {
 	// The cap: a dome on top of the column, undercut underneath, with the rim
 	// rolled outward and down. That undercut is the whole difference between a
 	// mushroom and a tree.
+	//
+	// A round dome, and under its edge a rim that is a torus -- a tube of
+	// cloud rolling outward and down -- rather than a ring that ran most of the
+	// cap's height. Drawn with soft edges that ring was a cylinder, and the
+	// whole cap a puck.
 	float dy = (h - cap_y) / max(cap_h, 0.001);
 	float rr = r / max(cap_r, 0.001);
-	float dome = smoothstep(1.0, 0.40, length(vec2(rr, dy * 1.15)));
-	float roll = smoothstep(0.42, 0.0, abs(rr - 0.76))
-		* smoothstep(1.7, 0.2, abs(dy + 0.40));
-	float d = max(stem, max(dome, roll * 0.9));
+	// Lumps in the outline itself, not just in the density inside it: a
+	// cauliflower edge rather than a smooth plastic one.
+	float lump = vnoise(p * 9.0 + vec3(0.0, -t * 0.04, 0.0)) - 0.5;
+	float dome = smoothstep(1.0, 0.55, length(vec2(rr, dy)) + lump * 0.40);
+	float tube = length(vec2((rr - 0.80) / 0.32, (dy + 0.25) / 0.55)) + lump * 0.55;
+	float roll = smoothstep(1.0, 0.35, tube);
+	float d = max(stem, max(dome, roll * 0.95));
 	if (d <= 0.002) {
 		return 0.0;
 	}
@@ -373,17 +382,29 @@ void fragment() {
 	}
 	const int STEPS = 34;
 	float dt = (t1 - t0) / float(STEPS);
+	// How much cloud one step crosses, in the box's units. The march runs in
+	// metres, and the opacity used to be taken straight from that: a step a
+	// hundred metres long made anything above a two-hundred-and-fiftieth of
+	// full density opaque, so every soft edge in the shape -- the dome's
+	// shoulder, the rim's long tails -- drew as a hard surface at its outermost
+	// reach, and the cloud came out a flat-topped puck with vertical sides.
+	float seg = dt * length(ld);
 	// An ordered offset, so the march's own steps do not show as shells.
 	float jit = fract(sin(dot(SCREEN_UV, vec2(41.7, 289.1))) * 43758.5453);
 	vec4 acc = vec4(0.0);
+	float first = -1.0;
 	for (int i = 0; i < STEPS; i++) {
 		if (acc.a > 0.985) {
 			break;
 		}
-		vec3 sp = lo + ld * (t0 + (float(i) + jit) * dt);
+		float ti = t0 + (float(i) + jit) * dt;
+		vec3 sp = lo + ld * ti;
 		float d = density(sp);
 		if (d <= 0.002) {
 			continue;
+		}
+		if (first < 0.0) {
+			first = ti;
 		}
 		// How much sun reaches this lump, marched a few steps towards it. This
 		// is what gives the cap a lit top and a dark underside instead of one
@@ -396,19 +417,29 @@ void fragment() {
 			ls *= 1.6;
 		}
 		vec3 col = mix(tint, lit, clamp(shade, 0.0, 1.0) * 0.85);
-		float a = clamp(d * dt * 2.4, 0.0, 1.0) * opacity;
+		// Extinction over the step: crossing the full cap through its core
+		// is nearly opaque, its thin edges and the rim's tails are not.
+		float a = (1.0 - exp(-d * seg * 22.0)) * opacity;
 		acc.rgb += col * a * (1.0 - acc.a);
 		acc.a += a * (1.0 - acc.a);
 	}
 	if (acc.a < 0.004) {
 		discard;
 	}
-	ALBEDO = acc.rgb / max(acc.a, 0.001);
+	// Its own aerial perspective, to the cloud rather than past it. The air
+	// shell is drawn after this and used to haze it for the whole distance to
+	// the sky behind, which washed a cloud fifteen kilometres off out to a
+	// pale ghost; this is drawn after the air now and hazes itself.
+	vec3 col = acc.rgb / max(acc.a, 0.001);
+	float haze = clamp(1.0 - exp(-max(first, 0.0) / 60000.0), 0.0, 0.75);
+	ALBEDO = mix(col, haze_col, haze);
 	ALPHA = clamp(acc.a, 0.0, 1.0);
 }
 """
 		_smoke = ShaderMaterial.new()
 		_smoke.shader = ssh
+		# after the air, which is 0 to 2: see the note on the haze above
+		_smoke.render_priority = 3
 		var bx := BoxMesh.new()
 		bx.size = Vector3.ONE
 		bx.material = _smoke
@@ -436,17 +467,25 @@ void fragment() {
 		# The cap keeps spreading long after it has stopped climbing.
 		var spread: float = 0.42 * grow + 0.30 * life
 		var cap_w: float = lethal * spread
-		var cap_th: float = lethal * (0.20 * grow + 0.06 * life)
+		# Thick enough to be a dome: at 0.20 of the lethal radius against a
+		# cap 0.72 wide it was a disc three times as wide as it was tall.
+		var cap_th: float = lethal * (0.30 * grow + 0.08 * life)
 		var box_h: float = maxf(rise + cap_th * 2.4, lethal * 0.5)
 		var box_w: float = maxf(cap_w * 2.6, lethal * 0.6)
 		_vol.scale = Vector3(box_w, box_h, box_w)
 		_vol.position = Vector3(0, box_h * 0.5, 0)
 		_smoke.set_shader_parameter("cap_y", clampf(rise / box_h, 0.08, 0.94))
+		# In the box's own units, where its sides are at +-0.5. These were
+		# handed over as fractions of the *half* width, so the shader drew the
+		# cap at twice the radius meant -- 0.77 of a box whose walls are at 0.5
+		# -- and the walls cut it off: from above, the top of the cloud was the
+		# square top of its box, and from the side its rim was a vertical face.
+		# The column was twice as fat for the same reason.
 		_smoke.set_shader_parameter("cap_r",
-			clampf(cap_w / (box_w * 0.5), 0.02, 0.95))
+			clampf(cap_w / box_w, 0.02, 0.42))
 		_smoke.set_shader_parameter("cap_h", clampf(cap_th / box_h, 0.02, 0.45))
 		_smoke.set_shader_parameter("stem_r",
-			clampf(lethal * 0.10 * (1.0 + grow) / (box_w * 0.5), 0.01, 0.40))
+			clampf(lethal * 0.10 * (1.0 + grow) / box_w, 0.01, 0.20))
 		if is_instance_valid(sun_node):
 			_smoke.set_shader_parameter("sun_dir",
 				-sun_node.global_transform.basis.z)
@@ -724,6 +763,7 @@ class Flash extends Node3D:
 		m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 		m.albedo_texture = Effects.glow_texture()
 		m.albedo_color = Color(1.0, 0.86, 0.52, 1.0)
+		m.render_priority = 6
 		qm.material = m
 		_mi.mesh = qm
 		_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -768,6 +808,7 @@ class Tracer extends Node3D:
 		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat.render_priority = 6
 		# Stretched along the way it is going, by how fast it is going.
 		#
 		# The round was a fixed nine metres of quad. A cannon shell leaves the
@@ -780,19 +821,55 @@ class Tracer extends Node3D:
 		var speed: float = vel.length()
 		var half: float = clampf(speed * 0.013, 4.5, 30.0)
 		var wide: float = clampf(speed * 0.0009, 0.55, 1.5)
-		var cst := MeshKit.begin()
+		# Built by hand, with texture coordinates. It was two MeshKit quads,
+		# and MeshKit writes none: every vertex sampled the glow at (0, 0),
+		# which is the transparent corner of a radial gradient, so the streak
+		# was added to the screen as black -- every gun in the game fired
+		# invisible rounds. Across the streak the glow falls off to the edges;
+		# along it the core is hottest in the middle and the ends taper.
+		var verts := PackedVector3Array()
+		var uvs := PackedVector2Array()
+		var idx := PackedInt32Array()
 		for roll in [0.0, PI * 0.5]:
-			var up := Vector3(cos(roll), sin(roll), 0.0)
-			MeshKit.quad(cst,
-				up * wide + Vector3(0, 0, -half), up * -wide + Vector3(0, 0, -half),
-				up * -wide + Vector3(0, 0, half), up * wide + Vector3(0, 0, half),
-				Vector3(0, 0, half * 9.0))
-		var m := MeshKit.finish(cst, mat)
+			var up := Vector3(cos(roll), sin(roll), 0.0) * wide
+			var b := verts.size()
+			verts.append_array(PackedVector3Array([
+				up + Vector3(0, 0, -half), -up + Vector3(0, 0, -half),
+				-up + Vector3(0, 0, half), up + Vector3(0, 0, half)]))
+			uvs.append_array(PackedVector2Array([
+				Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1)]))
+			idx.append_array(PackedInt32Array([b, b + 1, b + 2, b, b + 2, b + 3]))
+		var arr := []
+		arr.resize(Mesh.ARRAY_MAX)
+		arr[Mesh.ARRAY_VERTEX] = verts
+		arr[Mesh.ARRAY_TEX_UV] = uvs
+		arr[Mesh.ARRAY_INDEX] = idx
+		var m := ArrayMesh.new()
+		m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		m.surface_set_material(0, mat)
 		mi.mesh = m
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(mi)
+		_mi = mi
 		top_level = true
 		reset_physics_interpolation.call_deferred()
+
+	var _mi: MeshInstance3D = null
+
+	## Kept a few pixels wide however far off it is. A metre and a half of
+	## streak is a sliver at a kilometre and nothing at two, and a tracer is
+	## a thing you see from a long way: the eye picks out the glare, not the
+	## size of the pellet. Widened, never lengthened -- the length is how far
+	## it travels in a frame, and that is what makes it read as a line.
+	func _process(_dt: float) -> void:
+		if _mi == null:
+			return
+		var eye := get_viewport().get_camera_3d()
+		if eye == null:
+			return
+		var s: float = clampf(eye.global_position.distance_to(global_position) / 420.0,
+			1.0, 7.0)
+		_mi.scale = Vector3(s, s, 1.0)
 
 	func _physics_process(delta: float) -> void:
 		life -= delta

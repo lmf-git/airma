@@ -83,6 +83,10 @@ func start(id: String) -> void:
 			_gate_sequential()
 		"tdm", "ffa":
 			kill_goal = 12 if mode == "ffa" else 20
+		"strike":
+			# Nothing on this range shoots at an aeroplane, whatever it is.
+			Sim.no_air_threat = true
+			_strike_wave()
 	_announce()
 
 func _zone(i: int, team: int) -> void:
@@ -122,6 +126,9 @@ func _announce() -> void:
 			Sim.report("TEAM DEATHMATCH — first side to %d kills." % kill_goal, Sim.Ev.INFO)
 		"ffa":
 			Sim.report("FREE FOR ALL — %d kills wins, everyone is hostile." % kill_goal, Sim.Ev.INFO)
+		"strike":
+			Sim.report("STRIKE — armour, shipping and helicopters to hunt. Nothing down there shoots at aeroplanes.",
+				Sim.Ev.INFO)
 
 func _on_captured(z: CaptureZone, team: int) -> void:
 	Sim.report("sector %s taken by %s" % [z.label, "us" if team == 0 else "them"],
@@ -169,6 +176,7 @@ func _process(delta: float) -> void:
 			z.tick(delta, holders)
 	_garrison_near(holders)
 	_reinforce_ground(delta)
+	_tick_strike(delta)
 	_earn(delta)
 	if mode == "conquest":
 		var mine := 0
@@ -226,6 +234,7 @@ func _reinforce_ground(delta: float) -> void:
 	if _reinforce > 0.0:
 		return
 	_reinforce = 9.0
+	_assign_ground_goals()
 	for team in [0, 1]:
 		var want: int = AI_GROUND_PER_SIDE - _crewed_on(team)
 		var have := 0
@@ -252,6 +261,10 @@ func _crewed_on(team: int) -> int:
 			n += 1
 	return n
 
+## Each side's end of the field, for a mode with no sectors to start from: ours
+## north of the home airfield, theirs up the valley where their sites stand.
+const HOME_GROUND := {0: Vector3(-900.0, 0.0, -2600.0), 1: Vector3(400.0, 0.0, -9600.0)}
+
 ## One vehicle, put down at a sector the side holds -- or, with nothing held,
 ## at the one nearest home.
 func _send_up_armour(team: int) -> void:
@@ -267,11 +280,14 @@ func _send_up_armour(team: int) -> void:
 		if d < best:
 			best = d
 			at = z.global_position
+	# A team deathmatch has no sectors at all, and this returned -- so the mode
+	# that lists armour among the things fighting had none on either side.
 	if at == Vector3.INF:
+		at = HOME_GROUND[team]
+	var p := _dry_spot(at, 240.0, 620.0)
+	if p == Vector3.INF:
 		return
 	var a := randf() * TAU
-	var off := Vector3(cos(a), 0.0, sin(a)) * randf_range(240.0, 620.0)
-	var p := at + off
 	# One in three reinforcements is a patrol vehicle rather than a tank: they
 	# are quick to get to a sector and they are what a side actually has most of.
 	var roll := randi()
@@ -281,6 +297,50 @@ func _send_up_armour(team: int) -> void:
 	t.name = "%s %d" % ["patrol" if roll % 3 == 0 else "armour", roll % 100000]
 	get_parent().add_child(t)
 	t.global_transform = Tank.ground_pose(p, a, t.rest_height())
+
+## Somewhere a vehicle can stand, in a ring about `at`: not in the water.
+static func _dry_spot(at: Vector3, r0: float, r1: float) -> Vector3:
+	for i in 16:
+		var a := randf() * TAU
+		var p := at + Vector3(cos(a), 0.0, sin(a)) * randf_range(r0, r1 + 120.0 * i)
+		if Sim.height_at(p.x, p.z) <= Sim.sea_at(p.x, p.z) + 3.0:
+			continue
+		# and not in a town, where a column put down among the buildings spent
+		# the match pressed against them
+		var in_town := false
+		for pad in Sim._town_pads:
+			if Vector2(p.x, p.z).distance_to(pad["c"] as Vector2) < float(pad["r"]) * 1.3:
+				in_town = true
+				break
+		if not in_town:
+			return p
+	return Vector3.INF
+
+## Send every crewed vehicle somewhere. A garrison holds its sector; the rest go
+## for the nearest sector their side does not hold -- the one that is open, in
+## the modes that open them one at a time -- and with no sectors at all, for the
+## other side's end of the field.
+func _assign_ground_goals() -> void:
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not (n is Tank) or not is_instance_valid(n):
+			continue
+		var t := n as Tank
+		if not t.ai or not t.alive or t.occupied or t.has_meta("zone_asset") \
+				or t.has_meta("strike"):
+			continue
+		var goal := Vector3.INF
+		var bd := 1e18
+		for i in zones.size():
+			var z: CaptureZone = zones[i]
+			if not is_instance_valid(z) or z.owner_team == t.team or z.locked:
+				continue
+			var d: float = z.global_position.distance_squared_to(t.global_position)
+			if d < bd:
+				bd = d
+				goal = z.global_position
+		if goal == Vector3.INF and zones.is_empty() and mode == "tdm":
+			goal = HOME_GROUND[1 - t.team]
+		t.ai_goal = goal
 
 ## Command points accrue from the sectors you hold, not just from taking them.
 ## Without an income the number sat still between captures and told you nothing
@@ -329,4 +389,106 @@ func hud_state() -> Dictionary:
 		obj = "%s — %s" % [zones[active_sector].label, zones[active_sector].place]
 	return {"mode": mode, "tickets": tickets, "kills": kills, "goal": kill_goal,
 		"zones": zs, "cp": command_points, "result": result, "running": running,
-		"cp_rate": cp_rate, "held": held, "objective": obj}
+		"cp_rate": cp_rate, "held": held, "objective": obj,
+		"wave": wave, "left": _strike_left(), "destroyed": destroyed}
+
+# ------------------------------------------------------------------ strike
+## A range to practise on: columns of armour on the move, shipping, and
+## helicopters, none of which can hurt an aeroplane. A wave is everything that
+## was put up at once; clear it and the next comes in, a little bigger.
+var wave := 0
+var destroyed := 0
+var _wave_units: Array = []
+var _strike_check := 2.0
+
+func _tick_strike(delta: float) -> void:
+	if mode != "strike":
+		return
+	_strike_check -= delta
+	if _strike_check > 0.0:
+		return
+	_strike_check = 2.0
+	var left := _strike_left()
+	destroyed = maxi(destroyed, _wave_total - left + _destroyed_before)
+	if left == 0:
+		_destroyed_before = destroyed
+		Sim.score += 500 * wave
+		Sim.report("wave %d cleared" % wave, Sim.Ev.GOOD)
+		_strike_wave()
+
+var _wave_total := 0
+var _destroyed_before := 0
+
+func _strike_left() -> int:
+	var n := 0
+	for u in _wave_units:
+		if is_instance_valid(u) and (not u.has_method("is_alive") or u.is_alive()):
+			n += 1
+	return n
+
+func _strike_wave() -> void:
+	wave += 1
+	_wave_units.clear()
+	var world: Node = get_parent()
+	# Armour on the move: a column put down somewhere along the valley and sent
+	# across it, so it is a target that goes somewhere rather than a tank park.
+	var size: int = mini(4 + wave * 2, 12)
+	var from := _dry_spot(Vector3(randf_range(-6000.0, 6000.0), 0.0,
+		randf_range(-14000.0, -6000.0)), 0.0, 400.0)
+	if from != Vector3.INF:
+		var dest := _dry_spot(from + Vector3(randf_range(-7000.0, 7000.0), 0.0,
+			randf_range(4000.0, 8000.0)), 0.0, 600.0)
+		var classes := ["mbt", "ifv", "lav", "mbt", "ifv", "lav"]
+		for i in size:
+			var cls: String = classes[i % classes.size()]
+			var t := Tank.new()
+			t.setup(1, Tank.pick_kind(cls, 1, randi()))
+			t.ai = true
+			t.name = "Column %d-%d" % [wave, i + 1]
+			t.set_meta("strike", true)
+			world.add_child(t)
+			# pointed the way it is going: put down facing north with a goal to
+			# the south, each one had to turn round before it went anywhere
+			var head := 0.0
+			if dest != Vector3.INF:
+				var to_dest := dest - from
+				head = atan2(-to_dest.x, -to_dest.z)
+			var basis_h := Basis(Vector3.UP, head)
+			var lane: Vector3 = basis_h * Vector3(float(i % 3 - 1) * 28.0, 0.0,
+				floorf(float(i) / 3.0) * 60.0)
+			var at := from + lane
+			t.global_transform = Tank.ground_pose(at, head, t.rest_height())
+			t.ai_goal = dest if dest != Vector3.INF else Vector3.INF
+			_wave_units.append(t)
+	# Shipping: merchantmen and gun boats. A destroyer's tubes would be an air
+	# threat, so nothing that carries any is put on this range.
+	if world.has_method("_deep_water"):
+		var ships: int = mini(1 + wave, 5)
+		for i in ships:
+			var sh := Ship.new()
+			sh.setup("cargo" if i % 2 == 0 else "patrol", 1)
+			world.add_child(sh)
+			var sea: Vector3 = world.call("_deep_water",
+				Vector3(22000.0 + float(i) * 2600.0, 0.0, -3000.0 + float(i) * 1800.0))
+			sh.global_position = Vector3(sea.x, Sim.sea_surface(sea.x, sea.z), sea.z)
+			sh.name = "Shipping %d-%d" % [wave, i + 1]
+			_wave_units.append(sh)
+	# And helicopters, working low over the column.
+	var helis: int = mini(1 + int(wave / 2.0), 4)
+	var rotary: Array = ["mi28", "z10"] if JetSpec.bloc_of(Sim.selected_jet) == "nato" \
+		else ["ah64", "tiger"]
+	for i in helis:
+		var h := AIHeli.new()
+		h.setup(rotary[i % rotary.size()])
+		h.team = 1
+		h.name = "Helicopter %d-%d" % [wave, i + 1]
+		var hp: Vector3 = from if from != Vector3.INF else Vector3(0, 0, -9000)
+		h.home = hp + Vector3(float(i) * 900.0 - 450.0, 0.0, 600.0)
+		world.add_child(h)
+		h.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(180.0)),
+			Vector3(h.home.x, Sim.height_at(h.home.x, h.home.z) + 180.0, h.home.z))
+		_wave_units.append(h)
+	_wave_total = _wave_units.size()
+	Sim.report("wave %d: a column of %d, %d ship(s) and %d helicopter(s)" % [
+		wave, size if from != Vector3.INF else 0,
+		_wave_units.filter(func(u): return u is Ship).size(), helis], Sim.Ev.INFO)

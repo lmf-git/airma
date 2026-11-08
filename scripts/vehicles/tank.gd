@@ -113,7 +113,7 @@ const KINDS := {
 			 "hull": Color(0.27, 0.29, 0.25),
 			 "hp": 145.0, "power": 450_000.0, "top": 14.0, "gun": 400.0,
 			 "muzzle": 400.0, "reload": 85.0, "blast": 10.0,
-			 "missile": "zircon", "rounds": 1},
+			 "missile": "df21d", "rounds": 1},
 	# ------------------------------------------------ anti-satellite
 	# A direct-ascent launcher. It shoots at nothing in the atmosphere: the only
 	# thing it can engage is in orbit, and the round is most of a space launch
@@ -692,9 +692,120 @@ func _build() -> void:
 	_mantlet.add_child(_muzzle)
 
 # --------------------------------------------------------------------------
+## Where the crew has been sent: a sector to take, or the other side's end of the
+## field. INF holds them where they are, which is what a garrison does.
+##
+## Nothing drove. A crewed AI vehicle traversed and fired from wherever it had
+## been put down and never moved again, so the ground war was a scatter of
+## turrets with a gap between them that nobody ever crossed.
+var ai_goal := Vector3.INF
+## Time spent wanting to move and not moving, and the back-off it triggers.
+var _stuck_t := 0.0
+var _unstick_t := 0.0
+var _unstick_steer := 1.0
+## Time spent turning on the spot, and the push straight ahead that ends it.
+var _pivot_t := 0.0
+var _push_t := 0.0
+
+## Drive for the goal, and stop to fight when there is something in reach: a
+## vehicle firing on the move hits nothing, and one that drives past what it is
+## shooting at is not fighting it.
+func _ai_drive(delta: float) -> void:
+	in_throttle = 0.0
+	in_steer = 0.0
+	in_brake = false
+	# Backing off something it has driven into: a building, a bank, another
+	# hull. Reverse on the other lock, then try again.
+	if _unstick_t > 0.0:
+		_unstick_t -= delta
+		in_throttle = -0.6
+		in_steer = -_unstick_steer
+		return
+	if _push_t > 0.0:
+		_push_t -= delta
+		in_throttle = 0.6
+		return
+	if ai_goal == Vector3.INF or is_indirect() or is_air_defence() \
+			or vclass() == "tel" or vclass() == "asat":
+		return
+	if is_instance_valid(_ai_target) and not (_ai_target is Aircraft):
+		in_brake = absf(speed) > 1.0
+		return
+	var to := ai_goal - global_position
+	to.y = 0.0
+	var d := to.length()
+	if d < 180.0:
+		in_brake = absf(speed) > 1.0
+		return
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	var right := global_transform.basis.x
+	right.y = 0.0
+	if fwd.length() < 0.1 or right.length() < 0.1:
+		return
+	fwd = fwd.normalized()
+	var dirn := to / d
+	var side: float = dirn.dot(right.normalized())
+	var ahead: float = dirn.dot(fwd)
+	# Measured, not guessed: on full lock with the throttle open a hull all but
+	# stops -- the inside track brakes against the outside one and the side
+	# grip holds the lot -- and turns a few degrees in five seconds. Pivoting
+	# with the throttle shut turns an Abrams 156 degrees in the same time. So a
+	# goal well off the nose is turned to on the spot, and one near it is
+	# driven at with a little lock and the power on.
+	var off_nose: float = atan2(side, ahead)
+	var pivot: bool = absf(off_nose) > deg_to_rad(35.0)
+	if pivot:
+		in_throttle = 0.0
+		in_steer = 1.0 if side >= 0.0 else -1.0
+	else:
+		in_throttle = 0.75
+		in_steer = clampf(off_nose * 1.6, -0.45, 0.45)
+	# Wanting to go and going nowhere for four seconds is stuck. A pivot is
+	# not going anywhere by design, so it does not count.
+	if not pivot and absf(speed) < 0.8:
+		_stuck_t += delta
+		if _stuck_t > 4.0:
+			_stuck_t = 0.0
+			_unstick_t = 2.5
+			_unstick_steer = 1.0 if in_steer >= 0.0 else -1.0
+	else:
+		_stuck_t = 0.0
+	# Not into the sea, and not off anything a vehicle cannot drive down: look
+	# a little way ahead and stop for water, swing away from a drop.
+	var probe := global_position + fwd * 45.0
+	var here := Sim.height_at(global_position.x, global_position.z)
+	var there := Sim.height_at(probe.x, probe.z)
+	if there < Sim.sea_at(probe.x, probe.z) + 1.0:
+		in_throttle = 0.0
+		in_brake = true
+	elif absf(there - here) > 18.0:
+		# turned away on the spot: power on full lock is the one combination
+		# that neither drives nor turns
+		in_throttle = 0.0
+		in_steer = 1.0 if side >= 0.0 else -1.0
+	# Turning on the spot for ever is stuck too -- a hull on a shoulder where
+	# every heading looks like a drop. After a while it drives straight off it.
+	if in_throttle == 0.0 and absf(in_steer) > 0.5:
+		_pivot_t += delta
+		if _pivot_t > 8.0:
+			_pivot_t = 0.0
+			_push_t = 3.0
+	else:
+		_pivot_t = 0.0
+
+# --------------------------------------------------------------------------
 ## Garrison crew: find something hostile, traverse onto it and shoot. Direct
 ## fire vehicles lead the target; the artillery pieces arc onto it.
 func _ai_think(delta: float) -> void:
+	# On a range where nothing shoots back, the enemy's long guns and
+	# launchers do not either. Holding fire at aircraft was not enough: a
+	# Khorramshahr in its own country seventeen kilometres from the field
+	# found the vehicles on the apron, and when its bus opened over them the
+	# warheads took whatever was parked there -- the aeroplanes included.
+	if Sim.no_air_threat and team != 0 and is_indirect():
+		_ai_target = null
+		return
 	_ai_scan -= delta
 	if _ai_scan <= 0.0:
 		_ai_scan = 1.2
@@ -713,6 +824,9 @@ func _ai_think(delta: float) -> void:
 				continue
 			# an artillery piece does not shoot at aircraft
 			if is_indirect() and (n is Aircraft):
+				continue
+			# ...and on a range with no air threat, nothing does
+			if Sim.no_air_threat and (n is Aircraft):
 				continue
 			# ...and a battery shoots at nothing else. Everything about it —
 			# the rails, the radar, the round — is for what is overhead.
@@ -750,7 +864,7 @@ func _ai_think(delta: float) -> void:
 		return
 	if lay < 0.05 and _gun_cd <= 0.0:
 		fire_main(get_tree().current_scene)
-	if not is_indirect() and lay < 0.08 \
+	if has_coax() and lay < 0.08 \
 			and global_position.distance_to(_ai_target.global_position) < 1400.0:
 		fire_coax(get_tree().current_scene)
 
@@ -874,8 +988,11 @@ func _drive_input(delta: float) -> void:
 		# nothing more -- the round goes when the crew is told.
 		if tapped or (is_ripple() and held):
 			fire_main(get_tree().current_scene)
-	# V still works as a dedicated coax key whatever is selected
-	if Sim.held(&"gun") and current_weapon() != "coax" and vclass() != "lav":
+	# V still works as a dedicated coax key whatever is selected -- on a
+	# vehicle that carries one. It was every vehicle bar the patrol car, so a
+	# missile launcher, a SAM battery and a rocket truck all hosed tracer out
+	# of their launch rails from a machine gun nobody had fitted.
+	if Sim.held(&"gun") and current_weapon() != "coax" and has_coax():
 		fire_coax(get_tree().current_scene)
 	if Sim.tapped(&"interact"):
 		dismount_requested.emit()
@@ -928,6 +1045,7 @@ func _tick_tank_p(delta: float) -> void:
 			_asat_think(delta)
 		else:
 			_ai_think(delta)
+			_ai_drive(delta)
 	if occupied and alive and not scripted:
 		_drive_input(delta)
 	elif occupied and alive:
@@ -1516,10 +1634,23 @@ func weapons() -> PackedStringArray:
 		return PackedStringArray(["aa", "sam"])
 	if vclass() == "ifv":
 		return PackedStringArray(["cannon", "coax"])
+	# A launcher carries rounds, not a barrel. Both fell through to "main" and
+	# were labelled MAIN GUN on the bridge readout and the commander's sight --
+	# a gun on a vehicle that has none.
+	if vclass() == "tel":
+		return PackedStringArray(["missile"])
+	if vclass() == "mlrs":
+		return PackedStringArray(["rockets"])
 	var w := PackedStringArray(["main"])
 	if vclass() == "mbt":
 		w.append("coax")
 	return w
+
+## A machine gun alongside the main armament: the coaxial on a tank or a
+## fighting vehicle. Not the patrol car's roof gun, which is its main weapon and
+## is already on the trigger.
+func has_coax() -> bool:
+	return weapons().has("coax")
 
 func current_weapon() -> String:
 	var w := weapons()
@@ -1543,6 +1674,11 @@ func weapon_label() -> String:
 			return "AUTOCANNON"
 		"coax":
 			return "COAXIAL"
+		"missile":
+			return "%s  %d ON THE ERECTOR" % [
+				String(KINDS[kind].get("missile", "missile")).to_upper(), rounds_left]
+		"rockets":
+			return "ROCKETS  %d IN THE POD" % rounds_left
 		_:
 			return "MAIN GUN"
 
@@ -1739,6 +1875,39 @@ var map_lock: Node = null
 ## spread the load over the footprint at the primary mark.
 var mirv_marks: Array = []
 
+## Where a warhead's mark is now. A mark is either a patch of ground (a
+## Vector3) or a unit that was clicked on, and a unit is followed: the warhead
+## is locked on it, not on the spot it was standing on when it was picked.
+static func mark_at(mk: Variant) -> Vector3:
+	if mk is Vector3:
+		return mk
+	if is_instance_valid(mk) and mk is Node3D:
+		return (mk as Node3D).global_position
+	return Vector3.INF
+
+## The unit a mark is locked on, or null for a patch of ground.
+static func mark_unit(mk: Variant) -> Node3D:
+	if mk is Node3D and is_instance_valid(mk):
+		return mk
+	return null
+
+## Every warhead's mark, primary first: what the fire mission will hand the
+## bus. Units that have died since they were picked are dropped.
+func warhead_marks() -> Array:
+	var out: Array = []
+	if is_instance_valid(map_lock):
+		out.append(map_lock)
+	elif map_target != Vector3.INF:
+		out.append(map_target)
+	for mk in mirv_marks:
+		if mark_at(mk) != Vector3.INF:
+			out.append(mk)
+	return out
+
+## How many warheads the round on the rail carries; nought for a single one.
+func warheads() -> int:
+	return int(WeaponSpec.get_spec(String(KINDS[kind].get("missile", "kalibr"))).get("mirv", 0))
+
 ## Is there anything worth standing the canister up for? It goes back down when
 ## there is not, because a launcher sitting on the road with its tube in the air
 ## is a launcher that has already been seen.
@@ -1917,6 +2086,11 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	var mark: Vector3 = map_target
 	if is_instance_valid(map_lock):
 		mark = (map_lock as Node3D).global_position
+	# warheads marked but no primary: the bus goes for the first of them
+	if mark == Vector3.INF and not mirv_marks.is_empty():
+		var rv0: Array = warhead_marks()
+		if not rv0.is_empty():
+			mark = mark_at(rv0[0])
 	if mark == Vector3.INF:
 		mark = ground_aim()
 	if mark == Vector3.INF and is_instance_valid(_ai_target):
@@ -1966,8 +2140,16 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	# The primary mark first, then whatever else has been assigned, so a bus
 	# given two extra points still puts a warhead on the one you laid to begin
 	# with rather than leaving it alone.
-	if not mirv_marks.is_empty():
-		m.programmed = ([mark] as Array) + mirv_marks
+	var units := 0
+	var rvs: Array = []
+	if not mirv_marks.is_empty() or (warheads() > 0 and is_instance_valid(map_lock)):
+		rvs = warhead_marks()
+		if rvs.is_empty() or mark_at(rvs[0]) == Vector3.INF:
+			rvs.push_front(mark)
+		m.programmed = rvs
+		for mk in rvs:
+			if mark_unit(mk) != null:
+				units += 1
 	
 	m.team = team
 	world.add_child(m)
@@ -1979,6 +2161,14 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	Sim.report("%s: %s away — %.0f km on %03d, %d left" % [display_name(),
 		String(WeaponSpec.get_spec(id)["short"]), rng * 0.001,
 		int(wrapf(brg, 0.0, 360.0)), rounds_left], Sim.Ev.BAD)
+	if not rvs.is_empty():
+		Sim.report("%d warhead marks: %d locked on units, %d on ground points" % [
+			rvs.size(), units, rvs.size() - units], Sim.Ev.INFO)
+	# Spent with the round, so the next one's first click is RV1 again
+	if warheads() > 0:
+		mirv_marks.clear()
+		map_lock = null
+		map_target = Vector3.INF
 	return true
 
 ## A place for the round to guide onto. A patch of ground is not a contact, so

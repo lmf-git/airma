@@ -403,7 +403,8 @@ impl Ground {
         let r = self.chart.radius;
         let s2 = x * x + z * z;
         if self.globe {
-            r * (1.0 - (s2.sqrt() / r).cos())
+            // not 1 - cos in single precision: see `sphere::fall`
+            sphere::fall(&self.chart, x, z)
         } else {
             s2 / (2.0 * r)
         }

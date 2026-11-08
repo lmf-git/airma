@@ -289,7 +289,12 @@ static func _db() -> Dictionary:
 		# this aeroplane exists: its rounds burst where they land rather than
 		# raising the puff of dust every other cannon in the game does.
 		"gun": {"rounds": 1174, "rpm": 3900, "muzzle": 1010.0, "damage": 26.0,
-				"he": 1.15, "pos": Vector3(-0.18, -0.30, -5.4)},
+				# Under the tip of the nose and a little left of centre, which is
+				# where a GAU-8 comes out: the gun is carried offset so that the
+				# barrel firing is the one on the centreline. It was 2.7 m back
+				# inside the forward fuselage, and the flash and the tracer both
+				# started from inside the cockpit section.
+				"he": 1.15, "pos": Vector3(-0.10, -0.42, -8.3)},
 		"gear": [
 			{"pos": Vector3(0.45, -1.92, -4.6), "r": 0.36, "steer": true, "brake": false, "len": 1.20},
 			{"pos": Vector3(-2.30, -1.82, 1.15), "r": 0.46, "steer": false, "brake": true, "len": 1.15},
@@ -990,8 +995,11 @@ static func _db() -> Dictionary:
 			 "muzzle": 494.0, "spread": 0.004},
 			{"id": "g40", "name": "40 mm Bofors", "rpm": 100.0, "damage": 150.0, "blast": 9.0,
 			 "muzzle": 881.0, "spread": 0.008},
+			# Five milliradians, not sixteen: about twelve metres either way at
+			# two and a half kilometres. At sixteen the burst covered a football
+			# pitch and hit what it was aimed at by chance.
 			{"id": "g25", "name": "25 mm GAU-12", "rpm": 1800.0, "damage": 34.0, "blast": 3.5,
-			 "muzzle": 1040.0, "spread": 0.016},
+			 "muzzle": 1040.0, "spread": 0.005},
 		],
 		"gun": {"rounds": 0, "rpm": 600, "muzzle": 1000.0, "damage": 10.0,
 				"pos": Vector3(-2.0, -0.6, -2.0)},
@@ -1690,8 +1698,10 @@ static func _db() -> Dictionary:
 		"fuel": 6780.0, "sfc_mil": 0.70, "sfc_ab": 2.1,
 		"vne": 600.0, "g_limit": 7.5,
 		"stealth": 1.3,
+		# On top of the nose, ahead of the windscreen: the Hornet's M61 fires
+		# from there. It was five metres back, under the canopy.
 		"gun": {"rounds": 412, "rpm": 6000, "muzzle": 1030.0, "damage": 9.0,
-				"pos": Vector3(0.0, 0.70, -3.2)},
+				"pos": Vector3(0.0, 0.60, -7.0)},
 		"gear": [
 			{"pos": Vector3(0.0, -1.72, -4.3), "r": 0.34, "steer": true, "brake": false, "len": 0.95},
 			{"pos": Vector3(-1.55, -1.66, 0.7), "r": 0.44, "steer": false, "brake": true, "len": 0.88},

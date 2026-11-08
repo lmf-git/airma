@@ -1325,7 +1325,7 @@ impl Terra {
                     .iter()
                     .map(|v| (v.x, v.y))
                     .collect();
-                survey::chain(&seg, survey::SURVEY_STEP)
+                survey::chain(&survey::fillet(&seg), survey::SURVEY_STEP)
             })
             .collect();
         let mut p: Vec<(f32, f32)> = Vec::new();
@@ -1337,10 +1337,23 @@ impl Terra {
         out_starts.push(p.len() as i32);
         // the ground under every station, before any road is on it
         let w = world();
-        let g: Vec<f32> = p
-            .par_iter()
-            .map(|q| ground_at(w, corridor(), q.0, q.1, G_FIELDS))
-            .collect();
+        let sample = |p: &[(f32, f32)]| -> Vec<f32> {
+            p.par_iter()
+                .map(|q| ground_at(w, corridor(), q.0, q.1, G_FIELDS))
+                .collect()
+        };
+        let mut g: Vec<f32> = sample(&p);
+        // the valleys worth a viaduct, found before the design can settle into
+        // them -- and carried through, because what is a structure is decided
+        // again at the end against the same marks
+        let mut deck = survey::vales(&p, &g, &out_starts);
+        // and each one laid straight across, then found again on the new line
+        if let Some((np, ns)) = survey::straighten(&p, &out_starts, &deck) {
+            p = np;
+            out_starts = ns;
+            g = sample(&p);
+            deck = survey::vales(&p, &g, &out_starts);
+        }
         // the design profile and the gradient allowance it needed, then the
         // relaxation between lines
         let mut y = vec![0f32; p.len()];
@@ -1351,7 +1364,8 @@ impl Terra {
                 .map(|li| {
                     let (a0, a1) =
                         (out_starts[li] as usize, out_starts[li + 1] as usize);
-                    let (seg, allow) = survey::design(&p[a0..a1], &g[a0..a1]);
+                    let (seg, allow) =
+                        survey::design(&p[a0..a1], &g[a0..a1], &deck[a0..a1]);
                     (a0, seg, allow)
                 })
                 .collect();
@@ -1367,7 +1381,7 @@ impl Terra {
             .par_iter()
             .map(|q| ground_at(w, corridor(), q.0, q.1, G_FIELDS))
             .collect();
-        let (y, flags) = survey::finish(&p, &y, &g, &gr, &out_starts);
+        let (y, flags) = survey::finish(&p, &y, &g, &gr, &out_starts, &deck);
         let mut out: Array<Variant> = Array::new();
         let pv: Vec<Vector2> = p.iter().map(|q| Vector2::new(q.0, q.1)).collect();
         out.push(&PackedVector2Array::from(pv.as_slice()).to_variant());

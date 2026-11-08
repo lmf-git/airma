@@ -286,7 +286,7 @@ func _refresh_contacts() -> void:
 ## The contact nearest a point on screen, if the click is close enough to mean it.
 func _contact_near(at: Vector2, org: Vector2, ppm: float) -> Node:
 	var best: Node = null
-	var bd := 18.0
+	var bd := 26.0
 	for c in _contacts:
 		# Checked before it is typed. The list is rebuilt on a timer, so
 		# anything shot down between two ticks is still in it -- and assigning a
@@ -304,11 +304,9 @@ func _contact_near(at: Vector2, org: Vector2, ppm: float) -> Node:
 	return best
 
 func _gui_input(e: InputEvent) -> void:
-	# The globe is a view, not a chart: it turns and zooms, and the fire
-	# missions and aiming points stay on the chart where the ground is flat and
-	# a click means a coordinate. The one thing it does take is a satellite,
-	# because seeing where one actually is over the planet is the reason to be
-	# looking at a planet.
+	# The globe turns and zooms with the plain buttons, and the modified and
+	# right clicks do what they do on the chart: an objective, a fire mission,
+	# an aiming point, a satellite.
 	if globe:
 		# A trackpad does not send wheel buttons. Two fingers on a Mac trackpad
 		# is a pan gesture and a pinch is a magnify, and with neither handled
@@ -330,7 +328,22 @@ func _gui_input(e: InputEvent) -> void:
 			elif gb.button_index == MOUSE_BUTTON_WHEEL_DOWN and gb.pressed:
 				globe_zoom = clampf(globe_zoom / 1.2, 0.6, 260.0)
 			elif gb.button_index == MOUSE_BUTTON_RIGHT and gb.pressed:
-				_pick_satellite_globe(gb.position)
+				# Something on the ground under the cursor first. Zoomed out, the
+				# whole theatre is a few pixels of globe with the satellites
+				# passing over it, and the satellite pick came first: a right
+				# click on a red dot to lock a fire mission onto it selected
+				# whichever satellite was overhead instead.
+				if _contact_near_globe(gb.position) != null \
+						or not _pick_satellite_globe(gb.position):
+					_lay_mark(gb)
+			elif gb.button_index == MOUSE_BUTTON_LEFT and gb.pressed \
+					and (gb.shift_pressed or gb.ctrl_pressed or gb.meta_pressed):
+				# An objective, where the click lands on the ground. The map
+				# has only been the globe for a while and this branch took
+				# every click for turning it, so the objective marker -- which
+				# lived on the flat chart's side -- could not be set at all.
+				_objective_at(gb.position)
+				return
 			elif gb.button_index == MOUSE_BUTTON_LEFT:
 				_drag = gb.pressed
 		elif e is InputEventMouseMotion and _drag:
@@ -365,74 +378,27 @@ func _gui_input(e: InputEvent) -> void:
 			# is what anybody does when they want to target something.
 			if _pick_satellite(mb.position):
 				return
-			# right click lays a fire mission for an artillery piece, and the
-			# aiming point for a strategic launch when you are in the boat that
-			# carries one. There was no path at all for the latter: the map
-			# only ever spoke to a tank, and `_strategic_strike` asked the map
-			# for a `target_point` it did not have — so aiming the round on the
-			# map silently did nothing and the only way to send it was the pod.
-			var vp := get_viewport_rect().size
-			var org := vp * 0.5
-			var scl := minf(vp.x, vp.y) * 0.86 * zoom / (HALF * 2.0)
-			# On the globe the click is unprojected through the ball; on the
-			# chart it is a straight scale. Everything after this is the same
-			# either way, which is the point of doing it here.
-			var w: Vector2 = _globe_point(mb.position) if globe \
-				else centre + (mb.position - org) / scl
-			if is_inf(w.x):
-				return
-			var at := Vector3(w.x, Sim.height_at(w.x, w.y), w.y)
-			# Clicked on something rather than somewhere? Then it is a lock, and
-			# the round guides onto the unit instead of onto the patch of ground
-			# the unit happened to be standing on when you pressed the button.
-			var hit: Node = _contact_near_globe(mb.position) if globe \
-				else _contact_near(mb.position, org, scl)
-			if tank != null and is_instance_valid(tank) and tank.is_indirect():
-				# Shift adds a point rather than replacing one. A round that
-				# carries several warheads can be given several marks -- which
-				# is what "independently targetable" means -- and each warhead
-				# takes one as the bus opens. Without shift it is the primary
-				# mark and the extra ones are forgotten.
-				if mb.shift_pressed:
-					var extra: Vector3 = (hit as Node3D).global_position \
-						if hit != null else at
-					tank.mirv_marks.append(extra)
-					Sim.report("warhead %d assigned: %.1f km" % [
-						tank.mirv_marks.size(),
-						tank.global_position.distance_to(extra) * 0.001],
-						Sim.Ev.INFO)
-					return
-				tank.mirv_marks.clear()
-				tank.map_lock = hit
-				tank.map_target = (hit as Node3D).global_position if hit != null else at
-				if hit != null:
-					Sim.report("locked: %s at %.1f km" % [
-						String(hit.call("display_name")) if hit.has_method("display_name")
-						else String(hit.name),
-						tank.global_position.distance_to(tank.map_target) * 0.001],
-						Sim.Ev.GOOD)
-					return
-				Sim.report("fire mission: %.1f km" % (
-					tank.global_position.distance_to(tank.map_target) * 0.001), Sim.Ev.INFO)
-			elif ship != null and is_instance_valid(ship) and ship.can_launch():
-				strategic_mark = at
-				ship.strategic_aim = at
-				Sim.report("aiming point set: %.0f km" % (
-					ship.global_position.distance_to(at) * 0.001), Sim.Ev.INFO)
+			_lay_mark(mb)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
-			# CTRL and click plants an objective marker, and CTRL and click on a
-			# satellite assigns it to the ASAT launchers. Deliberately not
-			# shift: shift already belongs to the weapons — it is what assigns
-			# a warhead on a MIRV bus and picks the extra aiming points for a
-			# cluster round — and putting a navigation marker on the same
-			# modifier meant reaching for one and getting the other.
-			if (mb.ctrl_pressed or mb.meta_pressed) and mb.pressed:
+			# SHIFT or CTRL and click plants an objective marker, and the same
+			# on a satellite assigns it to the ASAT launchers. Shift on the
+			# *right* button belongs to the weapons -- the extra warheads on a
+			# MIRV bus -- so the left one is free for it, and shift and click is
+			# what anybody reaches for to drop a waypoint.
+			if (mb.shift_pressed or mb.ctrl_pressed or mb.meta_pressed) and mb.pressed:
 				if _pick_satellite(mb.position):
 					return
 				var vp0 := get_viewport_rect().size
 				var ppm0 := minf(vp0.x, vp0.y) * 0.86 * zoom / (HALF * 2.0)
 				var org0 := vp0 * 0.5
-				var w := centre + (mb.position - org0) / ppm0
+				# Through the ball on the globe, a straight scale on the chart:
+				# the same as a fire mission. Worked out as if the map were flat
+				# whatever it was showing, the marker landed hundreds of
+				# kilometres from the click whenever the planet was up.
+				var w: Vector2 = _globe_point(mb.position) if globe \
+					else centre + (mb.position - org0) / ppm0
+				if is_inf(w.x):
+					return
 				var at := Vector3(w.x, Sim.height_at(w.x, w.y), w.y)
 				if Sim.objective != Vector3.INF \
 						and Vector2(Sim.objective.x - at.x,
@@ -468,6 +434,198 @@ func _process(d: float) -> void:
 
 ## Was that click on something in orbit? Assigns it to the ASAT launchers if so
 ## and reports true, leaving the caller to do nothing else with the click.
+## A right click on the ground, chart or globe alike: a fire mission for the
+## artillery piece you are in, an aiming point for the strategic round in the
+## boat you are in. Split out of the chart's handler, because the map has been
+## the globe for a while and the globe never reached it -- right click on the
+## planet picked satellites and did nothing else, so a fire mission could not be
+## laid from the map at all.
+func _lay_mark(mb: InputEventMouseButton) -> void:
+	# right click lays a fire mission for an artillery piece, and the
+	# aiming point for a strategic launch when you are in the boat that
+	# carries one. There was no path at all for the latter: the map
+	# only ever spoke to a tank, and `_strategic_strike` asked the map
+	# for a `target_point` it did not have — so aiming the round on the
+	# map silently did nothing and the only way to send it was the pod.
+	var vp := get_viewport_rect().size
+	var org := vp * 0.5
+	var scl := minf(vp.x, vp.y) * 0.86 * zoom / (HALF * 2.0)
+	# On the globe the click is unprojected through the ball; on the
+	# chart it is a straight scale. Everything after this is the same
+	# either way, which is the point of doing it here.
+	var w: Vector2 = _globe_point(mb.position) if globe \
+		else centre + (mb.position - org) / scl
+	if is_inf(w.x):
+		return
+	var at := Vector3(w.x, Sim.height_at(w.x, w.y), w.y)
+	# Clicked on something rather than somewhere? Then it is a lock, and
+	# the round guides onto the unit instead of onto the patch of ground
+	# the unit happened to be standing on when you pressed the button.
+	var hit: Node = _contact_near_globe(mb.position) if globe \
+		else _contact_near(mb.position, org, scl)
+	# A rough click near a contact means the contact. Thirty pixels' worth of
+	# ground, but never less than two kilometres -- zoomed right in, a miss by
+	# a ship's length should still take her -- nor more than eight, or zoomed
+	# out a click anywhere in a sea area would grab whatever was in it.
+	if hit == null:
+		var m_per_px: float = Sim.PLANET_R / maxf(minf(vp.x, vp.y) * 0.42 * globe_zoom, 1.0) \
+			if globe else 1.0 / maxf(scl, 1e-6)
+		hit = _contact_by_ground(at, clampf(30.0 * m_per_px, 2000.0, 8000.0))
+	if tank != null and is_instance_valid(tank) and tank.is_indirect():
+		var n_rv: int = tank.warheads()
+		var laid: int = tank.warhead_marks().size()
+		# A unit clicked on is kept as the unit, so the warhead given it is
+		# locked on and follows it -- it used to be stored as the spot it was
+		# standing on, and the log said only how far away that spot was.
+		var mk: Variant = at
+		if hit != null:
+			mk = hit
+		var km: float = tank.global_position.distance_to(Tank.mark_at(mk)) * 0.001
+		if n_rv > 0:
+			# One click, one warhead. A round that carries several can be
+			# given several marks -- which is what "independently targetable"
+			# means -- and they used to need shift: a plain right click put
+			# the whole load on one mark, which read as every warhead going
+			# down at once. Now each click lays the next, RV1 to RVn; past the
+			# last one the next click starts the mission over, and ctrl clears
+			# it. Warheads left without a mark of their own share the ones
+			# there are.
+			if mb.ctrl_pressed or mb.meta_pressed:
+				tank.mirv_marks.clear()
+				tank.map_lock = null
+				tank.map_target = Vector3.INF
+				Sim.report("warhead marks cleared", Sim.Ev.INFO)
+				return
+			if laid >= n_rv or laid == 0:
+				if laid >= n_rv:
+					Sim.report("all %d warheads were marked — starting a new fire mission" % n_rv,
+						Sim.Ev.INFO)
+				tank.mirv_marks.clear()
+				tank.map_lock = hit
+				tank.map_target = Tank.mark_at(mk)
+			else:
+				tank.mirv_marks.append(mk)
+			var rv: int = tank.warhead_marks().size()
+			var next := ("  — right click for RV%d of %d" % [rv + 1, n_rv]) if rv < n_rv \
+				else "  — all %d marked" % n_rv
+			if hit != null:
+				var also := PackedStringArray()
+				var marks: Array = tank.warhead_marks()
+				for k in marks.size() - 1:
+					# is_same, not ==: a ground mark is a Vector3, and comparing
+					# one with an object is an error rather than false
+					if is_same(marks[k], hit):
+						also.append("RV%d" % (k + 1))
+				Sim.report("RV%d locked on %s — %.1f km%s%s" % [rv,
+					Sim.label_of(hit), km,
+					("  (same unit as %s)" % ", ".join(also)) if not also.is_empty() else "",
+					next], Sim.Ev.GOOD)
+			else:
+				Sim.report("RV%d on a ground point — %.1f km%s" % [rv, km, next], Sim.Ev.INFO)
+			return
+		tank.mirv_marks.clear()
+		tank.map_lock = hit
+		tank.map_target = Tank.mark_at(mk)
+		if hit != null:
+			Sim.report("locked: %s at %.1f km" % [Sim.label_of(hit), km], Sim.Ev.GOOD)
+			return
+		Sim.report("fire mission: %.1f km" % km, Sim.Ev.INFO)
+	elif ship != null and is_instance_valid(ship) and ship.can_launch():
+		strategic_mark = at
+		ship.strategic_aim = at
+		Sim.report("aiming point set: %.0f km" % (
+			ship.global_position.distance_to(at) * 0.001), Sim.Ev.INFO)
+
+## The nearest contact on the map to a point on the ground, within `reach`
+## metres: hostiles first, since that is what a fire mission is for, and never
+## one of your own.
+func _contact_by_ground(at: Vector3, reach: float) -> Node:
+	var best: Node = null
+	var bd := INF
+	for c in _contacts:
+		var nv: Variant = c["n"]
+		if not is_instance_valid(nv) or not bool(c["hostile"]):
+			continue
+		var p: Vector3 = (nv as Node3D).global_position
+		var d: float = Vector2(p.x - at.x, p.z - at.z).length()
+		if d < reach and d < bd:
+			bd = d
+			best = nv
+	return best
+
+## One warhead's mark on the map: a red ring and the unit's name when it is
+## locked on something, an amber ring when it is a patch of ground. Only the
+## warheads past the first are drawn when the first is the fire mission's own
+## mark, which has its own cross already.
+func _rv_mark(at: Vector2, wi: int, mk: Variant) -> void:
+	var unit: Node3D = Tank.mark_unit(mk)
+	if unit != null:
+		var rc := Color(1.0, 0.36, 0.30)
+		draw_arc(at, 11.0, 0, TAU, 18, rc, 2.0)
+		draw_arc(at, 15.0, 0, TAU, 18, Color(rc.r, rc.g, rc.b, 0.45), 1.0)
+		_label(at + Vector2(16, -6), "RV%d  %s" % [wi + 1, Sim.label_of(unit).to_upper()], rc, 11)
+		_label(at + Vector2(16, 8), "LOCKED", rc, 10)
+	else:
+		var wc := Color(1.0, 0.75, 0.25)
+		draw_arc(at, 9.0, 0, TAU, 16, wc, 1.4)
+		draw_line(at - Vector2(0, 9), at + Vector2(0, 9), wc, 1.2)
+		_label(at + Vector2(12, 4), "RV%d  GROUND" % (wi + 1), Color(1.0, 0.8, 0.4), 11)
+
+## The rest of the load the weapon camera's round came off a bus with, and
+## what each warhead is going for.
+##
+## The map followed the one round the camera was riding, so once a bus opened
+## it showed a single warhead and nothing of the other seven. Every one is
+## marked now, with a line to its target: a red ring on a unit it has locked, a
+## small cross on a patch of ground. `proj` turns a world point into a screen
+## point, with z > 0 when it is on the visible side.
+func _draw_salvo(riding: Node3D, proj: Callable) -> void:
+	if not (riding is Missile):
+		return
+	var rm: Missile = riding
+	var pack: Array = rm.salvo()
+	var amber := Color(1.0, 0.85, 0.35)
+	var red := Color(1.0, 0.40, 0.32)
+	var faint := Color(1.0, 0.85, 0.35, 0.6)
+	var units := 0
+	var drawn := {}
+	for i in pack.size():
+		var m: Missile = pack[i]
+		var unit: bool = m.locked_on_unit()
+		if unit:
+			units += 1
+		var q: Vector3 = proj.call(m.global_position, true)
+		var tq := Vector3(0, 0, -1)
+		if is_instance_valid(m.target):
+			tq = proj.call(m.target.global_position, false)
+		if q.z > 0.0 and tq.z > 0.0:
+			draw_line(Vector2(q.x, q.y), Vector2(tq.x, tq.y),
+				Color(red.r, red.g, red.b, 0.5) if unit else Color(faint.r, faint.g, faint.b, 0.35),
+				1.0)
+		var on_sheet: bool = Rect2(Vector2(-200, -200),
+			get_viewport_rect().size + Vector2(400, 400)).has_point(Vector2(q.x, q.y))
+		if q.z > 0.0 and m != rm and on_sheet:
+			var c := Vector2(q.x, q.y)
+			draw_colored_polygon(PackedVector2Array([c + Vector2(0, -4),
+				c + Vector2(4, 0), c + Vector2(0, 4), c + Vector2(-4, 0)]), amber)
+		if tq.z <= 0.0:
+			continue
+		var key: int = m.target.get_instance_id()
+		if drawn.has(key):
+			continue
+		drawn[key] = true
+		var t2 := Vector2(tq.x, tq.y)
+		if unit:
+			draw_arc(t2, 7.0, 0.0, TAU, 16, red, 1.6)
+		else:
+			draw_line(t2 + Vector2(-3.5, -3.5), t2 + Vector2(3.5, 3.5), faint, 1.2)
+			draw_line(t2 + Vector2(-3.5, 3.5), t2 + Vector2(3.5, -3.5), faint, 1.2)
+	if pack.size() > 1:
+		var rq: Vector3 = proj.call(rm.global_position, true)
+		if rq.z > 0.0:
+			_label(Vector2(rq.x, rq.y) + Vector2(14, 8), "x%d  %d locked" % [
+				pack.size(), units], red if units > 0 else amber, 11)
+
 func _pick_satellite(at: Vector2) -> bool:
 	var vp := get_viewport_rect().size
 	var ppm := minf(vp.x, vp.y) * 0.86 * zoom / (HALF * 2.0)
@@ -604,6 +762,9 @@ func _draw() -> void:
 		var riding_v: Variant = (world.cam as Node).get("weapon_cam")
 		if riding_v != null and is_instance_valid(riding_v) and riding_v is Node3D:
 			var riding: Node3D = riding_v
+			_draw_salvo(riding, func(w: Vector3, _air: bool) -> Vector3:
+				var f := _w2s(Vector2(w.x, w.z), org, ppm)
+				return Vector3(f.x, f.y, 1.0))
 			var rp: Vector3 = (riding as Node3D).global_position
 			var rq := _w2s(Vector2(rp.x, rp.z), org, ppm)
 			var rc := Color(1.0, 0.85, 0.35)
@@ -710,15 +871,14 @@ func _draw() -> void:
 				tank.global_position.distance_to(tank.map_target) * 0.001),
 				Color(1.0, 0.6, 0.3))
 		# and every warhead that has been given a mark of its own
-		for wi in tank.mirv_marks.size():
-			var wm: Vector3 = tank.mirv_marks[wi]
+		var rvs: Array = tank.warhead_marks()
+		for wi in rvs.size():
+			var wm: Vector3 = Tank.mark_at(rvs[wi])
 			var wp := _w2s(Vector2(wm.x, wm.z), org, ppm)
-			draw_arc(wp, 9.0, 0, TAU, 16, Color(1.0, 0.75, 0.25), 1.4)
-			draw_line(wp - Vector2(0, 9), wp + Vector2(0, 9), Color(1.0, 0.75, 0.25), 1.2)
-			_label(wp + Vector2(12, 4), "RV%d" % (wi + 1), Color(1.0, 0.8, 0.4), 11)
+			_rv_mark(wp, wi, rvs[wi])
 		_label(Vector2(24, vp.y - 120), "right click to lay a fire mission"
-			+ ("  ·  shift+right click assigns a warhead (%d)" % tank.mirv_marks.size()
-				if tank.mirv_marks.size() > 0 else "  ·  shift+right click assigns a warhead"),
+			+ ("  ·  each click marks the next warhead (%d of %d)  ·  ctrl+right click clears" % [
+				rvs.size(), tank.warheads()] if tank.warheads() > 0 else ""),
 			Color(1.0, 0.7, 0.4), 14)
 
 	# scale bar and legend
@@ -731,7 +891,7 @@ func _draw() -> void:
 	_label(Vector2(bx, vp.y - 60), "%d km" % int(bar_m * 0.001), Color(0.9, 0.95, 1.0))
 	_label(Vector2(24, 40), "TACTICAL MAP", Color(0.6, 0.95, 1.0), 22)
 	_label(Vector2(24, 64),
-		"wheel zoom   drag to pan   ctrl+click sets an objective   click a satellite to target it   M to close",
+		"wheel zoom   drag to pan   shift+click sets an objective (again to clear)   click a satellite to target it   M to close",
 		Color(0.6, 0.7, 0.8), 14)
 	# north arrow
 	var na := Vector2(vp.x - 60.0, 70.0)
@@ -920,7 +1080,7 @@ func _draw_globe() -> void:
 		alt = Sim.altitude(ap)
 		lat = Sim.latitude_at(ap.x, ap.z)
 	_label(Vector2(18, 26), "PLANET  —  drag to turn, wheel to zoom, right click "
-		+ "to lay a fire mission", Color(0.75, 0.85, 1.0), 15)
+		+ "to lay a fire mission, shift+click for an objective", Color(0.75, 0.85, 1.0), 15)
 	_label(Vector2(18, 48), "globe %.0f km across; you are %.1f km up at %.2f%s" % [
 		Sim.PLANET_R * 2.0 * 0.001, alt * 0.001,
 		absf(rad_to_deg(lat)), "N" if lat >= 0.0 else "S"],
@@ -1154,6 +1314,17 @@ func _globe_marks(org: Vector2, rad: float, b: Basis) -> void:
 			edge = PackedVector2Array()
 	if edge.size() > 1:
 		draw_polyline(edge, Color(0.55, 0.75, 0.95, 0.6), 1.4)
+	# the objective, the same mark the flat chart drew -- the globe drew none,
+	# so one set from the pod or the satellite terminal was nowhere on the map
+	if Sim.objective != Vector3.INF:
+		var oq := _globe_at(Vector2(Sim.objective.x, Sim.objective.z), org, rad, b)
+		if oq.z > 0.0:
+			var op := Vector2(oq.x, oq.y)
+			var oc := Color(1.0, 0.82, 0.25)
+			draw_arc(op, 9.0, 0.0, TAU, 20, oc, 2.0)
+			draw_line(op + Vector2(-14, 0), op + Vector2(14, 0), oc, 1.4)
+			draw_line(op + Vector2(0, -14), op + Vector2(0, 14), oc, 1.4)
+			_label(op + Vector2(12, -12), "OBJECTIVE", oc, 12)
 	# the airfield, which is the pole and the origin of everything else
 	var home := _globe_at(Vector2.ZERO, org, rad, b)
 	if home.z > 0.0:
@@ -1252,6 +1423,10 @@ func _globe_marks(org: Vector2, rad: float, b: Basis) -> void:
 		var riding_v: Variant = (world.cam as Node).get("weapon_cam")
 		if riding_v != null and is_instance_valid(riding_v) and riding_v is Node3D:
 			var riding: Node3D = riding_v
+			_draw_salvo(riding, func(w: Vector3, air: bool) -> Vector3:
+				var lift: float = 1.0 + maxf(Sim.altitude(w), 0.0) / Sim.PLANET_R \
+					if air else 1.0
+				return _globe_at(Vector2(w.x, w.z), org, rad, b, lift))
 			var rp: Vector3 = riding.global_position
 			var rl: float = 1.0 + maxf(Sim.altitude(rp), 0.0) / Sim.PLANET_R
 			var p := _globe_at(Vector2(rp.x, rp.z), org, rad, b, rl)
@@ -1333,17 +1508,13 @@ func _globe_marks(org: Vector2, rad: float, b: Basis) -> void:
 				_label(mp3 + Vector2(18, 4), "%.1f km" % (
 					tank.global_position.distance_to(tank.map_target) * 0.001),
 					Color(1.0, 0.6, 0.3))
-		for wi in tank.mirv_marks.size():
-			var wm3: Vector3 = tank.mirv_marks[wi]
+		var rvs3: Array = tank.warhead_marks()
+		for wi in rvs3.size():
+			var wm3: Vector3 = Tank.mark_at(rvs3[wi])
 			var wq := _globe_at(Vector2(wm3.x, wm3.z), org, rad, b)
 			if wq.z <= 0.0:
 				continue
-			var wp3 := Vector2(wq.x, wq.y)
-			var wc := Color(1.0, 0.75, 0.25)
-			draw_arc(wp3, 9.0, 0, TAU, 16, wc, 1.4)
-			draw_line(wp3 - Vector2(0, 9), wp3 + Vector2(0, 9), wc, 1.2)
-			_label(wp3 + Vector2(12, 4), "RV%d" % (wi + 1),
-				Color(1.0, 0.8, 0.4), 11)
+			_rv_mark(Vector2(wq.x, wq.y), wi, rvs3[wi])
 	# and the satellites, off the surface by their own altitude
 	for sat in get_tree().get_nodes_in_group("satellites"):
 		if not is_instance_valid(sat) or not (sat is Node3D):
@@ -1387,6 +1558,23 @@ func _me() -> Node3D:
 		return aircraft as Node3D
 	return null
 
+## Put the objective where a click on the globe meets the ground -- or take it
+## away, when the click is on the one already there.
+func _objective_at(click: Vector2) -> void:
+	var w := _globe_point(click)
+	if is_inf(w.x):
+		return
+	if Sim.objective != Vector3.INF:
+		var vp := get_viewport_rect().size
+		var q := _globe_at(Vector2(Sim.objective.x, Sim.objective.z), vp * 0.5,
+			minf(vp.x, vp.y) * 0.42 * globe_zoom, _globe_basis())
+		if q.z > 0.0 and Vector2(q.x, q.y).distance_to(click) < 14.0:
+			Sim.clear_objective()
+			queue_redraw()
+			return
+	Sim.set_objective(Vector3(w.x, Sim.height_at(w.x, w.y), w.y))
+	queue_redraw()
+
 ## Where a click on the globe lands on the ground, in chart coordinates.
 ##
 ## The inverse of `_globe_at` for a point on the surface: undo the screen scale
@@ -1412,7 +1600,7 @@ func _contact_near_globe(at: Vector2) -> Node:
 	var rad: float = minf(vp.x, vp.y) * 0.42 * globe_zoom
 	var b := _globe_basis()
 	var best: Node = null
-	var bd := 18.0
+	var bd := 26.0
 	for c in _contacts:
 		var nv: Variant = c["n"]
 		if not is_instance_valid(nv):
@@ -1432,7 +1620,7 @@ func _contact_near_globe(at: Vector2) -> Node:
 ## The same pick as on the chart, through the globe's own projection. Anything
 ## round the back of the planet is not clickable, which is the point of drawing
 ## a planet at all.
-func _pick_satellite_globe(at: Vector2) -> void:
+func _pick_satellite_globe(at: Vector2) -> bool:
 	var vp := get_viewport_rect().size
 	var org := vp * 0.5
 	var rad: float = minf(vp.x, vp.y) * 0.42 * globe_zoom
@@ -1452,11 +1640,12 @@ func _pick_satellite_globe(at: Vector2) -> void:
 			best = d
 			hit = sat
 	if hit == null:
-		return
+		return false
 	sat_target = null if sat_target == hit else hit
 	Sim.sat_target = sat_target
 	Sim.report("orbital target: %s" % (String(hit.call("display_name"))
 		if sat_target != null else "released"), Sim.Ev.INFO)
+	return true
 
 ## Where a direction from the planet's centre falls on the planet sheet.
 ##

@@ -347,6 +347,8 @@ void fragment() {
 	flame_mat.shader = flame_sh
 	flame_mat.set_shader_parameter("plume_len", 4.2)
 	flame_mat.set_shader_parameter("heat", 1.0)
+	# over the cloud deck and the air shells, as the smoke trails are
+	flame_mat.render_priority = 6
 	# no reheat, no plume either
 	for n in (nozzles if has_reheat else []):
 		var fst := MeshKit.begin()

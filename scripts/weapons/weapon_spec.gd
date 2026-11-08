@@ -45,7 +45,7 @@ static func _db() -> Dictionary:
 		"arm_time": 0.35, "fuse": 9.0, "damage": 105.0,
 		"colour": Color(0.86, 0.86, 0.83), "band": Color(0.85, 0.55, 0.15),
 		"eject": 0.0, "trail": Color(0.9, 0.85, 0.8),
-		"flare_bait": 0.55,
+		"flare_bait": 0.35,
 		"desc": "Short-range IR. Fire and forget, defeated by flares.",
 	},
 	"aim120": {
@@ -56,7 +56,7 @@ static func _db() -> Dictionary:
 		"arm_time": 0.6, "fuse": 13.0, "damage": 130.0,
 		"colour": Color(0.80, 0.80, 0.78), "band": Color(0.75, 0.72, 0.30),
 		"eject": 6.0, "trail": Color(0.85, 0.85, 0.9),
-		"flare_bait": 0.0, "chaff_bait": 0.45,
+		"flare_bait": 0.0, "chaff_bait": 0.35,
 		"desc": "Radar guided BVR. Needs lock until it goes active; chaff will break it.",
 	},
 	"sm2": {
@@ -73,7 +73,7 @@ static func _db() -> Dictionary:
 		"arm_time": 0.8, "fuse": 22.0, "damage": 290.0,
 		"colour": Color(0.86, 0.86, 0.84), "band": Color(0.30, 0.45, 0.70),
 		"eject": 0.0, "trail": Color(0.88, 0.88, 0.92),
-		"flare_bait": 0.0, "chaff_bait": 0.30,
+		"flare_bait": 0.0, "chaff_bait": 0.25,
 		"desc": "Fleet area defence. Long reach, heavy warhead; harder to chaff than an AMRAAM.",
 	},
 	"agm65": {
@@ -157,12 +157,16 @@ static func _db() -> Dictionary:
 	"kalibr": {
 		"name": "3M-14 Kalibr", "short": "KLB", "kind": "cruise",
 		"folding": true, "mass": 1780.0, "length": 6.20, "dia": 0.533, "fin": 0.90,
-		"boost": 42.0, "burn": 600.0, "max_g": 11.0, "drag": 0.00028,
+		"boost": 42.0, "burn": 6000.0, "max_g": 11.0, "drag": 0.00028,
 		"ref_speed": 260.0,
 		# Subsonic on the way in, then the sprint stage: the real weapon runs
 		# the last stretch at close to Mach three.
 		"sprint_speed": 900.0, "sprint_at": 32000.0,
-		"life": 600.0, "range": 150000.0, "seeker_fov": 60.0, "lock_time": 1.4,
+		# Fifteen hundred kilometres, the land-attack round's published reach
+		# and the short end of it. Range is motor time at cruising speed in this
+		# model, so at 260 m/s that is a sustainer burning for an hour and three
+		# quarters -- which is how long a Kalibr is in the air.
+		"life": 6300.0, "range": 1500000.0, "seeker_fov": 60.0, "lock_time": 1.4,
 		"arm_time": 2.0, "fuse": 18.0, "damage": 560.0, "lethal": 34.0,
 		"cruise_alt": 24.0, "pop": 2400.0,
 		"colour": Color(0.72, 0.73, 0.70), "band": Color(0.35, 0.34, 0.32),
@@ -174,9 +178,12 @@ static func _db() -> Dictionary:
 		"folding": true, "mass": 2400.0, "length": 8.40, "dia": 0.60, "fin": 0.80,
 		# Mach 8, which is what a Zircon is. At 1900 it was Mach 5.5 and did
 		# not deserve the name.
-		"boost": 260.0, "burn": 100.0, "max_g": 15.0, "drag": 0.0000022,
+		# A thousand kilometres, which is what it is credited with. It was
+		# ninety-six: a Mach 8 round with a scramjet sustainer cut off after a
+		# hundred seconds and grounded at under a tenth of its reach.
+		"boost": 260.0, "burn": 400.0, "max_g": 15.0, "drag": 0.0000022,
 		"cruise_alt": 6000.0, "pop": 16000.0, "ref_speed": 2700.0,
-		"life": 220.0, "range": 96000.0, "seeker_fov": 45.0, "lock_time": 1.2,
+		"life": 470.0, "range": 1000000.0, "seeker_fov": 45.0, "lock_time": 1.2,
 		"arm_time": 3.0, "fuse": 22.0, "damage": 1500.0, "lethal": 44.0,
 		"colour": Color(0.30, 0.31, 0.33), "band": Color(0.62, 0.18, 0.14),
 		"eject": 3.0, "trail": Color(0.95, 0.86, 0.72),
@@ -187,21 +194,39 @@ static func _db() -> Dictionary:
 		"name": "Fattah-1", "short": "FTH", "kind": "cruise",
 		"folding": true, "mass": 3200.0, "length": 12.0, "dia": 0.86, "fin": 1.05,
 		# Mach 10. Fattah is claimed at 13 to 15; this is the sober end of it.
-		"boost": 300.0, "burn": 90.0, "max_g": 12.0, "drag": 0.0000014,
+		# Fourteen hundred kilometres, the figure it was unveiled with.
+		"boost": 300.0, "burn": 440.0, "max_g": 12.0, "drag": 0.0000014,
 		"cruise_alt": 8000.0, "pop": 18000.0, "ref_speed": 3400.0,
-		"life": 240.0, "range": 120000.0, "seeker_fov": 40.0, "lock_time": 1.4,
+		"life": 520.0, "range": 1400000.0, "seeker_fov": 40.0, "lock_time": 1.4,
 		"arm_time": 4.0, "fuse": 22.0, "damage": 1300.0, "lethal": 40.0,
 		"colour": Color(0.52, 0.50, 0.44), "band": Color(0.20, 0.42, 0.24),
 		"eject": 3.0, "trail": Color(0.92, 0.88, 0.80),
 		"flare_bait": 0.0, "chaff_bait": 0.05,
 		"desc": "Hypersonic ballistic missile with a manoeuvring head.",
 	},
+	# The DF-21D's own round. Its launcher was loaded with Zircons -- a Russian
+	# scramjet on a Chinese anti-ship ballistic missile's erector. A ballistic
+	# anti-ship round with a manoeuvring head, flown the way Fattah is.
+	"df21d": {
+		"name": "DF-21D", "short": "DF21", "kind": "cruise",
+		"folding": true, "mass": 14700.0, "length": 10.7, "dia": 1.40, "fin": 1.0,
+		"boost": 300.0, "burn": 470.0, "max_g": 12.0, "drag": 0.0000014,
+		"cruise_alt": 8000.0, "pop": 18000.0, "ref_speed": 3400.0,
+		"life": 560.0, "range": 1500000.0, "seeker_fov": 40.0, "lock_time": 1.4,
+		"arm_time": 4.0, "fuse": 24.0, "damage": 1400.0, "lethal": 42.0,
+		"colour": Color(0.44, 0.46, 0.40), "band": Color(0.62, 0.14, 0.12),
+		"eject": 3.0, "trail": Color(0.94, 0.90, 0.82),
+		"flare_bait": 0.0, "chaff_bait": 0.05,
+		"desc": "Anti-ship ballistic missile. Fifteen hundred kilometres and a manoeuvring head.",
+	},
 	"oreshnik": {
 		"name": "Oreshnik", "short": "ORE", "kind": "radar",
 		"folding": true, "mass": 9000.0, "length": 14.5, "dia": 1.60, "fin": 1.10,
 		"boost": 260.0, "burn": 110.0, "max_g": 9.0, "drag": 0.00000171,
 		"ref_speed": 3027.4,
-		"life": 460.0, "range": 500000.0, "seeker_fov": 40.0, "lock_time": 1.6,
+		# Intermediate range: five thousand kilometres, not five hundred. The
+		# world is a planet now, so there is somewhere for it to go.
+		"life": 2100.0, "range": 5000000.0, "seeker_fov": 40.0, "lock_time": 1.6,
 		"arm_time": 6.0, "fuse": 26.0, "damage": 900.0, "lethal": 60.0,
 		"loft": true, "depressed": true,
 		# it does not arrive as one thing
@@ -214,9 +239,8 @@ static func _db() -> Dictionary:
 	"khorram": {
 		# Khorramshahr. Nineteen and a half tonnes, thirteen metres, a metre and
 		# a half across, liquid fuelled, and it carries most of two tonnes of
-		# warhead two thousand kilometres. In this world that is further than
-		# there is world to cross, so the reach is set to the map rather than to
-		# the missile -- everything else is the real article.
+		# warhead two thousand kilometres, and on a planet there is room for
+		# all of it: the reach is the missile's own now, not the old map's.
 		#
 		# Mach 8 to 16 is the re-entry speed of a ballistic shot, not something
 		# a motor holds: it comes from the arc. A long burn and almost no drag
@@ -226,7 +250,7 @@ static func _db() -> Dictionary:
 		"folding": true, "mass": 19500.0, "length": 13.0, "dia": 1.50, "fin": 1.05,
 		"boost": 300.0, "burn": 140.0, "max_g": 7.0, "drag": 0.00000086,
 		"ref_speed": 4281.4,
-		"life": 660.0, "range": 1000000.0, "seeker_fov": 36.0, "lock_time": 1.8,
+		"life": 860.0, "range": 2000000.0, "seeker_fov": 36.0, "lock_time": 1.8,
 		"arm_time": 6.0, "fuse": 30.0, "damage": 1100.0, "lethal": 72.0,
 		"loft": true, "depressed": true,
 		# A separating warhead section that opens high and wide.
@@ -379,7 +403,13 @@ static func _db() -> Dictionary:
 		"colour": Color(0.30, 0.31, 0.29), "band": Color(0.70, 0.30, 0.16),
 		"eject": 0.0, "trail": Color(0.88, 0.86, 0.84),
 		"flare_bait": 0.0,
-		"desc": "Unguided rocket. Barely steers — point the aircraft and fire.",
+		# The laser kit (APKWS): with a laser on the target the same rocket
+		# homes on the spot, and steers like a guided round to do it.
+		"laser_g": 12.0, "laser_fov": 40.0,
+		# and with no laser it is still a rocket: it leaves the rail and goes
+		# where the aircraft is pointing
+		"free_fire": true,
+		"desc": "Rocket. Unguided on its own -- point the aircraft and fire. With the laser on a target it homes on the spot.",
 	},
 	# ------------------------------------------------------------ air defence
 	# Ground launched. There have always been SAM sites shooting at you and no
@@ -392,7 +422,7 @@ static func _db() -> Dictionary:
 		"arm_time": 1.6, "fuse": 20.0, "damage": 620.0, "lethal": 30.0,
 		"colour": Color(0.74, 0.74, 0.72), "band": Color(0.60, 0.20, 0.16),
 		"eject": 0.0, "trail": Color(0.90, 0.90, 0.92),
-		"flare_bait": 0.0, "chaff_bait": 0.30,
+		"flare_bait": 0.0, "chaff_bait": 0.25,
 		"desc": "Area air defence off a launcher. Long reach and a big warhead.",
 	},
 	"manpads": {
@@ -403,7 +433,7 @@ static func _db() -> Dictionary:
 		"arm_time": 0.4, "fuse": 5.0, "damage": 150.0, "lethal": 8.0,
 		"colour": Color(0.26, 0.27, 0.25), "band": Color(0.72, 0.66, 0.22),
 		"eject": 0.0, "trail": Color(0.86, 0.84, 0.82),
-		"flare_bait": 0.70,
+		"flare_bait": 0.50,
 		"desc": "Short range infrared. Easily flared, and everywhere.",
 	},
 	# ----------------------------------------------------------- anti-satellite
@@ -462,25 +492,46 @@ static func _db() -> Dictionary:
 ## Low-poly store body used both as a carried visual and as the flying round.
 ## The tail fins, on their own, so a round that leaves a canister can unfold
 ## them once it is clear instead of standing in the tube with them already out.
-static func build_fins(id: String) -> ArrayMesh:
+## Where a moving surface turns: along the body, at the middle of its chord.
+## A tail fin or a canard, one of four, is an all-moving slab that pivots on a
+## spar running out from the body, so this is the station that spar is at.
+static func fin_hinge(id: String, canard := false) -> float:
+	var L: float = get_spec(id)["length"]
+	return -L * 0.5 + L * 0.37 if canard else L * 0.5 - L * 0.10
+
+## One control surface, on its own, standing out along +X from the axis and
+## drawn about its hinge, so the round can fold it and then steer with it.
+##
+## These were one mesh of four tail fins, baked together and scaled out of the
+## tube as a piece, and the canards were part of the body. A round could turn
+## through ninety degrees off the rail and run a thousand kilometres of course
+## corrections without anything on it moving.
+static func build_fin(id: String, canard := false) -> ArrayMesh:
 	var s := get_spec(id)
 	var L: float = s["length"]
 	var r: float = s["dia"] * 0.5
 	var half := L * 0.5
 	var fin: float = s["fin"]
+	var h := fin_hinge(id, canard)
 	var st := MeshKit.begin()
-	for i in 4:
-		var a := TAU * (float(i) + 0.5) / 4.0
-		var u := Vector3(cos(a), sin(a), 0.0)
-		var v := Vector3(0, 0, 1)
-		var poly := PackedVector2Array([
-			Vector2(r * 0.8, half - L * 0.20), Vector2(r + fin, half - L * 0.02),
-			Vector2(r + fin, half), Vector2(r * 0.8, half)])
-		MeshKit.prism(st, poly, u, v, u.cross(v).normalized(),
-			PackedFloat32Array([0.014, 0.010, 0.010, 0.014]))
+	var poly: PackedVector2Array
+	var th: PackedFloat32Array
+	if canard:
+		poly = PackedVector2Array([
+			Vector2(r * 0.8, -half + L * 0.26 - h), Vector2(r + fin * 0.62, -half + L * 0.30 - h),
+			Vector2(r + fin * 0.62, -half + L * 0.44 - h), Vector2(r * 0.8, -half + L * 0.48 - h)])
+		th = PackedFloat32Array([0.012, 0.009, 0.009, 0.012])
+	else:
+		poly = PackedVector2Array([
+			Vector2(r * 0.8, half - L * 0.20 - h), Vector2(r + fin, half - L * 0.02 - h),
+			Vector2(r + fin, half - h), Vector2(r * 0.8, half - h)])
+		th = PackedFloat32Array([0.014, 0.010, 0.010, 0.014])
+	var u := Vector3.RIGHT
+	var v := Vector3.BACK
+	MeshKit.prism(st, poly, u, v, u.cross(v).normalized(), th)
 	return MeshKit.finish(st, MeshKit.mat(s["colour"], 0.55, 0.10))
 
-static func build_mesh(id: String, with_tail := true) -> ArrayMesh:
+static func build_mesh(id: String, with_tail := true, with_canards := true) -> ArrayMesh:
 	var s := get_spec(id)
 	var L: float = s["length"]
 	var r: float = s["dia"] * 0.5
@@ -506,7 +557,7 @@ static func build_mesh(id: String, with_tail := true) -> ArrayMesh:
 				Vector2(r + fin, half), Vector2(r * 0.8, half)])
 			MeshKit.prism(st, poly, u, v, u.cross(v).normalized(),
 				PackedFloat32Array([0.014, 0.010, 0.010, 0.014]))
-		if s["kind"] != "bomb":
+		if s["kind"] != "bomb" and with_canards:
 			var poly2 := PackedVector2Array([
 				Vector2(r * 0.8, -half + L * 0.26), Vector2(r + fin * 0.62, -half + L * 0.30),
 				Vector2(r + fin * 0.62, -half + L * 0.44), Vector2(r * 0.8, -half + L * 0.48)])

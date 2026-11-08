@@ -130,6 +130,11 @@ struct Planet {
     // scale with the radius.
     hills: FastNoiseLite,
     detail: FastNoiseLite,
+    // Foothills: ridged ground about nine kilometres from crest to crest, and
+    // the regional pattern that says where there are any. Read in metres, like
+    // the two above.
+    foothill: FastNoiseLite,
+    region: FastNoiseLite,
     warp: FastNoiseLite,
     moist: FastNoiseLite,
     // The climate pair, on the sphere. Sampled on the chart pair they slide
@@ -199,6 +204,8 @@ fn planet() -> &'static Planet {
             // something at every scale it can be seen at.
             hills: mk3(20260907, 0.0000075, 5, FractalType::FBm),
             detail: mk3(20260905, 0.00025, 4, FractalType::FBm),
+            foothill: mk3(20260913, 0.00011, 3, FractalType::Ridged),
+            region: mk3(20260914, 0.0000143, 2, FractalType::FBm),
             // One octave. This is a distortion, not a field anybody looks at:
             // the second octave of it went into three lookups a sample once
             // the warp was done properly, and what it bought was detail in
@@ -295,7 +302,7 @@ pub fn homelands() -> &'static [[f32; 3]; 6] {
                 let r = (1.0 - y * y).max(0.0).sqrt();
                 let th = ga * i as f32;
                 let d = norm([r * th.cos(), y, r * th.sin()]);
-                let here = generated(d);
+                let here = generated_legacy(d);
                 if here < 40.0 {
                     return (-1e9, d);
                 }
@@ -320,7 +327,7 @@ pub fn homelands() -> &'static [[f32; 3]; 6] {
                             d[1] * ca + (a[1] * ct + b[1] * st) * sa,
                             d[2] * ca + (a[2] * ct + b[2] * st) * sa,
                         ]);
-                        let h = generated(q);
+                        let h = generated_legacy(q);
                         total += 1;
                         if h > 0.0 {
                             dry += 1;
@@ -388,6 +395,21 @@ pub const OCEAN: f32 = 4600.0;
 
 /// Height above sea level for a direction, in metres, before anything built.
 pub fn generated(d: [f32; 3]) -> f32 {
+    generated_v(d, false)
+}
+
+/// The same field as it was before the country was given more relief and one
+/// of its two river systems was taken out. Only the search that decides where
+/// the six countries sit reads this: what it scores is how gentle and how dry
+/// the ground is, and re-scoring it against the new relief would move every
+/// country, airfield and town on the planet to somewhere else -- the fleet's
+/// anchorage, the sectors and the ranges are all laid out against where they
+/// are now.
+fn generated_legacy(d: [f32; 3]) -> f32 {
+    generated_v(d, true)
+}
+
+fn generated_v(d: [f32; 3], legacy: bool) -> f32 {
     let p = planet();
     // The continental warp: three decorrelated samples, not one.
     //
@@ -480,7 +502,13 @@ pub fn generated(d: [f32; 3]) -> f32 {
             + 210.0;
         // And the grain over that: a few metres on a plain, a few tens on a
         // hillside, the same weighting the flat world gives its own detail.
-        lh += p.detail.get_noise_3d(pm[0], pm[1], pm[2]) * (14.0 + 120.0 * m);
+        //
+        // Thirty-six metres of it on low ground, not fourteen. Measured over
+        // the country round the home field, half the land rose less than one
+        // in a hundred over a kilometre: fourteen metres of grain on a plain
+        // is a table with a texture on it, and from the cockpit it read as one.
+        let grain = if legacy { 14.0 } else { 36.0 };
+        lh += p.detail.get_noise_3d(pm[0], pm[1], pm[2]) * (grain + 120.0 * m);
         // Coastal plains.
         //
         // Measured, this planet went from the shore to a 410 m tableland in
@@ -495,7 +523,31 @@ pub fn generated(d: [f32; 3]) -> f32 {
         // country is.
         let inner = p.cont1.get_noise_3d(q[0], q[1], q[2]);
         let plain = smoothstep(-0.02, 0.16, inner);
-        lh *= 0.18 + 0.82 * plain;
+        //
+        // Flattened to two fifths near the sea rather than a fifth: a coastal
+        // plain is low and gentle, not level, and at a fifth the hills that
+        // give a lowland its shape were pressed down to fifty metres.
+        lh *= if legacy { 0.18 + 0.82 * plain } else { 0.42 + 0.58 * plain };
+        // Foothills, in some country and not in the rest.
+        //
+        // Everything above varies too slowly to be seen from an aeroplane: the
+        // hills field is a hundred and thirty kilometres down to eight, so its
+        // slopes are a couple of per cent, and from a thousand metres a couple
+        // of per cent is a table. What gives country a shape you can fly
+        // through is ground that rises a few hundred metres over a few
+        // kilometres -- ridges, spurs, the hollows between them. Not
+        // everywhere: a regional field seventy kilometres across turns them on
+        // over about half the land, so there is open plain to put an airfield
+        // on and hill country to hide in. Somewhat lower near the sea.
+        if !legacy {
+            let reg = smoothstep(-0.18, 0.28,
+                p.region.get_noise_3d(pm[0], pm[1], pm[2]));
+            if reg > 0.0 {
+                let crest = (p.foothill.get_noise_3d(pm[0], pm[1], pm[2]) * 0.5 + 0.5)
+                    .clamp(0.0, 1.0);
+                lh += reg * crest * crest * 320.0 * (0.70 + 0.30 * plain);
+            }
+        }
         // And a floor under the lot of it.
         //
         // Land ought to be above the water and is not: what is left of the sum
@@ -542,7 +594,14 @@ pub fn generated(d: [f32; 3]) -> f32 {
         let ria = smoothstep(-0.40, 0.40,
             p.ria.get_noise_3d(q[0] + 3.0, q[1] - 9.0, q[2] + 5.0));
         h = river_cut(h, rv1, land, ria);
-        h = river_cut(h, rv2, land, ria);
+        // One drainage system, not two. The second crossed the first at a
+        // hundred and twenty kilometres and the two together carved a trench
+        // across the country every few tens of kilometres whichever way you
+        // flew -- on ground otherwise this gentle, it read as the land having
+        // been cut up rather than rivers having made it.
+        if legacy {
+            h = river_cut(h, rv2, land, ria);
+        }
     }
     h
 }
@@ -711,8 +770,7 @@ pub fn chart_xz(c: &Chart, d: [f32; 3]) -> (f32, f32) {
 /// agree to a metre near the chart and part company badly past it, and past
 /// it is the whole point of this.
 pub fn ground_world_y(c: &Chart, x: f32, z: f32, flags: u32) -> f32 {
-    let s = (x * x + z * z).sqrt();
-    let drop = c.radius * (1.0 - (s / c.radius).cos());
+    let drop = fall(c, x, z);
     // The carving is asked for at the coordinates the caller gave, not at the
     // ones that come back from turning them into a direction and out again.
     // The works are laid out on the chart and this *is* the chart; going round
@@ -906,8 +964,24 @@ pub fn sheet_window(w: usize, h: usize, north: [f32; 3], radius: f32,
 
 /// Sea level under a chart coordinate, in the same world `y` the ground uses.
 pub fn sea_at(c: &Chart, x: f32, z: f32) -> f32 {
+    crate::field::WATER_LEVEL - fall(c, x, z)
+}
+
+/// How far the surface has fallen below the chart's tangent plane, `R(1 - cos(s/R))`,
+/// written as `2R sin^2(s/2R)`.
+///
+/// The same number, but the first form loses it in single precision: cos of a
+/// small angle is one less a sliver, a float near one resolves steps of 6e-8,
+/// and R times that is 0.38 m. The drop therefore came out in whole steps of
+/// 0.38 m -- a terrace every thirty metres eighty kilometres out, every eight at
+/// three hundred, across all the ground and every road on it, each one a
+/// kerb-high ledge and a 1.2 % tilt between them. The sine of the half angle
+/// carries its full precision down to zero.
+#[inline]
+pub fn fall(c: &Chart, x: f32, z: f32) -> f32 {
     let s = (x * x + z * z).sqrt();
-    crate::field::WATER_LEVEL - c.radius * (1.0 - (s / c.radius).cos())
+    let h = (s / (2.0 * c.radius)).sin();
+    2.0 * c.radius * h * h
 }
 
 /// Temperature and moisture at a direction, 0..1 each. The planetary

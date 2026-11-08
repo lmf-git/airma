@@ -90,6 +90,792 @@ var _pod_test := false
 var _pod_t := 0.0
 var _pod_want := -1
 var _admin_test := false
+## What is on each side of a mode, whether the armour goes anywhere, and whether
+## anything is shooting at the player: --modetest with --preset=MODE:JET.
+var _mode_test := false
+var _mode_t := 0.0
+var _mode_pos: Dictionary = {}
+var _mode_at_player := 0
+var _mode_seen: Dictionary = {}
+
+## In a launcher, right click a hostile's dot on the map and see the fire mission
+## lock onto it: --maplocktest, with --jet=veh:KIND --preset=strike.
+var _map_lock_test := false
+var _map_lock_t := 0.0
+
+func _run_map_lock_test() -> void:
+	var bad := PackedStringArray()
+	if not is_instance_valid(tank) or not tank.is_indirect():
+		print("[maplock] RESULT: FAILED — not crewing a launcher or a gun")
+		get_tree().quit()
+		return
+	if not map.visible:
+		map.toggle()
+	for i in 30:
+		await get_tree().process_frame
+	map._refresh_contacts()
+	var foe: Node3D = null
+	var n_host := 0
+	for c in map._contacts:
+		var nv: Variant = c["n"]
+		if is_instance_valid(nv) and bool(c["hostile"]):
+			n_host += 1
+			if foe == null or ((nv as Node).has_meta("strike") and not foe.has_meta("strike")):
+				foe = nv
+	var n_strike := 0
+	for t in get_tree().get_nodes_in_group("hittable"):
+		if t.has_meta("strike"):
+			n_strike += 1
+			print("[maplock]   strike target %s at %.1f km" % [t.name,
+				tank.global_position.distance_to((t as Node3D).global_position) * 0.001])
+	print("[maplock] %d contacts, %d hostile; %d strike targets in the world" % [
+		map._contacts.size(), n_host, n_strike])
+	if foe == null:
+		print("[maplock] RESULT: FAILED — no hostile on the map (%d contacts)" % map._contacts.size())
+		get_tree().quit()
+		return
+	# zoom in on it, the way you would, and click on its dot
+	map.globe_zoom = 60.0
+	await get_tree().process_frame
+	var vp: Vector2 = map.get_viewport_rect().size
+	var q: Vector3 = map._globe_at(Vector2(foe.global_position.x, foe.global_position.z),
+		vp * 0.5, minf(vp.x, vp.y) * 0.42 * map.globe_zoom, map._globe_basis())
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_RIGHT
+	click.pressed = true
+	click.position = Vector2(q.x, q.y)
+	tank.map_lock = null
+	map._gui_input(click)
+	print("[maplock] clicked %s's dot at %.1f km: fire mission locked on %s; satellite selected: %s" % [
+		foe.name, tank.global_position.distance_to(foe.global_position) * 0.001,
+		Sim.label_of(tank.map_lock), str(Sim.sat_target != null)])
+	if tank.map_lock != foe:
+		bad.append("the lock did not take the unit that was clicked")
+	# and zoomed right out, where the satellites crowd the same few pixels
+	map.globe_zoom = 1.0
+	await get_tree().process_frame
+	q = map._globe_at(Vector2(foe.global_position.x, foe.global_position.z),
+		vp * 0.5, minf(vp.x, vp.y) * 0.42 * map.globe_zoom, map._globe_basis())
+	click.position = Vector2(q.x, q.y)
+	tank.map_lock = null
+	map._gui_input(click)
+	print("[maplock] zoomed out: locked on %s" % Sim.label_of(tank.map_lock))
+	for b in bad:
+		print("[maplock]   ", b)
+	print("[maplock] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## A mushroom cloud of a given age, set off in front of a --lookfrom camera so
+## its shape can be photographed: --nukeshot=X,Z,LETHAL,AGE with --shot.
+var _nuke_shot := PackedFloat32Array()
+var _nuke_shot_done := false
+
+func _set_off_nuke_shot() -> void:
+	var at := Vector3(_nuke_shot[0], 0.0, _nuke_shot[1])
+	at.y = Sim.height_at(at.x, at.z)
+	Effects.nuke(self, at, _nuke_shot[2])
+	await get_tree().process_frame
+	for n in get_children():
+		if n.get_class() == "Node3D" and "lethal" in n and "_t" in n:
+			n.set("_t", _nuke_shot[3])
+	print("[nukeshot] %.0f m lethal radius at %s, aged %.0f s" % [
+		_nuke_shot[2], str(at.round()), _nuke_shot[3]])
+
+## The road at one spot, a metre at a time: the finished ground against the
+## design surface along every leg that passes within 40 m, with the weights
+## and the drop, so a gradient the test flags can be put down to the design
+## or to how the design was laid into the ground. --roadprobe=X,Z
+var _road_probe := Vector2.INF
+
+func _run_road_probe() -> void:
+	Sim.resurvey_roads()
+	var at := _road_probe
+	print("[probe] limits: grade %.3f, max %.3f, hairpin %.3f" % [
+		Sim.road_grade_max, Sim.road_grade_max, Sim.road_grade_hairpin])
+	for r in Sim.ROADS:
+		var a: Vector2 = r[0]
+		var b: Vector2 = r[1]
+		var seg_d: float = a.distance_to(b)
+		var t: float = clampf((at - a).dot(b - a) / maxf(seg_d * seg_d, 1e-6), 0.0, 1.0)
+		if a.lerp(b, t).distance_to(at) > 40.0:
+			continue
+		print("[probe] leg %s -> %s, %.1f m, heading %.0f" % [str(a.round()), str(b.round()),
+			seg_d, rad_to_deg(atan2(b.x - a.x, -(b.y - a.y)))])
+		var prev_g := INF
+		var prev_d := INF
+		var steps: int = int(seg_d)
+		for k in steps + 1:
+			var q: Vector2 = a.lerp(b, float(k) / maxf(float(steps), 1.0))
+			var g: float = Sim.survey_height_at(q.x, q.y)
+			var made: Vector3 = Sim.road_surface(q.x, q.y)
+			var dsg: float = made.x + Sim.planet_drop(q.x, q.y)
+			var line := "[probe]   %5.1f m  ground %8.3f" % [float(k) * seg_d / maxf(float(steps), 1.0), g]
+			if prev_g != INF:
+				line += " (%+5.1f%%)" % ((g - prev_g) / (seg_d / maxf(float(steps), 1.0)) * 100.0)
+			line += "  design %8.3f" % dsg
+			if prev_d != INF:
+				line += " (%+5.1f%%)" % ((dsg - prev_d) / (seg_d / maxf(float(steps), 1.0)) * 100.0)
+			line += "  off %+.3f  w %.2f  pad %.2f" % [g - dsg, made.y, Sim.pad_weight(q.x, q.y)]
+			print(line)
+			prev_g = g
+			prev_d = dsg
+	get_tree().quit()
+
+## How often a salvo of flares or chaff breaks an air defence round's track,
+## by geometry and by how late it goes, and what holding the button down buys:
+## --decoytest.
+var _decoy_test := false
+
+func _run_decoy_test() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77
+	var tv := Vector3(0, 0, -220.0)          # the aeroplane, flying north
+	var cases := [["tail", Vector3(0, 0, 1)], ["beam", Vector3(1, 0, 0)],
+		["head-on", Vector3(0, 0, -1)]]
+	var bad := PackedStringArray()
+	for wid in ["manpads", "aim9", "sam_med", "aim120", "sm2"]:
+		var spec := WeaponSpec.get_spec(wid)
+		var ir: bool = float(spec.get("flare_bait", 0.0)) > 0.0
+		var bait: float = float(spec.get("flare_bait", 0.0)) if ir \
+			else float(spec.get("chaff_bait", 0.0))
+		var row := PackedStringArray()
+		var worst := 0.0
+		for c in cases:
+			for tgo in [2.0, 8.0]:
+				var dirv: Vector3 = c[1]
+				var sp: float = float(spec.get("ref_speed", 700.0))
+				var mpos: Vector3 = dirv * sp * tgo
+				var mvel: Vector3 = -dirv * sp
+				var p1: float = Missile.decoy_chance(bait, ir, mpos, mvel, Vector3.ZERO, tv)
+				# three salvos a half second apart, the button held down
+				var broke := 0
+				for k in 2000:
+					var wary := 1.0
+					for _j in 3:
+						if rng.randf() < Missile.decoy_chance(bait, ir, mpos, mvel,
+								Vector3.ZERO, tv, wary):
+							broke += 1
+							break
+						wary *= 0.6
+				var p3: float = float(broke) / 2000.0
+				worst = maxf(worst, p3)
+				row.append("%s %ds %2.0f%%/%2.0f%%" % [c[0], int(tgo), p1 * 100.0, p3 * 100.0])
+		print("[decoy] %-8s %s: %s" % [wid, "flares" if ir else "chaff ", "  ".join(row)])
+		if worst > 0.75:
+			bad.append("%s: three salvos at the best moment still break it %.0f%% of the time" % [
+				wid, worst * 100.0])
+	print("[decoy] (one salvo / three salvos held down)")
+	for b in bad:
+		print("[decoy]   ", b)
+	print("[decoy] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Lay a multiple-warhead fire mission the way a player does -- right click
+## near one hostile, shift and right click near others, none of them exactly
+## on the dot -- then fire and see what each warhead goes for:
+## --mirvlocktest, with --jet=veh:tel_oreshnik --preset=strike.
+var _mirv_lock_test := false
+var _mirv_lock_t := 0.0
+var _mirv_other := false
+
+func _run_mirv_lock_test() -> void:
+	var bad := PackedStringArray()
+	if not is_instance_valid(tank) or tank.warheads() <= 0:
+		print("[mirvlock] RESULT: FAILED — not crewing a multiple-warhead launcher")
+		get_tree().quit()
+		return
+	if not map.visible:
+		map.toggle()
+	for i in 20:
+		await get_tree().process_frame
+	map._refresh_contacts()
+	# The strike shipping, whether or not anybody on our side can see it yet:
+	# what is under test is the click and the warheads, not the detection.
+	var foes: Array = []
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if n is Ship and int(n.team) == 1 and (n as Ship).is_alive():
+			foes.append(n)
+	foes.sort_custom(func(x: Node3D, y: Node3D) -> bool:
+		return x.global_position.distance_to(tank.global_position) \
+			< y.global_position.distance_to(tank.global_position))
+	if foes.size() < 2:
+		print("[mirvlock] RESULT: FAILED — %d hostile ship(s) on the range" % foes.size())
+		get_tree().quit()
+		return
+	foes = foes.slice(0, 3)
+	for v in get_tree().get_nodes_in_group("hittable"):
+		if v is Tank and (v as Tank).warheads() > 0 and v != tank:
+			print("[mirvlock]   another multiple-warhead launcher: %s team %d ai=%s %.1f km away" % [
+				Sim.label_of(v), int(v.team), str((v as Tank).ai),
+				(v as Node3D).global_position.distance_to(tank.global_position) * 0.001])
+	for f in foes:
+		var seen := false
+		for c in map._contacts:
+			if c["n"] == f:
+				seen = true
+		if not seen:
+			map._contacts.append({"n": f, "hostile": true, "neutral": false})
+	map.globe_zoom = 400.0
+	var vp: Vector2 = map.get_viewport_rect().size
+	tank.map_lock = null
+	tank.map_target = Vector3.INF
+	tank.mirv_marks.clear()
+	# A click a little off each one: on screen for the first, a kilometre off
+	# on the ground for the rest.
+	for i in foes.size():
+		var f: Node3D = foes[i]
+		var p: Vector3 = f.global_position
+		if i > 0:
+			p += Vector3(900.0, 0.0, -500.0)
+		var q: Vector3 = map._globe_at(Vector2(p.x, p.z), vp * 0.5,
+			minf(vp.x, vp.y) * 0.42 * map.globe_zoom, map._globe_basis())
+		var click := InputEventMouseButton.new()
+		click.button_index = MOUSE_BUTTON_RIGHT
+		click.pressed = true
+		click.shift_pressed = i > 0
+		click.position = Vector2(q.x, q.y) + (Vector2(15, 9) if i == 0 else Vector2.ZERO)
+		map._gui_input(click)
+	var rvs: Array = tank.warhead_marks()
+	var names := PackedStringArray()
+	for mk in rvs:
+		var u: Node3D = Tank.mark_unit(mk)
+		names.append(Sim.label_of(u) if u != null else "ground")
+	print("[mirvlock] marks laid: %s" % ", ".join(names))
+	for i in foes.size():
+		if i >= rvs.size() or Tank.mark_unit(rvs[i]) != foes[i]:
+			bad.append("RV%d did not take the ship it was laid near" % (i + 1))
+	map.toggle()
+	# fire it and wait for the bus to open
+	Engine.time_scale = 5.0
+	tank._gun_cd = 0.0
+	var waited := 0
+	while tank._erect < 0.97 and waited < 1200:
+		tank.fire_main(self)
+		await get_tree().physics_frame
+		waited += 1
+	var fired: bool = tank.fire_main(self) if tank.rounds_left > 0 else true
+	print("[mirvlock] launched: %s" % str(fired))
+	var kids: Array = []
+	var t0 := Time.get_ticks_msec()
+	var next_dbg := 0.0
+	var tt := 0.0
+	while kids.is_empty() and Time.get_ticks_msec() - t0 < 240000:
+		await get_tree().physics_frame
+		tt += get_physics_process_delta_time()
+		if tt >= next_dbg:
+			next_dbg += 30.0
+			var ms := PackedStringArray()
+			for m2 in get_tree().get_nodes_in_group("missiles"):
+				if is_instance_valid(m2):
+					var mm: Missile = m2
+					ms.append("%s %.0fm up %.1fkm out tgt=%s" % [mm.wid,
+						Sim.altitude(mm.global_position),
+						mm.global_position.distance_to(tank.global_position) * 0.001,
+						Sim.label_of(mm.target) if is_instance_valid(mm.target) else "-"])
+			print("[mirvlock]   t=%.0f occupied=%s ai=%s rounds=%d jet alive=%s | %s" % [
+				tt, str(tank.occupied), str(tank.ai), tank.rounds_left,
+				str(player.alive) if is_instance_valid(player) else "gone", "; ".join(ms)])
+		for m in get_tree().get_nodes_in_group("missiles"):
+			if is_instance_valid(m) and not (m as Missile).siblings.is_empty():
+				if (m as Missile).shooter != tank:
+					if not _mirv_other:
+						_mirv_other = true
+						var sh: Variant = (m as Missile).shooter
+						print("[mirvlock]   somebody else's %s opened, fired by %s (team %s) %.1f km from us" % [
+							(m as Missile).wid, Sim.label_of(sh) if is_instance_valid(sh) else "?",
+							str(sh.team) if is_instance_valid(sh) and ("team" in sh) else "?",
+							(sh as Node3D).global_position.distance_to(tank.global_position) * 0.001
+							if is_instance_valid(sh) else -1.0])
+					continue
+				kids = (m as Missile).siblings
+				break
+	Engine.time_scale = 1.0
+	if kids.is_empty():
+		bad.append("the bus never opened")
+	var hits := {}
+	for k in kids:
+		if not is_instance_valid(k):
+			continue
+		var km: Missile = k
+		var lbl: String = Sim.label_of(km.target) if km.locked_on_unit() else "ground"
+		hits[lbl] = int(hits.get(lbl, 0)) + 1
+		if not km.locked_on_unit():
+			bad.append("a warhead is going for a patch of ground")
+	print("[mirvlock] warheads: %s" % str(hits))
+	for f in foes:
+		if not hits.has(Sim.label_of(f)):
+			bad.append("no warhead for %s" % Sim.label_of(f))
+	for b in bad:
+		print("[mirvlock]   ", b)
+	print("[mirvlock] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Fire a launcher at a mark a long way off and follow the round: how far it
+## gets, how close it comes, and whether the motor is still shown burning along
+## the way. --telrangetest=KIND,KM. Run at five times speed; a Zircon is six
+## minutes in the air.
+var _tel_range := ""
+
+func _run_tel_range_test(arg: String) -> void:
+	var parts := arg.split(",")
+	var kind: String = parts[0]
+	var km: float = float(parts[1]) if parts.size() > 1 else 500.0
+	var t := _spawn_tank(Vector3(1400.0, 0.0, -2600.0), 0.0, 0, kind)
+	t.ai = false
+	for i in 120:
+		await get_tree().physics_frame
+	var aim := Vector3(1400.0 + km * 1000.0, 0.0, -2600.0)
+	aim.y = Sim.height_at(aim.x, aim.z)
+	t.map_target = aim
+	var before: Array = get_tree().get_nodes_in_group("missiles")
+	var fired := false
+	for i2 in 1800:
+		await get_tree().physics_frame
+		if t.fire_main(self):
+			fired = true
+			break
+	if not fired:
+		print("[telrange] %s did not fire at %.0f km" % [kind, km])
+		get_tree().quit()
+		return
+	await get_tree().physics_frame
+	var m: Node3D = null
+	for n in get_tree().get_nodes_in_group("missiles"):
+		if not before.has(n) and is_instance_valid(n):
+			m = n
+	if m == null:
+		print("[telrange] no round in the air")
+		get_tree().quit()
+		return
+	Engine.time_scale = 5.0
+	var start: Vector3 = m.global_position
+	var last := start
+	var closest := 1e12
+	var lit_log := PackedStringArray()
+	var t0 := Time.get_ticks_msec()
+	var next_log := 30.0
+	var fin_over := 0.0
+	var fin_after := 0.0
+	var fin_now := 0.0
+	while is_instance_valid(m):
+		last = m.global_position
+		closest = minf(closest, Vector2(last.x - aim.x, last.z - aim.z).length())
+		var age: float = float(m.get("age"))
+		# how hard the tail surfaces are working: through the pitch-over off
+		# the rail, and afterwards on the way
+		fin_now = 0.0
+		for h in (m.get("_tails") as Array):
+			fin_now = maxf(fin_now, absf((h as Node3D).rotation.x))
+		if age < 6.0:
+			fin_over = maxf(fin_over, fin_now)
+		else:
+			fin_after = maxf(fin_after, fin_now)
+		if age >= next_log:
+			var fl: Variant = m.get("_flame")
+			lit_log.append("%ds %s %.0f m/s fins %.1f°" % [int(age),
+				"lit" if (fl != null and is_instance_valid(fl) and (fl as Node3D).visible) else "dark",
+				(m.get("vel") as Vector3).length(), rad_to_deg(fin_now)])
+			next_log += 60.0
+		await get_tree().physics_frame
+		if Time.get_ticks_msec() - t0 > 400000:
+			break
+	Engine.time_scale = 1.0
+	print("[telrange] %s at %.0f km: flew %.0f km, closest %.1f km to the mark" % [
+		kind, km, Vector2(last.x - start.x, last.z - start.z).length() * 0.001,
+		closest * 0.001])
+	print("[telrange] motor: %s" % ", ".join(lit_log))
+	print("[telrange] tail fins: up to %.1f° through the pitch-over, %.1f° after" % [
+		rad_to_deg(fin_over), rad_to_deg(fin_after)])
+	get_tree().quit()
+
+## What the country around the airfield is like, in numbers: how much of the
+## land is flat, how steep it is, how much it varies, and how much of it lies in
+## a trench below its surroundings. --terraintest.
+func _run_terrain_test() -> void:
+	_terrain_stats(40000.0, 500.0, 5, 12)
+	_terrain_stats(120000.0, 1000.0, 3, 6)
+	get_tree().quit()
+
+## One box of country: `ring_a` and `ring_b` are in samples, a narrow valley
+## and a broad one.
+func _terrain_stats(span: float, step: float, ring_a: int, ring_b: int) -> void:
+	var n := int(span * 2.0 / step) + 1
+	var h := PackedFloat32Array()
+	h.resize(n * n)
+	for j in n:
+		for i in n:
+			var x := -span + float(i) * step
+			var z := -span + float(j) * step
+			h[j * n + i] = Sim.natural_height_at(x, z) + Sim.planet_drop(x, z)
+	var land := 0
+	var flat := 0
+	var slope_sum := 0.0
+	var trench_a := 0
+	var trench_b := 0
+	var hs := 0.0
+	var hs2 := 0.0
+	var m := ring_b
+	for j in range(m, n - m):
+		for i in range(m, n - m):
+			var v: float = h[j * n + i]
+			if v < Sim.WATER_LEVEL + 2.0:
+				continue
+			land += 1
+			hs += v
+			hs2 += v * v
+			var dmax := 0.0
+			for o in [[1, 0], [-1, 0], [0, 1], [0, -1]]:
+				dmax = maxf(dmax, absf(h[(j + o[1]) * n + i + o[0]] - v))
+			slope_sum += dmax / step
+			if dmax < step * 0.01:
+				flat += 1
+			for pass_r in [ring_a, ring_b]:
+				var r: int = pass_r
+				var around := 0.0
+				for o2 in [[r, 0], [-r, 0], [0, r], [0, -r], [r, r], [-r, r], [r, -r], [-r, -r]]:
+					around += h[(j + o2[1]) * n + i + o2[0]]
+				if around / 8.0 - v > 35.0:
+					if r == ring_a:
+						trench_a += 1
+					else:
+						trench_b += 1
+	var lf: float = maxf(float(land), 1.0)
+	var mean: float = hs / lf
+	print("[terrain] +-%d km: %d%% land; flat %d%%, mean slope %.1f%%, height %.0f +- %.0f m; in a trough %d%% (%.1f km across) / %d%% (%.0f km across)" % [
+		int(span * 0.001), int(100.0 * float(land) / float((n - 2 * m) * (n - 2 * m))),
+		int(100.0 * float(flat) / lf), 100.0 * slope_sum / lf, mean,
+		sqrt(maxf(hs2 / lf - mean * mean, 0.0)),
+		int(100.0 * float(trench_a) / lf), float(ring_a) * step * 2.0 * 0.001,
+		int(100.0 * float(trench_b) / lf), float(ring_b) * step * 2.0 * 0.001])
+
+## From an artillery piece, right click on the map and see a fire mission laid
+## where the click was: --firemaptest with --jet=veh:m109 --preset=ramp.
+var _terrain_test := false
+var _fire_map_test := false
+var _fire_map_t := 0.0
+
+func _run_fire_map_test() -> void:
+	var bad := PackedStringArray()
+	if not is_instance_valid(tank) or not tank.is_indirect():
+		print("[firemap] RESULT: FAILED — not crewing an artillery piece")
+		get_tree().quit()
+		return
+	tank.map_target = Vector3.INF
+	if not map.visible:
+		map.toggle()
+	await get_tree().process_frame
+	var c: Vector2 = map.get_viewport_rect().size * 0.5 + Vector2(40.0, 30.0)
+	var want: Vector2 = map._globe_point(c) if map.globe else Vector2.INF
+	print("[firemap] map globe=%s tank on map=%s, ground under the click %s" % [
+		str(map.globe), str(map.tank == tank), str(want.round())])
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_RIGHT
+	click.pressed = true
+	click.position = c
+	map._gui_input(click)
+	if tank.map_target == Vector3.INF:
+		bad.append("right click laid no fire mission (satellite picked: %s)" % str(Sim.sat_target != null))
+	else:
+		var off: float = Vector2(tank.map_target.x - want.x, tank.map_target.z - want.y).length() \
+			if want.x != INF else 0.0
+		print("[firemap] fire mission laid %.1f km from the gun, %.1f m from the point under the cursor" % [
+			tank.global_position.distance_to(tank.map_target) * 0.001, off])
+		if off > 5.0:
+			bad.append("the mission landed %.0f m from the click" % off)
+	for b in bad:
+		print("[firemap]   ", b)
+	print("[firemap] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Shift and click on the map, and see the objective land where the click was
+## and stay put with the map closed: --objtest.
+var _obj_test := false
+var _obj_t := 0.0
+
+func _run_obj_test() -> void:
+	var bad := PackedStringArray()
+	Sim.clear_objective()
+	if not map.visible:
+		map.toggle()
+	await get_tree().process_frame
+	var c: Vector2 = map.get_viewport_rect().size * 0.5 + Vector2(12.0, -8.0)
+	var want: Vector2 = map._globe_point(c) if map.globe else Vector2.INF
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.pressed = true
+	click.shift_pressed = true
+	click.position = c
+	map._gui_input(click)
+	if Sim.objective == Vector3.INF:
+		bad.append("shift+click set no objective")
+	else:
+		var off: float = Vector2(Sim.objective.x - want.x, Sim.objective.z - want.y).length() \
+			if want.x != INF else 0.0
+		print("[obj] shift+click set the objective %.1f km from the aircraft, %.1f m from the point under the cursor" % [
+			Vector2(Sim.objective.x - player.global_position.x,
+				Sim.objective.z - player.global_position.z).length() * 0.001, off])
+		if off > 5.0:
+			bad.append("objective landed %.0f m from the click" % off)
+	map.toggle()
+	await get_tree().process_frame
+	if Sim.objective == Vector3.INF:
+		bad.append("the objective went away with the map")
+	# and a second shift+click on it takes it off again
+	map.toggle()
+	await get_tree().process_frame
+	map._gui_input(click)
+	if Sim.objective != Vector3.INF:
+		bad.append("a second shift+click did not clear it")
+	for b in bad:
+		print("[obj]   ", b)
+	print("[obj] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Track a vehicle with the pod, kill it, and check the sensor holds the ground
+## it was on rather than dropping back to slew: --trackkilltest[=free] (free
+## takes the node out of the tree outright instead of killing it).
+var _track_kill := ""
+var _track_kill_t := 0.0
+
+func _run_track_kill_test() -> void:
+	var bad := PackedStringArray()
+	var fwd: Vector3 = -player.global_transform.basis.z
+	fwd.y = 0.0
+	var at: Vector3 = player.global_position + fwd.normalized() * 3500.0
+	var spot := GameMode._dry_spot(at, 0.0, 300.0)
+	var t := Tank.new()
+	t.setup(1, Tank.pick_kind("mbt", 1, 7))
+	t.ai = false
+	add_child(t)
+	t.global_transform = Tank.ground_pose(spot, 0.0, t.rest_height())
+	await get_tree().create_timer(0.5).timeout
+	pod.platform = player
+	if not pod.active:
+		pod.toggle()
+	# point the head straight at it and take a point track
+	var o: Vector3 = pod._head_origin()
+	var rel: Vector3 = player.global_transform.basis.inverse() * (t.global_position - o)
+	pod.yaw = atan2(-rel.x, -rel.z)
+	pod.pitch = atan2(rel.y, Vector2(rel.x, rel.z).length())
+	pod._process(0.016)
+	pod.designate()
+	if pod.mode != SensorPod.POINT or pod.tracked != t:
+		bad.append("did not take a point track on the tank (mode %d)" % pod.mode)
+	var where: Vector3 = t.global_position
+	if _track_kill == "free":
+		t.queue_free()
+	else:
+		t.take_hit(1e6, null)
+	for i in 10:
+		await get_tree().process_frame
+	var held: float = Vector2(pod.area_point.x - where.x, pod.area_point.z - where.z).length()
+	print("[trackkill] after the kill (%s): mode %s, holding %.1f m from where it was, aeroplane target %s, locked %s" % [
+		"removed" if _track_kill == "free" else "destroyed",
+		["SLEW", "AREA", "TRACK"][pod.mode], held, Sim.label_of(player.target), str(player.locked)])
+	if pod.mode != SensorPod.AREA:
+		bad.append("the sensor did not hold the area")
+	elif held > 15.0:
+		bad.append("held %.0f m away from the target" % held)
+	# and it survives the page being shut
+	pod.toggle()
+	for i in 5:
+		await get_tree().process_frame
+	print("[trackkill] page closed: mode %s, aeroplane target %s" % [
+		["SLEW", "AREA", "TRACK"][pod.mode], Sim.label_of(player.target)])
+	if pod.mode != SensorPod.AREA or player.target == null:
+		bad.append("closing the page let the area go")
+	for b in bad:
+		print("[trackkill]   ", b)
+	print("[trackkill] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Hold each of the gunship's guns down for six seconds and count what leaves:
+## --rofltest, with --preset=free:ac130.
+var _rof_test := false
+var _rof_t := 0.0
+
+func _run_rof_test() -> void:
+	for gid in ["g105", "g40", "g25"]:
+		# off the port beam, from wherever the aeroplane has got to, so every gun
+		# is measured inside the battery's arc
+		var aim: Vector3 = player.global_position + (-player.global_transform.basis.x) * 2500.0
+		aim.y = Sim.height_at(aim.x, aim.z)
+		var wi: int = player.weapon_types.find(gid)
+		if wi < 0:
+			print("[rof] %s not carried" % gid)
+			continue
+		player.set_weapon(wi)
+		player.gun_cd = 0.0
+		var before: int = get_tree().get_nodes_in_group("shells").size()
+		var shots := 0
+		var t := 0.0
+		while t < 6.0:
+			if player.fire_gunship(self, aim):
+				shots += 1
+			await get_tree().physics_frame
+			t += 1.0 / float(Engine.physics_ticks_per_second)
+		var g: Dictionary = player.gunship_gun()
+		print("[rof] %s held 6 s: %d shots fired (table %d rpm = %.1f in 6 s), %d shells in the air" % [
+			gid, shots, int(g.get("rpm", 0)), float(g.get("rpm", 0)) / 10.0,
+			get_tree().get_nodes_in_group("shells").size() - before])
+	get_tree().quit()
+
+## Where on the home field the ground crew will come out, and a rearm at the far
+## end of the runway: --fieldsvctest.
+var _field_svc_test := false
+var _field_svc_t := 0.0
+
+func _run_field_svc_test() -> void:
+	var bad := PackedStringArray()
+	if not is_instance_valid(base):
+		print("[fieldsvc] RESULT: FAILED — no home airbase")
+		get_tree().quit()
+		return
+	var spots := [["far end of the runway", Vector3(0.0, 0.0, -1400.0), true],
+		["near end of the runway", Vector3(0.0, 0.0, 1450.0), true],
+		["the apron", Vector3(150.0, 0.0, -300.0), true],
+		["by the hangars", Vector3(268.0, 0.0, -240.0), true],
+		["a field 900 m off the side", Vector3(900.0, 0.0, 0.0), false]]
+	player.active = false
+	for sp in spots:
+		var w: Vector3 = base.global_transform * (sp[1] as Vector3)
+		w.y = Sim.height_at(w.x, w.z) + 2.0
+		player.global_position = w
+		var got: bool = player.near_service()
+		print("[fieldsvc] %-28s crew %s" % [String(sp[0]), "comes out" if got else "stays in"])
+		if got != bool(sp[2]):
+			bad.append("%s: %s" % [String(sp[0]), "serviced" if got else "not serviced"])
+	# and a full rearm out at the far end
+	var far: Vector3 = base.global_transform * Vector3(0.0, 0.0, -1400.0)
+	player.global_position = Vector3(far.x, Sim.height_at(far.x, far.z) + 2.0, far.z)
+	player.fuel = float(player.spec["fuel"]) * 0.2
+	var gone := 0
+	for st in player.stores:
+		st["gone"] = true
+		gone += 1
+	var fuel0: float = player.fuel
+	var t := 0.0
+	while t < 8.0:
+		player.linear_velocity = Vector3.ZERO
+		player.on_ground = true
+		player.update_ground_service(1.0 / 60.0)
+		await get_tree().process_frame
+		t += 1.0 / 60.0
+	var back := 0
+	for st2 in player.stores:
+		if not st2["gone"]:
+			back += 1
+	print("[fieldsvc] at the far end: crew working=%s, fuel %.0f -> %.0f kg, stores back %d of %d" % [
+		str(player.servicing), fuel0, player.fuel, back, gone])
+	if player.fuel <= fuel0 or (gone > 0 and back == 0):
+		bad.append("the far end did not rearm or refuel")
+	for b2 in bad:
+		print("[fieldsvc]   ", b2)
+	print("[fieldsvc] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Drive one vehicle straight, then on full lock, and say how far it went and
+## how far it turned: --drivetest=KIND.
+var _drive_test := ""
+
+func _run_drive_test(kind: String) -> void:
+	var t := Tank.new()
+	t.setup(1, kind)
+	t.ai = false
+	add_child(t)
+	# open country, clear of the airfield and the towns
+	var at := GameMode._dry_spot(Vector3(4000.0, 0.0, -6000.0), 0.0, 400.0)
+	t.global_transform = Tank.ground_pose(at, 0.0, t.rest_height())
+	t.scripted = true
+	t.occupied = true
+	await get_tree().create_timer(1.5).timeout
+	var p0 := t.global_position
+	var y0: float = t.rotation.y
+	for phase in [[0.6, 0.0], [0.6, 1.0], [0.0, 1.0], [0.3, 1.0]]:
+		var p_a := t.global_position
+		var y_a: float = t.global_transform.basis.get_euler().y
+		var t0 := 0.0
+		while t0 < 5.0:
+			t.in_throttle = float(phase[0])
+			t.in_steer = float(phase[1])
+			await get_tree().physics_frame
+			t0 += 1.0 / float(Engine.physics_ticks_per_second)
+		var y_b: float = t.global_transform.basis.get_euler().y
+		print("[drive] %s throttle %.1f steer %.1f: went %.0f m, turned %.0f deg, speed %.1f" % [
+			kind, float(phase[0]), float(phase[1]),
+			t.global_position.distance_to(p_a), rad_to_deg(absf(wrapf(y_b - y_a, -PI, PI))),
+			t.speed])
+	print("[drive] total %.0f m from the start, %s" % [t.global_position.distance_to(p0), str(y0)])
+	get_tree().quit()
+
+func _tick_mode_test(delta: float) -> void:
+	_mode_t += delta
+	# rounds sent at the player, counted once each
+	for m in get_tree().get_nodes_in_group("missiles"):
+		if is_instance_valid(m) and not _mode_seen.has(m) and m.get("target") == player:
+			_mode_seen[m] = true
+			_mode_at_player += 1
+	if _mode_t > 8.0 and _mode_pos.is_empty():
+		for n in get_tree().get_nodes_in_group("hittable"):
+			if n is Tank and (n as Tank).ai and (n as Tank).alive:
+				_mode_pos[n] = (n as Node3D).global_position
+	if _mode_t < 50.0:
+		return
+	_mode_test = false
+	var tanks := {0: 0, 1: 0}
+	var air := {0: 0, 1: 0}
+	var moved := 0
+	var far := 0.0
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or not ("team" in n):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		var tm: int = int(n.team)
+		if n is Tank and (n as Tank).ai:
+			tanks[tm] = int(tanks.get(tm, 0)) + 1
+			if _mode_pos.has(n):
+				var dd: float = (n as Node3D).global_position.distance_to(_mode_pos[n])
+				far = maxf(far, dd)
+				if dd > 40.0:
+					moved += 1
+		elif n is Aircraft and n != player:
+			air[tm] = int(air.get(tm, 0)) + 1
+	print("[modes] %s: aircraft ours %d / theirs %d, armour ours %d / theirs %d" % [
+		Sim.mission, int(air.get(0, 0)), int(air.get(1, 0)), int(tanks.get(0, 0)),
+		int(tanks.get(1, 0))])
+	print("[modes] %d of %d AI vehicles moved more than 40 m in 42 s (furthest %.0f m)" % [
+		moved, _mode_pos.size(), far])
+	# and what the ones that did not are doing about it
+	for n2 in _mode_pos.keys():
+		if not is_instance_valid(n2) or not (n2 as Tank).alive:
+			continue
+		var tk := n2 as Tank
+		if tk.global_position.distance_to(_mode_pos[n2]) > 40.0:
+			continue
+		var gd: float = tk.global_position.distance_to(tk.ai_goal) \
+			if tk.ai_goal != Vector3.INF else -1.0
+		var here2: float = Sim.height_at(tk.global_position.x, tk.global_position.z)
+		print("[modes]   stuck: %s (%s) speed %.1f, throttle %.2f steer %+.2f brake %s, target %s, goal %.0f m away, %.1f m off the ground, up %.2f" % [
+			tk.name, tk.kind, tk.speed, tk.in_throttle, tk.in_steer, str(tk.in_brake),
+			Sim.label_of(tk._ai_target), gd, tk.global_position.y - here2,
+			tk.global_transform.basis.y.dot(Vector3.UP)])
+	print("[modes] rounds sent at the player: %d; player %s" % [_mode_at_player,
+		"alive" if is_instance_valid(player) and player.alive else "DOWN"])
+	if mode != null:
+		print("[modes] mode state: wave %d, %d strike targets left, kills %s" % [
+			mode.wave, mode._strike_left(), str(mode.kills)])
+	get_tree().quit()
+
+## Put the pod's laser on a spot, select it, and send a rocket at it -- then one
+## more with the laser off, to show what the laser bought.
+var _apkws_test := false
+var _apkws_t := 0.0
+
+## Take the carrier's conn and press every aeroplane key at it: none of them
+## may reach the jet parked back on the ramp.
+var _carrier_conn_test := false
+var _carrier_conn_t := 0.0
 var _admin_t := 0.0
 var _admin_from := ""
 var _restart_test := false
@@ -318,6 +1104,11 @@ var _boat_t := 0.0
 var _float_test := false
 var _seamix := false
 var _tel_test := false
+## What the screen looked like from high on the arc: the haze and the camera
+## the HUD was projecting its boxes through.
+var _tel_hz := ""
+var _tel_hz_bad := false
+var _tel_salvo := 0
 var _tel_t := 0.0
 var _tel_step := 0
 var _tel: Tank = null
@@ -376,6 +1167,11 @@ var _fps_clock := 0.0
 ## instant happened to hold.
 var _fps_proc: Array = []
 var _fps_phys: Array = []
+## What the renderer itself measured: the CPU building the frame's command
+## lists, and the GPU executing them. "Process 12 ms" includes waiting on the
+## GPU, so on its own it cannot say which of the two is the frame.
+var _fps_rcpu: Array = []
+var _fps_rgpu: Array = []
 var _fps_nodes: Array = []
 var _fps_times: PackedFloat32Array = PackedFloat32Array()
 var _locktime_test := false
@@ -564,6 +1360,42 @@ var _board_seat := Vector3.ZERO
 var _skip_board := false
 var _shot_at := 0
 var _at := Vector3.ZERO
+## A fixed eye for screenshots: where it stands and what it looks at, in chart
+## x and z and world y. The aeroplane cameras all chase something moving, so a
+## picture of one piece of ground -- an abutment, a coastline -- had to be got
+## by flying past it at the right moment.
+var _look_from := Vector3.INF
+var _look_at := Vector3.INF
+var _look_cam: Camera3D = null
+## Right button held on a bridge: the ship's or the carrier's own camera
+## narrows, the same as the chase camera does in an aeroplane. Their cameras
+## are set to one field of view when they are built and never touched again,
+## so the easing in and out is done here.
+var _hull_zoom := false
+const HULL_FOV := 62.0
+
+func _ease_hull_zoom(delta: float) -> void:
+	var c: Camera3D = null
+	if is_instance_valid(ship):
+		c = ship.cam
+	elif _at_conn():
+		c = carrier.cam
+	else:
+		_hull_zoom = false
+	if c == null or not is_instance_valid(c):
+		return
+	var want: float = HULL_FOV * (0.32 if _hull_zoom else 1.0)
+	c.fov = lerpf(c.fov, want, clampf(delta * 8.0, 0.0, 1.0))
+
+## Hold the jet's trigger down, for a picture of what its gun puts out.
+var _hold_gun := false
+## For pictures of the main view: hold the zoom, and put the pod on a point four
+## kilometres ahead and close its page, so the mark it leaves can be seen.
+var _shot_zoom := false
+var _shot_podmark := false
+## and an objective six kilometres out, for a picture of how it shows in flight
+var _shot_obj := false
+var _shot_mark_t := 0.0
 
 ## True until the world exists. `_process` runs from the first frame, which is
 ## now long before there is a terrain or an aeroplane for it to touch.
@@ -796,6 +1628,8 @@ func _ready() -> void:
 	pod = SensorPod.new()
 	pod.visible = false
 	ui.add_child(pod)
+	# so the main view can show where the sensor is looking
+	hud.pod = pod
 	_place_pod()
 	get_viewport().size_changed.connect(_place_pod)
 	chat = ChatBox.new()
@@ -998,7 +1832,10 @@ func _environment() -> void:
 	env.fog_depth_end = 140000.0
 	env.fog_depth_curve = 1.6
 	env.fog_sky_affect = 0.08
-	env.glow_enabled = true
+	# Off. Measured with --fpstest over free flight it was a millisecond of a
+	# 12.5 ms frame -- about eight frames a second -- for the bloom round the
+	# brightest lights. The tuning is left below, so it is one line to put back.
+	env.glow_enabled = false
 	env.glow_intensity = 0.65
 	env.glow_bloom = 0.12
 	env.glow_hdr_threshold = 1.05
@@ -1103,8 +1940,16 @@ func _process(delta: float) -> void:
 				terrain.set_season(sn)
 	# The haze thins as the air does. Done here rather than in `apply`, because
 	# it is a function of where the eye is and that changes every frame.
+	#
+	# Where the *picture* is taken from, not where you are. It was your own
+	# vehicle's height, so riding a launcher's round up its ballistic arc on
+	# the weapon camera -- a hundred kilometres up and more -- drew the whole
+	# planet through sea-level haze: the fog's far end at a hundred and forty
+	# kilometres and everything beyond it a flat grey wash.
 	if weather != null and _env != null:
-		var eye: Node3D = _me_or_player()
+		var eye: Node3D = get_viewport().get_camera_3d()
+		if eye == null:
+			eye = _me_or_player()
 		if eye != null:
 			weather.thin_air(_env, Sim.altitude(eye.global_position), _psm)
 	var _pw := Sim.prof_at()
@@ -1125,18 +1970,23 @@ func _tick_world(delta: float) -> void:
 		_gt += delta
 		if _gt > 2.0 and not gunning:
 			toggle_gunner()
+		elif gunning and _gt > 3.0 and pod.mode == SensorPod.SLEW:
+			# hold a spot on the ground, the way a gunner does before shooting:
+			# it is the area track the rounds have to land on
+			pod.designate()
 		elif gunning and fmod(_gt, 3.0) < delta:
 			var b := player.global_transform.basis
 			var aim: Vector3 = pod.aim_point()
 			# ...and whether the barrels can actually get there. The battery is
 			# on trunnions with a real arc, so a sight that is holding a mark
 			# the mount cannot train onto is a shot that will not be taken.
-			var laid: bool = aim != Vector3.INF and player.aim_battery(aim)
+			var laid: bool = aim != Vector3.INF and player.lay_battery(aim)
 			print("[gunner] t=%4.1f alt=%6.1f bank=%+5.1f spd=%5.1f  pod=%s  battery=%s  gun=%s" % [
 				_gt, player.global_position.y, rad_to_deg(atan2(-b.x.y, b.y.y)),
 				player.linear_velocity.length(),
 				"locked" if aim != Vector3.INF else "no point",
-				"on the mark" if laid else "cannot train",
+				("on the mark" if laid else "cannot train (needs az %+.0f el %+.0f)" % [
+					player.battery_need(aim).x, player.battery_need(aim).y]) if aim != Vector3.INF else "-",
 				player.weapon_label(player.current_weapon())])
 			if aim != Vector3.INF:
 				player.fire_gunship(self, aim)
@@ -1158,8 +2008,8 @@ func _tick_world(delta: float) -> void:
 	if is_instance_valid(player) and player.has_method("aim_battery") \
 			and pod != null and pod.active:
 		var lay: Vector3 = pod.aim_point()
-		if lay != Vector3.INF:
-			player.aim_battery(lay)
+		if lay != Vector3.INF and player.has_method("lay_battery"):
+			player.lay_battery(lay)
 	if pod and pod.active and not gunning \
 			and (not running or on_foot or not is_instance_valid(pod.platform)):
 		pod.toggle()
@@ -1333,7 +2183,8 @@ func _tick_world(delta: float) -> void:
 			if vc != null:
 				atmo.follow(vc)
 	if is_instance_valid(hud) and is_instance_valid(cam) and running:
-		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT)
+		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT) \
+			and not is_instance_valid(cam.weapon_cam)
 	if boarding:
 		_tick_boarding(delta)
 	if running and is_instance_valid(player) and not boarding and not on_foot:
@@ -1620,6 +2471,73 @@ func _tick_world(delta: float) -> void:
 	if is_instance_valid(admin) and admin.following and is_instance_valid(cam):
 		if not is_instance_valid(cam.subject) or not _traffic.has(cam.subject):
 			_follow_traffic(true)
+	if _nuke_shot.size() == 4 and not _nuke_shot_done and running:
+		_nuke_shot_done = true
+		_set_off_nuke_shot()
+	if _road_probe != Vector2.INF:
+		_run_road_probe()
+		_road_probe = Vector2.INF
+	if _decoy_test and running:
+		_decoy_test = false
+		_run_decoy_test()
+	if _mirv_lock_test and running and is_instance_valid(tank):
+		_mirv_lock_t += delta
+		if _mirv_lock_t > 6.0:
+			_mirv_lock_test = false
+			_run_mirv_lock_test()
+	if _map_lock_test and running and is_instance_valid(tank):
+		_map_lock_t += delta
+		if _map_lock_t > 6.0:
+			_map_lock_test = false
+			_run_map_lock_test()
+	if _tel_range != "" and running:
+		var tr_arg := _tel_range
+		_tel_range = ""
+		_run_tel_range_test(tr_arg)
+	if _terrain_test and running:
+		_terrain_test = false
+		_run_terrain_test()
+	if _fire_map_test and running and is_instance_valid(tank):
+		_fire_map_t += delta
+		if _fire_map_t > 3.0:
+			_fire_map_test = false
+			_run_fire_map_test()
+	if _obj_test and running and is_instance_valid(player):
+		_obj_t += delta
+		if _obj_t > 3.0:
+			_obj_test = false
+			_run_obj_test()
+	if _track_kill != "" and running and is_instance_valid(player):
+		_track_kill_t += delta
+		if _track_kill_t > 3.0 and _track_kill_t < 1e8:
+			_track_kill_t = 1e9
+			_run_track_kill_test()
+	if _rof_test and running and is_instance_valid(player):
+		_rof_t += delta
+		if _rof_t > 3.0:
+			_rof_test = false
+			_run_rof_test()
+	if _field_svc_test and running and is_instance_valid(player):
+		_field_svc_t += delta
+		if _field_svc_t > 3.0:
+			_field_svc_test = false
+			_run_field_svc_test()
+	if _drive_test != "" and running:
+		var dk := _drive_test
+		_drive_test = ""
+		_run_drive_test(dk)
+	if _mode_test and running and is_instance_valid(player):
+		_tick_mode_test(delta)
+	if _apkws_test and running and is_instance_valid(player):
+		_apkws_t += delta
+		if _apkws_t > 2.0:
+			_apkws_test = false
+			_run_apkws_test()
+	if _carrier_conn_test:
+		_carrier_conn_t += delta
+		if _carrier_conn_t > 3.0:
+			_carrier_conn_test = false
+			_run_carrier_conn_test()
 	if _admin_test:
 		_admin_t += delta
 		if _admin_t > 3.0 and _traffic.is_empty():
@@ -2655,6 +3573,11 @@ func _tick_world(delta: float) -> void:
 				Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0)
 			_fps_phys.append(Performance.get_monitor(
 				Performance.TIME_PHYSICS_PROCESS) * 1000.0)
+			var vrid := get_viewport().get_viewport_rid()
+			RenderingServer.viewport_set_measure_render_time(vrid, true)
+			_fps_rcpu.append(RenderingServer.viewport_get_measured_render_time_cpu(vrid)
+				+ RenderingServer.get_frame_setup_time_cpu())
+			_fps_rgpu.append(RenderingServer.viewport_get_measured_render_time_gpu(vrid))
 			# The cheapest witness to what a frame was doing. A stall in a
 			# battle is nearly always something *arriving* -- an aeroplane
 			# built, a wreck made, an effect spawned -- and without this
@@ -3009,7 +3932,41 @@ func _tick_world(delta: float) -> void:
 					top = maxf(top, (m as Node3D).global_position.y)
 				elif String(m.wid) == "orehead":
 					kids += 1
+			# The first frame after the bus opens: the camera should be on one
+			# warhead and know about all of them, and the map open over it has
+			# to draw the lot.
+			if kids > 0 and _tel_kids == 0:
+				var rv: Variant = cam.get("weapon_cam") if is_instance_valid(cam) else null
+				if rv != null and is_instance_valid(rv) and rv is Missile:
+					var pk: Array = (rv as Missile).salvo()
+					var on_units := 0
+					for k5 in pk:
+						if (k5 as Missile).locked_on_unit():
+							on_units += 1
+					print("[tel] riding a warhead: it knows of %d in its load, %d on units" % [
+						pk.size(), on_units])
+					_tel_salvo = pk.size()
+				if not map.visible:
+					map.toggle()
 			_tel_kids = maxi(_tel_kids, kids)
+			# Riding the round high on its arc: the haze is the thin air at the
+			# eye, and the HUD draws through the camera that is on screen.
+			# Checked against the thinning the camera's own height calls for:
+			# the launcher's would leave it at the sea-level figure.
+			if is_instance_valid(cam) and cam.current \
+					and is_instance_valid(cam.weapon_cam) \
+					and Sim.altitude(cam.global_position) > 1500.0:
+				var live: Camera3D = hud._live_camera()
+				var ca: float = Sim.altitude(cam.global_position)
+				var cx: float = ca / 8500.0
+				var want_end: float = weather.fog_far * cx / (1.0 - exp(-cx))
+				_tel_hz = "at %.1f km up: fog ends %.0f km (%.0f km for that height, %.0f at the launcher's); HUD projects through %s" % [
+					ca * 0.001, _env.fog_depth_end * 0.001, want_end * 0.001,
+					weather.fog_far * 0.001,
+					"the weapon camera" if live == cam else str(live)]
+				# a frame behind at most, while the round climbs
+				_tel_hz_bad = _tel_hz_bad or live != cam \
+					or absf(_env.fog_depth_end - want_end) > want_end * 0.08
 			if fmod(_tel_t, 15.0) < delta:
 				print("[tel]   t=%5.1f  bus up %d (apogee so far %.0f m), warheads %d" % [
 					_tel_t, bus, top, kids])
@@ -3047,9 +4004,19 @@ func _tick_world(delta: float) -> void:
 				# A bus with a 900 m footprint should put its load inside about
 				# that; anything kilometres out is a warhead that never flew to
 				# the mark at all.
+				print("[tel] %s" % (_tel_hz if _tel_hz != ""
+					else "never saw the weapon camera off the ground"))
 				print("[tel] RESULT: %s" % ("ok" if _tel_kids >= 4 and _tel_cam
-					and not offs.is_empty() and worst < 2600.0 else "FAILED"))
+					and not offs.is_empty() and worst < 2600.0
+					and _tel_hz != "" and not _tel_hz_bad
+					and _tel_salvo == _tel_kids else "FAILED"))
 				get_tree().quit()
+		# a picture from the ride, when one was asked for: --shot with --frames,
+		# counted from the launch rather than from the start of the test
+		if _shot != "" and _tel_cam:
+			_shot_frames -= 1
+			if _shot_frames == 0:
+				_take_shot()
 		return
 	# How the world is divided between land and water, and whether there is any
 	# coastline in it or just one edge with sea on one side.
@@ -6064,6 +7031,25 @@ func _tick_world(delta: float) -> void:
 			lp_lines.size(), lp_detour, str(lp_at.round()), lp_loops])
 		print("[roads] %d of %d bends turn back on themselves by more than 120 deg" % [
 			lp_reversals, lp_bends])
+		# And how many corners are left on the network at all: a trunk road
+		# bends on a curve, so a station turning through more than a quarter of
+		# a right angle is a corner the survey did not round.
+		var sharp := 0
+		var sharp_at: Array = []
+		for ln3 in lp_lines:
+			var pl3: PackedVector2Array = ln3
+			for i in range(1, pl3.size() - 1):
+				var u3: Vector2 = pl3[i] - pl3[i - 1]
+				var v3: Vector2 = pl3[i + 1] - pl3[i]
+				if u3.length() < 1.0 or v3.length() < 1.0:
+					continue
+				var turn3: float = absf(u3.angle_to(v3))
+				if turn3 > deg_to_rad(25.0):
+					sharp += 1
+					if sharp_at.size() < 4:
+						sharp_at.append("%s %.0f deg" % [str(pl3[i].round()), rad_to_deg(turn3)])
+		print("[roads] %d corners sharper than 25 deg left on the trunk network%s" % [
+			sharp, (": " + ", ".join(sharp_at)) if sharp > 0 else ""])
 		# What the worst one is actually doing: where it starts, where it ends,
 		# and what it goes round on the way.
 		for ln2 in lp_lines:
@@ -6258,6 +7244,7 @@ func _tick_world(delta: float) -> void:
 		print("[roads] %d tunnel(s), %.2f km bored; %d viaduct(s), %.2f km carried" % [
 			Sim.road_tunnels.size(), bore * 0.001,
 			Sim.road_bridges.size(), carried * 0.001])
+		_report_valleys()
 		# Every span, against what it is actually crossing. A viaduct that
 		# stands a couple of metres off the ground for its whole length is an
 		# embankment somebody has drawn a deck on; one that has road painted on
@@ -6280,6 +7267,10 @@ func _tick_world(delta: float) -> void:
 			# and the corridor carries it a graded shoulder further. Anything
 			# inside that is the abutment, not the middle of a span.
 			var skirt: float = Sim.ROAD_HALF + Sim.ROAD_SHOULDER
+			var deck_ends: Array = []
+			for br_e in Sim.road_bridges:
+				deck_ends.append(br_e["a"])
+				deck_ends.append(br_e["b"])
 			for i in pts.size():
 				# the country under the deck, which nothing should have touched
 				var under: float = Sim.natural_height_at(pts[i].x, pts[i].y)
@@ -6291,8 +7282,15 @@ func _tick_world(delta: float) -> void:
 				# and no earthworks under it. Another road passing beneath a
 				# viaduct is perfectly ordinary; the corridor levelling the
 				# ground under the span it is carrying is not.
-				if pts[i].distance_to(pts[0]) > skirt \
-						and pts[i].distance_to(pts[pts.size() - 1]) > skirt:
+				# ...including another span's: where two roads meet at a deck
+				# end, the one joining brings its own approach embankment up
+				# to the same abutment, and that is the abutment too.
+				var near_end := false
+				for e_pt in deck_ends:
+					if pts[i].distance_to(e_pt) <= skirt + 20.0:
+						near_end = true
+						break
+				if not near_end:
 					var made2: Vector3 = Sim.road_surface(pts[i].x, pts[i].y)
 					# Another road passing under a viaduct is ordinary, and its
 					# earthworks are its own business. What would be wrong is
@@ -6320,6 +7318,13 @@ func _tick_world(delta: float) -> void:
 			Sim.road_bridges.size(), wet_spans,
 			clear_min if Sim.road_bridges.size() > 0 else 0.0,
 			clear_sum / maxf(float(Sim.road_bridges.size()), 1.0)])
+		print("[roads] the made road meets each deck end within %.2f m" % gap_worst)
+		for brp in Sim.road_bridges:
+			var bpa: Vector2 = brp["a"]
+			var bpb: Vector2 = brp["b"]
+			print("[roads]   span %s -> %s, %.2f km, deck %.0f -> %.0f" % [
+				str(bpa.round()), str(bpb.round()), bpa.distance_to(bpb) * 0.001,
+				float(brp["ya"]), float(brp["yb"])])
 		# One span in a hundred, not none. This measures the router's tendency to
 		# reach for a deck where fill would do, and on a network of 160 spans a
 		# single one sitting a metre and a half under the fill limit is which
@@ -7455,7 +8460,8 @@ func _tick_world(delta: float) -> void:
 			_hud_test = false
 			cam.mode = {"cockpit": 0, "chase": 1, "orbit": 2}.get(_hud_view, 0)
 			# let the gate run one more frame with the new mode
-			hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT)
+			hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT) \
+			and not is_instance_valid(cam.weapon_cam)
 			print("[hud] view=%s -> flight page drawn: %s" % [_hud_view, str(hud.flight_page)])
 			_check_hud_keys()
 			get_tree().quit()
@@ -8234,6 +9240,42 @@ func _tick_world(delta: float) -> void:
 		_run_t = Time.get_ticks_msec() * 0.001
 		if _run_t >= _run_for:
 			get_tree().quit()
+	_ease_hull_zoom(delta)
+	if _shot_zoom and running and is_instance_valid(cam):
+		cam.zoom = true
+	if _shot_obj and running and is_instance_valid(player):
+		_shot_obj = false
+		var fo: Vector3 = -player.global_transform.basis.z
+		var lo: Vector3 = -player.global_transform.basis.x
+		var op: Vector3 = player.global_position + fo * 5500.0 + lo * 2200.0
+		Sim.set_objective(Vector3(op.x, Sim.height_at(op.x, op.z), op.z))
+	if _shot_podmark and running and is_instance_valid(player):
+		_shot_mark_t += delta
+		if _shot_mark_t > 1.5:
+			_shot_podmark = false
+			pod.platform = player
+			if not pod.active:
+				pod.toggle()
+			var hh: float = player.global_position.y - Sim.height_at(
+				player.global_position.x, player.global_position.z)
+			pod.yaw = 0.25
+			pod.pitch = -atan2(hh, 4000.0)
+			pod._process(0.016)
+			pod.designate()
+			pod.toggle()
+	if _hold_gun and running and is_instance_valid(player) and not on_foot:
+		player.fire_gun(self)
+	if _look_from != Vector3.INF and running:
+		if _look_cam == null:
+			_look_cam = Camera3D.new()
+			_look_cam.fov = 60.0
+			add_child(_look_cam)
+			_look_cam.global_position = _look_from
+			_look_cam.look_at(_look_at, Vector3.UP)
+			if is_instance_valid(hud):
+				hud.visible = false
+		if not _look_cam.current:
+			_look_cam.current = true
 	if _shot != "":
 		_shot_frames -= 1
 		if _shot_frames <= 0:
@@ -8249,14 +9291,20 @@ func _start(id: String, mission: String) -> void:
 	# a "veh:" selection means the player starts in the driver's seat instead
 	var drive_kind := ""
 	var ship_kind := ""
+	# Starting in something other than an aeroplane put you on the ramp
+	# whatever mission was picked, so a launcher with STRIKE selected came up
+	# on an empty range: no column, no shipping, nothing on the map worth a
+	# fire mission. The strike range has nothing that shoots back at anybody,
+	# which suits a gun or a launcher as well as it does a jet.
+	var keep := mission == "strike"
 	if id.begins_with("sea:"):
 		ship_kind = id.substr(4)
 		id = "f16"
-		mission = "ramp"
+		mission = "strike" if keep else "ramp"
 	if id.begins_with("veh:"):
 		drive_kind = id.substr(4)
 		id = "f16"
-		mission = "ramp"
+		mission = "strike" if keep else "ramp"
 	_drive_kind = drive_kind
 	_ship_kind = ship_kind
 	Sim.selected_jet = id
@@ -8307,6 +9355,7 @@ func _start(id: String, mission: String) -> void:
 		cam.mode = {"cockpit": 0, "chase": 1, "orbit": 2}.get(_view, 0)
 	if _dist > 0.0:
 		cam.orbit_dist = _dist
+		cam.orbit_fixed = true
 		cam.orbit = _orbit if _orbit != Vector2.ZERO else Vector2(2.3, 0.18)
 	if _openbay:
 		player.set_bays(true)
@@ -8383,6 +9432,8 @@ func _start(id: String, mission: String) -> void:
 			_setup_battle(mission)
 		"carrier":
 			_setup_carrier_approach()
+		"strike":
+			_setup_strike()
 		"free":
 			player.global_transform = Transform3D(Basis(), Vector3(-600.0, 2400.0, 7000.0))
 			player.rotation.y = deg_to_rad(-4.0)
@@ -8527,6 +9578,85 @@ func _setup_battle(id: String) -> void:
 	hud.mode = mode
 	var wings: int = 3 if id in ["tdm", "ffa"] else 3
 	_spawn_threats(wings)
+	# Somebody on our side. Every battle mode put the player up alone against a
+	# flight, a pair of gunships and the ground war -- a team deathmatch with a
+	# team of one. Free for all is the one where there is no side to be on.
+	if id != "ffa":
+		_spawn_allies()
+
+## Our own flight and a pair of gunships, flying our side's hardware. They find
+## their own fights the same way the opposition does, by team.
+const ALLY_WINGS := 3
+func _spawn_allies() -> void:
+	if net != null and net.active and not net.is_host:
+		return
+	var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+	var jets: Array = NATO_JETS if nato else OPFOR_JETS
+	var rotary: Array = NATO_HELIS if nato else OPFOR_HELIS
+	var lead: AIPlane = null
+	for i in ALLY_WINGS:
+		var b := AIPlane.new()
+		b.setup(jets[i % jets.size()])
+		b.team = 0
+		b.name = "Blue %d" % (i + 1)
+		b.home = Vector3(1200.0 * i - 1200.0, 0.0, -2600.0)
+		b.patrol_r = 2600.0 + i * 500.0
+		add_child(b)
+		# off the player's wing, heading the same way into the fight
+		var at := Vector3(-500.0 + (i + 1) * 420.0, 3500.0 - i * 120.0, 7500.0 + i * 260.0)
+		b.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(-4.0)), at)
+		b.linear_velocity = -b.global_transform.basis.z * 230.0
+		if i % 2 == 1 and is_instance_valid(lead):
+			b.leader = lead
+			b.slot = Vector3(90.0, -18.0, 120.0)
+		else:
+			lead = b
+		b.died.connect(_on_ally_down)
+		_reset_interp.call_deferred(b)
+	for i in 2:
+		var h := AIHeli.new()
+		h.setup(rotary[i % rotary.size()])
+		h.team = 0
+		h.name = "Blue Gunship %d" % (i + 1)
+		h.home = Vector3(-1200.0 + i * 2400.0, 0.0, -3400.0)
+		add_child(h)
+		var hz: float = 600.0 + i * 300.0
+		var hx: float = -800.0 + i * 1600.0
+		h.global_transform = Transform3D(Basis(Vector3.UP, 0.0),
+			Vector3(hx, Sim.height_at(hx, hz) + 220.0, hz))
+		h.died.connect(_on_ally_down)
+		_reset_interp.call_deferred(h)
+	Sim.report("friendlies up: %d fighters and a pair of gunships on our side" % ALLY_WINGS,
+		Sim.Ev.INFO)
+
+func _on_ally_down(who: Node) -> void:
+	if mode and mode.running:
+		mode.register_kill(0)
+	Sim.report("%s is down" % who.name, Sim.Ev.BAD)
+
+## The range with nothing on it that can hurt an aeroplane: armour columns,
+## shipping and helicopters to find and hit, wave after wave.
+func _setup_strike() -> void:
+	if _drive_kind != "" or _ship_kind != "":
+		# in a vehicle or a boat: the ramp parks the aeroplanes and puts you
+		# in the seat, and the range is laid out round it the same as ever
+		_setup_ramp()
+	else:
+		player.global_transform = Transform3D(Basis(), Vector3(-500.0, 3000.0, 6000.0))
+		player.rotation.y = deg_to_rad(-4.0)
+		player.linear_velocity = -player.global_transform.basis.z * _entry_speed(230.0)
+		player.gear_down = false
+		player.gear_anim = 0.0
+		player.throttle = 0.8
+		player.power = 0.8
+	mode = GameMode.new()
+	mode.name = "GameMode"
+	add_child(mode)
+	mode.start("strike")
+	mode.finished.connect(_on_mode_finished)
+	hud.mode = mode
+	Sim.report("the column is up the valley, the shipping is offshore east; M for the map",
+		Sim.Ev.INFO)
 
 func _on_mode_finished(_win: bool, _text: String) -> void:
 	pass
@@ -8791,6 +9921,238 @@ func _strategic_strike() -> void:
 	boat.launch_strategic(at)
 
 ## Walk a berth seaward until it is over water deep enough to float in.
+func _run_apkws_test() -> void:
+	var bad := PackedStringArray()
+	var hi: int = player.weapon_types.find("hydra")
+	if hi < 0:
+		print("[laser] RESULT: FAILED — %s carries no rockets (use --preset=free:a10)" % player.name)
+		get_tree().quit()
+		return
+	# the head on a spot four kilometres ahead of the nose
+	pod.platform = player
+	if not pod.active:
+		pod.toggle()
+	var h: float = player.global_position.y - Sim.height_at(player.global_position.x,
+		player.global_position.z)
+	pod.yaw = 0.0
+	pod.pitch = -atan2(h, 4000.0)
+	await get_tree().process_frame
+	pod.designate()
+	pod.toggle_laser()
+	for i in 6:
+		await get_tree().process_frame
+	var spot: Node3D = pod._marker
+	if not is_instance_valid(spot) or not bool(spot.get("on")) or not bool(spot.get("lasing")):
+		bad.append("no lit spot after the laser came on")
+	elif player.target != spot:
+		bad.append("the spot was not selected when the laser came on (target %s)" % Sim.label_of(player.target))
+	# T: off the spot and back onto it, like any other contact
+	var visits := 0
+	var others := 0
+	for i in 10:
+		player.cycle_target()
+		if player.target == spot:
+			visits += 1
+		elif player.target != null:
+			others += 1
+	print("[laser] T walked %d time(s) onto the spot and %d onto other contacts in 10 presses" % [
+		visits, others])
+	if visits == 0:
+		bad.append("T never selected the spot")
+	var guard := 0
+	while player.target != spot and guard < 20:
+		player.cycle_target()
+		guard += 1
+	player.set_weapon(hi)
+	var waited := 0.0
+	while not player.locked and waited < 3.0:
+		await get_tree().physics_frame
+		waited += 1.0 / float(Engine.physics_ticks_per_second)
+	print("[laser] %s on the spot after %.2f s; release cue: %s" % [
+		"LOCK" if player.locked else "no lock", waited,
+		player.shot_blocked("hydra", spot) if player.shot_blocked("hydra", spot) != "" else "clear"])
+	var guided: float = await _apkws_shot(spot.global_position)
+	pod.toggle_laser()
+	player.target = null
+	await get_tree().physics_frame
+	var plain: float = await _apkws_shot(spot.global_position)
+	print("[laser] rocket on the laser landed %.1f m from the spot; with the laser off, %.1f m" % [
+		guided, plain])
+	if guided > 25.0:
+		bad.append("the guided rocket missed by %.0f m" % guided)
+	for b in bad:
+		print("[laser]   ", b)
+	print("[laser] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Fire the selected store and follow it down: how far from `aim` it ended.
+func _apkws_shot(aim: Vector3) -> float:
+	var before: Array = get_tree().get_nodes_in_group("missiles")
+	var why: String = player.fire()
+	if why != "":
+		print("[laser]   release refused: ", why)
+		return INF
+	await get_tree().physics_frame
+	var m: Node3D = null
+	for n in get_tree().get_nodes_in_group("missiles"):
+		if not before.has(n) and is_instance_valid(n) and n.get("shooter") == player:
+			m = n
+	if m == null:
+		return INF
+	var last: Vector3 = m.global_position
+	var t := 0.0
+	while is_instance_valid(m) and t < 30.0:
+		last = m.global_position
+		await get_tree().physics_frame
+		t += 1.0 / float(Engine.physics_ticks_per_second)
+	return Vector2(last.x - aim.x, last.z - aim.z).length()
+
+func _run_carrier_conn_test() -> void:
+	var bad := PackedStringArray()
+	if not _at_conn():
+		print("[conn] RESULT: FAILED — not at the carrier's conn (start with --jet=sea:carrier)")
+		get_tree().quit()
+		return
+	var mode0: int = cam.mode if is_instance_valid(cam) else -1
+	var rmb := InputEventMouseButton.new()
+	rmb.button_index = MOUSE_BUTTON_RIGHT
+	rmb.pressed = true
+	_shell_input(rmb)
+	if pod.active:
+		bad.append("right click opened a sensor page instead of zooming")
+	await get_tree().create_timer(0.8).timeout
+	if carrier.cam.fov > HULL_FOV * 0.6:
+		bad.append("right click held did not zoom the bridge view (fov %.0f)" % carrier.cam.fov)
+	var rup := InputEventMouseButton.new()
+	rup.button_index = MOUSE_BUTTON_RIGHT
+	rup.pressed = false
+	_shell_input(rup)
+	await get_tree().create_timer(0.8).timeout
+	if carrier.cam.fov < HULL_FOV * 0.9:
+		bad.append("letting go did not bring the view back out (fov %.0f)" % carrier.cam.fov)
+	# and O, which is what every key card says the sensor page is on
+	_press(KEY_O)
+	if pod.active and pod._armed(pod.platform):
+		bad.append("the carrier's sensor page offers weapons")
+	if not pod.active or pod.platform != carrier:
+		bad.append("O did not open the carrier's sensor page (open=%s, map open=%s)" % [
+			str(pod.active), str(map.visible)])
+	_press(KEY_O)
+	if pod.active:
+		bad.append("O did not close the sensor page")
+	_press(KEY_J)
+	if gunning:
+		bad.append("J opened a gunner station")
+	_press(KEY_P)
+	if is_instance_valid(cam) and cam.mode != mode0:
+		bad.append("P cycled the parked jet's camera")
+	_press(KEY_U)
+	if on_foot or not _at_conn():
+		bad.append("U climbed out of the parked jet")
+	_press(KEY_TAB)
+	var ids := PackedStringArray()
+	for it in actions.items:
+		ids.append(String(it["id"]))
+	if not actions.visible or ids != PackedStringArray(["sensor", "allstop", "amidships", "dismount"]):
+		bad.append("TAB opened %s" % str(ids))
+	actions.close()
+	hud._refresh_help()
+	if hud._card_sig != 64 and hud.show_help:
+		bad.append("the key card is not the conn's (sig %d)" % hud._card_sig)
+	# and the menu still works from here: all stop, then hand over
+	carrier.telegraph = 0.6
+	_do_action("allstop")
+	if absf(carrier.telegraph) > 0.001:
+		bad.append("all stop left the telegraph at %.2f" % carrier.telegraph)
+	_do_action("dismount")
+	if _at_conn() or not on_foot:
+		bad.append("hand over did not put you on the deck")
+	for b in bad:
+		print("[conn]   ", b)
+	print("[conn] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Every valley a road crosses, and what the road does about it: carried over
+## on a deck, or taken down one side and up the other. The same closing the
+## survey uses to find them -- the level a four kilometre straightedge rests at
+## along the line -- so this counts what the survey saw, and the deepest one
+## left on the ground is the number to watch.
+func _report_valleys() -> void:
+	var span_max := 5000.0
+	var decked := 0
+	var at_grade := 0
+	var gentle := 0
+	var worst := 0.0
+	var worst_at := Vector2.ZERO
+	var deepest_decked := 0.0
+	for li in Sim._road_lines.size():
+		var pl: PackedVector2Array = Sim._road_lines[li]
+		if li >= Sim._natural.size():
+			break
+		var g: PackedFloat32Array = Sim._natural[li]
+		var n := pl.size()
+		if n < 5:
+			continue
+		var s := PackedFloat32Array()
+		s.resize(n)
+		for i in range(1, n):
+			s[i] = s[i - 1] + pl[i].distance_to(pl[i - 1])
+		var dil := PackedFloat32Array()
+		dil.resize(n)
+		var shut := PackedFloat32Array()
+		shut.resize(n)
+		for pass_i in 2:
+			var src: PackedFloat32Array = g if pass_i == 0 else dil
+			var lo := 0
+			var hi := 0
+			for i in n:
+				while s[i] - s[lo] > span_max * 0.5:
+					lo += 1
+				hi = maxi(hi, i)
+				while hi + 1 < n and s[hi + 1] - s[i] <= span_max * 0.5:
+					hi += 1
+				var v: float = src[lo]
+				for k in range(lo + 1, hi + 1):
+					v = maxf(v, src[k]) if pass_i == 0 else minf(v, src[k])
+				if pass_i == 0:
+					dil[i] = v
+				else:
+					shut[i] = v
+		var i0 := 1
+		while i0 < n - 1:
+			if shut[i0] - g[i0] <= 2.0:
+				i0 += 1
+				continue
+			var i1 := i0
+			while i1 + 1 < n and shut[i1 + 1] - g[i1 + 1] > 2.0:
+				i1 += 1
+			var ra := i0 - 1
+			var rb := i1 + 1
+			i0 = i1 + 1
+			if rb >= n:
+				continue
+			var deep := 0.0
+			var on_deck := false
+			for k in range(ra + 1, rb):
+				deep = maxf(deep, shut[k] - g[k])
+				on_deck = on_deck or Sim._in_structure(li, k)
+			if deep < 60.0:
+				continue
+			var width: float = s[rb] - s[ra]
+			if deep / maxf(width * 0.5, 1.0) < 0.05:
+				gentle += 1
+				continue
+			if on_deck:
+				decked += 1
+				deepest_decked = maxf(deepest_decked, deep)
+			else:
+				at_grade += 1
+				if deep > worst:
+					worst = deep
+					worst_at = pl[int((ra + rb) / 2.0)]
+	print("[roads] valleys crossed: %d on a deck (deepest %.0f m), %d taken at grade (deepest %.0f m at %s), %d broad enough to drive through" % [
+		decked, deepest_decked, at_grade, worst, str(worst_at.round()), gentle])
+
 ## Water deep enough to float a hull in, near a wanted point.
 ##
 ## This used to walk due east in 900 m steps, which finds the sea on a world
@@ -9442,7 +10804,14 @@ func toggle_gunner() -> void:
 		player.auto = "orbit"
 		if "orbit_alt" in player:
 			player.orbit_alt = maxf(player.global_position.y, 1200.0)
-			player.orbit_speed = maxf(player.linear_velocity.length(), 110.0)
+			# Slow, the way a gunship works. Kept at the entry speed -- usually
+			# a hundred and forty-odd metres a second -- the circle round the
+			# mark was so wide that, banked to fly it, the sight line ran along
+			# the port wing and the battery, which points below it, could not
+			# reach. At a hundred it orbits a mark three kilometres out at
+			# twenty degrees of bank with the mark well under the wing, and
+			# still has a third over its stall in the turn.
+			player.orbit_speed = float(player.spec.get("orbit_speed", 100.0))
 		if not pod.active:
 			pod.toggle()
 		pod.set_fullscreen(true)
@@ -9470,10 +10839,11 @@ func _gunner_input(_delta: float) -> void:
 		return
 	for i in 8:
 		if Input.is_action_just_pressed(StringName("weapon_%d" % (i + 1))) \
-				and i < player.weapon_types.size():
+				and i < player.weapon_types.size() and not Sim.menu_keys:
 			player.set_weapon(i)
 			Sim.report(player.weapon_label(player.current_weapon()), Sim.Ev.INFO)
-	if Input.is_action_pressed(&"gun") or Input.is_action_pressed(&"fire"):
+	if (Input.is_action_pressed(&"gun") or Input.is_action_pressed(&"fire")) \
+			and not Sim.ui_modal:
 		var aim: Vector3 = pod.aim_point()
 		if aim != Vector3.INF:
 			player.fire_gunship(self, aim)
@@ -9490,7 +10860,7 @@ func _sensor_input() -> void:
 		return
 	for i in 8:
 		if Input.is_action_just_pressed(StringName("weapon_%d" % (i + 1))) \
-				and i < player.weapon_types.size():
+				and i < player.weapon_types.size() and not Sim.menu_keys:
 			player.set_weapon(i)
 			Sim.report(player.weapon_label(player.current_weapon()), Sim.Ev.INFO)
 	if Input.is_action_just_pressed(&"laser"):
@@ -10431,10 +11801,12 @@ func _do_action(id: String) -> void:
 		"sensor":
 			# Armour has a commander's sight too. This only ever opened for a
 			# ship, so a tank crew had a sensor page they could never reach.
-			if is_instance_valid(ship) or is_instance_valid(tank):
+			if is_instance_valid(ship) or is_instance_valid(tank) or _at_conn():
 				var mount: Node3D = tank
 				if is_instance_valid(ship):
 					mount = ship
+				elif _at_conn():
+					mount = carrier
 				pod.platform = mount
 				pod.toggle()
 				pod.set_fullscreen(pod.active)
@@ -10442,17 +11814,28 @@ func _do_action(id: String) -> void:
 		"allstop":
 			if is_instance_valid(ship):
 				ship.telegraph = 0.0
+			elif _at_conn():
+				carrier.telegraph = 0.0
 			return
 		"amidships":
 			if is_instance_valid(ship):
 				ship.helm = 0.0
+			elif _at_conn():
+				carrier.helm = 0.0
 			return
 		"dismount":
 			if is_instance_valid(ship):
 				_leave_ship()
-			elif is_instance_valid(tank):
+				return
+			if is_instance_valid(tank):
 				_leave_tank()
-			return
+				return
+			if _at_conn():
+				actions.close()
+				_leave_carrier()
+				return
+			# otherwise it is the aeroplane's "climb out", below -- which
+			# returning here unconditionally made a menu item that did nothing
 		"weapon":
 			if is_instance_valid(tank):
 				tank.cycle_weapon()
@@ -10460,7 +11843,8 @@ func _do_action(id: String) -> void:
 		"gunner":
 			if is_instance_valid(tank):
 				tank.gunner = not tank.gunner
-			return
+				return
+			# the gunship's station, below: the same id, and it never got there
 		"clearfm":
 			if is_instance_valid(tank):
 				tank.map_target = Vector3.INF
@@ -10597,14 +11981,31 @@ func _enter_carrier() -> void:
 		carrier.dismount_requested.connect(_leave_carrier)
 	carrier.mount(true)
 	hud.carrier = carrier
+	# The sensor is hers while she is crewed. Left alone it stayed hung off the
+	# aeroplane parked on the ramp, and the page that opened from the bridge
+	# was that jet's -- its gun, its stores, its weapon select.
+	pod.platform = carrier
 	Sim.report("you have the conn — W/S engine order, A/D helm", Sim.Ev.INFO)
-	Sim.report("mouse looks out from the island, U to hand over", Sim.Ev.INFO)
+	Sim.report("mouse looks out from the island, RMB sensor page, U to hand over",
+		Sim.Ev.INFO)
+
+## At the carrier's conn. She has no gun and no seat to climb out of, and the
+## aeroplane left parked on the ramp is not what is being commanded -- but the
+## aeroplane's keys went on reaching it from here: the sensor page opened on a
+## jet two hundred kilometres away with its gun and stores, J put you in a
+## gunship's gunner station, TAB listed its stores and U climbed out of it.
+func _at_conn() -> bool:
+	return is_instance_valid(carrier) and carrier.occupied
 
 func _leave_carrier() -> void:
 	if not is_instance_valid(carrier):
 		return
 	carrier.mount(false)
 	hud.carrier = null
+	if pod.active:
+		pod.toggle()
+		pod.set_fullscreen(false)
+	pod.platform = null
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	# put the captain down on his own flight deck
 	_spawn_walker(carrier.global_position
@@ -11325,6 +12726,8 @@ func _join_game(jet_id: String, address: String) -> void:
 		_start(jet_id, "free")
 
 func _clear_mission() -> void:
+	# the next mission decides for itself whether the range is a safe one
+	Sim.no_air_threat = false
 	on_foot = false
 	if is_instance_valid(walker):
 		walker.queue_free()
@@ -11671,6 +13074,12 @@ func _shell_input(e: InputEvent) -> void:
 			chat.open_line()
 			Sim.typing = true
 			return
+	# Letting go of the right button lets the view back out.
+	if e is InputEventMouseButton and not (e as InputEventMouseButton).pressed \
+			and (e as InputEventMouseButton).button_index == MOUSE_BUTTON_RIGHT:
+		_hull_zoom = false
+		if is_instance_valid(cam):
+			cam.zoom = false
 	# ALT + right click raises the targeting pod; the wheel zooms it.
 	if e is InputEventMouseButton and (e as InputEventMouseButton).pressed and running \
 			and not on_foot and not Sim.ui_modal:
@@ -11681,8 +13090,23 @@ func _shell_input(e: InputEvent) -> void:
 		# the top of the handler took the map, the radar ranges, the side
 		# panels and the action menu with it.
 		# ...and not on foot, where the right button is the sights.
+		# Plain right click zooms the view while it is held; the sensor page is
+		# on O, or ALT with the right button.
+		if mb.button_index == MOUSE_BUTTON_RIGHT and not is_instance_valid(tank) \
+				and not on_foot and not Input.is_action_pressed(&"freelook") \
+				and not pod.active:
+			if is_instance_valid(ship) or _at_conn():
+				# a bridge's own camera, eased in by `_ease_hull_zoom`
+				_hull_zoom = true
+				return
+			if is_instance_valid(cam) and cam.current:
+				cam.zoom = true
+				return
 		if mb.button_index == MOUSE_BUTTON_RIGHT and not is_instance_valid(tank) \
 				and not on_foot:
+			if _at_conn():
+				# her own masthead, not the jet parked back on the ramp
+				pod.platform = carrier
 			pod.toggle()
 			pod.set_fullscreen(pod.active)
 			if cam:
@@ -11717,7 +13141,7 @@ func _shell_input(e: InputEvent) -> void:
 		elif k == KEY_BRACKETRIGHT and running:
 			Sim.panel_right = (Sim.panel_right + 1) % 4
 			Sim.report("right panel: %s" % HUD.PANEL_NAMES[Sim.panel_right], Sim.Ev.INFO)
-		elif k == KEY_H and running and is_instance_valid(player) \
+		elif k == KEY_H and running and is_instance_valid(player) and not _at_conn() \
 				and bool(player.spec.get("stovl", false)):
 			player.hover_cmd = not player.hover_cmd
 			Sim.report("STOVL: %s" % ("converting to jetborne" if player.hover_cmd
@@ -11725,9 +13149,28 @@ func _shell_input(e: InputEvent) -> void:
 		elif k == KEY_M and running:
 			map.toggle()
 		elif k == KEY_O and running:
-			# Opens the map, which is the planet. It used to switch between the
-			# planet and a flat chart; there is one map now.
-			map.toggle_globe()
+			# The sensor page, which is what every key card says O is. This
+			# opened the map -- M already does -- and being first in the chain
+			# it took the key from both sensor branches below it, so O never
+			# raised the sensor anywhere: not in a cockpit, not on a bridge,
+			# not in a turret.
+			if on_foot:
+				# nothing to look through on foot; the map is what it did
+				map.toggle_globe()
+			elif is_instance_valid(ship) or is_instance_valid(tank) or _at_conn():
+				# whatever is crewed owns the sensor: the action menu's path,
+				# which hangs the head off the hull
+				_do_action("sensor")
+			elif is_instance_valid(player):
+				pod.platform = player
+				pod.toggle()
+				pod.set_fullscreen(pod.active)
+				if cam:
+					cam.pod_slew = pod.active
+				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if pod.active \
+					else Input.MOUSE_MODE_VISIBLE
+				Sim.report("sensor page %s" % ("up" if pod.active else "stowed"),
+					Sim.Ev.INFO)
 		elif k == KEY_TAB and running:
 			if actions.visible:
 				actions.close()
@@ -11740,6 +13183,8 @@ func _shell_input(e: InputEvent) -> void:
 				actions.open_for_vehicle(ship)
 			elif is_instance_valid(tank):
 				actions.open_for_vehicle(tank)
+			elif _at_conn():
+				actions.open_for_vehicle(carrier)
 			elif is_instance_valid(player):
 				actions.open_for(player)
 		elif k == KEY_K and running:
@@ -11751,23 +13196,7 @@ func _shell_input(e: InputEvent) -> void:
 				cam.weapon_cam = null
 			Sim.report("weapon camera %s" % ("armed" if weapon_cam_on else "off"),
 				Sim.Ev.INFO)
-		elif k == KEY_O and running and not on_foot \
-				and (is_instance_valid(ship) or is_instance_valid(tank)):
-			# A crewed hull owns the sensor: the same path the action menu
-			# takes, which mounts the pod on the boat. This branch demanded an
-			# aeroplane and never set the host, so from a submarine the key
-			# either did nothing or opened a page hung off a parked fighter.
-			_do_action("sensor")
-		elif k == KEY_O and running and not on_foot \
-				and is_instance_valid(player):
-			pod.toggle()
-			pod.set_fullscreen(pod.active)
-			if cam:
-				cam.pod_slew = pod.active
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if pod.active \
-				else Input.MOUSE_MODE_VISIBLE
-			Sim.report("sensor page %s" % ("up" if pod.active else "stowed"), Sim.Ev.INFO)
-		elif k == KEY_L and running and not pod.active \
+		elif k == KEY_L and running and not pod.active and not _at_conn() \
 				and is_instance_valid(player) and player.has_method("toggle_lights"):
 			player.toggle_lights()
 		elif (k == KEY_I or k == KEY_N) and pod.active:
@@ -11802,14 +13231,18 @@ func _shell_input(e: InputEvent) -> void:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			elif is_instance_valid(player) and player.mouse_fly:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		elif k == KEY_P and running and not on_foot:
+		elif k == KEY_P and running and not on_foot and not _at_conn():
 			cam.cycle()
 		elif k == KEY_J and running and is_instance_valid(_station_walker):
 			_leave_hold_station()
-		elif k == KEY_J and running and not on_foot and is_instance_valid(player) \
-				and player.spec.get("gunship", false):
+		elif k == KEY_J and running and not on_foot and not _at_conn() \
+				and is_instance_valid(player) and player.spec.get("gunship", false):
 			toggle_gunner()
-		elif k == KEY_U and running and not on_foot and not boarding:
+		elif k == KEY_U and running and not on_foot and not boarding \
+				and not _at_conn():
+			# The carrier takes U herself, from the conn. Let through here as
+			# well it reached the aeroplane parked back on the ramp and climbed
+			# out of that, two hundred kilometres from the bridge.
 			if is_instance_valid(ship):
 				_leave_ship()
 			else:
@@ -11843,6 +13276,19 @@ func _parse_cmdline() -> void:
 			_dist = float(a.substr(7))
 		elif a.begins_with("--frames="):
 			_shot_at = int(a.substr(9))
+		elif a == "--holdgun":
+			_hold_gun = true
+		elif a == "--zoom":
+			_shot_zoom = true
+		elif a == "--podmark":
+			_shot_podmark = true
+		elif a == "--objshot":
+			_shot_obj = true
+		elif a.begins_with("--lookfrom="):
+			var lv := a.substr(11).split(",")
+			if lv.size() == 6:
+				_look_from = Vector3(float(lv[0]), float(lv[1]), float(lv[2]))
+				_look_at = Vector3(float(lv[3]), float(lv[4]), float(lv[5]))
 		elif a.begins_with("--at="):
 			var av := a.substr(5).split(",")
 			if av.size() == 3:
@@ -11906,6 +13352,42 @@ func _parse_cmdline() -> void:
 			_pod_test = true
 		elif a == "--admintest":
 			_admin_test = true
+		elif a.begins_with("--nukeshot="):
+			for v in a.substr(11).split(","):
+				_nuke_shot.append(float(v))
+		elif a.begins_with("--roadprobe="):
+			var rp := a.substr(12).split(",")
+			_road_probe = Vector2(float(rp[0]), float(rp[1]))
+		elif a == "--decoytest":
+			_decoy_test = true
+		elif a == "--mirvlocktest":
+			_mirv_lock_test = true
+		elif a == "--maplocktest":
+			_map_lock_test = true
+		elif a.begins_with("--telrangetest="):
+			_tel_range = a.substr(15)
+		elif a == "--terraintest":
+			_terrain_test = true
+		elif a == "--firemaptest":
+			_fire_map_test = true
+		elif a == "--objtest":
+			_obj_test = true
+		elif a == "--trackkilltest":
+			_track_kill = "kill"
+		elif a == "--trackkilltest=free":
+			_track_kill = "free"
+		elif a == "--roftest":
+			_rof_test = true
+		elif a == "--fieldsvctest":
+			_field_svc_test = true
+		elif a.begins_with("--drivetest="):
+			_drive_test = a.substr(12)
+		elif a == "--modetest":
+			_mode_test = true
+		elif a == "--apkwstest":
+			_apkws_test = true
+		elif a == "--carrierconntest":
+			_carrier_conn_test = true
 		elif a.begins_with("--adminfrom="):
 			_admin_test = true
 			_admin_from = a.substr(12)
@@ -14616,6 +16098,8 @@ func _run_fps_test() -> void:
 	# is nearer one and a third on the frame. The bodies and pairs are printed
 	# with it because that is what decides it, and neither is visible anywhere
 	# else in this report.
+	print("[fps] renderer says: %.2f ms of CPU to build the frame, %.2f ms of GPU to draw it" % [
+		_median(_fps_rcpu), _median(_fps_rgpu)])
 	print("[fps] engine says: process %.2f ms, physics %.2f ms a step at %d Hz over %d bodies, %d pairs, %d islands" % [
 		_median(_fps_proc), _median(_fps_phys),
 		Engine.physics_ticks_per_second,

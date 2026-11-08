@@ -44,6 +44,47 @@ pub const TUNNEL_MAX: f32 = 220.0;
 pub const VIADUCT_MAX: f32 = 110.0;
 /// Running surface over the water on a crossing.
 const DECK_CLEAR: f32 = 2.5;
+/// The longest stretch between two spans that is carried across rather than
+/// put on a bank, and how far clear of the ground it has to stay to qualify.
+const BRIDGE_GAP: f32 = 400.0;
+const BRIDGE_GAP_CLEAR: f32 = 6.0;
+
+/// A valley the road is carried across at the level of its rims, rather than
+/// taken down one side and up the other.
+///
+/// The profile is a balance of cut against fill, so where a river has cut a
+/// trench across the line it follows the ground down into it: a 6% descent to
+/// the floor and a 6% climb out, with at best a low span over the channel at
+/// the bottom. That is what a farm track does. A trunk road throws a viaduct
+/// from rim to rim -- which is the only reason anyone builds one.
+///
+/// Measured rim to rim, so a valley is judged by its shape rather than by how
+/// the profile happened to settle into it: deep enough that taking the dip is
+/// a real descent, no wider than a viaduct is worth building across, and
+/// steeper-sided than the road's own ruling grade. A broad shallow vale fails
+/// the last test and the road takes it at grade, as a real one would.
+const VALE_DEEP: f32 = 60.0;
+/// Longest a valley viaduct is built. Not rim to rim on the big rivers -- they
+/// are ten and twelve kilometres across and two hundred metres deep, and a
+/// deck that long is not a bridge, it is a second country on legs -- but across
+/// the trench in the middle of them, at the level where the valley has closed
+/// in to this. The road comes down the outer slopes as a road would, and is
+/// carried over the channel instead of driving through the bottom of it.
+const VALE_SPAN: f32 = 5000.0;
+/// Average side slope, depth over half the span, and how deep it has to be.
+/// A viaduct is for a gorge or a deep river trench: with foothills on the
+/// planet, every hollow between two of them is thirty metres deep and a few
+/// per cent steep, and at the looser bars of thirty metres and two and a half
+/// per cent the network went fifty-nine viaducts and a hundred kilometres of
+/// deck -- a road on stilts. A road takes a hollow; it bridges a gorge.
+const VALE_STEEP: f32 = 0.05;
+/// How far below the rims a station has to be before it is in the valley at
+/// all, so a dip the width of one survey step does not split a crossing.
+const VALE_EDGE: f32 = 2.0;
+/// Tallest a valley viaduct stands. Bigger than `VIADUCT_MAX`: that limit is
+/// for a road that drifted onto a deck, this for one built to cross a gorge,
+/// and the river carving cuts 260 m into high ground.
+pub const VALE_HIGH: f32 = 300.0;
 
 const WELD: f32 = 34.0;
 /// How far apart in height two stretches of road may be and still be the same
@@ -60,6 +101,119 @@ pub const FILL_HARD: f32 = BRIDGE_HIGH;
 pub const F_OPEN: u8 = 0;
 pub const F_BRIDGE: u8 = 1;
 pub const F_TUNNEL: u8 = 2;
+
+/// Round the corners off a routed line before it is chained.
+///
+/// The router's line is a string of straight legs pulled taut between
+/// waypoints, so every change of direction was a corner with no curve in it at
+/// all: seen from the air the network was a zig-zag of hard angles, and a car
+/// on it turned forty degrees inside a car length. A road bends on a radius.
+///
+/// Each corner is replaced by a curve tangent to both legs -- a quadratic with
+/// its control point on the corner, which is as near an arc as a road needs --
+/// taking no more of either leg than `SHARE`, so neighbouring bends never meet,
+/// and no more than `TANGENT_MAX` metres, so the curve cuts the inside of a
+/// sharp corner by tens of metres rather than hundreds and stays on the ground
+/// the router chose. The ends of the line are junctions and are left exactly
+/// where they are.
+pub fn fillet(line: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    /// The radius a trunk road is built to, where the legs leave room for it.
+    const RADIUS: f32 = 320.0;
+    const TANGENT_MAX: f32 = 90.0;
+    const SHARE: f32 = 0.45;
+    /// Below this a corner is a kink nobody can see, and above it the line is
+    /// doubling back on itself -- a hairpin the router meant, not a corner.
+    const MIN_TURN: f32 = 0.05;
+    const MAX_TURN: f32 = 1.95;
+    /// Spacing of the points along a curve. Over the relaxation's own minimum
+    /// station spacing (`SURVEY_STEP * 0.35`), or it pushes them apart again.
+    const ARC_STEP: f32 = 18.0;
+    let n = line.len();
+    if n < 3 {
+        return line.to_vec();
+    }
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(n * 4);
+    out.push(line[0]);
+    for i in 1..n - 1 {
+        let (p0, p1, p2) = (line[i - 1], line[i], line[i + 1]);
+        let (ax, az) = (p1.0 - p0.0, p1.1 - p0.1);
+        let (bx, bz) = (p2.0 - p1.0, p2.1 - p1.1);
+        let la = (ax * ax + az * az).sqrt();
+        let lb = (bx * bx + bz * bz).sqrt();
+        if la < 1e-3 || lb < 1e-3 {
+            out.push(p1);
+            continue;
+        }
+        let (ux, uz) = (ax / la, az / la);
+        let (vx, vz) = (bx / lb, bz / lb);
+        let turn = (ux * vx + uz * vz).clamp(-1.0, 1.0).acos();
+        if !(MIN_TURN..=MAX_TURN).contains(&turn) {
+            out.push(p1);
+            continue;
+        }
+        let t = (RADIUS * (turn * 0.5).tan())
+            .min(TANGENT_MAX)
+            .min(la * SHARE)
+            .min(lb * SHARE);
+        if t < ARC_STEP {
+            out.push(p1);
+            continue;
+        }
+        let s0 = (p1.0 - ux * t, p1.1 - uz * t);
+        let e0 = (p1.0 + vx * t, p1.1 + vz * t);
+        let at = |u: f32| -> (f32, f32) {
+            let (w0, w1, w2) = ((1.0 - u) * (1.0 - u), 2.0 * u * (1.0 - u), u * u);
+            (w0 * s0.0 + w1 * p1.0 + w2 * e0.0, w0 * s0.1 + w1 * p1.1 + w2 * e0.1)
+        };
+        // Spaced by length along the curve, not by its parameter: a quadratic
+        // runs slowest at its apex, so even steps of `u` bunch the points up
+        // exactly where the bend is tightest -- under the relaxation's minimum
+        // spacing, which then shoves them apart into a zig-zag.
+        const DENSE: usize = 48;
+        let mut acc = vec![0.0f32; DENSE + 1];
+        let mut prev = s0;
+        for j in 1..=DENSE {
+            let q = at(j as f32 / DENSE as f32);
+            acc[j] = acc[j - 1] + ((q.0 - prev.0).powi(2) + (q.1 - prev.1).powi(2)).sqrt();
+            prev = q;
+        }
+        let total = acc[DENSE];
+        let k = ((total / ARC_STEP).floor() as usize).max(1);
+        out.push(s0);
+        let mut seg = 0usize;
+        for j in 1..k {
+            let want = total * j as f32 / k as f32;
+            while seg + 1 < DENSE && acc[seg + 1] < want {
+                seg += 1;
+            }
+            let span = (acc[seg + 1] - acc[seg]).max(1e-6);
+            let u = (seg as f32 + (want - acc[seg]) / span) / DENSE as f32;
+            out.push(at(u));
+        }
+        out.push(e0);
+    }
+    out.push(line[n - 1]);
+    // Nothing closer together than the relaxation will tolerate. What is left
+    // of a leg between two bends, or two waypoints the router put almost on
+    // top of one another, is a leg a few metres long -- and the relaxation
+    // pushes those apart, which is how a corner turns into a zig-zag.
+    let gap = SURVEY_STEP * 0.36;
+    let last = out[out.len() - 1];
+    let mut kept: Vec<(f32, f32)> = Vec::with_capacity(out.len());
+    kept.push(out[0]);
+    for q in &out[1..out.len() - 1] {
+        let k = kept[kept.len() - 1];
+        if ((q.0 - k.0).powi(2) + (q.1 - k.1).powi(2)).sqrt() >= gap {
+            kept.push(*q);
+        }
+    }
+    let k = kept[kept.len() - 1];
+    if kept.len() > 1 && ((last.0 - k.0).powi(2) + (last.1 - k.1).powi(2)).sqrt() < gap {
+        kept.pop();
+    }
+    kept.push(last);
+    kept
+}
 
 /// Chop a routed polyline into stations at survey spacing.
 ///
@@ -127,6 +281,279 @@ fn envelopes(g: &[f32], d: &[f32], gr: &[f32], u: &mut [f32], l: &mut [f32]) {
     }
 }
 
+/// Where each line crosses a valley it should bridge, and the deck height there.
+///
+/// Per station: the height a viaduct carries the road at, or NaN where the road
+/// is on the ground. Found from the ground profile alone, before any design,
+/// because the design is what would otherwise settle into the valley.
+///
+/// The valley is the morphological closing of the ground along the line -- the
+/// lowest level a straightedge `VALE_SPAN` long can rest at without passing
+/// through the ground -- minus the ground itself. Wherever that is more than a
+/// couple of metres there is a dip narrower than a viaduct, and its two ends
+/// are the rims the deck runs between.
+pub fn vales(p: &[(f32, f32)], g: &[f32], starts: &[i32]) -> Vec<f32> {
+    let n = p.len();
+    let mut deck = vec![f32::NAN; n];
+    if n == 0 {
+        return deck;
+    }
+    let lines = starts.len().saturating_sub(1);
+    let parts: Vec<(usize, Vec<f32>)> = (0..lines)
+        .into_par_iter()
+        .map(|li| {
+            let (a0, a1) = (starts[li] as usize, starts[li + 1] as usize);
+            (a0, vales_line(&p[a0..a1], &g[a0..a1]))
+        })
+        .collect();
+    for (a0, seg) in parts {
+        deck[a0..a0 + seg.len()].copy_from_slice(&seg);
+    }
+    // A crossing that another road joins down on the valley floor stays on
+    // the ground: that road has to be met, and a deck pinned to a junction a
+    // hundred metres below it is a viaduct with a hole in it. Roads that are
+    // both crossing at the same place -- welded onto one alignment, or meeting
+    // on the rim -- are no reason to give it up, so it is the height that
+    // decides, not the junction.
+    let owner = owners(n, starts);
+    let mut drop = vec![false; n];
+    for grp in junctions(p, starts, WELD) {
+        for &i in &grp {
+            let i = i as usize;
+            if !deck[i].is_finite() {
+                continue;
+            }
+            let below = grp.iter().any(|&j| {
+                let j = j as usize;
+                owner[j] != owner[i] && !deck[j].is_finite()
+                    && g[j] < deck[i] - AGREE * 2.0
+            });
+            if below {
+                drop[i] = true;
+            }
+        }
+    }
+    for i in 0..n {
+        if !drop[i] {
+            continue;
+        }
+        // the whole crossing goes, not just the station that was joined
+        let line = owner[i];
+        let mut k = i;
+        while k > 0 && owner[k - 1] == line && deck[k - 1].is_finite() {
+            k -= 1;
+        }
+        while k < n && owner[k] == line && deck[k].is_finite() {
+            deck[k] = f32::NAN;
+            k += 1;
+        }
+    }
+    deck
+}
+
+fn vales_line(p: &[(f32, f32)], g: &[f32]) -> Vec<f32> {
+    let n = g.len();
+    let mut deck = vec![f32::NAN; n];
+    if n < 5 {
+        return deck;
+    }
+    // distance along the line, so the window is a length and not a count
+    let d = runs(p);
+    let mut s = vec![0.0f32; n];
+    for i in 1..n {
+        s[i] = s[i - 1] + d[i];
+    }
+    let half = VALE_SPAN * 0.5;
+    // max over the window, then min of that over the window: the closing
+    let sweep = |src: &[f32], take_max: bool| -> Vec<f32> {
+        let mut out = vec![0.0f32; n];
+        let mut lo = 0usize;
+        let mut hi = 0usize;
+        for i in 0..n {
+            while s[i] - s[lo] > half {
+                lo += 1;
+            }
+            hi = hi.max(i);
+            while hi + 1 < n && s[hi + 1] - s[i] <= half {
+                hi += 1;
+            }
+            let mut v = src[lo];
+            for &w in &src[lo + 1..=hi] {
+                v = if take_max { v.max(w) } else { v.min(w) };
+            }
+            out[i] = v;
+        }
+        out
+    };
+    let shut = sweep(&sweep(g, true), false);
+    let mut i = 1usize;
+    while i + 1 < n {
+        if shut[i] - g[i] <= VALE_EDGE {
+            i += 1;
+            continue;
+        }
+        let i0 = i;
+        let mut i1 = i;
+        while i1 + 1 < n && shut[i1 + 1] - g[i1 + 1] > VALE_EDGE {
+            i1 += 1;
+        }
+        i = i1 + 1;
+        // A valley the line starts or ends in is a road going down to
+        // something on the floor, not one crossing over.
+        if i1 + 1 >= n {
+            continue;
+        }
+        let (ra, rb) = (i0 - 1, i1 + 1);
+        let span = s[rb] - s[ra];
+        let mut deep = 0.0f32;
+        for k in i0..=i1 {
+            deep = deep.max(shut[k] - g[k]);
+        }
+        if deep < VALE_DEEP || span > VALE_SPAN
+            || deep / (span * 0.5).max(1.0) < VALE_STEEP
+        {
+            continue;
+        }
+        // Rim to rim. The closing is level across the valley, so this is very
+        // nearly flat; held clear of anything left standing in the middle of
+        // it all the same.
+        for k in i0..=i1 {
+            let t = (s[k] - s[ra]) / span.max(1e-3);
+            deck[k] = lerp(g[ra], g[rb], t).max(g[k] + DECK_CLEAR * 2.0);
+        }
+    }
+    deck
+}
+
+/// Lay each valley crossing straight across, rim to rim.
+///
+/// The router found its way over the country for a road at grade, and a road
+/// at grade comes down a valley side on whatever line the slope allows, works
+/// along the floor to somewhere it can cross and climbs out the same way. Lifted
+/// onto a deck, that line is a viaduct with corners in it: measured, a V in mid
+/// air over the water, sixty degrees at the knee. A deck goes the short way.
+///
+/// The corners this leaves at the rims, where the road arrives on one heading
+/// and the span leaves on another, are eased over a few stations either side so
+/// the road curves onto the bridge instead of turning onto it.
+///
+/// `None` when nothing needed moving, so the caller can skip the resample.
+pub fn straighten(p: &[(f32, f32)], starts: &[i32], deck: &[f32])
+        -> Option<(Vec<(f32, f32)>, Vec<i32>)> {
+    const EASE_REACH: usize = 4;
+    const EASE_PASSES: usize = 6;
+    let lines = starts.len().saturating_sub(1);
+    let mut changed = false;
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(p.len());
+    let mut out_starts: Vec<i32> = Vec::with_capacity(starts.len());
+    let dist = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    for li in 0..lines {
+        let (a0, a1) = (starts[li] as usize, starts[li + 1] as usize);
+        out_starts.push(out.len() as i32);
+        let line = &p[a0..a1];
+        let dk = &deck[a0..a1];
+        let n = line.len();
+        let mut q: Vec<(f32, f32)> = Vec::with_capacity(n);
+        let mut rims: Vec<usize> = Vec::new();
+        let mut i = 0usize;
+        while i < n {
+            if i == 0 || !dk[i].is_finite() {
+                q.push(line[i]);
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j + 1 < n && dk[j + 1].is_finite() {
+                j += 1;
+            }
+            if j + 1 >= n {
+                q.extend_from_slice(&line[i..]);
+                break;
+            }
+            let (pa, pb) = (line[i - 1], line[j + 1]);
+            let chord = dist(pa, pb);
+            let mut path = 0.0f32;
+            for k in i..=j + 1 {
+                path += dist(line[k - 1], line[k]);
+            }
+            if path <= chord * 1.01 {
+                q.extend_from_slice(&line[i..=j]);
+            } else {
+                changed = true;
+                let m = ((chord / SURVEY_STEP).round() as usize).max(1);
+                rims.push(q.len() - 1);
+                for k in 1..m {
+                    let t = k as f32 / m as f32;
+                    q.push((lerp(pa.0, pb.0, t), lerp(pa.1, pb.1, t)));
+                }
+                // the far rim is the next station pushed
+                rims.push(q.len());
+            }
+            i = j + 1;
+        }
+        if !rims.is_empty() && q.len() >= 3 {
+            for _ in 0..EASE_PASSES {
+                let prev = q.clone();
+                for &r in &rims {
+                    let lo = r.saturating_sub(EASE_REACH).max(1);
+                    let hi = (r + EASE_REACH).min(q.len() - 2);
+                    for k in lo..=hi {
+                        let mx = (prev[k - 1].0 + prev[k + 1].0) * 0.5;
+                        let mz = (prev[k - 1].1 + prev[k + 1].1) * 0.5;
+                        q[k] = (lerp(prev[k].0, mx, 0.5), lerp(prev[k].1, mz, 0.5));
+                    }
+                }
+            }
+        }
+        out.extend_from_slice(&q);
+    }
+    out_starts.push(out.len() as i32);
+    if changed {
+        Some((out, out_starts))
+    } else {
+        None
+    }
+}
+
+/// Round off the change of grade where a road goes onto or off a structure.
+///
+/// The deck is held level across the valley and the road arriving at it is
+/// climbing or falling with the country, and between the two there was one
+/// station: a knee in the carriageway at the abutment, plain from the air and
+/// felt at the wheel. A real road has a vertical curve there. A few passes of a
+/// three point average over the stations either side does the same thing, and
+/// an average of a profile that keeps to its gradient still keeps to it.
+fn ease_ends(y: &mut [f32], flags: &[u8], starts: &[i32]) {
+    const REACH: usize = 6;
+    const PASSES: usize = 4;
+    for li in 0..starts.len().saturating_sub(1) {
+        let (a0, a1) = (starts[li] as usize, starts[li + 1] as usize);
+        if a1 < a0 + 3 {
+            continue;
+        }
+        let mut ends: Vec<usize> = Vec::new();
+        for k in a0 + 1..a1 {
+            if flags[k] != flags[k - 1] {
+                ends.push(k);
+            }
+        }
+        if ends.is_empty() {
+            continue;
+        }
+        for _ in 0..PASSES {
+            let prev = y[a0..a1].to_vec();
+            for &e in &ends {
+                let lo = e.saturating_sub(REACH).max(a0 + 1);
+                let hi = (e + REACH).min(a1 - 2);
+                for k in lo..=hi {
+                    let at = k - a0;
+                    y[k] = (prev[at - 1] + 2.0 * prev[at] + prev[at + 1]) * 0.25;
+                }
+            }
+        }
+    }
+}
+
 /// Leg lengths, `d[i]` being the run from station i-1 to station i.
 fn runs(p: &[(f32, f32)]) -> Vec<f32> {
     let mut d = vec![0.0f32; p.len()];
@@ -153,11 +580,19 @@ fn runs(p: &[(f32, f32)]) -> Vec<f32> {
 /// of the band, and the two fight for ever. Measured, that left the design
 /// surface seventy metres under the hillside at a place the classifier had not
 /// made a tunnel of.
-pub fn design(p: &[(f32, f32)], g: &[f32]) -> (Vec<f32>, Vec<f32>) {
+///
+/// `deck` is what `vales` found: across a valley to be bridged, the profile is
+/// designed against the deck rather than the ground, so it runs straight over
+/// at rim level instead of settling into the trench.
+pub fn design(p: &[(f32, f32)], g: &[f32], deck: &[f32]) -> (Vec<f32>, Vec<f32>) {
     let n = g.len();
     if n < 2 {
         return (g.to_vec(), vec![ROAD_GRADE; n]);
     }
+    let g: Vec<f32> = (0..n)
+        .map(|i| if deck[i].is_finite() { g[i].max(deck[i]) } else { g[i] })
+        .collect();
+    let g = g.as_slice();
     let d = runs(p);
     let mut gr = vec![ROAD_GRADE; n];
     let mut u = vec![0.0f32; n];
@@ -242,7 +677,8 @@ fn float_over_water(y: &mut [f32]) -> bool {
 /// a structure: a bridge over the low ground, a tunnel through the high. Marked
 /// per station and grouped into runs, because a road does not tunnel through
 /// every hummock -- a structure has to earn its length.
-pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32]) -> Vec<u8> {
+pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32],
+        deck: &[f32]) -> Vec<u8> {
     let mut flags = vec![F_OPEN; y.len()];
     for li in 0..starts.len().saturating_sub(1) {
         let (a0, a1) = (starts[li] as usize, starts[li + 1] as usize);
@@ -259,6 +695,40 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32]) -> Vec<u
                 F_OPEN
             };
         }
+        // One viaduct, not two with a bank between them. Where the deck dips
+        // close enough to the country to fall under the fill limit for a
+        // station or two -- the curve onto a span, a spur under the middle of
+        // one -- the road came back down onto a stub of embankment and went up
+        // onto a second deck: two abutments a hundred metres apart, in the air.
+        // A short gap that is still well clear of the ground is carried across.
+        let mut i = a0;
+        while i < a1 {
+            if flags[i] != F_BRIDGE {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j + 1 < a1 && flags[j + 1] == F_BRIDGE {
+                j += 1;
+            }
+            // the open run after this span, and whether a span follows it
+            let mut k = j + 1;
+            while k < a1 && flags[k] == F_OPEN {
+                k += 1;
+            }
+            if k < a1 && flags[k] == F_BRIDGE && k > j + 1 {
+                let gap = ((p[k].0 - p[j].0).powi(2) + (p[k].1 - p[j].1).powi(2)).sqrt();
+                let clear = (j + 1..k).all(|m| y[m] - g[m] > BRIDGE_GAP_CLEAR);
+                if gap <= BRIDGE_GAP && clear {
+                    for m in j + 1..k {
+                        flags[m] = F_BRIDGE;
+                    }
+                    // and look again from the same span, now longer
+                    continue;
+                }
+            }
+            i = j + 1;
+        }
         let mut i0 = a0;
         while i0 < a1 {
             if flags[i0] == F_OPEN {
@@ -274,6 +744,7 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32]) -> Vec<u
             let mut extreme = 0.0f32;
             let mut total = 0.0f32;
             let mut wet = false;
+            let mut vale = false;
             for k in i0..=i1 {
                 let over = (y[k] - g[k]).abs();
                 extreme = extreme.max(over);
@@ -281,10 +752,13 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32]) -> Vec<u
                 // A road cannot lie on the seabed, so a crossing is a bridge
                 // however short it is and however little it stands off the bed.
                 wet = wet || g[k] < WATER_LEVEL;
+                // and one carried across a valley on purpose was meant to be
+                vale = vale || (kind == F_BRIDGE && deck[k].is_finite());
             }
             let mean = total / (i1 - i0 + 1) as f32;
             let (min_run, min_deep, min_mean, max_run) = if kind == F_BRIDGE {
-                (BRIDGE_MIN, BRIDGE_HIGH, ROAD_FILL_MAX, BRIDGE_LONG)
+                (BRIDGE_MIN, BRIDGE_HIGH, ROAD_FILL_MAX,
+                    if vale { BRIDGE_LONG.max(VALE_SPAN) } else { BRIDGE_LONG })
             } else {
                 (TUNNEL_MIN, TUNNEL_DEEP, ROAD_CUT_MAX, TUNNEL_LONG)
             };
@@ -294,6 +768,7 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32]) -> Vec<u
             let always = if kind == F_BRIDGE { 52.0 } else { 62.0 };
             let earned = run <= max_run
                 && (wet
+                    || vale
                     || extreme >= always
                     || (run >= min_run && extreme >= min_deep && mean >= min_mean));
             if !earned {
@@ -311,12 +786,14 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32]) -> Vec<u
 /// it may be filled over. Open ground gets a cutting and an embankment; a
 /// structure gets a bore or a deck; a run that wanted a structure and did not
 /// earn one gets a little extra, because the alternative is a road that steps.
-fn limits(g: &[f32], flags: &[u8], refused: &[bool]) -> (Vec<f32>, Vec<f32>) {
+fn limits(g: &[f32], flags: &[u8], refused: &[bool], deck: &[f32])
+        -> (Vec<f32>, Vec<f32>) {
     let n = g.len();
     let mut lo = vec![0.0f32; n];
     let mut hi = vec![0.0f32; n];
     for i in 0..n {
         let (cut, fill) = match flags[i] {
+            F_BRIDGE if deck[i].is_finite() => (ROAD_CUT_MAX, VALE_HIGH),
             F_BRIDGE => (ROAD_CUT_MAX, VIADUCT_MAX),
             F_TUNNEL => (TUNNEL_MAX, ROAD_FILL_MAX),
             _ if refused[i] => (TUNNEL_DEEP, BRIDGE_HIGH),
@@ -429,7 +906,7 @@ fn solve_band(p: &[(f32, f32)], want: &[f32], g: &[f32], lo0: &[f32],
 /// over eighty thousand stations, and it was the longest thing left in world
 /// generation after the routing itself went native.
 pub fn finish(p: &[(f32, f32)], y0: &[f32], g: &[f32], gr: &[f32],
-        starts: &[i32]) -> (Vec<f32>, Vec<u8>) {
+        starts: &[i32], deck: &[f32]) -> (Vec<f32>, Vec<u8>) {
     let lines = starts.len().saturating_sub(1);
     let n = y0.len();
     let mut y = y0.to_vec();
@@ -442,7 +919,7 @@ pub fn finish(p: &[(f32, f32)], y0: &[f32], g: &[f32], gr: &[f32],
     // What is a structure depends on the profile, and the profile depends on
     // what may be built at each station -- so it is worked out by going round.
     for _ in 0..6 {
-        let mut want_flags = classify(p, &y, g, starts);
+        let mut want_flags = classify(p, &y, g, starts, deck);
         spread_structures(p, &y, &owner, &mut want_flags);
         // A run that asked for a structure and did not earn one is not simply
         // put back on the ground: it is the country that wanted one, so it gets
@@ -453,7 +930,7 @@ pub fn finish(p: &[(f32, f32)], y0: &[f32], g: &[f32], gr: &[f32],
             refused[i] = flags[i] != F_OPEN && want_flags[i] == F_OPEN;
         }
         flags = want_flags;
-        let (lo, hi) = limits(g, &flags, &refused);
+        let (lo, hi) = limits(g, &flags, &refused, deck);
         // Roads that meet have to go on agreeing about the height, and out of
         // the water before the solve rather than after it: a crossing lifted
         // onto a deck and then settled is a bridge, one settled and then lifted
@@ -503,8 +980,24 @@ pub fn finish(p: &[(f32, f32)], y0: &[f32], g: &[f32], gr: &[f32],
     for (a0, seg) in parts.drain(..) {
         y[a0..a0 + seg.len()].copy_from_slice(&seg);
     }
-    flags = classify(p, &y, g, starts);
+    flags = classify(p, &y, g, starts, deck);
     spread_structures(p, &y, &owner, &mut flags);
+    ease_ends(&mut y, &flags, starts);
+    // The easing averages over stations that are not evenly spaced -- a curve
+    // puts them eighteen metres apart, a straight forty-five -- and an average
+    // over uneven spacing can steepen the short leg past the hairpin limit it
+    // was inside a moment ago. Measured, 16.3 % over eight metres. Held to the
+    // limit again after it.
+    let mut parts: Vec<(usize, Vec<f32>)> = (0..lines)
+        .into_par_iter()
+        .map(|li| {
+            let (a0, a1) = (starts[li] as usize, starts[li + 1] as usize);
+            (a0, project(&p[a0..a1], &y[a0..a1], &hard[a0..a1]))
+        })
+        .collect();
+    for (a0, seg) in parts.drain(..) {
+        y[a0..a0 + seg.len()].copy_from_slice(&seg);
+    }
     (y, flags)
 }
 

@@ -55,6 +55,9 @@ const FADE_HI := 90_000.0
 ## is as far as the eye ever usefully reaches.
 const FAR_LO := 45_000.0
 const FAR_HI := 1_600_000.0
+## How far out the ground is built, from anywhere on it: the terrain's root
+## square is +-983 km.
+const ROOT_REACH := 980_000.0
 ## The near plane has to come out with it. Godot's directional shadow culler
 ## builds its frustum points in single precision, and past a near-to-far ratio
 ## of a few million it cannot: at 0.25 m against 1200 km it fails every frame,
@@ -186,6 +189,13 @@ func build(_relief: Texture2D) -> void:
 	_mi.name = "PlanetBody"
 	_mi.mesh = _sphere()
 	_mi.material_override = _mat
+	# Before the sea, which is -8. Both are transparent and the sea writes
+	# depth, so drawn after it the body failed the depth test everywhere the
+	# sea disc reaches -- fifteen hundred kilometres round the eye -- and from
+	# altitude there was no ground under the haze at all, only the air and the
+	# cloud deck over empty space. Drawn first, the sea composites over it as
+	# it fades out, which is what the fade was for.
+	_mat.render_priority = -9
 	_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# It is 12742 km across and centred on the camera's own planet, so no
 	# culling volume Godot works out for it is ever going to be wrong in a
@@ -260,7 +270,34 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 	# Only once there is something out there to see. Left at 2600 km from the
 	# ground the far plane would be paying for the whole cap on every frame of
 	# a landing circuit.
-	cam.far = lerpf(FAR_LO, FAR_HI, fade)
+	#
+	# And far enough to reach the horizon, wherever the eye is. A fixed
+	# sixteen hundred kilometres is past the horizon up to about two hundred
+	# kilometres; a round on its arc or an ASAT climbing to a satellite goes
+	# well above that, and from six hundred the edge of the planet is 2800 km
+	# away. Everything past the far plane went -- the planet body, the cloud
+	# deck -- while the air, which finds the planet by arithmetic rather than
+	# by depth, went on painting its haze over the empty space where it had
+	# been: a grey band standing where the limb should be, and the planet
+	# looking as though it stopped short of its own horizon. The distance to
+	# the horizon plus the air beyond it, which is visible past the edge.
+	#
+	# The same below the air, where the far plane was forty-five kilometres
+	# whatever the height. The ground is built out to nearly a thousand: the
+	# far plane cut it off at forty-five, and the air -- which hazes the
+	# distance by integrating up to whatever depth it finds -- painted its blue
+	# over the empty space past the cut. From ten kilometres the horizon is 357
+	# km away and you saw a flat band from 45 onwards. The depth fog never hid
+	# this: it runs in depth mode at zero density, which in Godot is no fog.
+	# So: out to the horizon, and two hundred kilometres beyond it for the
+	# mountains that stand up over it.
+	var r: float = Sim.PLANET_R
+	var to_limb: float = sqrt(maxf((r + alt) * (r + alt) - r * r, 0.0))
+	var beyond: float = sqrt(maxf((r + 100000.0) * (r + 100000.0) - r * r, 0.0))
+	var ground_reach: float = minf(to_limb + 200000.0, ROOT_REACH)
+	cam.far = maxf(FAR_LO, ground_reach)
+	if fade > 0.0:
+		cam.far = maxf(cam.far, maxf(lerpf(FAR_LO, FAR_HI, fade), (to_limb + beyond) * 1.05))
 	cam.near = clampf(cam.far / NEAR_RATIO, NEAR_LO, NEAR_MAX)
 	if is_instance_valid(terrain) and terrain.has_method("set_ground_fade"):
 		terrain.call("set_ground_fade", 1.0 - fade)

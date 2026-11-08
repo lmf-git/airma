@@ -512,13 +512,21 @@ func weapons() -> PackedStringArray:
 	# at all, so a boat could only ever be fought from above.
 	if has_torpedoes() and torps_left > 0:
 		w.append("torpedo")
-	if w.is_empty():
-		w.append("main")
+	# And nothing at all, if that is what she carries. An empty list used to be
+	# padded with a main battery, so a container ship -- or a boat that had
+	# shot her tubes dry -- had a gun on the bridge readout and the sensor page,
+	# selectable and READY, that was never there to fire.
 	return w
 
 func current_weapon() -> String:
 	var w := weapons()
+	if w.is_empty():
+		return ""
 	return w[clampi(sel_weapon, 0, w.size() - 1)]
+
+## Whether there is anything aboard to shoot with at all.
+func armed() -> bool:
+	return not weapons().is_empty()
 
 func set_weapon(i: int) -> void:
 	var w := weapons()
@@ -528,7 +536,9 @@ func set_weapon(i: int) -> void:
 	Sim.report(weapon_label(), Sim.Ev.INFO)
 
 func cycle_weapon() -> void:
-	set_weapon((sel_weapon + 1) % weapons().size())
+	var n := weapons().size()
+	if n > 0:
+		set_weapon((sel_weapon + 1) % n)
 
 ## Launch a cell at whatever the ship is holding, or at the nearest hostile.
 func fire_vls(at_node: Node3D = null) -> bool:
@@ -610,6 +620,8 @@ func has_gun() -> bool:
 
 func weapon_label() -> String:
 	match current_weapon():
+		"":
+			return "UNARMED"
 		"main":
 			return "MAIN BATTERY"
 		"torpedo":
@@ -622,6 +634,8 @@ func weapon_label() -> String:
 ## Is the selected weapon ready, and if not, why not.
 func weapon_state() -> String:
 	match current_weapon():
+		"":
+			return ""
 		"strategic":
 			if missiles_left <= 0:
 				return "MAGAZINE EMPTY"
@@ -693,7 +707,7 @@ func _conn(delta: float) -> void:
 						Sim.report("no aiming point — set one on the map", Sim.Ev.BAD)
 					else:
 						launch_strategic(mark)
-			_:
+			"main":
 				if has_gun():
 					fire_gun()
 	# a mast-head view, looking where the guns are laid
@@ -945,6 +959,8 @@ func _pick_threat() -> Node3D:
 const AIR_ENGAGE := 12000.0
 
 func _pick_air() -> Node3D:
+	if Sim.no_air_threat:
+		return null
 	var cands: Array = []
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or not (n is Aircraft):

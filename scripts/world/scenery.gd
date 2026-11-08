@@ -1603,13 +1603,29 @@ func _build_structures() -> void:
 	var dark := MeshKit.begin()
 	var decks := 0
 	var piers := 0
+	# Two roads welded onto one alignment are one road, and each of them came
+	# back with the same span: drawn twice in the same place the deck fought
+	# itself for every pixel.
+	var drawn: Array = []
 	for br in Sim.road_bridges:
 		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
 		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
 		if pts.size() < 2:
 			continue
+		var twin := false
+		for d0 in drawn:
+			var da: Vector2 = d0[0]
+			var db: Vector2 = d0[1]
+			if (da.distance_to(pts[0]) < 25.0 and db.distance_to(pts[pts.size() - 1]) < 25.0) \
+					or (da.distance_to(pts[pts.size() - 1]) < 25.0 and db.distance_to(pts[0]) < 25.0):
+				twin = true
+				break
+		if twin:
+			continue
+		drawn.append([pts[0], pts[pts.size() - 1]])
 		decks += 1
 		var since := 0.0
+		var last := pts.size() - 2
 		for i in range(pts.size() - 1):
 			var a2: Vector2 = pts[i]
 			var b2: Vector2 = pts[i + 1]
@@ -1618,6 +1634,12 @@ func _build_structures() -> void:
 				continue
 			var dir := (b2 - a2) / run
 			var nrm := Vector2(-dir.y, dir.x)
+			# The two end panels reach a couple of metres past the station, over
+			# the end of the carriageway, so the join is a lap and not a seam.
+			if i == 0:
+				a2 -= dir * 2.5
+			if i == last:
+				b2 += dir * 2.5
 			# The surveyed profile is in the flat frame, like everything the
 			# router produces. The piers under this deck reach down to
 			# `height_at`, which is not -- so left flat the deck floated a
@@ -1648,6 +1670,22 @@ func _build_structures() -> void:
 				var i0 := e0 - Vector3(nrm.x * 0.4 * sx, 0, nrm.y * 0.4 * sx)
 				var i1 := e1 - Vector3(nrm.x * 0.4 * sx, 0, nrm.y * 0.4 * sx)
 				MeshKit.quad_n(st, e0, e1, i1, i0, Vector3.UP)
+			# An abutment under each end: the deck sits on a wall rather than
+			# stopping in the air, whatever the embankment managed to reach.
+			for endp in ([[a2, ya]] if i == 0 else []) + ([[b2, yb]] if i == last else []):
+				var ep: Vector2 = endp[0]
+				var ey: float = endp[1]
+				var eg: float = Sim.height_at(ep.x, ep.y)
+				var tall: float = ey - 1.9 - eg
+				if tall > 0.5:
+					var wall := MeshKit.begin()
+					MeshKit.box(wall, Vector3(DECK_HALF * 2.0 + 1.0, tall + 3.0, 3.0),
+						Vector3(0.0, -(tall + 3.0) * 0.5, 0.0))
+					var mi_wall := MeshKit.mi(MeshKit.finish(wall,
+						MeshKit.mat(Color(0.58, 0.57, 0.55), 0.92, 0.0)), "Abutment")
+					mi_wall.position = Vector3(ep.x, ey - 1.9, ep.y)
+					mi_wall.rotation.y = atan2(dir.x, dir.y)
+					add_child(mi_wall)
 			# and a pier every so often, down to whatever is underneath
 			since += run
 			if since >= PIER_STEP:
@@ -1656,7 +1694,11 @@ func _build_structures() -> void:
 				var clear: float = yb - 1.9 - g
 				if clear > 5.0:
 					piers += 1
-					MeshKit.box(st, Vector3(4.4, clear, 4.4),
+					# Thicker the taller it stands: a valley viaduct can be two
+					# hundred metres off the floor, and at the width of a
+					# flyover pier that reads as a matchstick.
+					var pw: float = clampf(4.4 + clear * 0.035, 4.4, 14.0)
+					MeshKit.box(st, Vector3(pw, clear, pw),
 						Vector3(b2.x, g + clear * 0.5, b2.y))
 	var portals := 0
 	for tn in Sim.road_tunnels:

@@ -86,6 +86,8 @@ func _find_enemy() -> Node3D:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
+		if Sim.no_air_threat and (n is Aircraft):
+			continue
 		var d: float = global_position.distance_to(n.global_position)
 		if d < bd:
 			bd = d

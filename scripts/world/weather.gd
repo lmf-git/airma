@@ -254,6 +254,9 @@ uniform vec3 horizon_colour : source_color = vec3(0.66, 0.75, 0.87);
 uniform vec3 ground_colour : source_color = vec3(0.30, 0.32, 0.30);
 uniform float night = 0.0;
 uniform float dusk = 0.0;
+// Sine of how far below level the planet's own horizon lies from the eye:
+// zero on the ground, about -0.1 at thirty kilometres, -0.17 at a hundred.
+uniform float horizon_dip = 0.0;
 
 group_uniforms cloud;
 uniform float coverage = 0.48;      // 0 clear, 1 solid
@@ -523,7 +526,14 @@ void sky() {
 		ALPHA = acc.a;
 	} else {
 		// --- the sky behind them ---------------------------------------
-		float up = clamp(dir.y, -1.0, 1.0);
+		// Measured from the planet's horizon, not from level. Below level is
+		// ground only for an eye on the ground: from a round climbing out on
+		// its arc the horizon drops away -- five and a half degrees at thirty
+		// kilometres, ten at a hundred -- and every direction between level
+		// and the limb looks past the planet into the sky. Measured from level,
+		// that band was painted the ground colour: a flat grey slab with a dead
+		// straight edge standing above the curve of the planet.
+		float up = clamp((dir.y - horizon_dip) / (1.0 - horizon_dip), -1.0, 1.0);
 		vec3 sky_col = mix(horizon_colour, top_colour, pow(clamp(up, 0.0, 1.0), 0.55));
 		if (up < 0.0) {
 			sky_col = mix(horizon_colour, ground_colour, pow(-up, 0.35));
@@ -554,10 +564,12 @@ void sky() {
 			vec3 sp = floor(dir * 780.0);
 			float star = hash13(sp);
 			star = pow(max(star - 0.9965, 0.0) * 285.0, 2.2);
-			// Above the air they are there in daylight too: what hides stars
-			// is scattered sunlight, and there is none of it in vacuum.
+			// Above the air there is no scattered sunlight to hide them, but
+			// there is a sunlit planet filling half the view, and against that
+			// an eye -- or a camera -- stopped down for the daylight does not
+			// see them. Full at night, a few of the brightest by day.
 			sky_col += vec3(0.85, 0.88, 1.0) * star
-				* smoothstep(-0.05, 0.15, up);
+				* smoothstep(-0.05, 0.15, up) * mix(0.10, 1.0, night);
 		}
 		// The half resolution pass has nothing to say unless it drew cloud.
 		//
@@ -623,6 +635,9 @@ func thin_air(env: Environment, alt: float, psm: ShaderMaterial = null) -> void:
 	if psm != null:
 		psm.set_shader_parameter("top_colour", sky_top)
 		psm.set_shader_parameter("horizon_colour", sky_horizon)
+		# where the planet's edge is from this height, so the sky starts there
+		var rr: float = Sim.PLANET_R / (Sim.PLANET_R + maxf(alt, 0.0))
+		psm.set_shader_parameter("horizon_dip", -sqrt(maxf(1.0 - rr * rr, 0.0)))
 	if env == null:
 		return
 	# The usual exponential atmosphere: about eight and a half kilometres to an
@@ -639,7 +654,22 @@ func thin_air(env: Environment, alt: float, psm: ShaderMaterial = null) -> void:
 	# rocket. That is the jolt to dark blue.
 	env.fog_enabled = true
 	env.fog_sky_affect = SKY_FOG * clampf(rho / 0.20, 0.0, 1.0)
-	var stretch: float = 1.0 / maxf(rho, 0.004)
+	# How much further the same haze reaches, for a sight line from this
+	# height down to the ground.
+	#
+	# This was the air at the eye, 1/rho: thirty-four times the sea-level
+	# distances at thirty kilometres and two hundred and fifty at a hundred, so
+	# from a round on its arc the planet had no air on it at all -- a crisp
+	# disc in black space, horizon and all. But a line of sight from up there to
+	# the ground is not in thin air; most of its length is, and the end of it is
+	# down in the thick of it. Integrated through an exponential atmosphere, a
+	# ray from height h to sea level passes as much air as a level one at the
+	# surface (h/H) / (1 - e^(-h/H)) times shorter: three and a half times at
+	# thirty kilometres, twelve at a hundred. So looking straight down is clear
+	# and the limb, along kilometres of low air, is hazy -- which is what a
+	# planet with an atmosphere looks like from above it.
+	var x: float = maxf(alt, 0.0) / 8500.0
+	var stretch: float = 1.0 if x < 0.001 else x / (1.0 - exp(-x))
 	env.fog_depth_begin = fog_near * stretch
 	env.fog_depth_end = fog_far * stretch
 

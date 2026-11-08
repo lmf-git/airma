@@ -1876,7 +1876,21 @@ of the boundary — not because GDScript is slow at the arithmetic, but because
 each crossing costs more than the arithmetic does, and there is no way to spread
 it over the cores from there.
 
-Build it with `cd native && GODOT4_BIN=<godot> cargo build --release`.
+Build it with `cargo build --release` from `native/`, with `GODOT4_BIN` pointing
+at the Godot executable:
+
+```sh
+# macOS
+cd native && GODOT4_BIN=/Applications/Godot.app/Contents/MacOS/Godot cargo build --release
+```
+
+```powershell
+# Windows (PowerShell) — use wherever you unzipped Godot; the _console build prints to the terminal
+cd native; $env:GODOT4_BIN = "C:\Godot\Godot_v4.x-stable_win64_console.exe"; cargo build --release
+```
+
+Export `GODOT4_BIN` in your shell profile (or set it as a user environment
+variable on Windows) to skip it on every build.
 
 **Flight model.** Aerodynamics run in `_integrate_forces`: lift from a
 CL/α curve with a stall break and ground effect, induced plus parasitic drag

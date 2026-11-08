@@ -656,7 +656,14 @@ func near_service() -> bool:
 		var base := n2 as Airbase
 		if base == null:
 			continue
-		if global_position.distance_to(base.global_position) < SERVICE_RADIUS * 4.0:
+		# Anywhere on the field: the runway end to end, and the apron and the
+		# hangars beside it. It was a circle about the middle of the runway, a
+		# kilometre across: a jet that rolled out to the far end of a three
+		# kilometre strip was on the airfield and got nothing, and one parked
+		# in a field off the side of it got the full service.
+		var l: Vector3 = base.global_transform.affine_inverse() * global_position
+		if absf(l.z) < Airbase.HALF + 350.0 and l.x > -200.0 and l.x < 500.0 \
+				and absf(l.y) < 80.0:
 			return true
 	return false
 
@@ -1571,7 +1578,14 @@ func fire() -> String:
 	var ground_weapon: bool = String(ws["kind"]) == "bomb" \
 		or String(ws["kind"]) == "cruise" \
 		or bool(ws.get("air_to_ground", false))
-	if ground_weapon and is_instance_valid(designated_node):
+	# The spot itself, when that is what is selected: it moves with the laser,
+	# so a round sent at it goes where the laser is now rather than where it
+	# was at release -- which is what a laser-guided round is.
+	var spot_held: bool = is_instance_valid(target) and target.is_in_group("laser_spots") \
+		and bool(target.get("on"))
+	if ground_weapon and spot_held:
+		aim_node = target
+	elif ground_weapon and is_instance_valid(designated_node):
 		aim_node = designated_node
 	elif ground_weapon and designated != Vector3.INF:
 		var spot := DesignatedSpot.new()
@@ -1585,14 +1599,20 @@ func fire() -> String:
 	# to: a Harpoon or a Maverick released with no aim source flew where it was
 	# pointed and hit the ground, while the HUD had said LOCK the whole time.
 	# Either the shot works or the aeroplane says why it cannot.
-	var needs_aim: bool = String(ws["kind"]) == "cruise" \
-		or bool(ws.get("air_to_ground", false))
+	# A rocket is the exception: with nothing to follow it goes where it is
+	# pointed, which is how a rocket has always been fired.
+	var needs_aim: bool = (String(ws["kind"]) == "cruise" \
+		or bool(ws.get("air_to_ground", false))) and not bool(ws.get("free_fire", false))
 	if needs_aim and not is_instance_valid(aim_node):
 		s["gone"] = false
 		node.visible = true
 		_refresh_mass()
 		_note("no lock — nothing for it to follow")
 		return "no lock — nothing for it to follow"
+	# Following a laser, a round with a guidance kit steers like one: a Hydra
+	# is a three g dart on its own and a twelve g one with the seeker on it.
+	m.laser_guided = is_instance_valid(aim_node) and (spot_held
+		or aim_node == designated_node or aim_node is DesignatedSpot)
 	m.launch(w, xf, linear_velocity, self, aim_node)
 	get_tree().current_scene.add_child(m)
 	store_released.emit(m)
@@ -1626,7 +1646,7 @@ const BATTERY_EL_HI := 1.40      # to eighty degrees below it
 ## mark, the shot cannot be taken either, which is what banking a gunship into
 ## its orbit is for.
 func aim_battery(at: Vector3) -> bool:
-	var mounts := get_node_or_null("SideGuns")
+	var mounts := _battery()
 	if mounts == null:
 		return true
 	var ok := true
@@ -1634,7 +1654,11 @@ func aim_battery(at: Vector3) -> bool:
 		var node := m as Node3D
 		if node == null:
 			continue
-		var local: Vector3 = global_transform.affine_inverse() * at - node.position
+		# in the frame the mount actually hangs in, whatever the model root
+		# does to it
+		var frame := node.get_parent() as Node3D
+		var local: Vector3 = (frame.global_transform.affine_inverse() * at
+			if frame != null else global_transform.affine_inverse() * at) - node.position
 		if local.length() < 1.0:
 			continue
 		local = local.normalized()
@@ -1646,6 +1670,97 @@ func aim_battery(at: Vector3) -> bool:
 			clampf(el, BATTERY_EL_LO, BATTERY_EL_HI))
 	return ok
 
+## Lay the battery so the round arrives on the mark, rather than at it.
+##
+## `aim_battery` points the barrels straight down the sight line, and a gunship
+## round does not fly down the sight line. The 105 leaves at 494 m/s, so from
+## the orbit it is five seconds in the air: it falls a hundred and twenty metres
+## on the way, and it carries the aeroplane's own hundred-odd metres a second
+## sideways the whole time -- five hundred metres of it. Laid on the mark, the
+## whole battery landed short and well astern of whatever the sensor was
+## holding, and an area track was a place the rounds never went.
+##
+## Solved against the shell as it is actually flown: muzzle speed along the
+## bore plus the aeroplane's velocity, and gravity applied the way `Shell`
+## applies it, a physics step at a time. A point track is led by its own
+## velocity as well. A handful of iterations converges, because the round is
+## several times faster than anything else in the sum.
+func battery_lead(aim: Vector3, from: Vector3) -> Vector3:
+	var g := gunship_gun()
+	var v0: float = float(g.get("muzzle", 0.0))
+	if v0 <= 1.0:
+		return aim
+	var vt := _mark_velocity(aim)
+	var dt: float = 1.0 / float(maxi(Engine.physics_ticks_per_second, 1))
+	var t: float = from.distance_to(aim) / v0
+	var d := aim - from
+	for i in 10:
+		d = aim + vt * t - from - linear_velocity * t \
+			+ Vector3.UP * 4.905 * (t * t + t * dt)
+		t = d.length() / v0
+	# a long way out along the solution, so the mounts -- which lay from
+	# their own trunnions, a couple of metres from the muzzle -- read the
+	# direction and not the point
+	return from + d.normalized() * 100000.0
+
+## The training and elevation the first mount needs for a point, in degrees,
+## against its limits. For the harness: "cannot train" says nothing about which
+## way it cannot.
+func battery_need(aim: Vector3) -> Vector2:
+	var mounts := _battery()
+	if mounts == null or mounts.get_child_count() == 0:
+		return Vector2.ZERO
+	var node := mounts.get_child(0) as Node3D
+	var at := battery_lead(aim, _port_centre())
+	var local: Vector3 = (mounts.global_transform.affine_inverse() * at - node.position).normalized()
+	return Vector2(rad_to_deg(atan2(local.z, -local.x)),
+		rad_to_deg(asin(clampf(-local.y, -1.0, 1.0))))
+
+## Lay every mount on the solution for the selected gun. What the sight-follows
+## loop and the trigger both call, so the barrels you watch are the ones the
+## rounds leave.
+func lay_battery(aim: Vector3) -> bool:
+	return aim_battery(battery_lead(aim, _port_centre()))
+
+func _port_centre() -> Vector3:
+	var ports: Array = spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
+	var c := Vector3.ZERO
+	for q in ports:
+		c += q as Vector3
+	return global_transform * (c / float(maxi(ports.size(), 1)))
+
+## How fast the mark is moving: a point track's own velocity, nothing for a spot
+## on the ground.
+func _mark_velocity(aim: Vector3) -> Vector3:
+	var pd: Variant = get("pod")
+	if pd == null or not is_instance_valid(pd) or int(pd.get("mode")) != SensorPod.POINT:
+		return Vector3.ZERO
+	var t: Variant = pd.get("tracked")
+	if t == null or not is_instance_valid(t) or not (t is Node3D) \
+			or (t as Node3D).global_position.distance_to(aim) > 1.0:
+		return Vector3.ZERO
+	if "linear_velocity" in t:
+		return t.get("linear_velocity")
+	if (t as Node).has_method("get_velocity"):
+		return t.call("get_velocity")
+	if "vel" in t:
+		return t.get("vel")
+	return Vector3.ZERO
+
+## The side battery's mounts. Built inside the model, not on the aeroplane: it
+## was looked up as a child of the aeroplane itself, where it is not, so it was
+## never found -- the barrels never trained, and every round went down the
+## sight line instead of along a barrel.
+var _battery_node: Node3D = null
+
+func _battery() -> Node3D:
+	if _battery_node != null and is_instance_valid(_battery_node):
+		return _battery_node
+	var root: Variant = _model.get("root") if _model is Dictionary else null
+	if root is Node:
+		_battery_node = (root as Node).find_child("SideGuns", true, false) as Node3D
+	return _battery_node
+
 ## Where a given barrel is pointing, in world space. The mount was built along
 ## its own -X, so that axis rotated into the world is the bore.
 func _bore(node: Node3D) -> Vector3:
@@ -1655,16 +1770,22 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	var g := gunship_gun()
 	if g.is_empty() or gun_cd > 0.0 or not alive:
 		return false
-	if not aim_battery(aim):
-		return false
-	gun_cd = 60.0 / float(g["rpm"])
 	var ports: Array = spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
 	var pick: int = randi() % ports.size()
 	var muzzle: Vector3 = global_transform * (ports[pick] as Vector3)
+	# laid on where the round will meet the mark, from the barrel that fires it
+	var lead_pt := battery_lead(aim, muzzle)
+	if not aim_battery(lead_pt):
+		return false
+	# One round, then the loader. This line went missing once and the 105 fired
+	# every physics step -- a hundred and twenty howitzer rounds a second.
+	gun_cd = 60.0 / float(g["rpm"])
 	# Along the barrel that is actually firing, not along the sight line. The
-	# two agree whenever the mount is on the mark, which is the point.
-	var dir := aim - muzzle
-	var mounts := get_node_or_null("SideGuns")
+	# two agree whenever the mount is on the mark, which is the point. With no
+	# mount to read it is the solution itself -- it was the sight line, which
+	# is exactly where a round does not go.
+	var dir := lead_pt - muzzle
+	var mounts := _battery()
 	if mounts != null and pick < mounts.get_child_count():
 		var node := mounts.get_child(pick) as Node3D
 		if node != null:
@@ -1680,6 +1801,9 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	shell.blast = float(g["blast"])
 	shell.shooter = self
 	shell.team = team
+	# what it was sent at, so --debugweapons can say how far off it landed
+	shell.set_meta("aim", aim)
+	shell.set_meta("origin", muzzle)
 	world.add_child(shell)
 	shell.global_position = muzzle
 	Effects.muzzle_flash(world, muzzle, dir, 2.6 if float(g["rpm"]) < 40.0 else 1.3)
@@ -1687,6 +1811,41 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	Sfx.play_at(world, "boom" if float(g["rpm"]) < 40.0 else "rifle", muzzle,
 		-2.0 if float(g["rpm"]) < 40.0 else -6.0, 0.55 if float(g["rpm"]) < 40.0 else 0.8, 3000.0)
 	return true
+
+## Where the gun's rounds and flash come out, in the aeroplane's own frame.
+##
+## The table's gun position, carried out to the skin if it is under it. Most
+## of them sit a hand's breadth inside the fuselage -- the gun is in there, and
+## the muzzle is at a port in the skin beside it -- and the flash was being lit
+## inside the aeroplane, half of it hidden and the rest sitting on the
+## structure. Pushed out along the cross-section from its centre, so a gun in
+## the wing root comes out of the wing root and one in the nose out of the nose.
+var _muzzle_local := Vector3.INF
+
+func gun_muzzle() -> Vector3:
+	if _muzzle_local != Vector3.INF:
+		return _muzzle_local
+	var gp: Vector3 = (spec.get("gun", {}) as Dictionary).get("pos", Vector3.ZERO)
+	_muzzle_local = gp
+	var secs: Array = (spec.get("shape", {}) as Dictionary).get("sections", [])
+	for i in secs.size() - 1:
+		var z0: float = secs[i][0]
+		var z1: float = secs[i + 1][0]
+		if gp.z < minf(z0, z1) or gp.z > maxf(z0, z1):
+			continue
+		var f: float = (gp.z - z0) / maxf(z1 - z0, 0.001)
+		var hw: float = maxf(lerpf(float(secs[i][1]), float(secs[i + 1][1]), f), 0.05)
+		var hh: float = maxf(lerpf(float(secs[i][2]), float(secs[i + 1][2]), f), 0.05)
+		var cy: float = lerpf(float(secs[i][3]), float(secs[i + 1][3]), f)
+		var pw: float = maxf(lerpf(float(secs[i][4]), float(secs[i + 1][4]), f), 1.0)
+		var dy: float = gp.y - cy
+		var e: float = pow(absf(gp.x) / hw, pw) + pow(absf(dy) / hh, pw)
+		if e > 1e-4 and e < 1.0:
+			# out to just past the skin along the line from the section's centre
+			var k: float = pow(e, -1.0 / pw) * 1.04
+			_muzzle_local = Vector3(gp.x * k, cy + dy * k, gp.z)
+		break
+	return _muzzle_local
 
 func fire_gun(world: Node) -> bool:
 	if ammo <= 0 or gun_cd > 0.0 or not alive:
@@ -1696,7 +1855,7 @@ func fire_gun(world: Node) -> bool:
 	var g: Dictionary = spec["gun"]
 	gun_cd = 60.0 / float(g["rpm"]) * 4.0     # tracer every 4th round
 	ammo = maxi(ammo - 4, 0)
-	var muzzle := global_transform * (g["pos"] as Vector3)
+	var muzzle := global_transform * gun_muzzle()
 	var dir := -global_transform.basis.z
 	var v: float = g["muzzle"]
 	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * 4.0,
@@ -1720,7 +1879,7 @@ func fire_gun(world: Node) -> bool:
 		_gun_audio.unit_size = 26.0
 		_gun_audio.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
 		add_child(_gun_audio)
-		_gun_audio.position = g["pos"] as Vector3
+		_gun_audio.position = gun_muzzle()
 	if not _gun_audio.playing:
 		_gun_audio.play()
 	return true
@@ -1776,8 +1935,8 @@ func weapon_reaches(w: String, tgt: Node3D) -> bool:
 ## Why the shot is not on, or "" when it is.
 func shot_blocked(w: String, tgt: Node3D) -> String:
 	var ws0 := WeaponSpec.get_spec(w if w != "gun" else "aim9")
-	var needs: bool = String(ws0["kind"]) == "cruise" \
-		or bool(ws0.get("air_to_ground", false))
+	var needs: bool = (String(ws0["kind"]) == "cruise" \
+		or bool(ws0.get("air_to_ground", false))) and not bool(ws0.get("free_fire", false))
 	if needs and not is_instance_valid(tgt) and not is_instance_valid(designated_node) \
 			and designated == Vector3.INF:
 		return "NO AIM"
@@ -1805,6 +1964,14 @@ func _update_lock(delta: float) -> void:
 		locked = false
 		lock_time = 0.0
 		return
+	# A laser spot is a mark only while there is one: with the laser off and no
+	# track held it is a place nobody is pointing at.
+	var spot: bool = target.is_in_group("laser_spots")
+	if spot and not bool(target.get("on")):
+		target = null
+		locked = false
+		lock_time = 0.0
+		return
 	var to: Vector3 = target.global_position - global_position
 	var dist := to.length()
 	var ang := rad_to_deg((-global_transform.basis.z).angle_to(to))
@@ -1824,7 +1991,8 @@ func _update_lock(delta: float) -> void:
 	# And a targeting pod holding a point track keeps the lock whatever the nose
 	# is doing. Holding a target off boresight is the entire purpose of putting
 	# the sensor on a gimbal.
-	var pod_holds: bool = is_instance_valid(designated_node) and designated_node == target
+	var pod_holds: bool = (is_instance_valid(designated_node) and designated_node == target) \
+		or spot
 	# A lock the weapon cannot honour is not a lock.
 	if not weapon_reaches(w, target):
 		lock_time = maxf(lock_time - delta * 2.0, 0.0)
@@ -1854,6 +2022,10 @@ func rotate_speed() -> float:
 func hit_radius() -> float:
 	return 8.0
 
+## How many salvos have gone, so a seeker judges each one once.
+var flare_salvo := 0
+var chaff_salvo := 0
+
 func flare_active() -> bool:
 	return _flare_t > 0.0
 
@@ -1863,6 +2035,7 @@ func drop_flare() -> void:
 		return
 	_flare_cd = 0.45
 	_flare_t = 3.4                      # window in which an IR seeker can be spoofed
+	flare_salvo += 1
 	var n: int = mini(6, flares)
 	flares -= n
 	var b := global_transform.basis
@@ -1887,6 +2060,7 @@ func drop_chaff() -> void:
 		return
 	_chaff_cd = 0.45
 	_chaff_t = 4.2                      # a cloud lingers longer than a flare burns
+	chaff_salvo += 1
 	var n: int = mini(8, chaff)
 	chaff -= n
 	var b := global_transform.basis
@@ -2200,6 +2374,7 @@ class Flare extends Node3D:
 		_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 		_mat.albedo_texture = Effects.glow_texture()
 		_mat.albedo_color = Color(1.0, 0.86, 0.55, 0.95)
+		_mat.render_priority = 6
 		qm.material = _mat
 		_core.mesh = qm
 		_core.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

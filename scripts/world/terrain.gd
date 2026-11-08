@@ -514,6 +514,10 @@ func set_ground_fade(f: float) -> void:
 		_mat.set_shader_parameter("ground_fade", f)
 	if _sea_mat != null:
 		_sea_mat.set_shader_parameter("ground_fade", f)
+	# Gone means not drawn. Faded to nothing the disc still wrote its depth,
+	# and anything behind it that came later failed against it.
+	if is_instance_valid(_sea_mi):
+		_sea_mi.visible = f > 0.002
 
 const CLIMATE_N := 1024               # texels across the whole world
 
@@ -1247,8 +1251,20 @@ func _base_key(k: String) -> String:
 ## Where a conformed edge vertex sits, and which of the chunk's grid points it
 ## is. Written once and read by the probe, the stitching and the residual, so
 ## the three cannot walk the border in different orders.
-## The sea. Curvature is already in the mesh; this puts the swell on top of it
-## and gives the surface some life.
+## The sea.
+##
+## Drawn on a disc that rides under whichever camera is looking at it, built
+## fine in the middle and coarse at the rim, and laid onto the planet in the
+## vertex shader. Every vertex is placed exactly at sea level -- the same
+## `Sim.sea_at` the hulls float on -- so the only error anywhere is the sag of
+## a chord between two neighbours, and the neighbours are close together
+## wherever anyone could see the difference.
+##
+## It used to be one sphere, 120 segments round, which is three degrees -- 333
+## km -- to a facet. A flat facet that size sags 2.2 km under the curve it is
+## standing in for: half a kilometre under the carrier, which is to say under
+## the seabed, so from above there was no sea at all and the ships floated on
+## nothing.
 const SEA_SHADER := """
 shader_type spatial;
 render_mode blend_mix, depth_draw_always, cull_back, specular_schlick_ggx;
@@ -1267,61 +1283,100 @@ uniform float wc = 0.939;
 uniform float sea_time = 0.0;
 // Fades with the ground it belongs to; already transparent, so no dither.
 uniform float ground_fade = 1.0;
-// Whether the sea is a sphere about `up_axis` or a flat shell about the origin.
+// Which drop the ground uses: the exact one on the planet, the parabola on the
+// flat world. Both are `Sim.planet_drop`.
 uniform float round_world = 0.0;
-uniform vec3 up_axis = vec3(0.0);
+uniform float planet_r = 6371000.0;
+uniform float sea_level = -35.0;
+// Half the side of the square the ground is drawn over. There is no land drawn
+// past it, so there is no coast to stop at and no sea either.
+uniform float root_half = 1.0e9;
+// The disc's spoke angle and innermost ring spacing, which between them say how
+// far apart its vertices are at any distance from the middle.
+uniform float spoke_ang = 0.0327;
+uniform float inner_step = 3.0;
 
 varying vec3 wpos;
 
-// The identical expression Sim.wave_at uses. If these two ever disagree, ships
-// float above or sink into a sea that looks nothing like what they are on.
-float swell(vec2 p) {
-	return swell_a * sin(ka.x * p.x + ka.y * p.y + sea_time * wa)
-		+ swell_b * sin(kb.x * p.x + kb.y * p.y + sea_time * wb)
-		+ swell_c * sin(kc.x * p.x + kc.y * p.y + sea_time * wc);
+// How far the surface has fallen below the tangent plane, written so a float
+// keeps it: 1 - cos of a small angle throws every digit away, 2 sin^2 of half
+// of it keeps them all.
+float drop(vec2 p) {
+	float s = length(p);
+	if (round_world > 0.5) {
+		float h = sin(s / (2.0 * planet_r));
+		return 2.0 * planet_r * h * h;
+	}
+	return s * s / (2.0 * planet_r);
+}
+
+// What each component is worth where the sampling is `sp` apart: whole while
+// it is drawn with eight points a wave or better, gone by four. A swell drawn
+// with fewer points than that swims as the disc moves with the eye.
+vec3 keep(float sp, float lo, float hi) {
+	return vec3(
+		1.0 - smoothstep(lo * 6.28318 / length(ka), hi * 6.28318 / length(ka), sp),
+		1.0 - smoothstep(lo * 6.28318 / length(kb), hi * 6.28318 / length(kb), sp),
+		1.0 - smoothstep(lo * 6.28318 / length(kc), hi * 6.28318 / length(kc), sp));
 }
 
 void vertex() {
-	vec3 w = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	// Up is not `y` on a sphere. On the flat shell the two are the same and
-	// lifting the vertex along `y` is right; on the planet it has to be lifted
-	// along its own radius, or the swell shears the sea sideways and on the far
-	// side of the world lifts it *into* the planet. `round_world` is what tells
-	// the two apart, and `up_axis` is the centre it is round about.
-	vec3 up = round_world > 0.5 ? normalize(w - up_axis) : vec3(0.0, 1.0, 0.0);
-	float lift = swell(w.xz);
-	VERTEX += up * lift;
-	wpos = w + up * lift;
-	// the surface normal follows the swell, which is what makes the light run
-	// along the crests
-	float e = 6.0;
-	float hx = swell(w.xz + vec2(e, 0.0)) - swell(w.xz - vec2(e, 0.0));
-	float hz = swell(w.xz + vec2(0.0, e)) - swell(w.xz - vec2(0.0, e));
-	vec3 flat_n = normalize(vec3(-hx, 2.0 * e, -hz));
-	// The ripple is worked out about a flat up; on the planet it is carried
-	// onto the surface's own up so the highlight still runs along the crests.
-	NORMAL = round_world > 0.5
-		? normalize(up * flat_n.y + vec3(flat_n.x, 0.0, flat_n.z))
-		: flat_n;
+	// The mesh is built about its own middle and the instance never moves, so
+	// VERTEX is an offset from the eye and the eye is where it goes. Each view
+	// -- the cockpit, a sensor head, the weapon camera -- gets its own disc.
+	vec2 off = VERTEX.xz;
+	vec2 p = CAMERA_POSITION_WORLD.xz + off;
+	vec3 f = keep(max(inner_step, length(off) * spoke_ang), 0.125, 0.25);
+	// The identical expression Sim.wave_at uses, wherever the mesh can carry
+	// it. If the two ever disagree near a hull, ships float above or sink into
+	// a sea that looks nothing like what they are on.
+	float lift = f.x * swell_a * sin(dot(ka, p) + sea_time * wa)
+		+ f.y * swell_b * sin(dot(kb, p) + sea_time * wb)
+		+ f.z * swell_c * sin(dot(kc, p) + sea_time * wc);
+	VERTEX = vec3(p.x, sea_level - drop(p) + lift, p.y);
+	wpos = VERTEX;
 }
 
 void fragment() {
+	if (abs(wpos.x) > root_half || abs(wpos.z) > root_half) {
+		discard;
+	}
+	vec2 p = wpos.xz;
+	// The slope of the swell, per pixel rather than per vertex, so the light
+	// runs along the crests however coarse the mesh is out there -- and each
+	// wave let go once a pixel covers too much of it to show anything but
+	// sparkle.
+	float fp = max(length(dFdx(p)), length(dFdy(p)));
+	vec3 f = keep(fp, 0.25, 0.5);
+	vec2 grad = f.x * swell_a * cos(dot(ka, p) + sea_time * wa) * ka
+		+ f.y * swell_b * cos(dot(kb, p) + sea_time * wb) * kb
+		+ f.z * swell_c * cos(dot(kc, p) + sea_time * wc) * kc;
 	// small chop on top of the swell, in the normal only
-	vec2 q = wpos.xz;
-	vec3 ripple = vec3(
-		sin(q.x * 0.42 + sea_time * 1.9) + sin(q.y * 0.61 + sea_time * 1.1),
-		0.0,
-		sin(q.y * 0.37 + sea_time * 2.1) + sin(q.x * 0.55 + sea_time * 0.9));
-	NORMAL = normalize(NORMAL + ripple * 0.05);
+	vec2 rip = vec2(
+		sin(p.x * 0.42 + sea_time * 1.9) + sin(p.y * 0.61 + sea_time * 1.1),
+		sin(p.y * 0.37 + sea_time * 2.1) + sin(p.x * 0.55 + sea_time * 0.9))
+		* 0.05 * (1.0 - smoothstep(2.0, 6.0, fp));
+	vec3 n = normalize(vec3(rip.x - grad.x, 1.0, rip.y - grad.y));
+	// Worked out about a flat up and carried onto the surface's own, which
+	// leans away from the world's by the angle subtended at the centre.
+	float s = length(p);
+	vec2 dir = s > 1.0e-3 ? p / s : vec2(0.0);
+	float tilt = s / planet_r;
+	vec3 up = vec3(dir.x * sin(tilt), cos(tilt), dir.y * sin(tilt));
+	vec3 nw = normalize(up * n.y + vec3(n.x, 0.0, n.z));
+	NORMAL = normalize((VIEW_MATRIX * vec4(nw, 0.0)).xyz);
 	ALBEDO = vec3(0.07, 0.19, 0.28);
 	ROUGHNESS = 0.06;
 	METALLIC = 0.45;
 	RIM = 0.7;
-	ALPHA = 0.86 * ground_fade;
+	// clearer looking down into it, a mirror at a glance
+	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 5.0);
+	ALPHA = mix(0.84, 0.98, fres) * ground_fade;
 }
 """
 
 var _sea_mat: ShaderMaterial = null
+var _sea_mi: MeshInstance3D = null
 
 ## The sea has its own clock, advanced by Sim, and the shader is handed it every
 ## frame so the drawn swell and the swell the hulls ride stay in step.
@@ -1329,23 +1384,19 @@ func _process(_dt: float) -> void:
 	if _sea_mat != null:
 		_sea_mat.set_shader_parameter("sea_time", Sim.sea_time)
 
+## The disc: this many spokes, rings this far apart out to `SEA_INNER_R`, then
+## rings spaced as far apart as the spokes are, out to `SEA_REACH`. So a cell is
+## about square everywhere, three metres across under the eye and growing in
+## proportion to the distance -- which is how far apart the vertices can be
+## before anyone looking from the middle could tell.
+const SEA_SPOKES := 192
+const SEA_INNER := 3.0
+const SEA_INNER_R := 90.0
+## Further than the ground is ever drawn from anywhere on it: past this the
+## planet body has the view.
+const SEA_REACH := 1_500_000.0
 
 func _water() -> void:
-	# The sea is a shell, not a plate. A flat plane against curved ground floods
-	# the far half of the world: sixty kilometres out the land has dropped 283 m
-	# and a level sea is 283 m over the top of it. Built as a grid that follows
-	# the same d^2/2R the ground does, so the coastline stays where it is drawn.
-	# On the planet it is a sphere, because the sea is. A shell over the near
-	# 1400 km ends in a rim you can fly to and look over the edge of, and with
-	# the world square gone there is no reason for the water to be square
-	# either. Same shader, same swell, same clock -- only the surface it is
-	# painted on is closed.
-	var pm := _sea_sphere(120, 60) if Sim.globe \
-		else _sea_shell(Sim.WORLD_HALF * 1.2, 96)
-	# A shader, because the swell has to be drawn where a hull actually rides
-	# it. The constants and the clock come from Sim, which is the same pair the
-	# ships read — a sea drawn by one formula and floated on by another is worse
-	# than a flat one.
 	var sh := Shader.new()
 	sh.code = SEA_SHADER
 	var m := ShaderMaterial.new()
@@ -1356,97 +1407,85 @@ func _water() -> void:
 	# water you are actually looking at, and without this it happily draws over
 	# splashes, explosions and anything else at the surface.
 	m.render_priority = -8
+	# The constants and the clock come from Sim, which is the same pair the
+	# ships read -- a sea drawn by one formula and floated on by another is
+	# worse than a flat one.
 	m.set_shader_parameter("swell_a", Sim.SWELL_A)
 	m.set_shader_parameter("swell_b", Sim.SWELL_B)
+	m.set_shader_parameter("swell_c", Sim.SWELL_C)
 	m.set_shader_parameter("ka", Sim.SWELL_KA)
 	m.set_shader_parameter("kb", Sim.SWELL_KB)
+	m.set_shader_parameter("kc", Sim.SWELL_KC)
 	m.set_shader_parameter("wa", Sim.SWELL_WA)
 	m.set_shader_parameter("wb", Sim.SWELL_WB)
-	m.set_shader_parameter("swell_c", Sim.SWELL_C)
-	m.set_shader_parameter("round_world", 1.0 if Sim.globe else 0.0)
-	m.set_shader_parameter("up_axis", Sim.planet_centre)
-	m.set_shader_parameter("kc", Sim.SWELL_KC)
 	m.set_shader_parameter("wc", Sim.SWELL_WC)
-	var mi := MeshKit.mi(pm, "Water")
+	m.set_shader_parameter("round_world", 1.0 if Sim.globe else 0.0)
+	m.set_shader_parameter("planet_r", Sim.PLANET_R)
+	m.set_shader_parameter("sea_level", Sim.WATER_LEVEL)
+	m.set_shader_parameter("root_half", ROOT_SPAN * 0.5)
+	m.set_shader_parameter("spoke_ang", TAU / float(SEA_SPOKES))
+	m.set_shader_parameter("inner_step", SEA_INNER)
+	var mi := MeshKit.mi(_sea_disc(), "Water")
+	_sea_mi = mi
 	mi.material_override = m
-	# The sphere is built about the planet's centre and already carries sea
-	# level in its radius; the flat shell is built about the origin and is set
-	# down at it.
-	mi.position = Sim.planet_centre if Sim.globe \
-		else Vector3(0, Sim.WATER_LEVEL, 0)
-	# It is 12742 km across and wraps the camera, so no culling volume the
-	# engine works out for it can be right in a useful direction.
-	mi.extra_cull_margin = 16384.0
+	# At the origin and left there: the shader reads VERTEX as an offset from
+	# the eye, which only holds while the instance has no transform of its own.
+	mi.transform = Transform3D.IDENTITY
+	# Wherever the eye is, the disc is under it, so the box it could be in is
+	# the whole theatre and everything the drop takes it down to.
+	mi.custom_aabb = AABB(Vector3(-3.0e6, -3.0e5, -3.0e6), Vector3(6.0e6, 3.1e5, 6.0e6))
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
 
-## A curved sheet for the sea: a grid over the world, each vertex dropped by the
-## sagitta at its own distance from the origin, exactly as the ground and the
-## terrain shader are.
-## The sea as the planet's own surface: a sphere at sea level.
-##
-## Vertices are placed on the sphere and the shader lifts them by the same swell
-## a hull rides, so the two agree everywhere rather than only near the middle of
-## a patch. The normal is the outward radius, which is what makes the specular
-## roll off toward the horizon on a round world instead of staying flat.
-func _sea_sphere(segs: int, rings: int) -> ArrayMesh:
-	var r: float = Sim.PLANET_R + Sim.WATER_LEVEL
+func _sea_disc() -> ArrayMesh:
+	var radii := PackedFloat32Array([0.0])
+	var r := SEA_INNER
+	while r < SEA_INNER_R:
+		radii.append(r)
+		r += SEA_INNER
+	var q: float = 1.0 + TAU / float(SEA_SPOKES)
+	while r < SEA_REACH:
+		radii.append(r)
+		r *= q
+	radii.append(SEA_REACH)
+	var segs := SEA_SPOKES
+	var cs := PackedFloat32Array()
+	var sn := PackedFloat32Array()
+	for i in segs + 1:
+		var a: float = TAU * float(i) / float(segs)
+		cs.append(cos(a))
+		sn.append(sin(a))
 	var verts := PackedVector3Array()
-	var norms := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var idx := PackedInt32Array()
-	for j in rings + 1:
-		var th: float = PI * float(j) / float(rings)
+	verts.resize(radii.size() * (segs + 1))
+	var k := 0
+	for rr in radii:
 		for i in segs + 1:
-			var ph: float = TAU * float(i) / float(segs)
-			var u := Vector3(sin(th) * cos(ph), cos(th), sin(th) * sin(ph))
-			verts.append(u * r)
-			norms.append(u)
-			uvs.append(Vector2(float(i) / float(segs), float(j) / float(rings)))
-	for j2 in rings:
-		for i2 in segs:
-			var a: int = j2 * (segs + 1) + i2
+			verts[k] = Vector3(rr * cs[i], 0.0, rr * sn[i])
+			k += 1
+	var idx := PackedInt32Array()
+	idx.resize((radii.size() - 1) * segs * 6)
+	k = 0
+	for j in radii.size() - 1:
+		for i in segs:
+			var a: int = j * (segs + 1) + i
 			var b: int = a + 1
 			var c: int = a + segs + 1
 			var d: int = c + 1
-			idx.append_array([a, c, b, b, c, d])
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	arr[Mesh.ARRAY_NORMAL] = norms
-	arr[Mesh.ARRAY_TEX_UV] = uvs
-	arr[Mesh.ARRAY_INDEX] = idx
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-	return mesh
-
-func _sea_shell(half: float, n: int) -> ArrayMesh:
-	var verts := PackedVector3Array()
+			# clockwise seen from above, which is Godot's front face
+			idx[k] = a
+			idx[k + 1] = c
+			idx[k + 2] = b
+			idx[k + 3] = b
+			idx[k + 4] = c
+			idx[k + 5] = d
+			k += 6
 	var norms := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var idx := PackedInt32Array()
-	var step: float = half * 2.0 / float(n)
-	for j in n + 1:
-		for i in n + 1:
-			var x: float = -half + float(i) * step
-			var z: float = -half + float(j) * step
-			verts.append(Vector3(x, -Sim.planet_drop(x, z), z))
-			# The shell's own normal leans with it, which is what makes the
-			# specular roll off toward the horizon instead of staying flat.
-			norms.append(Vector3(x, Sim.PLANET_R, z).normalized())
-			uvs.append(Vector2(float(i) / float(n), float(j) / float(n)))
-	for j in n:
-		for i in n:
-			var a: int = j * (n + 1) + i
-			var b: int = a + 1
-			var c: int = a + n + 1
-			var d: int = c + 1
-			idx.append_array([a, c, b, b, c, d])
+	norms.resize(verts.size())
+	norms.fill(Vector3.UP)
 	var arr := []
 	arr.resize(Mesh.ARRAY_MAX)
 	arr[Mesh.ARRAY_VERTEX] = verts
 	arr[Mesh.ARRAY_NORMAL] = norms
-	arr[Mesh.ARRAY_TEX_UV] = uvs
 	arr[Mesh.ARRAY_INDEX] = idx
 	var am := ArrayMesh.new()
 	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)

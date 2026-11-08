@@ -42,6 +42,10 @@ func _unhandled_input(e: InputEvent) -> void:
 
 func _pilot(delta: float) -> void:
 	msg_t = maxf(msg_t - delta, 0.0)
+	# Down on a pad or a deck with the crew about: fuel, stores and repairs,
+	# the same as an aeroplane gets. A helicopter never asked for them, so an
+	# Apache that had fired its rockets had nowhere in the world to get more.
+	update_ground_service(delta)
 	if auto != "":
 		_auto_pilot(delta)
 		return
@@ -269,10 +273,6 @@ func cycle_target() -> void:
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
 		cand.append(n)
-	if cand.is_empty():
-		target = null
-		say("no targets")
-		return
 	var fwd := -global_transform.basis.z
 	# Rank on angle *and* range. Sorting on boresight angle alone locks the
 	# radar onto whatever happens to be dead ahead, so a contact ninety
@@ -283,6 +283,12 @@ func cycle_target() -> void:
 		return fwd.angle_to(rel) + rel.length() / reach * 1.2
 	cand = cand.filter(func(n): return \
 		global_position.distance_to(n.global_position) < reach)
+	# and our own laser spot, which the hostile test above passes over
+	for sp in get_tree().get_nodes_in_group("laser_spots"):
+		if is_instance_valid(sp) and bool(sp.get("on")) and int(sp.get("team")) == team \
+				and global_position.distance_to((sp as Node3D).global_position) < reach \
+				and not cand.has(sp):
+			cand.append(sp)
 	if cand.is_empty():
 		say("no targets")
 		target = null

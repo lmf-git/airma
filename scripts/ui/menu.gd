@@ -22,6 +22,7 @@ const MISSIONS := [
 	["tdm", "TEAM DEATHMATCH", "Hostile. Two sides, first to twenty kills."],
 	["ffa", "FREE FOR ALL", "Hostile. Everyone shoots everyone; twelve kills wins."],
 	["carrier", "CARRIER TRAP", "No threats. Three miles behind the boat with the hook down."],
+	["strike", "STRIKE", "No air threat. Armour columns, shipping and helicopters to hunt, wave after wave — nothing down there can shoot back at an aeroplane."],
 	["combat", "PATROL", "Hostile. Bandits and a SAM belt north of the field. Open the bay before you shoot."],
 ]
 

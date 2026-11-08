@@ -70,7 +70,7 @@ func _build() -> void:
 			_mesh.add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.28, 0.32, 0.26), 0.75, 0.2)), "M"))
 
 func _physics_process(delta: float) -> void:
-	if not alive:
+	if not alive or Sim.no_air_threat:
 		return
 	if kind == "manpads":
 		_manpads(delta)

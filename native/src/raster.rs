@@ -235,7 +235,14 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
             } else {
                 y = ground_at(w, c, qx, qz, G_ALL);
             }
-            row[k] = [qx, y + 0.16, qz];
+            // Into the frame the ground is drawn in. Everything above is the
+            // flat frame the corridor and the survey work in, and the terrain
+            // mesh, the viaduct decks and `Sim.height_at` all have the fall of
+            // the planet taken off -- the ribbons did not, so a road ten
+            // kilometres out stood eight metres clear of its own country and
+            // of the bridge it was meant to run onto, and a kilometre clear a
+            // hundred kilometres out.
+            row[k] = [qx, y + 0.16 - drop_at(qx, qz), qz];
         }
         // lift the surface to the highest of the two kerbs so it never sinks in
         let top = row[1][1].max(row[2][1]);
@@ -251,6 +258,21 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
         prev = row;
     }
     out
+}
+
+/// How far the drawn ground has fallen below the flat frame here: the same
+/// number as `Sim.planet_drop`, exact on the planet and the parabola on the flat
+/// world, and written so a float keeps it.
+#[inline]
+pub fn drop_at(x: f32, z: f32) -> f32 {
+    let r = crate::sphere::chart().radius.max(1.0);
+    let s2 = x * x + z * z;
+    if crate::world::is_globe() {
+        let h = (s2.sqrt() / (2.0 * r)).sin();
+        2.0 * r * h * h
+    } else {
+        s2 / (2.0 * r)
+    }
 }
 
 /// One ribbon per leg, before they are put together.
