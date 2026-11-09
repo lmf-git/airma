@@ -126,19 +126,33 @@ void fragment() {
 	// CLOSEST APPROACH instead, which is the point the crossing converges to at
 	// tangency.
 	float t_geo = clamp(-b, t0, t1);
-	float discc = b * b - (dot(oc, oc) - cloud_radius * cloud_radius);
-	if (discc > 0.0) {
-		float sc = sqrt(discc);
-		// NO BRANCH BETWEEN THE TWO ROOTS. Selecting "whichever crossing is
-		// ahead" flips from the near root to the far root the instant the camera
-		// crosses the deck, and the two differ by 2*sc. Total opacity does not
-		// change, but the clouds are opaque, so all the haze teleports from
-		// behind them to in front of them and the view snaps from white to blue.
-		// Inside the slab there is no true front or back anyway -- cloud and air
-		// are interleaved -- so migrate between the two roots ACROSS the slab.
-		float below = smoothstep(cloud_radius + cloud_band * 0.5,
-			cloud_radius - cloud_band * 0.5, length(oc));
-		t_geo = mix(clamp(-b - sc, t0, t1), clamp(-b + sc, t0, t1), below);
+	// Split where the ray first ENTERS THE SLAB, not where it crosses a sphere
+	// through the middle of it.
+	//
+	// This used to migrate between the two roots of the mid-deck sphere as the
+	// camera crossed the slab. From inside the layer the far root of a ray just
+	// under the horizon is hundreds of kilometres off, so half of that whole
+	// column of haze was drawn OVER cloud that begins at the windscreen: a blue
+	// band along the horizon in the middle of a white-out, with the edges of
+	// the blend showing as arcs either side of it.
+	//
+	// Under the base the cloud starts where the ray leaves the base sphere;
+	// above the top, where it enters the top sphere; inside, at the eye. Those
+	// agree wherever they meet for any ray that has cloud on it. Where they do
+	// not agree -- a ray looking down from the very base -- the cloud it is
+	// being ordered against has no density yet, and the order of two layers
+	// does not matter when one of them is empty.
+	float r_cam = length(oc);
+	float r_lo = cloud_radius - cloud_band * 0.5;
+	float r_hi = cloud_radius + cloud_band * 0.5;
+	if (r_cam < r_lo) {
+		float dl = b * b - (dot(oc, oc) - r_lo * r_lo);
+		t_geo = clamp(-b + sqrt(max(dl, 0.0)), t0, t1);
+	} else {
+		float dh = b * b - (dot(oc, oc) - r_hi * r_hi);
+		if (dh > 0.0) {
+			t_geo = clamp(-b - sqrt(dh), t0, t1);
+		}
 	}
 	// Rays that pass well ABOVE the deck meet no cloud, so there is nothing to
 	// composite against and splitting them only thins the limb glow. Fade back

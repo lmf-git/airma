@@ -49,6 +49,8 @@ var _wcam_prev: Node3D = null
 var _wcam_hold := 0.0
 var _wcam_off := Vector3.ZERO
 var _wcam_look := Vector3.FORWARD
+var _wcam_side := Vector3.ZERO
+var _wcam_up := Vector3.ZERO
 var _wcam_diag := Vector3.ZERO
 var wcam_jitter := 0.0        # worst frame-to-frame boom wobble, metres
 var wcam_jsum := 0.0
@@ -125,6 +127,30 @@ func _free_look(delta: float) -> Basis:
 		free_pitch = lerpf(free_pitch, 0.0, back_k)
 	return Basis(Vector3.UP, free_yaw) * Basis(Vector3.RIGHT, free_pitch)
 
+## A reference direction kept square to `axis` and eased toward `target` only
+## as far as `target` means anything. Square to the axis `target` has a length
+## of the sine of the angle between them: near zero it is noise, so the held
+## direction is simply carried along; well clear of it the held one is turned
+## toward it about the axis, which cannot pass through nothing the way a blend
+## of two opposed vectors does.
+func _carry(held: Vector3, axis: Vector3, target: Vector3, delta: float) -> Vector3:
+	var h := held - axis * held.dot(axis)
+	var t := target - axis * target.dot(axis)
+	var tl := t.length()
+	if h.length() < 0.001:
+		if tl > 0.001:
+			return t / tl
+		h = axis.cross(Vector3.RIGHT)
+		if h.length() < 0.01:
+			h = axis.cross(Vector3.FORWARD)
+		return h.normalized()
+	h = h.normalized()
+	var w := smoothstep(0.10, 0.42, tl)
+	if w <= 0.0:
+		return h
+	var ang := h.signed_angle_to(t / tl, axis)
+	return h.rotated(axis, ang * clampf(delta * 3.0 * w, 0.0, 1.0)).normalized()
+
 func _process(delta: float) -> void:
 	# Weapon cam: ride whatever was last let go, until it goes off.
 	if weapon_cam != null:
@@ -160,11 +186,23 @@ func _process(delta: float) -> void:
 			# a burning throat behind it reads as a glowing ball and nothing
 			# else, however far back the boom is set. Stood off to one side and
 			# a little above, the body is in profile with the flame behind it.
-			var side := wdir.cross(Vector3.UP)
-			if side.length() < 0.01:
-				side = Vector3.RIGHT
-			side = side.normalized()
-			var want := wp - wdir * 20.0 + side * 7.5 + Vector3(0, 5.5, 0)
+			#
+			# Which side is carried, not worked out afresh. "Across the flight
+			# and level" is flight crossed with up, and a round going straight
+			# up has no such direction: the cross product is the size of the
+			# wobble in its heading, so normalising it swung the boom anywhere
+			# round the round from one frame to the next, and at pitch-over it
+			# landed wherever the answer finally settled. A ballistic launch
+			# spends its first seconds exactly there. Up is the planet's, too:
+			# five thousand kilometres down range it is not the y axis.
+			var fresh := _wcam_prev != weapon_cam
+			var u := Sim.up_at(wp)
+			if fresh or _wcam_side == Vector3.ZERO:
+				_wcam_side = global_transform.basis.x
+				_wcam_up = global_transform.basis.y
+			_wcam_side = _carry(_wcam_side, wdir, wdir.cross(u), delta)
+			var side := _wcam_side
+			var want := wp - wdir * 20.0 + side * 7.5 + u * 5.5
 			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 3.0)
 			# Rigid on the round, eased on the boom. Lerping the world position
 			# toward a target doing six hundred metres a second leaves a steady
@@ -174,7 +212,7 @@ func _process(delta: float) -> void:
 			# direction of flight swings as the weapon guides, and the terrain
 			# floor snaps as the ground comes up under it.
 			var off := want - wp
-			if _wcam_prev != weapon_cam:
+			if fresh:
 				# Come across to the round rather than cutting to it. Snapping
 				# the pose the instant a store is released throws the view
 				# sideways and spins it round to the new heading in one frame,
@@ -206,14 +244,18 @@ func _process(delta: float) -> void:
 			_free_look(delta)
 			var turn := Basis.IDENTITY
 			if absf(free_yaw) > 0.0005 or absf(free_pitch) > 0.0005:
-				var across := _wcam_look.cross(Vector3.UP)
+				var across := _wcam_look.cross(_wcam_up)
 				if across.length_squared() < 0.0001:
-					across = Vector3.RIGHT
-				turn = Basis(Vector3.UP, free_yaw) * Basis(across.normalized(), free_pitch)
+					across = _wcam_side
+				turn = Basis(u, free_yaw) * Basis(across.normalized(), free_pitch)
 			var look: Vector3 = (turn * _wcam_look).normalized()
 			global_position = wp + turn * _wcam_off
-			var up_ref := Vector3.UP if absf(look.y) < 0.985 else Vector3.FORWARD
-			look_at(wp + look * 40.0, up_ref)
+			# The same for which way up the picture is. This switched reference
+			# from the sky to north at ten degrees off the vertical, which is a
+			# roll of anything up to half a turn in one frame -- on the way up
+			# off the launcher, and again on the way down onto the mark.
+			_wcam_up = _carry(_wcam_up, look, u, delta)
+			look_at(wp + look * 40.0, _wcam_up)
 			fov = lerpf(fov, (58.0) * _zoom_mul(), delta * 4.0)
 			if diag:
 				var d := global_position - wp

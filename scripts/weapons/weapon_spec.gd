@@ -222,7 +222,13 @@ static func _db() -> Dictionary:
 	"oreshnik": {
 		"name": "Oreshnik", "short": "ORE", "kind": "radar",
 		"folding": true, "mass": 9000.0, "length": 14.5, "dia": 1.60, "fin": 1.10,
-		"boost": 260.0, "burn": 110.0, "max_g": 9.0, "drag": 0.00000171,
+		# Seven g, not twenty-six. At 260 the round reached its burnout speed
+		# in ten seconds, the motor was cut there, and the flame went out while
+		# the round was still climbing off the rail -- a hundred and ten second
+		# stage that burned for ten. At 70 it burns for thirty to sixty seconds
+		# of a short shot, and the 72 km --teltest still puts the warheads a
+		# mean of 27 m from the mark.
+		"boost": 70.0, "burn": 110.0, "max_g": 9.0, "drag": 0.00000171,
 		"ref_speed": 3027.4,
 		# Intermediate range: five thousand kilometres, not five hundred. The
 		# world is a planet now, so there is somewhere for it to go.

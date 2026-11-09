@@ -2182,6 +2182,9 @@ func _tick_world(delta: float) -> void:
 			var vc: Camera3D = get_viewport().get_camera_3d()
 			if vc != null:
 				atmo.follow(vc)
+		# The same for the cloud: its mesh is only which pixels get to ask.
+		if is_instance_valid(clouds):
+			clouds.follow(get_viewport().get_camera_3d())
 	if is_instance_valid(hud) and is_instance_valid(cam) and running:
 		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT) \
 			and not is_instance_valid(cam.weapon_cam)
@@ -12968,9 +12971,16 @@ func _on_store_released(m: Node) -> void:
 		# back to the vehicle. Hand the screen over for the flight.
 		if is_instance_valid(ship) and is_instance_valid(ship.cam):
 			_cam_was_ship = true
+			# From where the view is, not from wherever the chase camera was
+			# last left: it eases across from its own pose, and one that has
+			# not had the screen since the hull was boarded is nowhere near.
+			if not cam.current:
+				cam.global_transform = ship.cam.global_transform
 			cam.current = true
 		elif is_instance_valid(tank) and is_instance_valid(tank.cam):
 			_cam_was_tank = true
+			if not cam.current:
+				cam.global_transform = tank.cam.global_transform
 			cam.current = true
 	# a ship's round is not reported over the wire here: the hull's own fire
 	# path already tells the other end
@@ -15715,20 +15725,21 @@ func _run_cloud_test() -> void:
 	if mi == null or mi.mesh == null:
 		print("[cloud] RESULT: FAILED — the layer has no mesh")
 		return
-	# Round the planet, not round the camera: the shell's centre is the
-	# planet's, and every vertex of it stands at the top of the layer.
-	var lo := 1e12
-	var hi := -1e12
+	# The cloud is round the planet; the mesh it is drawn on is round the camera.
+	# A sphere of the layer's own radius has faces three hundred kilometres
+	# across that sag under the layer's base, and the cloud was cut off along
+	# them. So: is the proxy about the eye, and wholly inside the frustum's
+	# depth, so that every pixel is covered from any altitude?
+	var vcam: Camera3D = get_viewport().get_camera_3d()
+	var proxy_r: float = mi.global_transform.basis.get_scale().x
+	var proxy_off: float = 1e12
+	if vcam != null:
+		proxy_off = mi.global_position.distance_to(vcam.global_position)
+	var proxy_ok: bool = vcam != null and proxy_off < proxy_r * 0.25 \
+		and proxy_r > vcam.near * 4.0 and proxy_r < vcam.far * 0.8
 	var faces: PackedVector3Array = mi.mesh.get_faces()
-	for i in range(0, faces.size(), 97):
-		var r: float = (faces[i] + clouds.position).distance_to(Sim.planet_centre)
-		lo = minf(lo, r)
-		hi = maxf(hi, r)
-	var want: float = Sim.PLANET_R + CloudShell.TOP
-	print("[cloud] the shell stands %.0f m to %.0f m from the planet's centre; the layer's top is %.0f m" % [
-		lo, hi, want])
-	print("[cloud] %d triangles, centred on the planet at %s" % [
-		int(faces.size() / 3.0), str(clouds.position.round())])
+	print("[cloud] drawn on a sphere of %.0f m carried %.1f m from the eye; %d triangles" % [
+		proxy_r, proxy_off, int(faces.size() / 3.0)])
 	# One system, not two. Both of the old ones are off and have to stay off.
 	var sky_off: bool = not Weather.FOG_VOLUME
 	print("[cloud] the camera-following slab is %s; the sky's own march is %s" % [
@@ -15887,9 +15898,8 @@ func _run_cloud_test() -> void:
 	weather.thin_air(_env, 0.0)
 	print("[cloud] the haze begins at, and tints the sky by: %s" % [
 		", ".join(PackedStringArray(fog_at))])
-	print("[cloud] RESULT: %s" % ("ok" if absf(hi - want) < 2.0
-		and absf(lo - want) < 2.0 and sky_off and inside
-		and cover > 0.0 and faces.size() > 30000
+	print("[cloud] RESULT: %s" % ("ok" if proxy_ok and sky_off and inside
+		and cover > 0.0 and faces.size() > 300
 		and drift > 1.0 and drift < 60.0
 		# A cloud has to be something you can fly between, and the march has to
 		# be able to see the gap.

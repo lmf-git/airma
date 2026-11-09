@@ -1791,6 +1791,11 @@ func fire_main(world: Node) -> bool:
 		return fire_coax(world)
 	if _gun_cd > 0.0 or not alive:
 		return false
+	# Before the cannon, not after it. The gun rule below takes every spaag and
+	# returns, so with this underneath it selecting the missiles changed the
+	# readout and nothing else: the trigger still fired the cannon.
+	if vclass() == "spaag" and current_weapon() == "sam":
+		return _fire_shorad(world, kd)
 	# An autocannon and an anti-aircraft gun are the same thing as far as this
 	# is concerned: a fast shell, a small burst, and a fuse that goes off near
 	# whatever it passes. Neither is a main gun and neither is artillery.
@@ -1811,8 +1816,6 @@ func fire_main(world: Node) -> bool:
 		Sfx.play_at(world, "rifle", _muzzle.global_position, -5.0,
 			randf_range(0.92, 1.08), 1800.0)
 		return true
-	if vclass() == "spaag" and current_weapon() == "sam":
-		return _fire_shorad(world, kd)
 	if vclass() == "sam":
 		return _fire_sam(world, kd)
 	if vclass() == "asat":

@@ -23,11 +23,11 @@ extends Node3D
 ## Where the layer sits, above sea level.
 const BASE := 2200.0
 const TOP := 3600.0
-## Segments and rings of the shell. It is only ever seen from within a few tens
-## of kilometres of its own surface, so the silhouette never matters; what this
-## has to do is cover the sky without the quads showing.
-const SEGS := 128
-const RINGS := 64
+## Segments and rings of the sphere the layer is drawn on. That sphere is not
+## the layer -- see `follow` -- it only decides which pixels get to ask, and the
+## camera is inside it, so it needs no more than enough to be closed.
+const SEGS := 32
+const RINGS := 16
 ## How big a weather system is: the shape channel is tiled this many times to
 ## the radian, so a tile is the planet's radius over this -- 354 km -- and the
 ## octaves baked into it run from a quarter of that down to a sixty-fourth.
@@ -118,11 +118,20 @@ shader_type spatial;
 // Never occludes and never writes depth: it is weather, and the ground behind
 // it has already been drawn. Cull disabled because you can be under it, in it
 // or above it, and all three have to work.
-render_mode blend_mix, depth_draw_never, cull_disabled, unshaded;
+//
+// depth_test_disabled, because the mesh is not where the cloud is. It is a
+// small sphere carried by the camera, and the layer is found analytically
+// along each ray; what hides cloud is the scene depth, read below, and not the
+// depth of a triangle that only stands for "this pixel".
+render_mode blend_mix, depth_draw_never, depth_test_disabled, cull_disabled, unshaded;
 
 uniform vec3 centre = vec3(0.0);
 uniform float r_base = 6373200.0;
 uniform float r_top = 6374600.0;
+// The ground, as a sphere: sea level. A ray that goes into it has no cloud
+// beyond it, whatever the far side of the planet holds.
+uniform float r_ground = 6371000.0;
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
 uniform float coverage = 0.48;
 uniform float density_mul = 1.0;
 uniform float wind_time = 0.0;
@@ -154,6 +163,9 @@ uniform float extinction = 0.0045;
 // opacity through the whole depth of the layer, which is haze rather than
 // cloud.
 uniform float density_k = 6.5;
+// How much of the column over a sample its own density is taken to stand for,
+// when working out how much sun reaches it. See the march.
+uniform float shadow_k = 0.5;
 uniform vec3 wind_uv = vec3(0.0);
 uniform vec3 sun_dir = vec3(0.0, 1.0, 0.0);
 uniform vec3 tint : source_color = vec3(0.92, 0.94, 0.97);
@@ -188,7 +200,13 @@ uniform sampler3D vol : filter_linear, repeat_enable;
 // How much cloud there is at a point, from the direction it lies in and how far
 // it is up the slab. A direction has no edges, so the field wraps the planet
 // with nothing to seam and nothing to repeat.
-float density(vec3 p) {
+//
+// `column` comes back as what this column of sky would hold at the fullest
+// part of the profile. The field is a function of direction alone and the
+// profile only shapes it in height, so that one number is the whole of the
+// cloud standing over a sample, and the march lights with it.
+float density(vec3 p, out float column) {
+	column = 0.0;
 	vec3 up = normalize(p - centre);
 	float r = length(p - centre);
 	float h = clamp((r - r_base) / max(r_top - r_base, 1.0), 0.0, 1.0);
@@ -217,7 +235,11 @@ float density(vec3 p) {
 	vec3 qd = up * detail_scale + vec3(shape * detail_warp)
 		+ wind_uv * wind_time * 3.0;
 	float detail = texture(vol, qd).g;
-	return max(shape - (1.0 - detail) * erode, 0.0) * density_mul * density_k;
+	float cut = (1.0 - detail) * erode;
+	// `shape` is the same field with the profile taken off it again.
+	column = max(shape + (1.0 - profile) * (shape + 1.0 - coverage)
+		/ max(profile, 0.05) - cut, 0.0) * density_mul * density_k;
+	return max(shape - cut, 0.0) * density_mul * density_k;
 }
 
 // Where a ray crosses a sphere about the planet's centre; x is the near root and
@@ -261,6 +283,23 @@ void fragment() {
 			t0 = max(t0, inner.y);
 		}
 	}
+	// Nothing through the planet. From under the base a ray that looks down
+	// leaves the inner sphere on the far side of the world, and the "slab" it
+	// then finds is the cloud over the antipodes.
+	vec2 ground = shell_hit(eye, dir, r_ground);
+	if (ground.x < ground.y && ground.x > 0.0) {
+		t1 = min(t1, ground.x);
+	}
+	// ...and nothing behind anything solid. The layer is not depth tested as
+	// geometry, so this is the whole of what puts a hill or an aeroplane in
+	// front of the cloud behind it -- and leaves the cloud between you and it
+	// in front. Sky reads as zero and is left alone: unprojected it would be
+	// the far plane, which is nearer than the march reaches.
+	float sd = texture(depth_tex, SCREEN_UV).r;
+	if (sd > 0.0) {
+		vec4 sview = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, sd, 1.0);
+		t1 = min(t1, length(sview.xyz / sview.w));
+	}
 	if (t1 <= t0) {
 		discard;
 	}
@@ -285,8 +324,14 @@ void fragment() {
 	// the layer, where the profile is zero and there is no cloud, and leaves the
 	// band in the middle that holds all of it to three or four samples. Looking
 	// up, that read as haze.
-	float g = span > float(steps) * 220.0 ? 1.14 : 1.0;
-	float dt = g > 1.0
+	//
+	// And eased from one to the other, not switched. The switch was a line in
+	// the sky: every ray longer than seven kilometres started with a 15 m step
+	// and every shorter one with 220 m, and from inside the layer the place
+	// where they met was an arc six degrees either side of the horizon.
+	float even = float(steps) * 220.0;
+	float g = 1.0 + 0.14 * smoothstep(even, even * 4.0, span);
+	float dt = g > 1.001
 		? span * (g - 1.0) / (pow(g, float(steps)) - 1.0)
 		: span / float(steps);
 	// Where in its own step each sample is taken, per pixel.
@@ -311,7 +356,8 @@ void fragment() {
 		float step_len = dt;
 		t += dt;
 		dt *= g;
-		float d = density(p);
+		float column;
+		float d = density(p, column);
 		if (d <= 0.0) {
 			continue;
 		}
@@ -325,7 +371,24 @@ void fragment() {
 		float face = clamp(dot(normalize(p - centre), sun_dir) * 0.5 + 0.72,
 			0.0, 1.0);
 		float a = 1.0 - exp(-d * step_len * extinction);
-		lit = mix(lit, mix(0.18, 1.0, hgt * hgt) * face, a * (1.0 - alpha));
+		// How much of the sun gets down to this sample: Beer's law over the
+		// cloud standing above it.
+		//
+		// This was a ramp on height alone, so every sample at the bottom of the
+		// layer was the same grey whatever was over it, and from underneath the
+		// deck was one flat sheet with holes in it. Light does not care how
+		// high a sample is, it cares how much cloud it came through: the core
+		// of a cloud is dark underneath, its thin edges are lit through, and
+		// that difference is the whole of what gives a base its relief.
+		//
+		// It costs no second march, because the field does not vary with
+		// height: what is overhead is this column's strength times however
+		// much of the profile is left above -- which is about six tenths of
+		// the slab from the base, falling away to nothing at the top.
+		float over = 0.63 * (1.0 - smoothstep(0.05, 0.95, hgt));
+		float tau = column * over * (r_top - r_base) * extinction * shadow_k;
+		float sun_in = mix(0.08, 1.0, exp(-tau));
+		lit = mix(lit, sun_in * face, a * (1.0 - alpha));
 		alpha += a * (1.0 - alpha);
 	}
 	if (alpha < 0.004) {
@@ -341,7 +404,7 @@ var _mat: ShaderMaterial
 var _t := 0.0
 
 func build() -> void:
-	position = Sim.planet_centre
+	position = Vector3.ZERO
 	_mat = ShaderMaterial.new()
 	var sh := Shader.new()
 	sh.code = SHADER
@@ -349,6 +412,7 @@ func build() -> void:
 	_mat.set_shader_parameter("centre", Sim.planet_centre)
 	_mat.set_shader_parameter("r_base", Sim.PLANET_R + BASE)
 	_mat.set_shader_parameter("r_top", Sim.PLANET_R + TOP)
+	_mat.set_shader_parameter("r_ground", Sim.PLANET_R)
 	_mat.set_shader_parameter("vol", _noise_volume())
 	_mat.set_shader_parameter("noise_scale", NOISE_SCALE)
 	_mat.set_shader_parameter("detail_scale", DETAIL_SCALE)
@@ -376,8 +440,30 @@ func build() -> void:
 	_mi.sorting_offset = -64.0
 	add_child(_mi)
 
+## Keep the sphere the layer is drawn on round the camera.
+##
+## The layer used to be drawn on a sphere of its own radius: 128 segments round
+## 6374 km, so every face was a flat plate three hundred kilometres across, and
+## the middle of a plate sagged **1.9 km** under the sphere its corners stood
+## on -- lower than the layer's own base. The march in the shader is analytic
+## and never cared, but a pixel only marches if a triangle covers it, and the
+## triangle was depth tested. So climbing through a plate the cloud overhead
+## had no geometry left to be drawn on and vanished, while the cloud below was
+## cut off flat along the plate; near a corner it went the other way, the plate
+## was above you and behind the ground looking down, and the cloud under you
+## went instead. Which of the two you got changed as you flew, and it flickered.
+##
+## The same cure as the atmosphere's: the mesh is a small sphere carried by the
+## camera, every pixel is covered whatever the altitude, and the cloud is still
+## a function of where it is round the planet -- nothing about the field moves.
+func follow(cam: Camera3D) -> void:
+	if _mi == null or cam == null or not is_instance_valid(cam):
+		return
+	_mi.global_position = cam.global_position
+	_mi.scale = Vector3.ONE * clampf(cam.far * 0.2, cam.near * 12.0, 2.0e6)
+
 func _shell() -> ArrayMesh:
-	var r: float = Sim.PLANET_R + TOP
+	var r := 1.0
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	for i in RINGS:
