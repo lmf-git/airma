@@ -15,17 +15,20 @@ extends Control
 const ACCENT := Color(0.62, 0.92, 1.0)
 const DIM := Color(0.42, 0.55, 0.68)
 const BAR_BACK := Color(0.10, 0.16, 0.22)
-## Sky, top to bottom: night at the zenith through to the last of the light
-## sitting on the horizon.
-const SKY_TOP := Color(0.020, 0.035, 0.062)
-const SKY_MID := Color(0.047, 0.085, 0.130)
-const SKY_LOW := Color(0.115, 0.170, 0.215)
-const GLOW := Color(0.30, 0.46, 0.56)
+## Sky, top to bottom: deep blue at the zenith down to a warm band of light
+## on the horizon. It was all one family of near-black blue-greys, land and
+## sky alike, and with the palest band in the middle it read upside down --
+## as dark ground hanging over water. Blue above, warm at the horizon, green
+## below: nobody has to work out which way up that is.
+const SKY_TOP := Color(0.045, 0.090, 0.200)
+const SKY_MID := Color(0.120, 0.230, 0.400)
+const SKY_LOW := Color(0.520, 0.500, 0.480)
+const GLOW := Color(1.00, 0.66, 0.36)
 ## Two ridge lines and the ground, each darker than the one behind it, which is
 ## what gives a flat drawing any depth at all.
-const RIDGE_FAR := Color(0.055, 0.086, 0.115)
-const RIDGE_NEAR := Color(0.030, 0.048, 0.066)
-const GROUND := Color(0.016, 0.026, 0.036)
+const RIDGE_FAR := Color(0.130, 0.190, 0.170)
+const RIDGE_NEAR := Color(0.070, 0.120, 0.080)
+const GROUND := Color(0.040, 0.075, 0.045)
 
 ## A ridge line across the screen, built from a few sine waves at different
 ## rates so it never repeats within the width.
@@ -117,7 +120,7 @@ func _draw() -> void:
 		var u2: float = float(i) / 21.0
 		draw_rect(Rect2(0.0, hy - (1.0 - u2) * hy * 0.16,
 			vs.x, hy * 0.16 / 21.0 + 1.0),
-			Color(GLOW.r, GLOW.g, GLOW.b, 0.10 * u2 * u2))
+			Color(GLOW.r, GLOW.g, GLOW.b, 0.20 * u2 * u2))
 	# --- country --------------------------------------------------------
 	_ridge(vs, hy + 2.0, vs.y * 0.055, 0.7, RIDGE_FAR)
 	_ridge(vs, hy + vs.y * 0.045, vs.y * 0.038, 3.1, RIDGE_NEAR)

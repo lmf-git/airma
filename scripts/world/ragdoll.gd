@@ -15,7 +15,7 @@ const LIMBS := [
 ]
 const JOINTS := [
 	["pelvis", "torso", Vector3(0, 0.21, 0), 0.7, 0.5],
-	["torso", "head", Vector3(0, 0.44, 0), 0.6, 0.4],
+	["torso", "head", Vector3(0, 0.70, 0), 0.6, 0.4],
 	["torso", "arm_l", Vector3(-0.28, 0.66, 0), 1.4, 0.9],
 	["torso", "arm_r", Vector3(0.28, 0.66, 0), 1.4, 0.9],
 	["pelvis", "leg_l", Vector3(-0.12, -0.13, 0), 1.1, 0.5],
@@ -24,6 +24,20 @@ const JOINTS := [
 
 var bodies := {}
 var life := 26.0
+## A man who has been shot falls down. The tumble below is for crew thrown
+## out of an aeroplane that has just come apart, and on someone standing in a
+## street it is a body that spins on the spot like a dropped firework.
+var calm := false
+
+## For a figure whose origin is at its feet. `spawn_from` wants the pelvis:
+## handed the feet, the legs start a metre underground and the solver throws
+## the whole thing into the air getting them out.
+func spawn_standing(feet: Transform3D, velocity: Vector3) -> void:
+	calm = true
+	var xf := feet
+	xf.basis = xf.basis.orthonormalized()
+	xf.origin += xf.basis.y * 0.96
+	spawn_from(xf, velocity)
 
 func spawn_from(xf: Transform3D, velocity: Vector3) -> void:
 	set_meta("spawn_xf", xf)
@@ -50,18 +64,34 @@ func _ready() -> void:
 		box.size = l[1]
 		cs.shape = box
 		b.add_child(cs)
-		var col := Pilot.SUIT
+		# dressed as whoever fell: a figure that changed uniform as it went
+		# down read as a different man
+		var col: Color = get_meta("suit", Pilot.SUIT)
 		if l[0] == "head":
-			col = Pilot.HELMET
+			col = get_meta("helmet", Pilot.HELMET)
 		b.add_child(MeshKit.mi(_box_mesh(l[1], col), "M"))
 		add_child(b)
-		b.global_position = xf.origin + xf.basis * (l[2] as Vector3)
-		b.linear_velocity = vel + Vector3(randf_range(-2, 2), randf_range(0, 3), randf_range(-2, 2))
-		b.angular_velocity = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
+		# Facing the way the figure faced. Placed by position alone, every
+		# limb was square to the world whatever way he had been standing.
+		b.global_transform = Transform3D(xf.basis.orthonormalized(),
+			xf.origin + xf.basis * (l[2] as Vector3))
+		if calm:
+			b.linear_velocity = vel + Vector3(randf_range(-0.3, 0.3), 0.0, randf_range(-0.3, 0.3))
+			b.angular_velocity = Vector3(randf_range(-0.8, 0.8), randf_range(-0.4, 0.4),
+				randf_range(-0.8, 0.8))
+			b.angular_damp = 1.2
+			b.linear_damp = 0.15
+		else:
+			b.linear_velocity = vel + Vector3(randf_range(-2, 2), randf_range(0, 3), randf_range(-2, 2))
+			b.angular_velocity = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
 		bodies[l[0]] = b
 	for j in JOINTS:
 		var joint := ConeTwistJoint3D.new()
-		joint.position = (j[2] as Vector3)
+		# Turned with the body. The anchors were laid out for a figure facing
+		# north and left there, so anyone facing another way had his shoulders
+		# and hips pinned to points in space beside him: the limbs were dragged
+		# to them on the first step and the figure folded up.
+		joint.transform = Transform3D(xf.basis.orthonormalized(), xf.basis * (j[2] as Vector3))
 		joint.set_param(ConeTwistJoint3D.PARAM_SWING_SPAN, float(j[3]))
 		joint.set_param(ConeTwistJoint3D.PARAM_TWIST_SPAN, float(j[4]))
 		joint.set_param(ConeTwistJoint3D.PARAM_SOFTNESS, 0.7)

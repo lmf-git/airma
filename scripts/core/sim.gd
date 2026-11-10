@@ -2319,6 +2319,12 @@ func _setup_input() -> void:
 	# ground has, so the keys are free where he is standing.
 	_add(&"ads",          [_mb(MOUSE_BUTTON_RIGHT)])
 	_add(&"reload",       [_key(KEY_R)])
+	# G is the undercarriage in a cockpit, and a man on foot has none.
+	_add(&"grenade",      [_key(KEY_G)])
+	# and F is the flaps
+	_add(&"pickup",       [_key(KEY_F)])
+	# Z is the look-behind in a cockpit
+	_add(&"prone",        [_key(KEY_Z)])
 	# V is the dedicated cannon key. It is off the mouse: left click already
 	# pulls the trigger, and having both meant one click fired the gun and a
 	# missile at the same time.

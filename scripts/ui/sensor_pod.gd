@@ -241,10 +241,44 @@ func slew(rel: Vector2) -> void:
 	# becoming so fine at full zoom that slewing anywhere takes all day.
 	var fov: float = _cam.fov if is_instance_valid(_cam) else ZOOMS[zoom_step]
 	var gain: float = 0.0022 * clampf(fov / ZOOMS[0], 0.05, 1.0)
+	# Holding a piece of ground, the hand moves the piece of ground. The track
+	# stays a track: the head goes on being stabilised on a point, and that
+	# point is walked across the country under the crosshair. Dropping to a
+	# free slew the moment the mouse moved meant every small correction threw
+	# the stabilisation away, with the aeroplane banking underneath.
+	if mode == AREA:
+		var look: Vector3 = _aim_dir()
+		var frame := Basis.looking_at(look, Vector3.UP if absf(look.y) < 0.98 else Vector3.FORWARD)
+		var moved: Vector3 = (frame * (Basis(Vector3.UP, -rel.x * gain)
+			* Basis(Vector3.RIGHT, -rel.y * gain) * Vector3(0, 0, -1))).normalized()
+		var hit0: Vector3 = _ground_hit(_head_origin(), moved)
+		if hit0 != Vector3.INF:
+			area_point = hit0
+			if _marker != null and is_instance_valid(_marker):
+				_marker.global_position = hit0
+			return
+	# Coming off a track, the hand takes over from where the head IS. The slew
+	# angles are the gimbal's own, and while the head was holding a point they
+	# were not being used -- so they still said wherever it was last moved by
+	# hand, and the first touch of the mouse threw the picture across the
+	# country to there.
+	if mode != SLEW:
+		_sync_head()
 	yaw = wrapf(yaw - rel.x * gain, -PI, PI)
 	pitch = clampf(pitch - rel.y * gain, -1.5, 0.35)
 	mode = SLEW
 	tracked = null
+
+## Set the gimbal angles to wherever the head is looking right now, so that
+## letting go of a track leaves it looking at the same place.
+func _sync_head() -> void:
+	if platform == null or not is_instance_valid(platform):
+		return
+	var d: Vector3 = _mount_xf(platform).basis.orthonormalized().inverse() * _aim_dir()
+	if d.length() < 0.5:
+		return
+	yaw = atan2(-d.x, -d.z)
+	pitch = clampf(asin(clampf(d.y, -1.0, 1.0)), -1.5, 0.35)
 
 func zoom(dir: int) -> void:
 	zoom_step = clampi(zoom_step + dir, 0, ZOOMS.size() - 1)
@@ -282,14 +316,20 @@ func designate() -> void:
 	var origin := _head_origin()
 	var dir := _aim_dir()
 	var best: Node3D = null
-	var best_ang := deg_to_rad(2.6)
+	# How near the crosshair a thing has to be to be taken: a twelfth of the
+	# picture, and never more than a degree and a half. It was a flat 2.6
+	# degrees, which from four kilometres is a circle a hundred and eighty
+	# metres across -- so asking for a piece of ground anywhere near a vehicle
+	# got the vehicle instead.
+	var fov_now: float = deg_to_rad(_cam.fov if is_instance_valid(_cam) else ZOOMS[zoom_step])
+	var best_ang: float = minf(deg_to_rad(1.5), fov_now / 12.0)
 	var me := platform
 	# Whose side the thing is on decides whether it can be taken at all, before
 	# how close to the crosshair it is. There was no team test here: the sight
 	# took whatever sat nearest the middle, so a friendly between you and what
 	# you were aiming at simply won, and the track jumped to your own side.
 	var my_team: int = int(me.team) if ("team" in me) else -1
-	var friend_ang := deg_to_rad(2.6)
+	var friend_ang: float = best_ang
 	var friend: Node3D = null
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or n == me:
@@ -312,8 +352,11 @@ func designate() -> void:
 		if a < best_ang:
 			best_ang = a
 			best = n
+	# One of your own under the crosshair is not taken. Laying fire close to
+	# friends means holding the ground beside them, and a sight that jumps
+	# onto the friend instead is a sight aimed at him.
 	if best == null and friend != null:
-		best = friend
+		Sim.report("friendly under the sight — holding the ground, not the unit", Sim.Ev.INFO)
 	if best:
 		tracked = best
 		_track_last = best.global_position
@@ -423,6 +466,8 @@ func _update_laser() -> void:
 		_select_spot = false
 
 func break_lock() -> void:
+	if mode != SLEW:
+		_sync_head()
 	mode = SLEW
 	tracked = null
 
@@ -802,26 +847,75 @@ func _draw_bomb_mark(frame: Vector2) -> void:
 			q.x - p.x, q.z - p.z).length(), HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
 			Color(0.55, 1.0, 0.72))
 
-## Where the head is pointing relative to the nose. Without this the picture
-## gives you no idea whether you are looking off the left wing or over your
-## shoulder.
+## Where the head is pointing relative to whatever is carrying it.
+##
+## This was a compass rose with an N at the top, which is the one thing it was
+## not: the top of the dial was the nose, and nothing on it said what the nose
+## belonged to. What you want to know with your head in the sight is which way
+## you are looking off your own vehicle -- out over the port wing, back past
+## the turret -- so it draws the vehicle, from above, nose up, and the line of
+## sight coming off it. Elevation is the bar beside it.
 func _draw_pointing(frame: Vector2, g: Color) -> void:
-	var c := Vector2(frame.x - 86.0, frame.y - 96.0)
-	var rad := 40.0
-	draw_arc(c, rad, 0.0, TAU, 32, g, 1.4)
-	# nose marker at the top
-	draw_line(c + Vector2(0, -rad - 6), c + Vector2(0, -rad + 6), g, 2.0)
-	draw_string(_font, c + Vector2(-8, -rad - 10), "N", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, g)
-	for a in [PI * 0.5, PI, PI * 1.5]:
-		draw_line(c + Vector2(sin(a), -cos(a)) * (rad - 5.0),
-			c + Vector2(sin(a), -cos(a)) * rad, g, 1.0)
-	# the head: azimuth round the dial, elevation as the length of the needle
-	var lean: float = clampf(1.0 - absf(pitch) / 1.55, 0.25, 1.0)
-	var tip := c + Vector2(sin(yaw), -cos(yaw)) * rad * lean
-	draw_line(c, tip, Color(1.0, 0.85, 0.35), 2.4)
-	draw_circle(tip, 3.4, Color(1.0, 0.85, 0.35))
-	draw_string(_font, c + Vector2(-46, rad + 18),
-		"AZ %+04d  EL %+03d" % [int(rad_to_deg(yaw)), int(rad_to_deg(pitch))],
+	var c := Vector2(frame.x - 92.0, frame.y - 104.0)
+	var k := 1.0
+	var dim := Color(g.r, g.g, g.b, 0.85)
+	var shape := PackedVector2Array()
+	if platform is Aircraft and bool((platform as Aircraft).spec.get("rotary", false)):
+		# a helicopter: pod, boom and the disc over it
+		shape = PackedVector2Array([Vector2(0, -22), Vector2(6, -14), Vector2(6, 4), Vector2(2, 10),
+			Vector2(2, 30), Vector2(9, 30), Vector2(9, 34), Vector2(-9, 34), Vector2(-9, 30),
+			Vector2(-2, 30), Vector2(-2, 10), Vector2(-6, 4), Vector2(-6, -14)])
+		draw_arc(c + Vector2(0, -4), 26.0, 0.0, TAU, 28, Color(g.r, g.g, g.b, 0.35), 1.0)
+	elif platform is Aircraft:
+		shape = PackedVector2Array([Vector2(0, -34), Vector2(4, -18), Vector2(5, -4), Vector2(30, 10),
+			Vector2(30, 15), Vector2(5, 12), Vector2(4, 24), Vector2(13, 31), Vector2(13, 34),
+			Vector2(0, 31), Vector2(-13, 34), Vector2(-13, 31), Vector2(-4, 24), Vector2(-5, 12),
+			Vector2(-30, 15), Vector2(-30, 10), Vector2(-5, -4), Vector2(-4, -18)])
+	elif platform is Tank:
+		shape = PackedVector2Array([Vector2(-13, -24), Vector2(13, -24), Vector2(13, 24),
+			Vector2(-13, 24)])
+		for sx in [-1.0, 1.0]:
+			draw_rect(Rect2(c.x + sx * 13.0 - 2.5, c.y - 26.0, 5.0, 52.0), dim, false, 1.0)
+		draw_arc(c, 8.0, 0.0, TAU, 16, dim, 1.2)
+	else:
+		# a hull: sharp at the bow, square at the stern
+		shape = PackedVector2Array([Vector2(0, -36), Vector2(8, -18), Vector2(9, 28), Vector2(6, 34),
+			Vector2(-6, 34), Vector2(-9, 28), Vector2(-8, -18)])
+		draw_rect(Rect2(c.x - 4.0, c.y - 6.0, 8.0, 16.0), dim, false, 1.0)
+	var pts := PackedVector2Array()
+	for q in shape:
+		pts.append(c + q * k)
+	pts.append(pts[0])
+	draw_polyline(pts, dim, 1.4)
+	# The line of sight: a wedge as wide as the picture is, so zooming in
+	# narrows it, and shorter the more steeply the head is looking down.
+	var fov: float = deg_to_rad(_cam.fov if is_instance_valid(_cam) else 20.0)
+	var half: float = clampf(fov * 0.5, 0.03, 0.6)
+	var reach: float = 46.0 * clampf(cos(pitch), 0.3, 1.0) + 8.0
+	var hot := Color(1.0, 0.85, 0.35)
+	var l := c + Vector2(-sin(yaw + half), -cos(yaw + half)) * reach
+	var r := c + Vector2(-sin(yaw - half), -cos(yaw - half)) * reach
+	draw_colored_polygon(PackedVector2Array([c, l, r]), Color(1.0, 0.85, 0.35, 0.22))
+	draw_line(c, l, hot, 1.4)
+	draw_line(c, r, hot, 1.4)
+	draw_line(c, c + Vector2(-sin(yaw), -cos(yaw)) * (reach + 6.0), hot, 2.0)
+	# elevation: level at the top of the bar, straight down at the bottom
+	var bx: float = c.x + 58.0
+	draw_line(Vector2(bx, c.y - 34.0), Vector2(bx, c.y + 34.0), dim, 1.2)
+	draw_line(Vector2(bx - 4.0, c.y - 34.0), Vector2(bx + 4.0, c.y - 34.0), dim, 1.2)
+	var ey: float = c.y - 34.0 + clampf(-pitch / 1.5, -0.2, 1.0) * 68.0
+	draw_colored_polygon(PackedVector2Array([Vector2(bx - 8.0, ey), Vector2(bx - 1.0, ey - 4.0),
+		Vector2(bx - 1.0, ey + 4.0)]), hot)
+	var side := "AHEAD"
+	var deg: float = rad_to_deg(wrapf(-yaw, -PI, PI))
+	if absf(deg) > 150.0:
+		side = "ASTERN"
+	elif deg > 30.0:
+		side = "STARBOARD" if not (platform is Tank) else "RIGHT"
+	elif deg < -30.0:
+		side = "PORT" if not (platform is Tank) else "LEFT"
+	draw_string(_font, c + Vector2(-50, 56),
+		"%s %03d   DOWN %02d" % [side, int(absf(deg)), int(maxf(rad_to_deg(-pitch), 0.0))],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 13, g)
 
 

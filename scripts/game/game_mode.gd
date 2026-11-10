@@ -83,6 +83,9 @@ func start(id: String) -> void:
 			_gate_sequential()
 		"tdm", "ffa":
 			kill_goal = 12 if mode == "ffa" else 20
+		"cqb", "ground", "arms":
+			kill_goal = CqbMatch.KILL_GOAL
+			Sim.no_air_threat = mode != "arms"
 		"strike":
 			# Nothing on this range shoots at an aeroplane, whatever it is.
 			Sim.no_air_threat = true
@@ -124,6 +127,15 @@ func _announce() -> void:
 				Sim.Ev.INFO)
 		"tdm":
 			Sim.report("TEAM DEATHMATCH — first side to %d kills." % kill_goal, Sim.Ev.INFO)
+		"cqb":
+			Sim.report("CQB — two squads on foot in the middle of town. First side to %d kills." % kill_goal,
+				Sim.Ev.INFO)
+		"ground":
+			Sim.report("GROUND COMBAT — infantry and armour in the streets. First side to %d kills." % kill_goal,
+				Sim.Ev.INFO)
+		"arms":
+			Sim.report("COMBAT — infantry, armour and aircraft over one town. First side to %d kills." % kill_goal,
+				Sim.Ev.INFO)
 		"ffa":
 			Sim.report("FREE FOR ALL — %d kills wins, everyone is hostile." % kill_goal, Sim.Ev.INFO)
 		"strike":
@@ -150,7 +162,7 @@ func _on_captured(z: CaptureZone, team: int) -> void:
 func register_kill(team_of_victim: int) -> void:
 	var scorer: int = 1 - team_of_victim
 	kills[scorer] = int(kills.get(scorer, 0)) + 1
-	if mode in ["tdm", "ffa"] and kills[scorer] >= kill_goal:
+	if mode in ["tdm", "ffa", "cqb", "ground", "arms"] and kills[scorer] >= kill_goal:
 		_finish(scorer == 0, "KILL LIMIT REACHED")
 	if mode in ["conquest", "warlords"]:
 		tickets[team_of_victim] = maxi(int(tickets[team_of_victim]) - 5, 0)

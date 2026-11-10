@@ -47,6 +47,30 @@ func target_point() -> Vector3:
 ## Opens framing about forty kilometres, which is the ground you actually fly
 ## over; the rest of the six hundred is there to be zoomed out to.
 var zoom := 29.0
+## Far enough in to tell one street from the next. Four hundred was the limit,
+## which on a six hundred kilometre sheet is two metres to the pixel: a whole
+## street fight in a patch the size of a thumbnail.
+const MAX_ZOOM := 9000.0
+const GLOBE_MAX := 30000.0
+## Somebody waiting for a place to be chosen: the next plain click on the
+## chart is handed to this as a point on the ground, and the map closes.
+var pick_cb: Callable = Callable()
+var pick_label := ""
+
+## Open on the player, close enough in to see a street, and wait for a click.
+func pick(label: String, cb: Callable) -> void:
+	pick_cb = cb
+	pick_label = label
+	globe = false
+	if not visible:
+		toggle()
+	follow = true
+	zoom = maxf(zoom, 2400.0)
+	queue_redraw()
+
+func cancel_pick() -> void:
+	pick_cb = Callable()
+	pick_label = ""
 var centre := Vector2.ZERO     # world metres
 var follow := true
 var _tex: ImageTexture
@@ -212,6 +236,8 @@ func detail() -> ImageTexture:
 
 func toggle() -> void:
 	visible = not visible
+	if not visible:
+		cancel_pick()
 	set_process(visible)
 	# The camera must not take the mouse off the map: freelook shares CMD with
 	# the objective marker.
@@ -241,7 +267,9 @@ func _refresh_contacts() -> void:
 	_contacts = []
 	var mine: Array = []
 	var theirs: Array = []
-	for n in get_tree().get_nodes_in_group("hittable"):
+	# Men on foot as well. They are kept off the radar picture on purpose, but
+	# a map of a street fight with nobody on it is a map of some buildings.
+	for n in get_tree().get_nodes_in_group("hittable") + get_tree().get_nodes_in_group("infantry"):
 		if not is_instance_valid(n) or n.is_in_group("no_lock") or not (n is Node3D):
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
@@ -313,20 +341,20 @@ func _gui_input(e: InputEvent) -> void:
 		# the map simply could not be zoomed on a laptop.
 		if e is InputEventPanGesture:
 			globe_zoom = clampf(globe_zoom * pow(1.08,
-				-(e as InputEventPanGesture).delta.y), 0.6, 260.0)
+				-(e as InputEventPanGesture).delta.y), 0.6, GLOBE_MAX)
 			queue_redraw()
 			return
 		if e is InputEventMagnifyGesture:
 			globe_zoom = clampf(
-				globe_zoom * (e as InputEventMagnifyGesture).factor, 0.6, 260.0)
+				globe_zoom * (e as InputEventMagnifyGesture).factor, 0.6, GLOBE_MAX)
 			queue_redraw()
 			return
 		if e is InputEventMouseButton:
 			var gb := e as InputEventMouseButton
 			if gb.button_index == MOUSE_BUTTON_WHEEL_UP and gb.pressed:
-				globe_zoom = clampf(globe_zoom * 1.2, 0.6, 260.0)
+				globe_zoom = clampf(globe_zoom * 1.2, 0.6, GLOBE_MAX)
 			elif gb.button_index == MOUSE_BUTTON_WHEEL_DOWN and gb.pressed:
-				globe_zoom = clampf(globe_zoom / 1.2, 0.6, 260.0)
+				globe_zoom = clampf(globe_zoom / 1.2, 0.6, GLOBE_MAX)
 			elif gb.button_index == MOUSE_BUTTON_RIGHT and gb.pressed:
 				# Something on the ground under the cursor first. Zoomed out, the
 				# whole theatre is a few pixels of globe with the satellites
@@ -357,20 +385,20 @@ func _gui_input(e: InputEvent) -> void:
 	# The chart, the same way: pan to zoom, pinch to zoom.
 	if e is InputEventPanGesture:
 		zoom = clampf(zoom * pow(1.10,
-			-(e as InputEventPanGesture).delta.y), 1.0, 400.0)
+			-(e as InputEventPanGesture).delta.y), 1.0, MAX_ZOOM)
 		follow = false
 		queue_redraw()
 		return
 	if e is InputEventMagnifyGesture:
-		zoom = clampf(zoom * (e as InputEventMagnifyGesture).factor, 1.0, 400.0)
+		zoom = clampf(zoom * (e as InputEventMagnifyGesture).factor, 1.0, MAX_ZOOM)
 		queue_redraw()
 		return
 	if e is InputEventMouseButton:
 		var mb := e as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
-			zoom = clampf(zoom * 1.25, 1.0, 400.0)
+			zoom = clampf(zoom * 1.25, 1.0, MAX_ZOOM)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
-			zoom = clampf(zoom / 1.25, 1.0, 400.0)
+			zoom = clampf(zoom / 1.25, 1.0, MAX_ZOOM)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
 			# On a satellite, either button assigns it. Nothing else on the map
 			# lives a hundred kilometres up, so there is nothing for a right
@@ -406,6 +434,15 @@ func _gui_input(e: InputEvent) -> void:
 					Sim.clear_objective()
 				else:
 					Sim.set_objective(at)
+				return
+			if pick_cb.is_valid() and mb.pressed and not globe:
+				var vp1 := get_viewport_rect().size
+				var ppm1 := minf(vp1.x, vp1.y) * 0.86 * zoom / (HALF * 2.0)
+				var w1: Vector2 = centre + (mb.position - vp1 * 0.5) / ppm1
+				var cb := pick_cb
+				cancel_pick()
+				toggle()
+				cb.call(Vector3(w1.x, Sim.height_at(w1.x, w1.y), w1.y))
 				return
 			_drag = mb.pressed
 			if mb.pressed:
@@ -679,6 +716,31 @@ func _draw() -> void:
 	# trunk roads over the top so the network reads at any zoom
 	for r in Sim.ROADS:
 		draw_line(_w2s(r[0], org, ppm), _w2s(r[1], org, ppm), Color(0.55, 0.5, 0.42, 0.8), 1.6)
+
+	# Close in, the buildings themselves. The sheet underneath is a picture
+	# of the country at two metres a texel at best; at the scale of a street
+	# it is a smear, and a map of a street fight has to show the streets.
+	if ppm > 0.35:
+		var half_w: Vector2 = vp * 0.5 / ppm
+		for f in Obstacles.footprints(centre - half_w, centre + half_w):
+			var fc: Vector2 = f[0]
+			var fh: Vector2 = f[1]
+			var fy: float = f[2]
+			var ax := Vector2(cos(fy), -sin(fy)) * fh.x
+			var az := Vector2(sin(fy), cos(fy)) * fh.y
+			var tall: float = f[3]
+			var fcol := Color(0.62, 0.66, 0.72, 0.92) if tall > 4.0 else Color(0.50, 0.46, 0.38, 0.9)
+			draw_colored_polygon(PackedVector2Array([_w2s(fc - ax - az, org, ppm),
+				_w2s(fc + ax - az, org, ppm), _w2s(fc + ax + az, org, ppm),
+				_w2s(fc - ax + az, org, ppm)]), fcol)
+		# a scale, because at this zoom nothing else says how far anything is
+		var bar: float = 50.0 * ppm
+		draw_line(Vector2(24, vp.y - 60), Vector2(24 + bar, vp.y - 60), Color(1, 1, 1, 0.9), 2.0)
+		_label(Vector2(24, vp.y - 78), "50 m", Color(1, 1, 1, 0.9), 12)
+	if pick_cb.is_valid():
+		draw_rect(Rect2(0, 0, vp.x, 44), Color(0.5, 0.1, 0.05, 0.85))
+		_label(Vector2(24, 12), "%s — click where you want it.  M cancels." % pick_label,
+			Color(1, 0.95, 0.85), 18)
 
 	# Towns, as they were actually sited and wherever they are.
 	#

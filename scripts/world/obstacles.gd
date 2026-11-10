@@ -23,6 +23,7 @@ extends Node3D
 const CELL := 160.0                 # spatial hash cell
 const MIN_HEIGHT := 2.5             # below this it is a fence post, not an obstacle
 const STRIDE := 8                   # x, ybase, z, hx, height, hz, cos, sin
+const MAX_SEGMENT := 6000.0         # the longest line `segment` will walk
 
 ## Flat on purpose: the inner loop of a query reads this a few thousand times a
 ## second and an array of dictionaries spends all of it unboxing Variants.
@@ -119,6 +120,161 @@ static func hit(p: Vector3, r := 0.0) -> int:
 					return id
 	return -1
 
+## One box that is not part of a MultiMesh batch: a barricade, a wrecked car, a
+## length of wall. Returns the entry, so whoever put it there can take it away
+## again with `remove` when the match that wanted it is over.
+static func add_box(origin: Vector3, half_x: float, height: float, half_z: float,
+		yaw := 0.0) -> int:
+	var id: int = _dead.size()
+	_ent.append_array(PackedFloat32Array([origin.x, origin.y, origin.z, half_x,
+		height, half_z, cos(yaw), sin(yaw)]))
+	_dead.append(0)
+	var reach: float = sqrt(half_x * half_x + half_z * half_z)
+	for cj in range(int(floor((origin.z - reach) / CELL)), int(floor((origin.z + reach) / CELL)) + 1):
+		for ci in range(int(floor((origin.x - reach) / CELL)), int(floor((origin.x + reach) / CELL)) + 1):
+			var k := _key(ci, cj)
+			var arr: PackedInt32Array = _cells.get(k, PackedInt32Array())
+			arr.append(id)
+			_cells[k] = arr
+	stats["count"] = _dead.size()
+	stats["cells"] = _cells.size()
+	return id
+
+static func remove(id: int) -> void:
+	if id >= 0 and id < _dead.size():
+		_dead[id] = 1
+
+## The same question as `hit`, asked by something standing on the ground rather
+## than flying through the air. `hit` pads the box by `r` in every direction,
+## which is right for a wingtip and wrong for a man: it makes a waist-high wall
+## as tall as he can jump plus his own shoulder width, so nothing could ever be
+## vaulted. Here `r` is his width and his feet are a point.
+static func blocks(p: Vector3, r: float) -> int:
+	if _dead.is_empty():
+		return -1
+	var ci := int(floor(p.x / CELL))
+	var cj := int(floor(p.z / CELL))
+	for dj in range(-1, 2):
+		for di in range(-1, 2):
+			var k := _key(ci + di, cj + dj)
+			if not _cells.has(k):
+				continue
+			for id in (_cells[k] as PackedInt32Array):
+				if _dead[id] != 0:
+					continue
+				var b: int = id * STRIDE
+				var dy: float = p.y - _ent[b + 1]
+				# under it by more than his own height is walking beneath it:
+				# a crane's jib, a scaffold deck
+				if dy < -1.85 or dy >= _ent[b + 4] - 0.02:
+					continue
+				var dx: float = p.x - _ent[b]
+				var dz: float = p.z - _ent[b + 2]
+				var c: float = _ent[b + 6]
+				var s: float = _ent[b + 7]
+				var lx: float = dx * c + dz * s
+				var lz: float = -dx * s + dz * c
+				if absf(lx) <= _ent[b + 3] + r and absf(lz) <= _ent[b + 5] + r:
+					return id
+	return -1
+
+## How far along a segment the first structure is, as a fraction of it, or 1.0
+## if the way is clear. This is what stops a bullet, and what decides whether
+## one man can see another: a slab test against each box near the line, so a
+## thin wall stops a round that would have stepped clean over it between ticks.
+static func segment(from: Vector3, to_in: Vector3) -> float:
+	if _dead.is_empty():
+		return 1.0
+	# Never further than this. The cells are walked along the line, and a
+	# caller asking about a target in another country -- which a tank crew
+	# scanning the whole contact list does -- was asking for seventy thousand
+	# cells each way. Nothing built stops a line of sight that long anyway;
+	# the curve of the ground does.
+	var to := to_in
+	var full: float = from.distance_to(to_in)
+	var part := 1.0
+	if full > MAX_SEGMENT:
+		part = MAX_SEGMENT / full
+		to = from.lerp(to_in, part)
+	var best := 1.0
+	var d := to - from
+	# The cells the line passes through, not the box it spans: a diagonal
+	# across a town is forty cells, where its bounding box is eight hundred.
+	var flat: float = Vector2(d.x, d.z).length()
+	var steps: int = int(ceil(flat / (CELL * 0.5))) + 1
+	var seen: Dictionary = {}
+	var keys: Array = []
+	for i in steps + 1:
+		var q: Vector3 = from + d * (float(i) / float(steps))
+		var ci0 := int(floor(q.x / CELL))
+		var cj0 := int(floor(q.z / CELL))
+		for dj in range(-1, 2):
+			for di in range(-1, 2):
+				var kk := _key(ci0 + di, cj0 + dj)
+				if not seen.has(kk):
+					seen[kk] = true
+					if _cells.has(kk):
+						keys.append(kk)
+	var done: Dictionary = {}
+	for k in keys:
+		if true:
+			for id in (_cells[k] as PackedInt32Array):
+				if _dead[id] != 0 or done.has(id):
+					continue
+				done[id] = true
+				var b: int = id * STRIDE
+				var c: float = _ent[b + 6]
+				var s: float = _ent[b + 7]
+				var ox: float = from.x - _ent[b]
+				var oz: float = from.z - _ent[b + 2]
+				# origin and direction in the box's own frame
+				var px: float = ox * c + oz * s
+				var pz: float = -ox * s + oz * c
+				var py: float = from.y - _ent[b + 1]
+				var vx: float = d.x * c + d.z * s
+				var vz: float = -d.x * s + d.z * c
+				var t0 := 0.0
+				var t1: float = best
+				var hx: float = _ent[b + 3]
+				var hz: float = _ent[b + 5]
+				var hy: float = _ent[b + 4]
+				# x slab
+				if absf(vx) < 1e-7:
+					if absf(px) > hx:
+						continue
+				else:
+					var a: float = (-hx - px) / vx
+					var e: float = (hx - px) / vx
+					t0 = maxf(t0, minf(a, e))
+					t1 = minf(t1, maxf(a, e))
+					if t0 > t1:
+						continue
+				# z slab
+				if absf(vz) < 1e-7:
+					if absf(pz) > hz:
+						continue
+				else:
+					var a2: float = (-hz - pz) / vz
+					var e2: float = (hz - pz) / vz
+					t0 = maxf(t0, minf(a2, e2))
+					t1 = minf(t1, maxf(a2, e2))
+					if t0 > t1:
+						continue
+				# y slab, base to roof
+				if absf(d.y) < 1e-7:
+					if py < 0.0 or py > hy:
+						continue
+				else:
+					var a3: float = (0.0 - py) / d.y
+					var e3: float = (hy - py) / d.y
+					t0 = maxf(t0, minf(a3, e3))
+					t1 = minf(t1, maxf(a3, e3))
+					if t0 > t1:
+						continue
+				best = t0
+	# as a fraction of the line that was asked about, not the part looked at
+	return 1.0 if best >= 1.0 else best * part
+
 ## How high the structures at a point stand, or the ground if there are none.
 ## What a helicopter has to clear to hover over a town.
 static func top_at(x: float, z: float) -> float:
@@ -143,6 +299,94 @@ static func top_at(x: float, z: float) -> float:
 				if absf(lx) <= _ent[b + 3] and absf(lz) <= _ent[b + 5]:
 					best = maxf(best, _ent[b + 1] + _ent[b + 4])
 	return best
+
+## The floor a man at height `y` would be standing on here: the highest roof
+## that is not above him. `top_at` answers "how tall is what is here", which is
+## the right question for a helicopter and the wrong one for somebody walking
+## underneath a scaffold -- it puts him on top of it.
+static func floor_under(x: float, z: float, y: float) -> float:
+	var best := -1e9
+	var ci := int(floor(x / CELL))
+	var cj := int(floor(z / CELL))
+	for dj in range(-1, 2):
+		for di in range(-1, 2):
+			var k := _key(ci + di, cj + dj)
+			if not _cells.has(k):
+				continue
+			for id in (_cells[k] as PackedInt32Array):
+				if _dead[id] != 0:
+					continue
+				var b: int = id * STRIDE
+				var top: float = _ent[b + 1] + _ent[b + 4]
+				if top > y + 0.55 or top <= best:
+					continue
+				var dx: float = x - _ent[b]
+				var dz: float = z - _ent[b + 2]
+				var c: float = _ent[b + 6]
+				var s: float = _ent[b + 7]
+				if absf(dx * c + dz * s) <= _ent[b + 3] and absf(-dx * s + dz * c) <= _ent[b + 5]:
+					best = top
+	return best
+
+## Which face of a structure a point is against, and where on it: the outward
+## normal, how far along the face the point is, and how long the face is either
+## side of its middle. What somebody climbing it needs to know.
+static func face_of(id: int, p: Vector3) -> Dictionary:
+	var b := id * STRIDE
+	var c: float = _ent[b + 6]
+	var s: float = _ent[b + 7]
+	var dx: float = p.x - _ent[b]
+	var dz: float = p.z - _ent[b + 2]
+	var lx: float = dx * c + dz * s
+	var lz: float = -dx * s + dz * c
+	var hx: float = _ent[b + 3]
+	var hz: float = _ent[b + 5]
+	var nx := 0.0
+	var nz := 0.0
+	var along := 0.0
+	var half := 0.0
+	var off := 0.0
+	if hx - absf(lx) < hz - absf(lz):
+		nx = signf(lx) if lx != 0.0 else 1.0
+		along = lz
+		half = hz
+		off = hx
+	else:
+		nz = signf(lz) if lz != 0.0 else 1.0
+		along = lx
+		half = hx
+		off = hz
+	var n := Vector3(nx * c - nz * s, 0.0, nx * s + nz * c)
+	var centre := Vector3(_ent[b], 0.0, _ent[b + 2])
+	return {"n": n, "along": along, "half": half, "foot": centre + n * off,
+		"base": _ent[b + 1], "top": _ent[b + 1] + _ent[b + 4]}
+
+## Every structure standing inside a rectangle of ground, as footprints:
+## [centre, half extents, yaw, height]. For drawing them -- a map zoomed in
+## far enough to show a street has to show what the street runs between.
+static func footprints(lo: Vector2, hi: Vector2, limit := 1500) -> Array:
+	var out: Array = []
+	var seen: Dictionary = {}
+	for cj in range(int(floor(lo.y / CELL)), int(floor(hi.y / CELL)) + 1):
+		for ci in range(int(floor(lo.x / CELL)), int(floor(hi.x / CELL)) + 1):
+			var k := _key(ci, cj)
+			if not _cells.has(k):
+				continue
+			for id in (_cells[k] as PackedInt32Array):
+				if _dead[id] != 0 or seen.has(id):
+					continue
+				seen[id] = true
+				var b: int = id * STRIDE
+				out.append([Vector2(_ent[b], _ent[b + 2]), Vector2(_ent[b + 3], _ent[b + 5]),
+					atan2(_ent[b + 7], _ent[b + 6]), _ent[b + 4]])
+				if out.size() >= limit:
+					return out
+	return out
+
+## The height of one structure's roof, in the world.
+static func top_of(id: int) -> float:
+	var b := id * STRIDE
+	return _ent[b + 1] + _ent[b + 4]
 
 static func centre_of(id: int) -> Vector3:
 	var b := id * STRIDE

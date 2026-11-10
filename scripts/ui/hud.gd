@@ -662,27 +662,201 @@ func _draw_driver() -> void:
 		Color(0.85, 0.92, 1.0))
 	_draw_log(vp)
 
-## Minimal symbology while you are walking the ramp.
+## What a man on foot needs in front of him: where the rounds will go, what
+## is left to send, and what is being done to him.
 func _draw_on_foot() -> void:
 	var vp := get_viewport_rect().size
 	var c := vp * 0.5
-	draw_arc(c, 3.0, 0, TAU, 10, Color(1, 1, 1, 0.5), 1.5)
-	var p: String = walker.prompt()
+	var w: Walker = walker as Walker
+	var g: Dictionary = w.gun_spec()
+	var eye: Camera3D = w.cam
+
+	# Whose side everyone is on. Uniforms do it up close; across a street in
+	# bad light a chevron over your own people does it better.
+	if is_instance_valid(eye) and eye.current:
+		for n in get_tree().get_nodes_in_group("infantry"):
+			var sd := n as Soldier
+			if sd == null or sd.team != w.side or not sd.is_alive():
+				continue
+			var at: Vector3 = sd.global_position + Vector3(0, 2.05, 0)
+			if eye.is_position_behind(at):
+				continue
+			var far: float = eye.global_position.distance_to(at)
+			var sp: Vector2 = eye.unproject_position(at)
+			var a: float = clampf(1.15 - far / 160.0, 0.25, 0.9)
+			var blue := Color(0.35, 0.72, 1.0, a)
+			draw_colored_polygon(PackedVector2Array([sp + Vector2(-5, -8), sp + Vector2(5, -8),
+				sp + Vector2(0, 0)]), blue)
+			if far < 40.0:
+				_txt(Vector2(sp.x - 60.0, sp.y - 12.0), sd.callsign, 11, blue,
+					HORIZONTAL_ALIGNMENT_CENTER, 120.0)
+
+	if w.scoped():
+		# through the glass: everything outside the tube is the inside of it
+		var r: float = vp.y * 0.46
+		var dark := Color(0, 0, 0, 1)
+		draw_rect(Rect2(0, 0, c.x - r, vp.y), dark)
+		draw_rect(Rect2(c.x + r, 0, vp.x - c.x - r, vp.y), dark)
+		var ring := PackedVector2Array()
+		for i in 65:
+			var t: float = TAU * float(i) / 64.0
+			ring.append(c + Vector2(cos(t), sin(t)) * r)
+		for i in 64:
+			# the corners between the circle and the square it sits in
+			var p0: Vector2 = ring[i]
+			var p1: Vector2 = ring[i + 1]
+			var edge_y: float = 0.0 if p0.y < c.y else vp.y
+			draw_colored_polygon(PackedVector2Array([p0, p1, Vector2(p1.x, edge_y),
+				Vector2(p0.x, edge_y)]), dark)
+		draw_arc(c, r, 0, TAU, 64, Color(0, 0, 0, 1), 6.0)
+		var ink := Color(0.03, 0.03, 0.03, 0.95)
+		draw_line(c + Vector2(-r, 0), c + Vector2(-14, 0), ink, 2.0)
+		draw_line(c + Vector2(14, 0), c + Vector2(r, 0), ink, 2.0)
+		draw_line(c + Vector2(0, 14), c + Vector2(0, r), ink, 2.0)
+		draw_line(c + Vector2(0, -r), c + Vector2(0, -14), ink, 1.0)
+		for k in range(1, 5):
+			draw_line(c + Vector2(-5, k * 22.0), c + Vector2(5, k * 22.0), ink, 1.0)
+		draw_circle(c, 1.4, Color(0.9, 0.1, 0.05, 0.9))
+	elif not (w._ads > 0.85 and not w.third and g.get("dot", false)):
+		# Four ticks that open as the weapon wanders. Through a red dot the dot
+		# is the mark, and a second one painted over it only hides it.
+		var px: float = vp.y * 0.5 / tan(deg_to_rad(eye.fov * 0.5)) if is_instance_valid(eye) else 600.0
+		var gap: float = clampf(w.spread_now * px, 3.0, 90.0) + 3.0
+		var col := Color(1, 1, 1, 0.82 if w.reloading <= 0.0 else 0.3)
+		for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
+			draw_line(c + d * gap, c + d * (gap + 7.0), Color(0, 0, 0, 0.5), 3.0)
+			draw_line(c + d * gap, c + d * (gap + 7.0), col, 1.4)
+		draw_circle(c, 1.2, col)
+
+	# the seeker: a box on what it is looking at, closed when it has it
+	if is_instance_valid(w.lock_target) and is_instance_valid(eye) \
+			and not eye.is_position_behind(w.lock_target.global_position):
+		var lp: Vector2 = eye.unproject_position(w.lock_target.global_position)
+		var locked: bool = w.lock_t >= w.LOCK_TIME
+		var lc := RED if locked else AMBER
+		var lh: float = 26.0 if locked else lerpf(60.0, 26.0, clampf(w.lock_t / w.LOCK_TIME, 0.0, 1.0))
+		_box(Rect2(lp.x - lh, lp.y - lh, lh * 2.0, lh * 2.0), lc, 2.0)
+		_txt(Vector2(lp.x - 60.0, lp.y + lh + 16.0), "LOCK" if locked else "SEEKING", 14, lc,
+			HORIZONTAL_ALIGNMENT_CENTER, 120.0)
+	# a round of yours landing
+	if w.hit_t > 0.0:
+		var hc := Color(1.0, 0.25, 0.2, 1.0) if (w.kill_t > 0.0 or w.hit_head) else Color(1, 1, 1, 1)
+		hc.a = clampf(w.hit_t / 0.22, 0.0, 1.0)
+		var o: float = 7.0 + (1.0 - hc.a) * 4.0
+		for d2 in [Vector2(1, 1), Vector2(-1, 1), Vector2(1, -1), Vector2(-1, -1)]:
+			draw_line(c + d2 * o, c + d2 * (o + 8.0), hc, 2.2)
+	# and one of theirs: an arc on the side it came from
+	if w.hurt_t > 0.0 and is_instance_valid(eye):
+		var to: Vector3 = w.hurt_from - w.global_position
+		var bearing: float = atan2(to.x, -to.z) + w.yaw
+		var ha: float = clampf(w.hurt_t, 0.0, 1.0) * 0.85
+		draw_arc(c, 120.0, bearing - PI * 0.5 - 0.32, bearing - PI * 0.5 + 0.32, 14,
+			Color(1.0, 0.12, 0.08, ha), 7.0)
+	# hurt: the edges of the world close in
+	var blood: float = clampf(1.0 - w.health / 60.0, 0.0, 1.0)
+	if blood > 0.0:
+		var edge := Color(0.55, 0.0, 0.0, 0.34 * blood)
+		var band: float = vp.y * 0.16
+		draw_rect(Rect2(0, 0, vp.x, band), edge)
+		draw_rect(Rect2(0, vp.y - band, vp.x, band), edge)
+		draw_rect(Rect2(0, band, band, vp.y - band * 2.0), edge)
+		draw_rect(Rect2(vp.x - band, band, band, vp.y - band * 2.0), edge)
+
+	var p: String = w.prompt()
 	if p != "":
-		var w := 420.0
-		draw_rect(Rect2(c.x - w * 0.5, c.y + 90.0, w, 40.0), Color(0.02, 0.05, 0.07, 0.6), true)
-		_box(Rect2(c.x - w * 0.5, c.y + 90.0, w, 40.0), AMBER, 1.4)
-		_txt(Vector2(c.x - w * 0.5, c.y + 116.0), p, 19, AMBER, HORIZONTAL_ALIGNMENT_CENTER, w)
-	var amm: int = walker.ammo
-	var rel: float = walker.reloading
-	_txt(Vector2(26, vp.y - 132.0), "AMMO %d / %d%s" % [amm, walker.MAG,
-		"   RELOADING" if rel > 0.0 else ""], 19,
-		RED if (amm <= 5 or rel > 0.0) else GREEN)
-	_txt(Vector2(26, vp.y - 106.0), "HEALTH %d" % int(maxf(walker.health, 0.0)), 17,
-		RED if walker.health < 40.0 else GREEN)
-	_txt(Vector2(26, vp.y - 76.0), "WASD walk   SHIFT run   CTRL crouch   SPACE jump   V fire   C view   U board", 15,
-		Color(0.85, 0.92, 1.0))
+		var bw := 420.0
+		draw_rect(Rect2(c.x - bw * 0.5, c.y + 90.0, bw, 40.0), Color(0.02, 0.05, 0.07, 0.6), true)
+		_box(Rect2(c.x - bw * 0.5, c.y + 90.0, bw, 40.0), AMBER, 1.4)
+		_txt(Vector2(c.x - bw * 0.5, c.y + 116.0), p, 19, AMBER, HORIZONTAL_ALIGNMENT_CENTER, bw)
+
+	# what is in the hands, bottom right where the weapon is
+	var rel: bool = w.reloading > 0.0
+	var low: bool = w.ammo <= maxi(int(float(g["mag"]) * 0.2), 1)
+	_txt(Vector2(vp.x - 330.0, vp.y - 118.0), String(g["name"])
+		+ ("  · SUPPRESSED" if (w.suppressed and Firearm.can_suppress(g)) else ""), 15,
+		Color(0.85, 0.92, 1.0), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+	_txt(Vector2(vp.x - 330.0, vp.y - 78.0), "%d" % w.ammo, 40,
+		RED if (low or rel) else WHITE, HORIZONTAL_ALIGNMENT_RIGHT, 220.0)
+	_txt(Vector2(vp.x - 104.0, vp.y - 78.0), "/ %d" % w.spare, 20,
+		Color(0.75, 0.8, 0.85), HORIZONTAL_ALIGNMENT_LEFT, 90.0)
+	if rel:
+		_txt(Vector2(vp.x - 330.0, vp.y - 54.0), "RELOADING", 14, AMBER,
+			HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+	elif w.ammo == 0:
+		_txt(Vector2(vp.x - 330.0, vp.y - 54.0), "EMPTY — R" if w.spare > 0 else "OUT — SWITCH WEAPON",
+			14, RED, HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+	_txt(Vector2(vp.x - 330.0, vp.y - 32.0), "GRENADES %d" % w.grenades, 14,
+		Color(0.75, 0.8, 0.85), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+	# the rack: which number is which
+	for i in w.slots.size():
+		var on: bool = i == w.slot
+		_txt(Vector2(vp.x - 330.0, vp.y - 196.0 + i * 18.0), "%d  %s" % [i + 1,
+			String(w.spec_of(int(w.slots[i]))["name"])], 13,
+			AMBER if on else Color(0.55, 0.6, 0.65), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+
+	var hb := 220.0
+	var frac: float = clampf(w.health / 100.0, 0.0, 1.0)
+	var hcol := RED if w.health < 40.0 else GREEN
+	_box(Rect2(26, vp.y - 74.0, hb, 12), hcol, 1.2)
+	draw_rect(Rect2(27, vp.y - 73.0, (hb - 2.0) * frac, 10), hcol)
+	_txt(Vector2(26, vp.y - 82.0), "HEALTH %d" % int(maxf(w.health, 0.0)), 14, hcol)
+	# wind: only worth drawing when some of it has been spent
+	if w.stamina < 0.995:
+		draw_rect(Rect2(27, vp.y - 59.0, (hb - 2.0) * w.stamina, 3),
+			AMBER if w._winded else Color(0.85, 0.92, 1.0, 0.8))
+	if w.arena != null and is_instance_valid(w.arena) and w.arena.has_method("hud_state"):
+		var cs: Dictionary = w.arena.hud_state()
+		_txt(Vector2(26, vp.y - 104.0), "KILLS %d   DEATHS %d   HEADSHOTS %d   STREAK %d" % [
+			int(cs["kills"]), int(cs["deaths"]), int(cs["headshots"]), int(cs["streak"])], 14,
+			Color(0.85, 0.92, 1.0))
+		_draw_cqb_map(cs, Rect2(26.0, vp.y - 312.0, 184.0, 184.0))
+		# the ladder: what a run of kills buys, and what is waiting to be spent
+		var ly: float = vp.y - 300.0
+		for k in cs["streaks"]:
+			var have: int = int((cs["bank"] as Dictionary).get(k["id"], 0))
+			var live: bool = String(k["id"]) == "uav" and float(cs["uav"]) > 0.0
+			var txt: String = "%d  %s" % [int(k["key"]), String(k["name"])]
+			if have > 0:
+				txt += "  READY" + (" x%d" % have if have > 1 else "")
+			elif live:
+				txt += "  %ds" % int(float(cs["uav"]))
+			else:
+				txt += "  (%d kills)" % int(k["at"])
+			_txt(Vector2(vp.x - 330.0, ly), txt, 13,
+				GREEN if have > 0 else (AMBER if live else Color(0.5, 0.55, 0.6)),
+				HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+			ly += 18.0
+	_txt(Vector2(26, vp.y - 40.0),
+		"F2 keys   SPACE vault/climb walls   C crouch   Z prone   F pick up   Q/E lean   G grenade   P view",
+		13, Color(0.85, 0.92, 1.0))
 	_draw_log(vp)
+	if mode != null and is_instance_valid(mode):
+		_draw_mode(vp)
+
+## The few blocks the fight is in, north up, with everyone you are entitled
+## to know about on it.
+func _draw_cqb_map(cs: Dictionary, box: Rect2) -> void:
+	var tex: Texture2D = cs["map"]
+	if tex != null:
+		draw_texture_rect(tex, box, false)
+	_box(box, Color(0.6, 0.75, 0.9, 0.7), 1.2)
+	if float(cs["uav"]) > 0.0:
+		# the sweep, so it is obvious why there is red on the map
+		var sw: float = fmod(Time.get_ticks_msec() * 0.001, 2.0) / 2.0
+		draw_line(Vector2(box.position.x + box.size.x * sw, box.position.y),
+			Vector2(box.position.x + box.size.x * sw, box.end.y), Color(1, 0.3, 0.2, 0.35), 2.0)
+	for d in cs["dots"]:
+		var uv: Vector2 = d[0]
+		if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+			continue
+		draw_circle(box.position + uv * box.size, 3.2,
+			Color(0.35, 0.72, 1.0) if int(d[1]) == 0 else Color(1.0, 0.2, 0.15))
+	var me: Vector2 = box.position + (cs["me"] as Vector2).clamp(Vector2.ZERO, Vector2.ONE) * box.size
+	var yaw: float = cs["yaw"]
+	var f := Vector2(-sin(yaw), -cos(yaw))
+	var r := Vector2(-f.y, f.x)
+	draw_colored_polygon(PackedVector2Array([me + f * 8.0, me - f * 5.0 + r * 5.0,
+		me - f * 2.0, me - f * 5.0 - r * 5.0]), Color(1, 1, 1))
 
 ## Work out where the combiner glass sits on screen this frame.
 func _setup_hud_box() -> void:
@@ -1603,7 +1777,8 @@ func _draw_mode(vp: Vector2) -> void:
 	var cx := vp.x * 0.5
 	var y := 96.0
 	var name_map := {"conquest": "CONQUEST", "rush": "RUSH", "warlords": "WARLORDS",
-		"tdm": "TEAM DEATHMATCH", "ffa": "FREE FOR ALL", "strike": "STRIKE"}
+		"tdm": "TEAM DEATHMATCH", "ffa": "FREE FOR ALL", "strike": "STRIKE",
+		"cqb": "CLOSE QUARTERS", "ground": "GROUND COMBAT", "arms": "COMBAT"}
 	_txt(Vector2(0, y), str(name_map.get(st["mode"], st["mode"])).to_upper(), 15,
 		Color(0.7, 0.85, 1.0), HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 	y += 22.0
@@ -1611,7 +1786,7 @@ func _draw_mode(vp: Vector2) -> void:
 		_txt(Vector2(0, y), "WAVE %d    %d LEFT    %d DESTROYED" % [int(st["wave"]),
 			int(st["left"]), int(st["destroyed"])], 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		y += 26.0
-	elif st["mode"] in ["tdm", "ffa"]:
+	elif st["mode"] in ["tdm", "ffa", "cqb", "ground", "arms"]:
 		var k: Dictionary = st["kills"]
 		_txt(Vector2(0, y), "US %d    —    THEM %d    (to %d)" % [int(k.get(0, 0)),
 			int(k.get(1, 0)), int(st["goal"])], 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
@@ -1758,14 +1933,22 @@ func _foot_keys() -> Array:
 	return [
 		["ON FOOT", [
 			["WASD", "walk"],
-			["SHIFT", "run"],
-			["CTRL", "crouch"],
-			["SPACE", "jump"],
+			["SHIFT", "sprint  ( weapon down, spends wind )"],
+			["C / CTRL", "crouch on and off  ( from a sprint: slide )"],
+			["Z", "prone on and off"],
+			["SPACE", "jump  /  vault  /  climb  —  at a tall wall: take hold of it"],
+			["on a wall", "W S A D climb, SHIFT faster, SPACE kick off, C let go"],
+			["F", "pick up a dropped weapon"],
+			["4 - 7", "kill streaks: UAV, airstrike, AC-130, fire mission"],
+			["", "airstrike and fire mission open the map: click the spot"],
+			["M", "map — wheel zooms right in to the streets"],
+			["Q / E", "lean left / right"],
 			["LMB", "fire"],
-			["RMB", "sights  ( zoom )"],
-			["1 - 3", "rifle / marksman / pistol"],
+			["RMB", "sights"],
+			["1 - 3", "the two long guns and the sidearm"],
 			["R", "reload"],
-			["P", "view"],
+			["G", "grenade"],
+			["P", "first person / over the shoulder"],
 			["N", "night vision"],
 			["U", "board what you are standing at"],
 		]],

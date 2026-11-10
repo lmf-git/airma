@@ -131,6 +131,54 @@ static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: fl
 	world.add_child(t)
 	t.global_position = pos
 
+## A rifle round rather than a cannon shell. The same projectile -- travel time,
+## drop, a streak you can see -- but drawn at the size of the thing, stopped by
+## walls, and able to tell a head from a chest. `glow` is how much of it burns:
+## not every round in a magazine is tracer.
+static func bullet(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
+		team: int, glow := 1.0, life := 1.4) -> void:
+	var t := Tracer.new()
+	t.vel = vel
+	t.shooter = owner
+	t.dmg = dmg
+	t.team = team
+	t.small = true
+	t.glow = glow
+	t.life = life
+	world.add_child(t)
+	t.global_position = pos
+
+## Where a round went in: a chip of dust, a spark, and the sound of it.
+static func bullet_impact(world: Node, pos: Vector3, hard: bool) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	var e := Boom.new()
+	e.radius = 0.16 if hard else 0.22
+	e.tint = Color(0.80, 0.76, 0.68) if hard else Color(0.62, 0.52, 0.40)
+	e.smoke = false
+	e.lit = false
+	e.life_max = 0.28
+	world.add_child(e)
+	e.global_position = pos
+	if randf() < 0.6:
+		Sfx.play_at(world, "ricochet" if (hard and randf() < 0.3) else
+			("impact_hard" if hard else "impact_soft"), pos, -9.0,
+			randf_range(0.85, 1.25), 90.0)
+
+## A round going into a man.
+static func blood(world: Node, pos: Vector3) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	var e := Boom.new()
+	e.radius = 0.2
+	e.tint = Color(0.55, 0.05, 0.04)
+	e.smoke = false
+	e.lit = false
+	e.life_max = 0.32
+	world.add_child(e)
+	e.global_position = pos
+	Sfx.play_at(world, "hit_body", pos, -7.0, randf_range(0.9, 1.15), 60.0)
+
 ## A nuclear detonation: white flash, a fireball that expands and rises, and a
 ## column with a cap on it. Scaled off the lethal radius so a bigger weapon
 ## genuinely looks bigger.
@@ -542,7 +590,29 @@ static func splash(world: Node, pos: Vector3, size: float) -> void:
 		var a := TAU * float(i) / 8.0
 		dust(world, pos + Vector3(cos(a), 0.0, sin(a)) * size * 0.7, size * 0.45)
 
+## Men on foot are not in "hittable", so nothing that works by blast ever
+## touched them: a 105 mm shell landing in a squad was a light show. Every burst
+## comes through one of two functions, so this is asked from both. `credit` is
+## who called the fire in, `spare_team` the side it is not meant for, and
+## `mute_blast` is for a caller that has already done its own sums.
+static var credit: Node = null
+static var spare_team := -1
+static var mute_blast := false
+
+static func _blast_infantry(world: Node, pos: Vector3, r: float) -> void:
+	if mute_blast or world == null or not world.is_inside_tree():
+		return
+	for n in world.get_tree().get_nodes_in_group("infantry"):
+		if not is_instance_valid(n) or not n.has_method("take_hit"):
+			continue
+		if spare_team >= 0 and "team" in n and n.team == spare_team:
+			continue
+		var d: float = ((n as Node3D).global_position + Vector3(0, 0.9, 0)).distance_to(pos)
+		if d < r:
+			n.take_hit(280.0 * pow(1.0 - d / r, 1.2), credit if is_instance_valid(credit) else null)
+
 static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -> void:
+	_blast_infantry(world, pos, maxf(radius * 0.8, 5.0))
 	# anything standing inside the blast comes down
 	if Scenery.current != null and is_instance_valid(Scenery.current) and radius > 5.0:
 		var flattened := Scenery.current.damage_area(pos, radius * 1.6)
@@ -573,6 +643,7 @@ static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -
 static func he_impact(world: Node, pos: Vector3, scale := 1.0) -> void:
 	if world == null or not is_instance_valid(world):
 		return
+	_blast_infantry(world, pos, 3.2 * scale)
 	var f := Flash.new()
 	f.size = 0.85 * scale
 	f.dir = Vector3.UP
@@ -792,6 +863,10 @@ class Tracer extends Node3D:
 	var life := 2.2
 	## Burst scale of an explosive shell; 0 is solid shot and puffs dust.
 	var he := 0.0
+	## Small arms: drawn thin, stopped by buildings, heard going past.
+	var small := false
+	var glow := 1.0
+	var _whizzed := false
 
 	func _ready() -> void:
 		var mi := MeshInstance3D.new()
@@ -821,6 +896,12 @@ class Tracer extends Node3D:
 		var speed: float = vel.length()
 		var half: float = clampf(speed * 0.013, 4.5, 30.0)
 		var wide: float = clampf(speed * 0.0009, 0.55, 1.5)
+		if small:
+			# A cannon streak is nine metres by one, which across a street is
+			# a searchlight. A rifle round is a line you half see.
+			half = clampf(speed * 0.0032, 0.7, 2.8)
+			wide = 0.035
+			mat.albedo_color = Color(2.2, 1.5, 0.7, 0.9 * glow)
 		# Built by hand, with texture coordinates. It was two MeshKit quads,
 		# and MeshKit writes none: every vertex sampled the glow at (0, 0),
 		# which is the transparent corner of a radial gradient, so the streak
@@ -833,9 +914,14 @@ class Tracer extends Node3D:
 		for roll in [0.0, PI * 0.5]:
 			var up := Vector3(cos(roll), sin(roll), 0.0) * wide
 			var b := verts.size()
+			# All of it behind the round, none of it ahead. Centred on the
+			# round, half the streak stuck out backwards from the muzzle the
+			# moment it was fired -- thirteen metres of it for a cannon shell
+			# -- which from a chase camera, a turret camera or over a man's
+			# shoulder is a line of fire that starts at the lens.
 			verts.append_array(PackedVector3Array([
-				up + Vector3(0, 0, -half), -up + Vector3(0, 0, -half),
-				-up + Vector3(0, 0, half), up + Vector3(0, 0, half)]))
+				up, -up,
+				-up + Vector3(0, 0, half * 2.0), up + Vector3(0, 0, half * 2.0)]))
 			uvs.append_array(PackedVector2Array([
 				Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1)]))
 			idx.append_array(PackedInt32Array([b, b + 1, b + 2, b, b + 2, b + 3]))
@@ -851,10 +937,18 @@ class Tracer extends Node3D:
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(mi)
 		_mi = mi
+		_len = half * 2.0
+		# nothing to draw until it has gone somewhere
+		mi.scale = Vector3(1.0, 1.0, 0.001)
 		top_level = true
 		reset_physics_interpolation.call_deferred()
 
 	var _mi: MeshInstance3D = null
+	var _len := 1.0
+	## Where it left the barrel. The streak is never longer than the distance
+	## the round has actually covered, so it grows out of the muzzle instead of
+	## appearing full length across it.
+	var _born := Vector3.INF
 
 	## Kept a few pixels wide however far off it is. A metre and a half of
 	## streak is a sliver at a kilometre and nothing at two, and a tracer is
@@ -867,24 +961,47 @@ class Tracer extends Node3D:
 		var eye := get_viewport().get_camera_3d()
 		if eye == null:
 			return
-		var s: float = clampf(eye.global_position.distance_to(global_position) / 420.0,
-			1.0, 7.0)
-		_mi.scale = Vector3(s, s, 1.0)
+		var far: float = eye.global_position.distance_to(global_position)
+		var s: float = clampf(far / 420.0, 1.0, 7.0)
+		if small:
+			s = clampf(far / 22.0, 1.0, 24.0)
+		var gone: float = 0.0 if _born == Vector3.INF else _born.distance_to(global_position)
+		_mi.scale = Vector3(s, s, clampf(gone / _len, 0.001, 1.0))
 
 	func _physics_process(delta: float) -> void:
 		life -= delta
 		var from := global_position
+		if _born == Vector3.INF:
+			_born = from
 		vel += Vector3.DOWN * 9.81 * delta
 		var to := from + vel * delta
+		if small:
+			if _small_step(from, to):
+				return
+			global_position = to
+			if vel.length_squared() > 1.0:
+				look_at(to + vel, Vector3.UP)
+			if to.y < Sim.height_at(to.x, to.z):
+				Effects.bullet_impact(get_tree().current_scene, to, false)
+				queue_free()
+			elif life <= 0.0:
+				queue_free()
+			return
 		global_position = to
 		if vel.length_squared() > 1.0:
 			look_at(to + vel, Vector3.UP)
-		for n in get_tree().get_nodes_in_group("hittable"):
+		# men on foot as well as everything on the radar picture: a coaxial
+		# machine gun that could not hit a rifleman was no use in a street
+		for n in get_tree().get_nodes_in_group("hittable") + get_tree().get_nodes_in_group("infantry"):
 			if n == shooter or not is_instance_valid(n):
 				continue
 			if n.has_method("is_alive") and not n.is_alive():
 				continue
 			if "team" in n and n.team == team:
+				continue
+			# a man on foot carries his side as `side`, so that nothing which
+			# hunts by `team` mistakes him for a vehicle
+			if "side" in n and n.side == team:
 				continue
 			var r: float = n.hit_radius() if n.has_method("hit_radius") else 6.0
 			if Geometry3D.get_closest_point_to_segment(n.global_position, from, to).distance_to(n.global_position) < r:
@@ -904,6 +1021,79 @@ class Tracer extends Node3D:
 			queue_free()
 		elif life <= 0.0:
 			queue_free()
+
+	## One tick of a rifle round. Walls first, because whatever is behind one
+	## is safe from it; then anyone standing in what is left of the path; and
+	## last, whether it went close enough past the listener to be heard.
+	func _small_step(from: Vector3, to_in: Vector3) -> bool:
+		var world := get_tree().current_scene
+		var stop := to_in
+		var wall: float = Obstacles.segment(from, stop)
+		if wall < 1.0:
+			stop = from.lerp(to_in, wall)
+		var best: Node = null
+		var best_t := 2.0
+		var best_k := 0.0
+		for grp in ["infantry", "hittable"]:
+			for n in get_tree().get_nodes_in_group(grp):
+				if n == shooter or not is_instance_valid(n):
+					continue
+				if n.has_method("is_alive") and not n.is_alive():
+					continue
+				if "team" in n and n.team == team:
+					continue
+				if "side" in n and n.side == team:
+					continue
+				var k := 0.0
+				var at := 0.0
+				if n.has_method("bullet_hit"):
+					var r: Vector2 = n.bullet_hit(from, stop)
+					k = r.x
+					at = r.y
+				elif grp == "hittable":
+					var rad: float = n.hit_radius() if n.has_method("hit_radius") else 6.0
+					var c: Vector3 = Geometry3D.get_closest_point_to_segment(
+						n.global_position, from, stop)
+					if c.distance_to(n.global_position) < rad:
+						k = 1.0
+						at = from.distance_to(c) / maxf(from.distance_to(stop), 0.001)
+				if k > 0.0 and at < best_t:
+					best = n
+					best_t = at
+					best_k = k
+		if best != null:
+			var where := from.lerp(stop, clampf(best_t, 0.0, 1.0))
+			var was_alive: bool = not best.has_method("is_alive") or best.is_alive()
+			# a rifle round does nothing to armour plate but mark the paint
+			var plate: bool = best is Tank or best is Ship
+			if best.has_method("take_hit") and not plate:
+				best.take_hit(dmg * best_k, shooter if is_instance_valid(shooter) else null)
+			if best.has_method("bullet_hit"):
+				Effects.blood(world, where)
+			else:
+				Effects.bullet_impact(world, where, true)
+			if is_instance_valid(shooter) and shooter.has_method("hit_confirm"):
+				var dead_now: bool = was_alive and best.has_method("is_alive") \
+					and not best.is_alive()
+				shooter.hit_confirm(best_k > 1.5, dead_now)
+			queue_free()
+			return true
+		if wall < 1.0:
+			Effects.bullet_impact(world, stop - vel.normalized() * 0.05, true)
+			queue_free()
+			return true
+		if not _whizzed:
+			var eye := get_viewport().get_camera_3d()
+			if eye != null and is_instance_valid(shooter) \
+					and not shooter.is_ancestor_of(eye):
+				var c2: Vector3 = Geometry3D.get_closest_point_to_segment(
+					eye.global_position, from, stop)
+				var miss: float = c2.distance_to(eye.global_position)
+				if miss < 3.2 and from.distance_to(eye.global_position) > 4.0:
+					_whizzed = true
+					Sfx.play_at(world, "whiz" if miss > 1.2 else "snap", c2,
+						-3.0, randf_range(0.85, 1.3), 40.0)
+		return false
 
 class Boom extends Node3D:
 	var radius := 12.0

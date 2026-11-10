@@ -2123,6 +2123,7 @@ func _tick_world(delta: float) -> void:
 	Sim.ui_modal = (is_instance_valid(map) and map.visible) \
 		or (is_instance_valid(actions) and actions.visible) \
 		or (is_instance_valid(chat) and chat.typing) \
+		or (is_instance_valid(deploy_ui) and deploy_ui.visible) \
 		or get_tree().paused
 	if _nettest and net != null:
 		_nettest = false
@@ -8878,6 +8879,30 @@ func _tick_world(delta: float) -> void:
 				str(pod.active), str(pod.fullscreen), str(pod.size), str(tex_behind),
 				SensorPod.CHANNEL_NAMES[pod.channel]])
 			get_tree().quit()
+	_tick_town_sets(delta)
+	if is_instance_valid(cqb):
+		_tick_cqb_support(delta)
+	if _cqb_test and is_instance_valid(cqb):
+		_tick_cqb_test(delta)
+	if _cqb_view != "" and is_instance_valid(cqb) and is_instance_valid(walker):
+		# pose the player for a photograph
+		var cv := _cqb_view
+		walker.third = cv.begins_with("tp")
+		walker.hold_ads = cv in ["ads", "tpads", "dmr"]
+		var want_kit: int = Firearm.index_of("dmr" if cv == "dmr" else ("pistol" if cv == "pistol"
+			else ("shotgun" if cv == "shotgun" else "carbine")))
+		if walker.kit_idx != want_kit:
+			if cv != "fp" and cv != "tp" and cv != "ads" and cv != "tpads" and cv != "reload":
+				walker.slots[walker.slot] = want_kit
+				walker.rearm()
+			walker._take_up(want_kit, false)
+		if cv == "reload" and walker.reloading <= 0.0:
+			walker.ammo = 3
+			walker._begin_reload(walker.gun_spec())
+		if cv == "reload" and walker.reloading < walker._reload_span * 0.55:
+			walker.reloading = walker._reload_span * 0.55
+		if cv == "look":
+			walker.pitch = -0.9
 	if _aim_test and is_instance_valid(walker) and is_instance_valid(walker.body):
 		_aim_t += delta
 		if _aim_t > 2.0:
@@ -9299,15 +9324,23 @@ func _start(id: String, mission: String) -> void:
 	# on an empty range: no column, no shipping, nothing on the map worth a
 	# fire mission. The strike range has nothing that shoots back at anybody,
 	# which suits a gun or a launcher as well as it does a jet.
-	var keep := mission == "strike"
+	var keep := mission == "strike" or mission in ["ground", "arms"]
+	# "foot" is a choice in the modes that are fought over a town: no vehicle
+	_cqb_on_foot = id == "foot" or mission == "cqb"
+	if id == "foot":
+		# whatever aeroplane was last looked at in the hangar says whose side
+		# this is, which is what the deploy screen offers vehicles from
+		var last := String(menu.jet_id) if is_instance_valid(menu) else ""
+		id = last if (last != "" and last != "foot" and not last.contains(":")) else "f16"
+	var kept_mission := mission
 	if id.begins_with("sea:"):
 		ship_kind = id.substr(4)
 		id = "f16"
-		mission = "strike" if keep else "ramp"
+		mission = "strike" if kept_mission == "strike" else "ramp"
 	if id.begins_with("veh:"):
 		drive_kind = id.substr(4)
 		id = "f16"
-		mission = "strike" if keep else "ramp"
+		mission = kept_mission if keep else "ramp"
 	_drive_kind = drive_kind
 	_ship_kind = ship_kind
 	Sim.selected_jet = id
@@ -9433,6 +9466,8 @@ func _start(id: String, mission: String) -> void:
 				Sim.Ev.INFO)
 		"conquest", "rush", "warlords", "tdm", "ffa":
 			_setup_battle(mission)
+		"cqb", "ground", "arms":
+			_setup_cqb(mission)
 		"carrier":
 			_setup_carrier_approach()
 		"strike":
@@ -9663,6 +9698,408 @@ func _setup_strike() -> void:
 
 func _on_mode_finished(_win: bool, _text: String) -> void:
 	pass
+
+# ------------------------------------------------------------------- CQB
+## The street fight, if one is running.
+var cqb: CqbMatch = null
+var _cqb_gunship: Aircraft = null
+var _cqb_gun_t := 0.0
+var _cqb_parked: Aircraft = null
+var _cqb_tel: Tank = null
+var _cqb_tel_t := 0.0
+var _cqb_tel_fired := false
+var _cqb_fall := -1.0
+const CQB_GUNSHIP_TIME := 120.0
+
+## A gunship overhead with the player at its guns. The same aeroplane, the
+## same battery and the same station a man in the hold would take -- it is
+## simply already in its orbit when he gets there, and it goes home when the
+## time is up.
+func cqb_gunship(centre: Vector3) -> bool:
+	if is_instance_valid(_cqb_gunship) or not is_instance_valid(walker) or not on_foot:
+		return false
+	var j := PlayerJet.new()
+	j.setup("ac130")
+	j.team = 0
+	j.name = "Spooky"
+	add_child(j)
+	# Northbound with the town off the port wing, which is where the guns are.
+	j.global_transform = Transform3D(Basis(), centre + Vector3(2300.0, 1500.0, 0.0))
+	j.linear_velocity = Vector3(0, 0, -105.0)
+	j.gear_down = false
+	j.gear_anim = 0.0
+	j.throttle = 0.6
+	j.power = 0.6
+	_reset_interp.call_deferred(j)
+	_cqb_parked = player
+	_cqb_gunship = j
+	_cqb_gun_t = CQB_GUNSHIP_TIME
+	cqb.set_away(true)
+	_take_hold_station(j)
+	# laid on the middle of the fight to begin with; the mouse takes it from there
+	pod.mode = SensorPod.AREA
+	pod.area_point = centre
+	# His ears go with him. The camera that draws the screen is still the one
+	# in the street, so everything was heard from there: the guns he was
+	# firing were a distant thump and the shells landing were on top of him.
+	var ears := AudioListener3D.new()
+	ears.name = "GunnerEars"
+	j.add_child(ears)
+	ears.make_current()
+	Sim.report("AC-130 on station for %d seconds — you have the guns" % int(CQB_GUNSHIP_TIME),
+		Sim.Ev.GOOD)
+	return true
+
+func _cqb_gunship_done() -> void:
+	if is_instance_valid(_station_walker):
+		_leave_hold_station()
+	if is_instance_valid(_cqb_parked):
+		player = _cqb_parked
+		pod.platform = player
+		map.aircraft = player
+		if audio:
+			audio.aircraft = player
+	if is_instance_valid(_cqb_gunship):
+		var ears := _cqb_gunship.get_node_or_null("GunnerEars") as AudioListener3D
+		if ears != null:
+			ears.clear_current()
+		_cqb_gunship.queue_free()
+	_cqb_gunship = null
+	_cqb_gun_t = 0.0
+	if is_instance_valid(cqb):
+		cqb.set_away(false)
+	Sim.report("gunship off station", Sim.Ev.INFO)
+
+## A round from a launcher parked out of town: a rocket battery for a NATO
+## side, a cruise missile off a TEL for anyone else. A real vehicle, laid and
+## fired the way one driven by a player is -- so the round takes as long to
+## arrive as it takes, and comes in from where the launcher actually is.
+func cqb_fire_mission(mark: Vector3) -> bool:
+	if _cqb_tel_t > 0.0:
+		Sim.report("fire mission: the battery is already working", Sim.Ev.BAD)
+		return false
+	if not is_instance_valid(_cqb_tel) or not _cqb_tel.alive:
+		var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+		_cqb_tel = _spawn_tank(Vector3(mark.x + 350.0, 0.0, mark.z + 2700.0), 0.0, 0,
+			"m270" if nato else "tel_kalibr")
+		_cqb_tel.name = "Fire support"
+	_cqb_tel.map_target = mark
+	_cqb_tel_t = 45.0
+	_cqb_tel_fired = false
+	Sim.report("fire mission accepted — %s laying on your mark, keep clear of it"
+		% _cqb_tel.display_name(), Sim.Ev.GOOD)
+	return true
+
+func _tick_cqb_support(delta: float) -> void:
+	if is_instance_valid(_cqb_gunship):
+		_cqb_gun_t -= delta
+		# time up, or he has stepped away from the guns himself
+		if _cqb_gun_t <= 0.0 or not is_instance_valid(_station_walker):
+			_cqb_gunship_done()
+	if _cqb_tel_t > 0.0:
+		_cqb_tel_t -= delta
+		if not is_instance_valid(_cqb_tel):
+			_cqb_tel_t = 0.0
+			return
+		# Nobody is sitting in it to lay the tubes, so the mission does: the
+		# bearing to the mark and the elevation that carries that far.
+		if _cqb_tel.vclass() != "tel" and _cqb_tel.map_target != Vector3.INF:
+			var mk: Vector3 = _cqb_tel.map_target
+			_cqb_tel.turret_yaw = atan2(mk.x - _cqb_tel.global_position.x,
+				-(mk.z - _cqb_tel.global_position.z))
+			var sol: Dictionary = _cqb_tel.fire_solution(mk, float(Tank.KINDS[_cqb_tel.kind]["muzzle"]))
+			if not sol.is_empty():
+				_cqb_tel.turret_pitch = float(sol["elev"])
+		if _cqb_tel.lay_error() < 0.04 and _cqb_tel.fire_main(self):
+			if not _cqb_tel_fired:
+				_cqb_tel_fired = true
+				_cqb_tel_t = minf(_cqb_tel_t, 22.0)    # long enough for a ripple to land
+		if _cqb_tel_fired and _cqb_test and _cqb_tel.map_target != Vector3.INF:
+			var fall: float = Sim.last_burst.distance_to(_cqb_tel.map_target)
+			if fall < 400.0 and fall != _cqb_fall:
+				_cqb_fall = fall
+				print("[cqb] fire mission: a round down %.0f m from the mark" % fall)
+		if _cqb_tel_t <= 0.0 and is_instance_valid(_cqb_tel):
+			_cqb_tel.map_target = Vector3.INF
+
+var _cqb_test := false
+var _cqb_view := ""
+var _cqb_sup := 0
+var _cqb_los_said := false
+var _cqb_dummy: Tank = null
+var _cqb_dummy_hp := 0.0
+var _cqb_t := 0.0
+var _cqb_said := 0
+
+## Two squads on foot in the middle of the nearest town. The aeroplane that
+## was picked stays on the apron with the canopy shut: every page in the game
+## expects there to be one, and this is a mission that never goes near it.
+func _setup_cqb(kind := "cqb") -> void:
+	var flying: bool = kind == "arms" and not _cqb_on_foot and _drive_kind == ""
+	player.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(-90.0)),
+		Vector3(150.0, _apron_y(150.0, -150.0) + _stance(player.spec), -150.0))
+	player.gear_down = true
+	player.gear_anim = 1.0
+	player.throttle = 0.0
+	player.active = flying
+	player.set_canopy(false, true)
+	parked = [player]
+	mode = GameMode.new()
+	mode.name = "GameMode"
+	add_child(mode)
+	mode.start(kind)
+	mode.finished.connect(_on_mode_finished)
+	hud.mode = mode
+	var town := Vector2(-2300.0, -5200.0)
+	var town_name := "Kestrel"
+	if is_instance_valid(scenery) and not scenery.sites.is_empty():
+		var site: Dictionary = scenery.sites[clampi(CqbMatch.town, 0, scenery.sites.size() - 1)]
+		town = site["c"]
+		town_name = String(site.get("name", "town"))
+	Sim.report("the fight is in %s" % town_name, Sim.Ev.INFO)
+	cqb = CqbMatch.new()
+	cqb.name = "Cqb"
+	cqb.armour = kind != "cqb"
+	cqb.air = kind == "arms"
+	if is_instance_valid(scenery) and not scenery.sites.is_empty():
+		cqb.site = scenery.sites[clampi(CqbMatch.town, 0, scenery.sites.size() - 1)]
+	add_child(cqb)
+	cqb.setup(town, mode, self, town_set(clampi(CqbMatch.town, 0, maxi(scenery.sites.size() - 1, 0))))
+	if is_instance_valid(map):
+		# close enough in to see a street fight when the map is opened
+		map.zoom = 2400.0
+	var c3 := Vector3(cqb.centre.x, Sim.height_at(cqb.centre.x, cqb.centre.y), cqb.centre.y)
+	if kind != "cqb":
+		_cqb_armour(c3)
+	if kind == "arms":
+		_cqb_air(c3)
+	if flying:
+		# In from the south at a height to see the town from, with the fight
+		# already going on under the nose.
+		player.global_transform = Transform3D(Basis(), c3 + Vector3(0.0, 1500.0, 7000.0))
+		player.linear_velocity = Vector3(0, 0, -_entry_speed(230.0))
+		player.gear_down = false
+		player.gear_anim = 0.0
+		player.throttle = 0.8
+		player.power = 0.8
+		_reset_interp.call_deferred(player)
+		Sim.report("the town is seven kilometres off the nose; armour in the streets, their aircraft above it",
+			Sim.Ev.INFO)
+		return
+	if _drive_kind != "":
+		var start: Vector3 = _cqb_vehicle_spot(c3, 0)
+		_cqb_parked_at.append(start)
+		var mine := _spawn_tank(start, 0.0, 0, _drive_kind)
+		mine.died.connect(_on_cqb_vehicle_down)
+		_drive_kind = ""
+		_enter_tank(mine)
+		Sim.report("you are crewing the %s — the fight is up the street; U to get out and go on foot"
+			% mine.display_name(), Sim.Ev.INFO)
+		return
+	_spawn_walker(cqb.spawn_point(0, 0))
+	walker.yaw = 0.0                       # facing up the street, at them
+	cqb.set_player(walker)
+	Sim.report("SPACE vaults low cover and climbs what is taller; F picks up a dropped weapon; F2 for the keys",
+		Sim.Ev.INFO)
+	_cqb_deploy(true)
+
+var _cqb_on_foot := false
+
+# ---------------------------------------------------------- town dressing
+## What is standing in the streets of each town that has been visited, by its
+## place in the scenery's list. One town, one set, whatever the mission: the
+## crane you climbed in a street fight is there when you fly past it.
+var _town_sets: Dictionary = {}
+var _town_tick := 0.0
+
+func town_set(i: int) -> TownSet:
+	if _town_sets.has(i) and is_instance_valid(_town_sets[i]):
+		return _town_sets[i]
+	if not is_instance_valid(scenery) or i < 0 or i >= scenery.sites.size():
+		return null
+	var st: Dictionary = scenery.sites[i]
+	var ts := TownSet.new()
+	ts.name = "TownSet %s" % String(st.get("name", str(i)))
+	add_child(ts)
+	ts.build(st["c"], st)
+	_town_sets[i] = ts
+	return ts
+
+## Stand a town's set up as you come to it and take it down once it is well
+## behind you. Never more than one in a tick: it is a couple of hundred meshes.
+func _tick_town_sets(delta: float) -> void:
+	_town_tick -= delta
+	if _town_tick > 0.0 or not is_instance_valid(scenery):
+		return
+	_town_tick = 1.0
+	var eye := get_viewport().get_camera_3d()
+	if eye == null:
+		return
+	var at := eye.global_position
+	var built := false
+	for i in scenery.sites.size():
+		var c: Vector2 = scenery.sites[i]["c"]
+		var d: float = Vector2(at.x - c.x, at.z - c.y).length()
+		var have: bool = _town_sets.has(i) and is_instance_valid(_town_sets[i])
+		if not have and d < 1300.0 and not built and running:
+			town_set(i)
+			built = true
+		elif have and d > 3600.0:
+			var ts: TownSet = _town_sets[i]
+			if is_instance_valid(cqb) and cqb.dressing == ts:
+				continue
+			ts.queue_free()
+			_town_sets.erase(i)
+## The deploy screen: class, gunsmith and what to go in as.
+var deploy_ui: DeployMenu = null
+
+## Put the deploy screen up. The man is already standing at the start line
+## behind it; until DEPLOY is pressed he does nothing and nothing can see him.
+func _cqb_deploy(first: bool) -> void:
+	# A harness run has nobody to press the button, and a command line that
+	# names a loadout has already chosen.
+	if _cqb_test or _cqb_view != "" or CqbMatch.plain or DisplayServer.get_name() == "headless":
+		return
+	if not is_instance_valid(walker) or not is_instance_valid(cqb):
+		return
+	if not is_instance_valid(deploy_ui):
+		deploy_ui = DeployMenu.new()
+		deploy_ui.name = "Deploy"
+		menu.get_parent().add_child(deploy_ui)
+		deploy_ui.deploy.connect(_on_cqb_deploy)
+	walker.set_physics_process(false)
+	cqb.set_away(true)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var takes: String = {"ground": "ground", "arms": "any"}.get(String(Sim.mission), "none")
+	deploy_ui.open(takes, first, String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa")))
+
+func _on_cqb_deploy(what: String) -> void:
+	if not is_instance_valid(cqb):
+		return
+	# the click on the button is still down
+	Sim.block_until_released([&"foot_fire", &"fire", &"gun"])
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	if what == "foot" or not is_instance_valid(walker):
+		if is_instance_valid(walker):
+			var all: Array = CqbMatch.kit_classes()
+			walker.apply_class(all[clampi(CqbMatch.class_pick, 0, all.size() - 1)])
+			walker.set_physics_process(true)
+			walker.activate()
+		cqb.set_away(false)
+		return
+	if what.begins_with("veh:"):
+		var at: Vector3 = _cqb_vehicle_spot(Vector3(cqb.centre.x,
+			Sim.height_at(cqb.centre.x, cqb.centre.y), cqb.centre.y), 0)
+		cqb.set_away(false)
+		cqb.set_player(null)
+		var mine := _spawn_tank(at, 0.0, 0, what.substr(4))
+		mine.died.connect(_on_cqb_vehicle_down)
+		_enter_tank(mine)
+		Sim.report("you are crewing the %s — U to get out and go on foot" % mine.display_name(),
+			Sim.Ev.INFO)
+		return
+	# An aeroplane. Only offered before the match has begun, because taking
+	# one means beginning it again with you in the air.
+	_start(what, String(Sim.mission))
+
+## Two vehicles a side on the start lines: a tank and something lighter, in
+## each side's own kit. They go for the other end of town and fight what they
+## meet on the way.
+func _cqb_armour(c3: Vector3) -> void:
+	var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+	var ours: Array = ["m1a2", "bradley"] if nato else ["t90", "bmp3"]
+	var theirs: Array = ["t90", "bmp3"] if nato else ["m1a2", "bradley"]
+	for team in [0, 1]:
+		var kit: Array = ours if team == 0 else theirs
+		var z_sign: float = 1.0 if team == 0 else -1.0
+		for i in kit.size():
+			if not Tank.KINDS.has(kit[i]):
+				continue
+			var at := _cqb_vehicle_spot(c3, team)
+			var t := _spawn_tank(at, 0.0 if team == 0 else PI, team, String(kit[i]))
+			_cqb_parked_at.append(at)
+			t.ai = true
+			t.ai_goal = c3 + Vector3(-30.0 + i * 60.0, 0.0, -z_sign * 110.0)
+			t.name = "%s %s" % ["Blue" if team == 0 else "Red", String(kit[i])]
+			t.died.connect(_on_cqb_vehicle_down)
+
+var _cqb_parked_at: Array = []
+
+## Somewhere on a side's own street to put a vehicle down where nothing on
+## the other side's street can see it. They were stood at fixed points, and
+## two of those points looked straight at each other down the gaps between
+## the buildings: the match opened with the tanks already laid on one another.
+func _cqb_vehicle_spot(c3: Vector3, team: int) -> Vector3:
+	var z: float = c3.z + (126.0 if team == 0 else -126.0)
+	var far_z: float = c3.z - (126.0 if team == 0 else -126.0)
+	var best := Vector3(c3.x + 60.0, c3.y, z)
+	var best_score := 1e9
+	for k in 29:
+		# working outwards from a little off the middle, alternating sides
+		var x: float = c3.x + (20.0 + floorf(k * 0.5) * 8.0) * (1.0 if k % 2 == 0 else -1.0)
+		var p := Vector3(x, Sim.height_at(x, z), z)
+		if Obstacles.hit(p + Vector3(0, 1.5, 0), 4.5) >= 0:
+			continue
+		var crowded := false
+		for q in _cqb_parked_at:
+			if (q as Vector3).distance_to(p) < 16.0:
+				crowded = true
+		if crowded:
+			continue
+		# how much of the far street can see this spot, and whether anything
+		# already parked over there can
+		var score := 0.0
+		for j in 23:
+			var fx: float = c3.x - 110.0 + j * 10.0
+			if Obstacles.segment(p + Vector3(0, 2.2, 0),
+					Vector3(fx, Sim.height_at(fx, far_z) + 2.2, far_z)) >= 1.0:
+				score += 1.0
+		for q2 in _cqb_parked_at:
+			if absf((q2 as Vector3).z - z) > 60.0 and Obstacles.segment(p + Vector3(0, 2.2, 0),
+					(q2 as Vector3) + Vector3(0, 2.2, 0)) >= 1.0:
+				score += 50.0
+		score += absf(x - c3.x) * 0.01
+		if score < best_score:
+			best_score = score
+			best = p
+	return best
+
+func _on_cqb_vehicle_down(who: Node) -> void:
+	if is_instance_valid(cqb) and who is Tank:
+		cqb.vehicle_down((who as Tank).team, (who as Tank).display_name())
+	if who == tank and is_instance_valid(cqb):
+		# it was yours: out of the wreck, back to the start line, and choose
+		# again what to go in as
+		var fight := cqb
+		await get_tree().create_timer(3.0).timeout
+		if not is_instance_valid(fight) or fight != cqb:
+			return
+		if is_instance_valid(tank):
+			_leave_tank()
+		if is_instance_valid(walker):
+			walker.queue_free()
+		_spawn_walker(fight.spawn_point(0, 0))
+		walker.yaw = 0.0
+		fight.set_player(walker)
+		_cqb_deploy(false)
+
+## Both sides' aircraft, moved to wherever the town is. The flights are laid
+## out round the home valley; over a town three hundred kilometres away they
+## are the same flights, shifted.
+func _cqb_air(c3: Vector3) -> void:
+	var before: Array = get_tree().get_nodes_in_group("hittable")
+	_spawn_threats(2)
+	_spawn_allies()
+	var shift: Vector3 = c3 - Vector3(-1084.0, 256.0, -6414.0)
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if before.has(n) or not (n is Aircraft):
+			continue
+		var a := n as Aircraft
+		a.global_position += shift
+		if "home" in a:
+			a.home += Vector3(shift.x, 0.0, shift.z)
+		_reset_interp.call_deferred(a)
+
 
 ## Three km final on the boat.
 func _setup_carrier_approach() -> void:
@@ -12604,12 +13041,29 @@ func _run_weapon_test(delta: float) -> void:
 				_wtest = ""
 
 func _on_walker_died(where: Vector3) -> void:
-	Sim.report("pilot down", Sim.Ev.BAD)
+	var fight := cqb
+	if is_instance_valid(fight):
+		var by: Node = walker.last_attacker if is_instance_valid(walker) else null
+		Sim.report("you were dropped by %s" % (String(by.get("callsign"))
+			if is_instance_valid(by) and by is Soldier else "your own grenade"), Sim.Ev.BAD)
+		fight.player_down()
+	else:
+		Sim.report("pilot down", Sim.Ev.BAD)
 	await get_tree().create_timer(3.5).timeout
 	if not on_foot or not is_inside_tree():
 		return
 	if is_instance_valid(walker):
 		walker.queue_free()
+	# Back in with the rest of the side, not six paces from where it happened:
+	# in a street fight that is six paces from whoever did it.
+	if is_instance_valid(fight) and fight == cqb:
+		_spawn_walker(fight.spawn_point(0, 0))
+		walker.yaw = 0.0
+		fight.set_player(walker)
+		_cqb_deploy(false)
+		return
+	if is_instance_valid(cqb) or is_instance_valid(fight):
+		return
 	_spawn_walker(where + Vector3(6.0, 0, 6.0))
 
 ## Crew in the back of a gunship can take the gun station without flying it.
@@ -12807,6 +13261,18 @@ func _clear_mission() -> void:
 		mode.queue_free()
 	mode = null
 	hud.mode = null
+	if is_instance_valid(cqb):
+		cqb.queue_free()
+	cqb = null
+	if is_instance_valid(deploy_ui):
+		deploy_ui.queue_free()
+	deploy_ui = null
+	_cqb_gunship = null
+	_cqb_parked = null
+	_cqb_parked_at.clear()
+	_cqb_tel = null
+	_cqb_tel_t = 0.0
+	_cqb_gun_t = 0.0
 	for z in get_tree().get_nodes_in_group("zones"):
 		if is_instance_valid(z):
 			z.queue_free()
@@ -13112,6 +13578,12 @@ func _shell_input(e: InputEvent) -> void:
 			if is_instance_valid(cam) and cam.current:
 				cam.zoom = true
 				return
+		if mb.button_index == MOUSE_BUTTON_RIGHT and gunning:
+			# At a gun station the sight is the seat. Right click stowed it,
+			# which left the gunner looking out of whatever camera was behind
+			# it -- from a gunship called in over a street fight, his own eyes
+			# back on the ground.
+			return
 		if mb.button_index == MOUSE_BUTTON_RIGHT and not is_instance_valid(tank) \
 				and not on_foot:
 			if _at_conn():
@@ -13305,6 +13777,24 @@ func _parse_cmdline() -> void:
 				_at = Vector3(float(av[0]), float(av[1]), float(av[2]))
 		elif a == "--noboard":
 			_skip_board = true
+		elif a.begins_with("--cqbtown="):
+			CqbMatch.town = int(a.substr(10))
+		elif a.begins_with("--cqbkit="):
+			var kv := a.substr(9).split(",")
+			if kv.size() >= 2:
+				CqbMatch.loadout = [kv[0], kv[1]]
+				CqbMatch.plain = true
+		elif a == "--cqbquiet":
+			CqbMatch.quiet = true
+			CqbMatch.plain = true
+		elif a.begins_with("--cqbclass="):
+			CqbMatch.class_pick = int(a.substr(11))
+		elif a.begins_with("--cqbview="):
+			# with --preset=cqb --shot=: fp, ads, tp, tpads, reload, dmr, pistol, run
+			_cqb_view = a.substr(10)
+		elif a == "--cqbtest":
+			# with --preset=cqb: watch a street fight run and say what happened
+			_cqb_test = true
 		elif a.begins_with("--weapontest="):
 			_wtest = a.substr(13)
 		elif a == "--host":
@@ -13320,7 +13810,8 @@ func _parse_cmdline() -> void:
 		elif a.begins_with("--runfor="):
 			_run_for = float(a.substr(9))
 		elif a.begins_with("--mission="):
-			menu.mission_id = a.substr(10)
+			# through the menu's own door, so what it lists follows the mode
+			menu._select_mission(a.substr(10))
 		elif a == "--netlog":
 			_net_log = true
 			net.verbose = true
@@ -16318,3 +16809,340 @@ func _run_faction_test() -> void:
 	print("[faction] RESULT: %s" % ("ok" if wet == 0 and has_field
 		and home_up > 0.0 and nearest > 2000.0
 		else "FAILED — %d of %d countries are under water" % [wet, names.size()]))
+
+
+## Does the street fight actually happen? Run with --preset=cqb --cqbtest.
+##
+## Nothing here drives the player: it stands him where he spawned and watches
+## the two squads. What it wants to know is whether the set was built, whether
+## the men can find their way through it, whether they find each other, and
+## whether the rig is holding the weapon and standing on the ground while they
+## do. Each of those has a way of failing silently -- a squad that cannot route
+## stands at its start line for ever and the match simply never begins.
+func _tick_cqb_test(delta: float) -> void:
+	_cqb_t += delta
+	if not is_instance_valid(walker):
+		# in a vehicle or an aeroplane: nothing of his to measure, so just
+		# watch the fight
+		if not _cqb_los_said and _cqb_t > 0.3:
+			_cqb_los_said = true
+			var sees := 0
+			var pairs := 0
+			for a in get_tree().get_nodes_in_group("hittable"):
+				for b in get_tree().get_nodes_in_group("hittable"):
+					if a is Tank and b is Tank and (a as Tank).team == 0 and (b as Tank).team == 1:
+						pairs += 1
+						if Obstacles.segment((a as Tank).global_position + Vector3(0, 2.2, 0),
+								(b as Tank).global_position + Vector3(0, 2.2, 0)) >= 1.0:
+							sees += 1
+			print("[cqb] vehicles at the start: %d of %d opposing pairs can see each other" % [sees, pairs])
+		if _cqb_t > float(_cqb_said + 1) * 20.0:
+			_cqb_said += 1
+			var sv: Dictionary = mode.hud_state()
+			var tanks := 0
+			var planes := 0
+			for n in get_tree().get_nodes_in_group("hittable"):
+				if n is Tank and (n as Tank).alive:
+					tanks += 1
+				elif n is Aircraft and (n as Aircraft).alive and n != player:
+					planes += 1
+			print("[cqb] t=%3.0f  kills us %d them %d   %d men, %d vehicles and %d aircraft up; in a %s" % [
+				_cqb_t, int((sv["kills"] as Dictionary).get(0, 0)), int((sv["kills"] as Dictionary).get(1, 0)),
+				cqb.soldiers.size(), tanks, planes,
+				tank.display_name() if is_instance_valid(tank) else String(player.spec["name"])])
+		if _cqb_t > 62.0:
+			get_tree().quit()
+		return
+	if _cqb_said == 0 and _cqb_t > 0.5:
+		_cqb_said = 1
+		print("[cqb] %s, %s: %d cranes (top at %s), %d scaffolds" % [String(cqb.stats.get("faction", "?")),
+			String(cqb.stats.get("biome", "?")), int(cqb.stats.get("cranes", 0)),
+			str(cqb.crane_at.round()), int(cqb.stats.get("scaffolds", 0))])
+		print("[cqb] arena at %s: %d props, %d ruins, %d of %d grid points walkable, %d obstacle boxes of our own" % [
+			str(cqb.centre), int(cqb.stats["props"]), int(cqb.stats["ruins"]),
+			int(cqb.stats["free_cells"]), cqb._n * cqb._n, cqb.dressing._boxes.size()])
+		var a: Vector3 = cqb.spawn_point(0)
+		var b: Vector3 = cqb.spawn_point(1)
+		var route: PackedVector2Array = cqb.path(a, b)
+		var walked := 0.0
+		for i in range(1, route.size()):
+			walked += route[i].distance_to(route[i - 1])
+		print("[cqb] start line to start line: %.0f m apart, route of %d points and %.0f m" % [
+			a.distance_to(b), route.size(), walked])
+		print("[cqb] %d soldiers up; player at %s with %s, %d rounds" % [
+			cqb.soldiers.size(), str(walker.global_position.round()),
+			String(walker.gun_spec()["name"]), walker.ammo])
+		# the rig, swept through the whole of its travel with every weapon
+		var body: Pilot = walker.body
+		for g in Firearm.KIT:
+			body.equip(g)
+			var worst_r := 0.0
+			var worst_l := 0.0
+			var worst_f := 0.0
+			for step in 60:
+				body.in_pitch = deg_to_rad(lerpf(-75.0, 75.0, float(step % 20) / 19.0))
+				body.in_ads = 1.0 if step >= 20 else 0.0
+				body.in_crouch = step >= 40
+				body.in_lean = 0.0 if step < 50 else 1.0
+				body.in_move = Vector2.ZERO
+				body.in_air = 0
+				body.in_ready = 1.0
+				body.in_reload = -1.0
+				for settle in 30:
+					body.animate(0.05)
+				var e: Dictionary = body.rig_error()
+				worst_r = maxf(worst_r, float(e["hand_r"]))
+				worst_l = maxf(worst_l, float(e["hand_l"]))
+				worst_f = maxf(worst_f, maxf(absf(float(e["foot_l"])), absf(float(e["foot_r"]))))
+			print("[cqb] rig %-14s worst hand off grip: right %.3f m, left %.3f m; worst foot off floor %.3f m" % [
+				String(g["name"]), worst_r, worst_l, worst_f])
+		body.equip(walker.gun_spec())
+		walker.take_hit(0.0)
+		# Getting over and onto things. Stand him square in front of one of
+		# each and ask; then run the move to its end and see where he is.
+		for want in [["barrier", "vault"], ["sandbags", "vault"], ["container", "climb"],
+				["crates", "climb"], ["car", "climb"]]:
+			var found := false
+			for pr in cqb.props:
+				if String(pr[0]) != String(want[0]) or found:
+					continue
+				var at: Vector3 = pr[1]
+				var across := Basis(Vector3.UP, float(pr[2])) * Vector3(0, 0, 1)
+				if String(want[0]) in ["container", "car"]:
+					across = Basis(Vector3.UP, float(pr[2])) * Vector3(1, 0, 0)
+				var thick: float = {"barrier": 0.31, "sandbags": 0.40, "crates": 0.65,
+					"car": 0.93, "container": 1.22}[String(want[0])]
+				var stand: Vector3 = at + across * (thick + 0.75)
+				stand.y = Sim.height_at(stand.x, stand.z)
+				if Obstacles.blocks(stand, Walker.BODY_R) >= 0:
+					continue
+				found = true
+				walker.global_position = stand
+				walker.on_floor = true
+				var began: bool = walker._begin_traverse(-across, false)
+				var kind: String = walker._trav
+				var span: float = walker._trav_span
+				var steps := 0
+				while walker._trav != "" and steps < 600:
+					walker._traverse(1.0 / 120.0)
+					steps += 1
+				print("[cqb] %-9s (top %.2f m): %s%s, %.2f s, ends %.2f m above where he started and %.2f m on" % [
+					String(want[0]), Obstacles.top_at(at.x, at.z) - stand.y,
+					kind if began else "REFUSED", "" if kind == String(want[1]) or not began
+					else " (expected %s)" % String(want[1]), span,
+					walker.global_position.y - stand.y,
+					Vector2(walker.global_position.x - stand.x, walker.global_position.z - stand.z).length()])
+			if not found:
+				print("[cqb] no %s to try" % String(want[0]))
+		# Up the crane, the way anybody would: jump at the mast, climb, and
+		# walk out along the jib.
+		if cqb.crane_at != Vector3.INF:
+			var mast := Vector3(cqb.crane_at.x, 0.0, cqb.crane_at.z)
+			var from_side := mast + Vector3(0, 0, 1.9)
+			from_side.y = Sim.height_at(from_side.x, from_side.z)
+			walker.global_position = from_side
+			walker.on_floor = true
+			var took: bool = walker._begin_traverse(Vector3(0, 0, -1), false)
+			var ticks := 0
+			walker.test_climb = 1.0
+			while (walker._wall >= 0 or walker._trav != "") and ticks < 6000:
+				if walker._wall >= 0:
+					walker._on_wall(1.0 / 120.0)
+				else:
+					walker._traverse(1.0 / 120.0)
+				ticks += 1
+			walker.test_climb = 0.0
+			var up_y: float = walker.global_position.y
+			# along the jib, a pace at a time, the way the ground code would
+			var jib_ok := 0
+			for stepn in 20:
+				var q := walker.global_position + (Vector3(1, 0, 0) if stepn >= 0 else Vector3.ZERO)
+				if absf(Obstacles.floor_under(q.x, q.z, up_y) - up_y) < 0.2:
+					jib_ok += 1
+			var q2 := walker.global_position + Vector3(0, 0, 1)
+			var jz := 0
+			for stepn in 20:
+				if absf(Obstacles.floor_under(q2.x, q2.z + stepn, up_y) - up_y) < 0.2:
+					jz += 1
+			print("[cqb] crane: took hold=%s, %.1f s to the top, now %.1f m up (mast is %.1f); jib underfoot for %d m; and standing under the jib the floor is %.1f m up" % [
+				str(took), ticks / 120.0, up_y - from_side.y, cqb.crane_at.y - from_side.y,
+				maxi(jib_ok, jz), Obstacles.floor_under(mast.x + 8.0, mast.z, from_side.y) - from_side.y
+				if Obstacles.floor_under(mast.x + 8.0, mast.z, from_side.y) > -1e8 else 0.0])
+			walker.third = false
+			walker._wall = -1
+		# A ladder: step onto it, go up it, and check the hands and feet are
+		# on the face the whole way.
+		print("[cqb] %d ladders" % cqb.ladders.size())
+		if not cqb.ladders.is_empty():
+			var lad: Array = cqb.ladders[cqb.ladders.size() - 1]
+			var lfoot: Vector3 = lad[0]
+			var ln2: Vector3 = lad[1]
+			walker.global_position = lfoot + ln2 * 0.7
+			walker.global_position.y = Sim.height_at(walker.global_position.x, walker.global_position.z)
+			walker.on_floor = true
+			var seen_l: Array = TownSet.ladder_at(walker.global_position)
+			var y0: float = walker.global_position.y
+			if not seen_l.is_empty():
+				walker._take_ladder(seen_l)
+			var on_it: bool = walker._ladder
+			walker.test_climb = 1.0
+			var worst_h := 0.0
+			var worst_f := 0.0
+			var lt := 0
+			while (walker._wall >= 0 or walker._trav != "") and lt < 6000:
+				if walker._wall >= 0:
+					walker._on_wall(1.0 / 120.0)
+					if lt > 60 and walker._wall >= 0:
+						var le: Dictionary = walker.body.rig_error()
+						worst_h = maxf(worst_h, maxf(float(le["hand_l"]), float(le["hand_r"])))
+						worst_f = maxf(worst_f, maxf(float(le["foot_l"]), float(le["foot_r"])))
+				else:
+					walker._traverse(1.0 / 120.0)
+				lt += 1
+			walker.test_climb = 0.0
+			print("[cqb] ladder: found=%s, on it=%s, %.1f s, ends %.1f m up of %.1f; worst hand %.0f mm and worst foot %.0f mm off the face" % [
+				str(not seen_l.is_empty()), str(on_it), lt / 120.0, walker.global_position.y - y0,
+				float(lad[3]) - y0, worst_h * 1000.0, worst_f * 1000.0])
+			walker.third = false
+			walker._wall = -1
+			walker.body.in_action = ""
+		# How steady the sights are on the move: walk with them up and measure
+		# how far the eye and the weapon wander from each other and in space.
+		body.equip(walker.gun_spec())
+		for case in [["standing, walking", false, false], ["crouched, walking", true, false],
+				["prone, crawling", false, true]]:
+			body.in_crouch = case[1]
+			body.in_prone = case[2]
+			body.in_ads = 1.0
+			body.in_pitch = 0.0
+			body.in_lean = 0.0
+			body.in_action = ""
+			body.in_move = Vector2(0.6, 2.2) if not case[2] else Vector2(0.0, 0.9)
+			for settle in 480:
+				body.animate(1.0 / 120.0)
+			var e0: Vector3 = walker.to_local(body.eye_pos())
+			var w0: Vector3 = body.weapon_mount.position - e0
+			var eye_w := 0.0
+			var gun_w := 0.0
+			var hand_w := 0.0
+			for tick in 360:
+				body.animate(1.0 / 120.0)
+				var e1: Vector3 = walker.to_local(body.eye_pos())
+				eye_w = maxf(eye_w, e1.distance_to(e0))
+				gun_w = maxf(gun_w, (body.weapon_mount.position - e1).distance_to(w0))
+				var re: Dictionary = body.rig_error()
+				hand_w = maxf(hand_w, maxf(float(re["hand_r"]), float(re["hand_l"])))
+			print("[cqb] sights up, %-18s eye moves %.1f mm, weapon moves %.1f mm against the eye, worst hand off grip %.1f mm; eye height %.2f m" % [
+				String(case[0]) + ":", eye_w * 1000.0, gun_w * 1000.0, hand_w * 1000.0, e0.y])
+		body.in_crouch = false
+		body.in_prone = false
+		body.in_move = Vector2.ZERO
+		# The tube and the missile. A tank put down in front of him for the
+		# rocket; for the missile, whatever of theirs is flying.
+		walker.global_position = cqb.spawn_point(0, 0)
+		var here: Vector3 = walker.global_position
+		var dummy := _spawn_tank(here + Vector3(0, 0, -45.0), 0.0, 1, "bmp3")
+		dummy.ai = false
+		var hp0: float = dummy.health
+		var fwd0 := (dummy.global_position + Vector3(0, 1.2, 0) - (here + Vector3(0, 1.6, 0))).normalized()
+		Firearm.rocket(self, walker, 0, Firearm.spec("law"), here + Vector3(0, 1.6, 0), fwd0)
+		_cqb_dummy = dummy
+		_cqb_dummy_hp = hp0
+		walker.apply_class(CqbMatch.kit_classes()[1])
+		print("[cqb] anti-armour class: slots %s, holding %s (%d + %d), second %s" % [str(walker.slots),
+			String(walker.gun_spec()["name"]), walker.ammo, walker.spare,
+			String(walker.spec_of(int(walker.slots[1]))["name"])])
+		var mk4: Dictionary = Firearm.fitted("carbine", {"sight": "scope", "grip": true, "mag": true})
+		print("[cqb] gunsmith: carbine with scope, grip and long magazine: fov %.0f, magazine %d, kick %.4f (stock %.4f)" % [
+			float(mk4["fov"]), int(mk4["mag"]), float(mk4["kick"]), float(Firearm.spec("carbine")["kick"])])
+		walker.apply_class(CqbMatch.kit_classes()[0])
+		# and a weapon off the road
+		var home: Vector3 = cqb.spawn_point(0, 0)
+		walker.global_position = home
+		Firearm.drop(self, "shotgun", 4, home + Vector3(0.8, 0, -0.8))
+		var before: String = String(walker.gun_spec()["id"])
+		walker._near_drop = null
+		for n in get_tree().get_nodes_in_group("pickups"):
+			walker._grab_item = n
+		walker._grab_t = 0.0
+		for i in 120:
+			walker._reach_for(1.0 / 120.0)
+		print("[cqb] pick-up: was holding %s, now %s with %d + %d; slots %s; %d weapon(s) left on the road" % [
+			before, String(walker.gun_spec()["id"]), walker.ammo, walker.spare,
+			str(walker.slots), get_tree().get_nodes_in_group("pickups").size()])
+	if _cqb_t > float(_cqb_said) * 10.0 and _cqb_said >= 1:
+		_cqb_said += 1
+		var st: Dictionary = mode.hud_state()
+		var moved := 0
+		var fighting := 0
+		var far := 0.0
+		for s in cqb.soldiers:
+			if not is_instance_valid(s):
+				continue
+			var sd := s as Soldier
+			if sd.vel.length() > 0.5:
+				moved += 1
+			if sd.state == Soldier.FIGHT:
+				fighting += 1
+			far = maxf(far, absf(sd.global_position.z - cqb.centre.y))
+		print("[cqb] t=%3.0f  kills us %d them %d   %d up, %d moving, %d in contact; player health %.0f, deaths %d" % [
+			_cqb_t, int((st["kills"] as Dictionary).get(0, 0)),
+			int((st["kills"] as Dictionary).get(1, 0)), cqb.soldiers.size(), moved,
+			fighting, walker.health if is_instance_valid(walker) else -1.0, cqb.deaths])
+	if _cqb_dummy != null and _cqb_t > 3.0:
+		print("[cqb] rocket at a BMP-3 at 45 m: health %.0f -> %.0f, alive=%s" % [_cqb_dummy_hp,
+			_cqb_dummy.health if is_instance_valid(_cqb_dummy) else -1.0,
+			str(_cqb_dummy.alive) if is_instance_valid(_cqb_dummy) else "gone"])
+		if is_instance_valid(_cqb_dummy):
+			_cqb_dummy.queue_free()
+		_cqb_dummy = null
+	# the support, called the way a streak calls it
+	if _cqb_said >= 2 and _cqb_sup == 0 and _cqb_t > 12.0:
+		_cqb_sup = 1
+		var mk := Vector3(cqb.centre.x, Sim.height_at(cqb.centre.x, cqb.centre.y - 60.0), cqb.centre.y - 60.0)
+		var reds: int = cqb.enemies_of(0).size()
+		for i in 7:
+			cqb._bombs.append([0.1 + i * 0.1, mk + Vector3(0, 0, -20.0 + i * 12.0)])
+		print("[cqb] airstrike laid on %s with %d hostiles up" % [str(mk.round()), reds])
+		print("[cqb] fire mission accepted: %s" % str(cqb_fire_mission(mk + Vector3(40, 0, -30))))
+	if _cqb_sup == 1 and _cqb_t > 14.0:
+		_cqb_sup = 2
+		print("[cqb] after the stick: player kills %d, streak %d, banked %s" % [cqb.kills,
+			cqb.streak, str(cqb.bank)])
+		print("[cqb] gunship called: %s" % str(cqb_gunship(Vector3(cqb.centre.x, walker.global_position.y, cqb.centre.y))))
+	if _cqb_sup == 2 and _cqb_t > 24.0:
+		_cqb_sup = 3
+		if is_instance_valid(_cqb_gunship):
+			var g3 := _cqb_gunship
+			print("[cqb] gunship after 10 s: %.0f m up, %.0f m/s, %.0f m from the town, gunning=%s, pod %s on %s, walker hidden=%s" % [
+				g3.global_position.y - walker.global_position.y, g3.linear_velocity.length(),
+				Vector2(g3.global_position.x - cqb.centre.x, g3.global_position.z - cqb.centre.y).length(),
+				str(gunning), str(pod.active), str(pod.aim_point().round()),
+				str(not _station_walker.visible if is_instance_valid(_station_walker) else false)])
+			_cqb_gun_t = 0.5
+		else:
+			print("[cqb] gunship is not there")
+	if _cqb_sup == 3 and _cqb_t > 26.0:
+		_cqb_sup = 4
+		print("[cqb] gunship gone=%s, back on foot=%s, walker camera live=%s, player is the parked jet=%s" % [
+			str(not is_instance_valid(_cqb_gunship)), str(on_foot),
+			str(is_instance_valid(walker) and walker.cam.current), str(player == _cqb_parked)])
+	if _cqb_sup >= 1 and is_instance_valid(_cqb_tel) and _cqb_tel_fired and _cqb_sup < 9 \
+			and _cqb_t > 30.0:
+		_cqb_sup = 9
+		print("[cqb] fire support %s fired from %.0f m; last burst %.0f m from the mark" % [
+			_cqb_tel.display_name(), _cqb_tel.global_position.distance_to(walker.global_position),
+			Sim.last_burst.distance_to(Vector3(cqb.centre.x + 40, Sim.last_burst.y, cqb.centre.y - 90))])
+	if _cqb_t > 62.0:
+		if _cqb_tel_fired:
+			print("[cqb] the last thing to go off was %.0f m from the fire mission's mark" % 
+				Vector2(Sim.last_burst.x - (cqb.centre.x + 40.0), Sim.last_burst.z - (cqb.centre.y - 90.0)).length())
+		if not _cqb_tel_fired:
+			print("[cqb] fire support never fired: lay error %.2f, timer %.1f" % [
+				_cqb_tel.lay_error() if is_instance_valid(_cqb_tel) else -1.0, _cqb_tel_t])
+		var st2: Dictionary = mode.hud_state()
+		var total: int = int((st2["kills"] as Dictionary).get(0, 0)) \
+			+ int((st2["kills"] as Dictionary).get(1, 0))
+		print("[cqb] RESULT: %s — %d kills in a minute" % [
+			"the fight happens" if total > 0 else "FAILED, nobody found anybody", total])
+		get_tree().quit()

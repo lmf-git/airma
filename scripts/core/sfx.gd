@@ -208,8 +208,268 @@ static func _bake(id: String) -> AudioStreamWAV:
 			for i in n:
 				shake[i] = b[i] * (0.6 + 0.4 * sin(TAU * 11.0 * float(i) / RATE))
 			return _wav(_norm(shake, 0.8), true)
+		# ------------------------------------------------------ small arms
+		# One shot was doing for every weapon a man can carry, pitched up or
+		# down. A report has three parts and each weapon weights them its own
+		# way: the crack of the gas leaving the muzzle, the thump of the
+		# action and the chest, and the tail the street hands back.
+		"carbine":
+			return _wav(_shot(0.34, 0.80, 0.30, 0.95, 150.0, 0.55, 0.20, 211), false)
+		"smg":
+			return _wav(_shot(0.22, 0.62, 0.36, 0.80, 210.0, 0.40, 0.10, 223), false)
+		"shotgun":
+			return _wav(_shot(0.60, 0.50, 0.14, 1.50, 78.0, 1.10, 0.36, 227), false)
+		"dmr":
+			return _wav(_shot(0.55, 0.88, 0.22, 1.20, 105.0, 0.85, 0.34, 229), false)
+		"pistol":
+			return _wav(_shot(0.24, 0.70, 0.40, 0.70, 240.0, 0.45, 0.10, 233), false)
+		"suppressed":
+			# A can takes the crack off and leaves the gas and the action: a
+			# cough, and the bolt going home after it.
+			var n := int(RATE * 0.20)
+			var b := _noise(n, 0.11, 401)
+			var hiss := _noise(n, 0.55, 409, 0.25)
+			var clack := _clicks([[0.035, 0.9, 1700.0, 0.012]], 0.20, 419)
+			for i in n:
+				var secs := float(i) / RATE
+				b[i] = b[i] * exp(-secs * 48.0) * 1.3 + hiss[i] * exp(-secs * 30.0) * 0.28 \
+					+ sin(TAU * 120.0 * secs) * exp(-secs * 40.0) * 0.5 + clack[i] * 0.5
+			return _wav(_norm(b, 0.8), false)
+		"shot_far":
+			# What a rifle is from three streets away: the crack has gone and
+			# what arrives is the thump and what the walls made of it.
+			var n := int(RATE * 0.9)
+			var b := _noise(n, 0.07, 239)
+			var slap := _noise(n, 0.16, 241)
+			var gap := int(RATE * 0.11)
+			for i in n:
+				var t := float(i) / float(n)
+				var v: float = b[i] * pow(1.0 - t, 7.0)
+				if i >= gap:
+					var t2 := float(i - gap) / float(n - gap)
+					v += slap[i] * pow(1.0 - t2, 5.0) * 0.55
+				b[i] = v
+			return _wav(_norm(b, 0.9), false)
+		"dry":
+			return _wav(_clicks([[0.0, 0.9, 3200.0, 0.012]], 0.09, 251), false)
+		"mag_out":
+			return _wav(_clicks([[0.0, 0.7, 1500.0, 0.020], [0.07, 0.5, 620.0, 0.05]],
+				0.24, 257), false)
+		"mag_in":
+			return _wav(_clicks([[0.0, 0.5, 900.0, 0.03], [0.09, 1.0, 1900.0, 0.022]],
+				0.26, 263), false)
+		"bolt":
+			return _wav(_clicks([[0.0, 0.8, 1300.0, 0.03], [0.11, 1.0, 2400.0, 0.018]],
+				0.30, 269), false)
+		"pump":
+			return _wav(_clicks([[0.0, 0.9, 700.0, 0.05], [0.17, 1.0, 950.0, 0.045]],
+				0.42, 271), false)
+		"shell":
+			return _wav(_clicks([[0.0, 0.7, 1100.0, 0.03], [0.05, 0.6, 500.0, 0.04]],
+				0.20, 277), false)
+		"cloth":
+			# webbing and a sling: what bringing a weapon up sounds like
+			var n := int(RATE * 0.28)
+			var b := _noise(n, 0.5, 281, 0.2)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] *= sin(t * PI) * (0.6 + 0.4 * sin(t * 40.0))
+			return _wav(_norm(b, 0.45), false)
+		"step_a", "step_b", "step_c":
+			# a boot on a hard road: a heel, then the scuff of the sole
+			var which: int = ["step_a", "step_b", "step_c"].find(id)
+			var n := int(RATE * 0.16)
+			var b := _noise(n, 0.10 + 0.03 * which, 283 + which * 7)
+			var grit := _noise(n, 0.6, 293 + which * 5, 0.3)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = b[i] * pow(1.0 - t, 9.0) + grit[i] * pow(1.0 - t, 4.0) \
+					* clampf(t / 0.12, 0.0, 1.0) * 0.20
+			return _wav(_norm(b, 0.8), false)
+		"land":
+			var n := int(RATE * 0.3)
+			var b := _noise(n, 0.07, 307)
+			var grit := _noise(n, 0.5, 311, 0.3)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = b[i] * pow(1.0 - t, 6.0) + grit[i] * pow(1.0 - t, 5.0) * 0.3
+			return _wav(_norm(b, 0.9), false)
+		"impact_hard":
+			# into masonry: a tick and a spray of grit
+			var n := int(RATE * 0.16)
+			var b := _noise(n, 0.85, 313, 0.35)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] *= pow(1.0 - t, 12.0) + pow(1.0 - t, 3.0) * 0.12
+			return _wav(_norm(b, 0.85), false)
+		"impact_soft":
+			var n := int(RATE * 0.14)
+			var b := _noise(n, 0.16, 317)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] *= pow(1.0 - t, 8.0)
+			return _wav(_norm(b, 0.8), false)
+		"ricochet":
+			# the whine of something tumbling off a wall, falling in pitch
+			var n := int(RATE * 0.55)
+			var b := PackedFloat32Array()
+			b.resize(n)
+			var tick := _noise(n, 0.85, 331, 0.35)
+			var ph := 0.0
+			for i in n:
+				var t := float(i) / float(n)
+				var f: float = lerpf(3400.0, 1300.0, pow(t, 0.6))
+				ph += TAU * f / RATE
+				b[i] = (sin(ph) + sin(ph * 1.51) * 0.4) * pow(1.0 - t, 2.4) * 0.5 \
+					* clampf(t / 0.03, 0.0, 1.0) + tick[i] * pow(1.0 - t, 30.0)
+			return _wav(_norm(b, 0.7), false)
+		"snap":
+			# a supersonic round passing close: its own small crack, no report
+			var n := int(RATE * 0.07)
+			var b := _noise(n, 0.95, 337, 0.4)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] *= pow(1.0 - t, 14.0)
+			return _wav(_norm(b, 0.95), false)
+		"whiz":
+			var n := int(RATE * 0.3)
+			var b := _noise(n, 0.5, 347, 0.12)
+			var ph := 0.0
+			for i in n:
+				var t := float(i) / float(n)
+				var f: float = lerpf(1900.0, 700.0, t)
+				ph += TAU * f / RATE
+				b[i] = (b[i] * 0.5 + sin(ph) * 0.35) * sin(t * PI) * sin(t * PI)
+			return _wav(_norm(b, 0.6), false)
+		"hit_body":
+			var n := int(RATE * 0.12)
+			var b := _noise(n, 0.09, 349)
+			var wet := _noise(n, 0.4, 353)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = b[i] * pow(1.0 - t, 7.0) + wet[i] * pow(1.0 - t, 12.0) * 0.4
+			return _wav(_norm(b, 0.85), false)
+		"hitmark":
+			# the tick that tells you a round landed
+			var n := int(RATE * 0.05)
+			var b := PackedFloat32Array()
+			b.resize(n)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = (sin(TAU * 2300.0 * float(i) / RATE)
+					+ sin(TAU * 3450.0 * float(i) / RATE) * 0.5) * pow(1.0 - t, 5.0)
+			return _wav(_norm(b, 0.5), false)
+		"killmark":
+			var n := int(RATE * 0.16)
+			var b := PackedFloat32Array()
+			b.resize(n)
+			for i in n:
+				var t := float(i) / float(n)
+				var f: float = 1250.0 if t < 0.4 else 1870.0
+				b[i] = sin(TAU * f * float(i) / RATE) * pow(1.0 - t, 2.5)
+			return _wav(_norm(b, 0.5), false)
+		"hurt":
+			# taking a round: a dull knock right in the ears
+			var n := int(RATE * 0.22)
+			var b := _noise(n, 0.05, 359)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = (b[i] + sin(TAU * 90.0 * float(i) / RATE) * 0.6) * pow(1.0 - t, 5.0)
+			return _wav(_norm(b, 0.9), false)
+		"pin":
+			return _wav(_clicks([[0.0, 0.8, 3800.0, 0.012], [0.06, 0.6, 2600.0, 0.03]],
+				0.2, 367), false)
+		"clink":
+			# a grenade body meeting the road
+			var n := int(RATE * 0.2)
+			var b := PackedFloat32Array()
+			b.resize(n)
+			var k := _noise(n, 0.4, 373)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = (sin(TAU * 1700.0 * float(i) / RATE) * 0.5
+					+ sin(TAU * 2750.0 * float(i) / RATE) * 0.3) * pow(1.0 - t, 7.0) \
+					+ k[i] * pow(1.0 - t, 20.0)
+			return _wav(_norm(b, 0.7), false)
+		"frag":
+			# sharper and shorter than a bomb: all crack, with debris after it
+			var n := int(RATE * 1.3)
+			var b := _noise(n, 0.09, 379)
+			var crack := _noise(n, 0.8, 383)
+			var debris := _noise(n, 0.55, 389, 0.3)
+			for i in n:
+				var t := float(i) / float(n)
+				b[i] = b[i] * pow(1.0 - t, 3.2) + crack[i] * pow(1.0 - t, 18.0) * 0.9 \
+					+ debris[i] * pow(1.0 - t, 3.0) * clampf((t - 0.08) / 0.1, 0.0, 1.0) \
+					* 0.10 * (0.5 + 0.5 * sin(t * 90.0))
+			return _wav(_norm(b, 1.0), false)
 		_:
 			return _wav(PackedFloat32Array([0.0]), false)
+
+## A gunshot. `crack` and `body` are filter cutoffs for the two noise layers,
+## `weight` how much chest there is to it, `thump_hz` the low knock of the
+## action, `tail` how much of the street comes back and `slap` how long after.
+static func _shot(dur: float, crack: float, body: float, weight: float,
+		thump_hz: float, tail: float, slap: float, seed_v: int) -> PackedFloat32Array:
+	var n := int(RATE * dur)
+	var hi := _noise(n, crack, seed_v, 0.18)
+	var lo := _noise(n, body * 0.5, seed_v + 2)
+	var echo := _noise(n, 0.14, seed_v + 4)
+	var out := PackedFloat32Array()
+	out.resize(n)
+	var gap := int(RATE * slap * 0.35)
+	for i in n:
+		var t := float(i) / float(n)
+		var secs := float(i) / RATE
+		var v: float = hi[i] * exp(-secs * 95.0) * 1.0
+		v += lo[i] * exp(-secs * 34.0) * weight
+		v += sin(TAU * thump_hz * secs) * exp(-secs * 26.0) * weight * 0.55
+		# the report coming back off the far side of the street
+		if i >= gap:
+			var t2 := float(i - gap) / float(maxi(n - gap, 1))
+			v += echo[i] * pow(1.0 - t2, 3.5) * tail * 0.28
+		out[i] = v * (1.0 - pow(t, 6.0))
+	return _norm(out, 0.97)
+
+## Metal on metal: a list of [when, how loud, ring Hz, how long] struck in turn.
+static func _clicks(hits: Array, dur: float, seed_v: int) -> PackedFloat32Array:
+	var n := int(RATE * dur)
+	var grit := _noise(n, 0.8, seed_v, 0.3)
+	var out := PackedFloat32Array()
+	out.resize(n)
+	for h in hits:
+		var at := int(float(h[0]) * RATE)
+		var amp: float = h[1]
+		var hz: float = h[2]
+		var span: float = h[3]
+		for i in range(at, n):
+			var secs := float(i - at) / RATE
+			if secs > span * 6.0:
+				break
+			var env: float = exp(-secs / span)
+			out[i] += (grit[i] * 0.7 + sin(TAU * hz * secs) * 0.5
+				+ sin(TAU * hz * 2.37 * secs) * 0.25) * env * amp
+	return _norm(out, 0.6)
+
+## Bake a set of clips ahead of time. Each is synthesised the first time it is
+## asked for, which for a gunshot is the moment the trigger is pulled -- and a
+## frame spent building a waveform is a frame the first shot of a fight hitches.
+static func warm(ids: Array) -> void:
+	for id in ids:
+		get_clip(String(id))
+
+## Straight into the ears, with no position: the tick of a hit, a dry trigger,
+## your own magazine going home.
+static func play_ui(world: Node, id: String, db := 0.0, pitch := 1.0) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	var p := AudioStreamPlayer.new()
+	p.stream = get_clip(id)
+	p.volume_db = db
+	p.pitch_scale = pitch
+	p.finished.connect(p.queue_free)
+	world.add_child(p)
+	p.play()
 
 ## One-shot at a world position. Falls back to a 2D player when no scene is set.
 static func play_at(world: Node, id: String, pos: Vector3, db := 0.0, pitch := 1.0, dist := 900.0) -> void:

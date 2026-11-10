@@ -19,6 +19,9 @@ const MISSIONS := [
 	["conquest", "CONQUEST", "Hostile. Five sectors across the valley — hold more than they do and their tickets bleed away."],
 	["rush", "RUSH", "Hostile. Sectors open one at a time; smash the garrison or hold the ring to advance."],
 	["warlords", "WARLORDS", "Hostile. Sequential sectors that pay command points as you take them."],
+	["cqb", "CQB", "Hostile, and on foot. Two squads of six in the streets of Kestrel — no vehicles, no air. Rifles, corners and whatever is lying in the road to get behind. First side to forty kills."],
+	["ground", "GROUND COMBAT", "Hostile. The same streets with armour in them: two squads and two vehicles a side. Take a tank, a fighting vehicle or anything else off the ground list — or go on foot and stay out of their way. First side to forty kills."],
+	["arms", "COMBAT", "Hostile. Everything over one town: infantry in the streets, armour among them and both sides' aircraft overhead. Take an aeroplane, a helicopter, a vehicle, or go on foot. First side to forty kills."],
 	["tdm", "TEAM DEATHMATCH", "Hostile. Two sides, first to twenty kills."],
 	["ffa", "FREE FOR ALL", "Hostile. Everyone shoots everyone; twelve kills wins."],
 	["carrier", "CARRIER TRAP", "No threats. Three miles behind the boat with the hook down."],
@@ -80,7 +83,7 @@ func _ready() -> void:
 	title.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
 	root.add_child(title)
 	var sub := Label.new()
-	sub.text = "select airframe"
+	sub.text = "pick the mode first — it decides what you can take into it"
 	sub.add_theme_font_size_override("font_size", 15)
 	sub.add_theme_color_override("font_color", Color(0.6, 0.7, 0.8))
 	root.add_child(sub)
@@ -98,7 +101,25 @@ func _ready() -> void:
 	inner.add_theme_constant_override("separation", 12)
 	scroll.add_child(inner)
 
+	# The mode comes first. What you can take depends on it -- nothing at all
+	# into a street fight, anything on wheels or tracks into a ground battle --
+	# so choosing the vehicle first meant choosing something the mode then
+	# quietly ignored.
+	_mode_box = VBoxContainer.new()
+	_mode_box.add_theme_constant_override("separation", 8)
+	inner.add_child(_mode_box)
+	var h1 := Label.new()
+	h1.text = "1   MODE"
+	h1.add_theme_font_size_override("font_size", 14)
+	h1.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
+	_mode_box.add_child(h1)
+	_veh_head = Label.new()
+	_veh_head.text = "2   WHAT YOU TAKE"
+	_veh_head.add_theme_font_size_override("font_size", 14)
+	_veh_head.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
+	inner.add_child(_veh_head)
 	var frow := HBoxContainer.new()
+	_frow = frow
 	frow.add_theme_constant_override("separation", 6)
 	inner.add_child(frow)
 	var facs := [["", "ALL"], ["ground", "GROUND"], ["sea", "NAVAL"]]
@@ -142,10 +163,10 @@ func _ready() -> void:
 	right.add_child(_blurb)
 
 	var mgrid := GridContainer.new()
-	mgrid.columns = 4
+	mgrid.columns = 6
 	mgrid.add_theme_constant_override("h_separation", 8)
 	mgrid.add_theme_constant_override("v_separation", 6)
-	right.add_child(mgrid)
+	_mode_box.add_child(mgrid)
 	var mrow := mgrid
 	for m in MISSIONS:
 		var mb := Button.new()
@@ -173,11 +194,22 @@ func _ready() -> void:
 		wrow.add_child(wb)
 		_weather_btns[w] = wb
 
+	# Close quarters has things to choose that no other mission does: where,
+	# and what to carry in. Shown only while it is the mission picked.
+	_cqb_row = HBoxContainer.new()
+	_cqb_row.add_theme_constant_override("separation", 8)
+	_cqb_row.visible = false
+	_mode_box.add_child(_cqb_row)
+	_cqb_town = _cqb_pick("TOWN", [])
+	_cqb_town.item_selected.connect(func(i: int): CqbMatch.town = _cqb_town.get_item_id(i))
+
 	var mdesc := Label.new()
 	mdesc.name = "MissionDesc"
 	mdesc.add_theme_font_size_override("font_size", 14)
 	mdesc.add_theme_color_override("font_color", Color(0.62, 0.72, 0.82))
-	right.add_child(mdesc)
+	mdesc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_mode_box.add_child(mdesc)
+	_mode_box.move_child(mdesc, 2)
 
 	var btns := HBoxContainer.new()
 	btns.add_theme_constant_override("separation", 12)
@@ -186,7 +218,8 @@ func _ready() -> void:
 	_launch.text = "LAUNCH"
 	_launch.custom_minimum_size = Vector2(190, 52)
 	_launch.add_theme_font_size_override("font_size", 20)
-	_launch.pressed.connect(func(): start_requested.emit(jet_id, mission_id))
+	_launch.pressed.connect(func(): start_requested.emit(
+		"foot" if mode_takes(mission_id) == "none" else jet_id, mission_id))
 	btns.add_child(_launch)
 	_resume = Button.new()
 	_resume.text = "RESUME"
@@ -327,8 +360,18 @@ func _rebuild_cards() -> void:
 	# aircraft first, then everything that drives, so the ground fleet is visible
 	# without having to know the GROUND tab exists
 	# a ship you can take command of: the ones with a gun on the foredeck
-	var sea_ids := _sea_for(faction)
-	if not sea_ids.is_empty() or faction == "sea":
+	var takes := mode_takes(mission_id)
+	if takes == "ground" or takes == "any":
+		# no vehicle at all is a choice, in the modes fought over a town
+		var fb := Button.new()
+		fb.custom_minimum_size = Vector2(152, 62)
+		fb.text = "ON FOOT\nrifle, grenades, legs"
+		fb.add_theme_font_size_override("font_size", 12)
+		fb.pressed.connect(_select.bind("foot"))
+		_grid.add_child(fb)
+		_cards["foot"] = fb
+	var sea_ids := _sea_for(faction) if takes == "air" else []
+	if takes == "air" and (not sea_ids.is_empty() or faction == "sea"):
 		# The carrier first: she is the biggest thing afloat and she is not in
 		# `Ship.KINDS`, so nothing would ever have listed her. She is American,
 		# so she belongs on that page and on the ones that show everybody —
@@ -381,6 +424,84 @@ func _rebuild_cards() -> void:
 		_grid.add_child(b)
 		_cards[id] = b
 
+var _cqb_row: HBoxContainer
+var _cqb_town: OptionButton
+var _mode_box: VBoxContainer
+var _veh_head: Label
+var _frow: HBoxContainer
+
+## What a mode lets you bring: "air" is the hangar as it always was, "ground"
+## is wheels and tracks, "any" is all of it, "none" is your own two feet.
+func mode_takes(id: String) -> String:
+	# The three fought over a town take nothing from here at all: class,
+	# weapons and vehicle are chosen on the deploy screen inside the match,
+	# where they can be changed between lives.
+	if id in ["cqb", "ground", "arms"]:
+		return "none"
+	return "air"
+
+## Make the list of things to take agree with the mode that was picked.
+func _apply_mode() -> void:
+	var takes := mode_takes(mission_id)
+	var town_fight: bool = takes != "air"
+	if _cqb_row != null:
+		_cqb_row.visible = town_fight
+		if town_fight:
+			_fill_cqb_towns()
+	if _frow == null:
+		return
+	_frow.visible = takes == "air" or takes == "any"
+	_grid.visible = takes != "none"
+	_veh_head.text = "2   WHAT YOU TAKE" if takes != "none" \
+		else "2   WHAT YOU TAKE — chosen on the deploy screen when the match starts: class, gunsmith, vehicle"
+	if is_instance_valid(_stats):
+		_stats.visible = takes != "none"
+	if is_instance_valid(_blurb) and takes == "none":
+		_blurb.text = "Pick the town above and launch.\n\nThe deploy screen comes up when the match starts and every time you go down: choose a class, set its weapons up on the gunsmith, and in the modes with vehicles choose what to go in as."
+	if takes == "ground":
+		faction = "ground"
+	elif faction == "ground" and takes == "air":
+		faction = ""
+	_rebuild_cards()
+	for k in _faction_btns:
+		_faction_btns[k].modulate = Color(1, 1, 1) if k != faction else Color(0.55, 1.0, 0.75)
+	# whatever was selected may not be on the list any more
+	if takes == "ground" and not (jet_id.begins_with("veh:") or jet_id == "foot"):
+		_select("foot")
+	elif takes == "any" and jet_id.begins_with("sea:"):
+		_select("foot")
+	elif takes == "air" and jet_id == "foot":
+		_select("f22")
+
+func _cqb_pick(label: String, items: Array) -> OptionButton:
+	var l := Label.new()
+	l.text = label
+	l.add_theme_font_size_override("font_size", 12)
+	l.add_theme_color_override("font_color", Color(0.6, 0.7, 0.8))
+	_cqb_row.add_child(l)
+	var ob := OptionButton.new()
+	ob.add_theme_font_size_override("font_size", 12)
+	ob.custom_minimum_size = Vector2(118, 30)
+	for it in items:
+		ob.add_item(String(it))
+	_cqb_row.add_child(ob)
+	return ob
+
+## Every settlement on the map, home valley first. Filled when the row is
+## first shown: the towns are sited while the world is built, which is after
+## this screen is.
+func _fill_cqb_towns() -> void:
+	if _cqb_town.item_count > 0 or Scenery.current == null:
+		return
+	var sites: Array = Scenery.current.sites
+	for i in sites.size():
+		var t: Dictionary = sites[i]
+		_cqb_town.add_item("%s  (%s)" % [String(t.get("name", "Town %d" % i)),
+			"city" if float(t["r"]) > 1200.0 else ("town" if float(t["r"]) > 600.0 else "village")], i)
+	for i in _cqb_town.item_count:
+		if _cqb_town.get_item_id(i) == CqbMatch.town:
+			_cqb_town.select(i)
+
 func _fit() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var vs := get_viewport_rect().size
@@ -401,6 +522,13 @@ func set_paused(p: bool) -> void:
 
 func _select(id: String) -> void:
 	jet_id = id
+	if id == "foot":
+		for k in _cards:
+			_cards[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
+		_blurb.text = "On foot\n\nTwo long guns and a sidearm, chosen above, and whatever you pick up off the road. Armour cannot be hurt with a rifle: a grenade underneath it can, and so can anything a run of kills lets you call in.\n\nF2 in the match lists the keys."
+		for c in _stats.get_children():
+			c.queue_free()
+		return
 	if id.begins_with("veh:"):
 		for k in _cards:
 			_cards[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
@@ -584,6 +712,7 @@ func _mission_tip(id: String) -> String:
 
 func _select_mission(id: String) -> void:
 	mission_id = id
+	_apply_mode()
 	if net_role == "host":
 		mission_changed.emit(id)
 	for k in _mission_btns:

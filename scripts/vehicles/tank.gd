@@ -815,10 +815,19 @@ func _ai_think(delta: float) -> void:
 			else float(KINDS[kind].get("reach", 2600.0))
 		if is_air_defence():
 			reach = float(KINDS[kind].get("reach", 30000.0))
-		for n in get_tree().get_nodes_in_group("hittable"):
+		# Men on foot too, for anything with a gun to lay on them. They are
+		# not in "hittable" -- that is the radar picture -- so a tank crew
+		# drove through a squad of riflemen as if the street were empty.
+		var seen: Array = get_tree().get_nodes_in_group("hittable")
+		if not is_indirect() and not is_air_defence():
+			seen = seen + get_tree().get_nodes_in_group("infantry")
+		for n in seen:
 			if not is_instance_valid(n) or n == self:
 				continue
 			if ("team" in n) and n.team == team:
+				continue
+			# a man on foot carries his side as `side`
+			if ("side" in n) and n.side == team:
 				continue
 			if n.has_method("is_alive") and not n.is_alive():
 				continue
@@ -840,6 +849,14 @@ func _ai_think(delta: float) -> void:
 			if n is Aircraft and agl > 900.0 and not is_air_defence():
 				continue
 			if d < reach and d < best:
+				# A gun crew cannot shoot what a building is standing in front
+				# of. Asked last, and only of something already in reach: it is
+				# the one expensive question here, and asked of every contact
+				# on the map it was asked about targets in other countries.
+				if not is_indirect() and not is_air_defence() and not (n is Aircraft) \
+						and d < 4000.0 and Obstacles.segment(global_position + Vector3(0, 2.2, 0),
+							(n as Node3D).global_position + Vector3(0, 1.5, 0)) < 1.0:
+					continue
 				best = d
 				_ai_target = n
 	if _ai_target == null or not is_instance_valid(_ai_target):

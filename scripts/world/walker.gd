@@ -1,49 +1,94 @@
 class_name Walker
 extends Node3D
-## On-foot pilot. Moves over the analytic terrain (the world has no collision
-## mesh), looks with the mouse, and can climb into any jet in the "boardable"
-## group.
+## The player on foot. Moves over the analytic terrain (the world has no
+## collision mesh), looks with the mouse, fights with what he is carrying, and
+## can climb into any jet in the "boardable" group.
+##
+## One body and one rig in both views: first person puts the eye in the head and
+## hides the head, third person pulls the camera back over the right shoulder.
+## The weapon is where `Pilot.animate` puts it either way, so what you see in
+## your hands is what anyone else sees you holding.
 
 signal board_requested(jet)
 signal hold_requested(jet)
 signal station_requested(jet)
+signal died(where)
 
 const EYE := 1.62
 const EYE_CROUCH := 1.02
-const WALK := 4.2
-const RUN := 8.6
+const WALK := 4.0
+const RUN := 7.4
 const CROUCH := 2.1
 const GRAV := 18.0
 const JUMP := 6.6
 const MAG := 30
-
-## What the man is carrying.
-##
-## One rifle with one magazine was the whole armoury: no sights to bring up, no
-## second weapon, and a reload that happened to you rather than one you called
-## for. Each entry is a weapon in its own right -- how fast it shoots, how far
-## it throws, how much it wanders, and what the world looks like down its
-## sights.
-const KIT := [
-	{"name": "rifle", "mag": 30, "cd": 0.105, "dmg": 18.0, "muzzle": 880.0,
-		"hip": 0.012, "ads": 0.0022, "fov": 42.0, "reload": 2.1, "kick": 0.020,
-		"sound": "rifle"},
-	{"name": "marksman", "mag": 10, "cd": 0.62, "dmg": 46.0, "muzzle": 1010.0,
-		"hip": 0.019, "ads": 0.0006, "fov": 14.0, "reload": 2.9, "kick": 0.055,
-		"sound": "rifle"},
-	{"name": "pistol", "mag": 15, "cd": 0.17, "dmg": 12.0, "muzzle": 480.0,
-		"hip": 0.021, "ads": 0.0045, "fov": 54.0, "reload": 1.5, "kick": 0.026,
-		"sound": "rifle"},
-]
-var kit_idx := 0
-## How far into the sights he is, 0 hip and 1 shouldered.
-var _ads := 0.0
 const BASE_FOV := 74.0
+const EYE_BACK := 0.13
+## Shoulder width, near enough, for deciding what he fits through.
+const BODY_R := 0.42
+
+## What he is carrying is `Firearm.KIT`: one entry per weapon, each with its
+## own magazine and its own spare rounds.
+var kit_idx := 0
+## What is actually on him: two long guns and a sidearm, as indices into the
+## kit. Anything else has to be picked up off the road, and takes the place of
+## whatever is in his hands when he does.
+var slots: Array = [0, 1, 4]
+## A can on the muzzle of everything that takes one. Quieter, no flash, and
+## nobody three streets away turns round; a little off the muzzle velocity.
+var suppressed := false
+
+## What to carry: two long guns by name, and whether they are suppressed.
+func set_loadout(primary: String, second: String, quiet: bool) -> void:
+	var a: int = Firearm.index_of(primary)
+	var b: int = Firearm.index_of(second)
+	if b == a:
+		b = (a + 1) % 4
+	_mods = {}
+	slots = [a, b, Firearm.index_of("pistol")]
+	suppressed = quiet
+	slot = 0
+	rearm()
+	_take_up(a, false)
+var slot := 0
+var _rounds: Array = []
+var _spare: Array = []
+var grenades := 2
+## Which side he is on. Not called `team`: everything that hunts by `team`
+## expects a vehicle on the other end of it.
+var side := 0
+## The match he is fighting in, if any -- told about noise and deaths.
+var arena: Node = null
+## Wounds close up when nobody has hit him for a while.
+var regen := false
+
+## Weapons as he has them fitted: sight, grip, magazine. Anything not in
+## here is as it comes out of the table.
+var _mods: Dictionary = {}
+
+func spec_of(i: int) -> Dictionary:
+	return _mods.get(i, Firearm.KIT[i % Firearm.KIT.size()])
 
 func gun_spec() -> Dictionary:
-	return KIT[kit_idx % KIT.size()]
+	return spec_of(kit_idx)
 
-signal died(where)
+## Deploy as a class: its two weapons, set up the way its owner left them.
+func apply_class(c: Dictionary) -> void:
+	var a: int = Firearm.index_of(String(c["primary"]))
+	var b: int = Firearm.index_of(String(c["second"]))
+	if b == a:
+		b = (a + 1) % 4
+	_mods = {a: Firearm.fitted(String(c["primary"]), c), b: Firearm.fitted(String(c["second"]), c)}
+	slots = [a, b, Firearm.index_of("pistol")]
+	suppressed = bool(c.get("quiet", false))
+	slot = 0
+	rearm()
+	_take_up(a, false)
+
+## An aircraft the launcher is looking at, and how long it has been.
+var lock_target: Node3D = null
+var lock_t := 0.0
+const LOCK_TIME := 1.3
 
 var cam: Camera3D
 var body: Pilot
@@ -56,16 +101,77 @@ var on_floor := true
 var crouching := false
 var target_jet: Node = null
 var ammo := MAG
+var spare := 0
 var reloading := 0.0
 var health := 100.0
 var dead := false
-var _anim := 0.0
-var _bob := 0.0
+var last_attacker: Node = null
+
+## Sights held up without the button, for the harness to photograph.
+var hold_ads := false
+## How far into the sights he is, 0 hip and 1 shouldered.
+var _ads := 0.0
+var _lean := 0.0
 var _eye := EYE
 var _shot_cd := 0.0
 var _recoil := 0.0
+var _bloom := 0.0
 var _fall_peak := 0.0
-var _flash: MeshInstance3D
+var _trigger_was := false
+var _queued := 0.0
+var _reload_span := 1.0
+var _reload_mark := 0
+var _reload_empty := false
+var _pump_in := 0.0
+var _sprint := false
+var _steps_seen := 0
+var _since_hit := 99.0
+var _yaw_was := 0.0
+var _pitch_was := 0.0
+## Wind. A sprint spends it and standing gets it back.
+var stamina := 1.0
+var _winded := false
+var _sprint_s := 0.0
+## Sliding out of a sprint: seconds left, and which way.
+var _slide := 0.0
+var _slide_dir := Vector3.ZERO
+## Going over or up something: "vault" or "climb", and the path it takes.
+var _trav := ""
+var _trav_t := 0.0
+var _trav_span := 0.5
+var _trav_a := Vector3.ZERO
+var _trav_b := Vector3.ZERO
+var _trav_top := 0.0
+var _trav_grip := Vector3.ZERO
+## Picking something up: how far through, and what.
+var _grab_t := -1.0
+var _grab_item: Node3D = null
+var _near_drop: Node3D = null
+## 0 standing, 1 crouched, 2 prone. Toggled, not held: on a Mac a click with
+## CTRL down arrives as the *right* button, so a crouch that had to be held
+## turned every shot fired from it into nothing at all.
+var stance := 0
+var prone := false
+## On a wall: which structure, the face he is on, and the view he had before.
+var _wall := -1
+var _wall_n := Vector3.ZERO
+var _wall_speed := 0.0
+## On a ladder rather than a bare wall: no going sideways, and quicker.
+var _ladder := false
+var near_ladder: Array = []
+## The harness holding W for him on a wall.
+var test_climb := 0.0
+var _third_was := false
+const VAULT_MAX := 1.3            # higher than this is a climb
+const CLIMB_MAX := 2.85           # higher than this is a wall
+## What the HUD draws: how wide the weapon is wandering, and what just happened.
+var spread_now := 0.0
+var hit_t := 0.0
+var hit_head := false
+var kill_t := 0.0
+var hurt_t := 0.0
+var hurt_from := Vector3.ZERO
+
 ## Under canopy after an ejection. The pilot settles at a steady sink rate,
 ## steers the drift, and arrives without breaking anything.
 var chute := false
@@ -83,31 +189,51 @@ func _ready() -> void:
 	body = Pilot.new()
 	body.build()
 	add_child(body)
-	weapon = body.add_weapon()
-	_flash = MeshInstance3D.new()
-	var qm := QuadMesh.new()
-	qm.size = Vector2(0.5, 0.5)
-	var fm := StandardMaterial3D.new()
-	fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	fm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	fm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	fm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	fm.albedo_texture = Effects.glow_texture()
-	fm.albedo_color = Color(1.0, 0.85, 0.45, 0.95)
-	qm.material = fm
-	_flash.mesh = qm
-	_flash.visible = false
-	_flash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	weapon.add_child(_flash)
-	_flash.position = Vector3(0, 0, -0.44)
+	for i in Firearm.KIT.size():
+		_rounds.append(0)
+		_spare.append(0)
+	rearm()
+	_take_up(int(slots[0]), false)
 	cam = Camera3D.new()
 	cam.far = 45000.0
-	cam.near = 0.12
-	cam.fov = 74.0
+	cam.near = 0.06
+	cam.fov = BASE_FOV
 	cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	add_child(cam)
 	add_to_group("hittable")
+	# The weapon is placed relative to the eye every tick. With the body
+	# interpolated and the camera not, the two were a tick apart and the rifle
+	# shivered in the hands whenever the view moved.
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+## A full load again: what a man has when he walks back out of the armoury.
+func rearm() -> void:
+	for i in Firearm.KIT.size():
+		var g: Dictionary = spec_of(i)
+		var carried: bool = slots.has(i)
+		_rounds[i] = int(g["mag"]) if carried else 0
+		_spare[i] = 0
+		if carried:
+			_spare[i] = int(g["mag"]) * int(g["spare"]) if not g.get("shells", false) \
+				else int(g["spare"])
+	grenades = 2
+	ammo = int(_rounds[kit_idx])
+	spare = int(_spare[kit_idx])
+	reloading = 0.0
+
+func _take_up(i: int, noisy := true) -> void:
+	kit_idx = i
+	body.equip(gun_spec(), suppressed)
+	weapon = body.gun_node
+	ammo = int(_rounds[kit_idx])
+	spare = int(_spare[kit_idx])
+	reloading = 0.0
+	_shot_cd = 0.38                     # bringing it up takes a moment
+	_bloom = 0.0
+	_pump_in = 0.0
+	if noisy and is_inside_tree():
+		Sfx.play_ui(get_tree().current_scene, "cloth", -10.0, randf_range(0.9, 1.1))
 
 ## Put the canopy up or cut it away. The mesh is made the first time it is
 ## needed, so a pilot who never ejects never carries one.
@@ -142,8 +268,10 @@ func _unhandled_input(e: InputEvent) -> void:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var mm := e as InputEventMouseMotion
-		yaw -= mm.relative.x * 0.0032
-		pitch = clampf(pitch - mm.relative.y * 0.0032, -1.4, 1.35)
+		# slower through the sights, in proportion to how far they magnify
+		var k: float = 0.0032 * lerpf(1.0, cam.fov / BASE_FOV, _ads)
+		yaw -= mm.relative.x * k
+		pitch = clampf(pitch - mm.relative.y * k, -1.4, 1.35)
 
 ## Step into an aircraft hold: reparent, keep the world pose, zero the velocity.
 func enter_frame(hold: Node3D, jet: Node) -> void:
@@ -159,6 +287,8 @@ func enter_frame(hold: Node3D, jet: Node) -> void:
 	vel = Vector3.ZERO
 	position.y = maxf(position.y, 0.0)
 	yaw = rotation.y
+	# riding something that is itself interpolated
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	Sim.report("aboard — walk aft off the ramp to jump", Sim.Ev.INFO)
 
 ## Step back out into the world, inheriting the aircraft velocity.
@@ -184,6 +314,7 @@ func exit_frame(scene: Node) -> void:
 	frame = null
 	frame_owner = null
 	on_floor = false
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	if jump:
 		# a moment of freefall first, so it reads as stepping out rather than
 		# being suspended from the tailgate
@@ -194,13 +325,21 @@ func exit_frame(scene: Node) -> void:
 ## there is no jump in progress.
 var _chute_at := -1.0
 
-## Shoulder width, near enough, for deciding what he fits through.
-const BODY_R := 0.42
-
 func _physics_process(delta: float) -> void:
 	var _pt := Sim.prof_at()
 	_tick_walk_p(delta)
 	Sim.prof_end(&"walk.tick", _pt)
+
+## What the legs are being asked to do, in his own frame: x right, z forward.
+func _wish() -> Vector3:
+	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+	var right := Vector3(cos(yaw), 0, -sin(yaw))
+	var wish := Vector3.ZERO
+	wish += fwd * (Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up"))
+	wish += right * (Sim.strength(&"roll_right") - Sim.strength(&"roll_left"))
+	if wish.length() > 1.0:
+		wish = wish.normalized()
+	return wish
 
 func _tick_walk_p(delta: float) -> void:
 	if not cam.current or dead:
@@ -221,21 +360,66 @@ func _tick_walk_p(delta: float) -> void:
 			Sim.report("canopy", Sim.Ev.GOOD)
 	if Sim.tapped(&"camera"):
 		third = not third
-	crouching = Sim.held(&"crouch")
-
+	# Halfway over a wall there is nothing to decide: the move finishes.
+	if _trav != "":
+		_traverse(delta)
+		return
+	if _wall >= 0:
+		_on_wall(delta)
+		return
+	var wish := _wish()
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
-	var right := Vector3(cos(yaw), 0, -sin(yaw))
-	var wish := Vector3.ZERO
-	wish += fwd * (Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up"))
-	wish += right * (Sim.strength(&"roll_right") - Sim.strength(&"roll_left"))
-	if wish.length() > 1.0:
-		wish = wish.normalized()
-	var running: bool = Sim.held(&"throttle_up") and not crouching
-	var speed: float = CROUCH if crouching else (RUN if running else WALK)
+	var crouch_tap: bool = Sim.tapped(&"crouch")
+	# Dropping out of a sprint is a slide: the legs go out from under him and
+	# he keeps the speed for a couple of paces, low, with the weapon coming up.
+	if crouch_tap and _sprint and on_floor and _slide <= 0.0:
+		_slide = 0.85
+		_slide_dir = Vector3(vel.x, 0, vel.z).normalized()
+		stance = 1
+		Sfx.play_at(get_tree().current_scene, "land", global_position, -12.0, 0.8, 40.0)
+	elif crouch_tap:
+		stance = 0 if stance == 1 else 1
+	if Sim.tapped(&"prone") and on_floor and _grab_t < 0.0:
+		stance = 1 if stance == 2 else 2
+		Sfx.play_at(get_tree().current_scene, "cloth", global_position, -9.0, 0.7, 40.0)
+	# running is done standing up
+	if stance > 0 and Sim.held(&"throttle_up") and wish.dot(fwd) > 0.5 and _slide <= 0.0:
+		stance = 0
+	_slide = maxf(_slide - delta, 0.0)
+	if _slide > 0.0 and not on_floor:
+		_slide = 0.0
+	var want_crouch: bool = stance > 0
+	prone = stance == 2 and on_floor
+	crouching = want_crouch or _slide > 0.0
+	# A sprint is forwards, upright and with the weapon down. Pulling the
+	# trigger or bringing the sights up ends it, and so does running out of
+	# wind -- after which he has to get some back before he can go again.
+	if stamina <= 0.0:
+		_winded = true
+	elif stamina > 0.3:
+		_winded = false
+	_sprint = Sim.held(&"throttle_up") and not crouching and on_floor and not _winded \
+		and wish.dot(fwd) > 0.5 and not Sim.held(&"ads") and not _trigger() \
+		and _grab_t < 0.0
+	stamina = clampf(stamina + delta * (-1.0 / 8.0 if _sprint else
+		(1.0 / 4.5 if wish.length() < 0.1 else 1.0 / 7.0)), 0.0, 1.0)
+	_sprint_s = lerpf(_sprint_s, 1.0 if _sprint else 0.0, clampf(delta * 6.0, 0.0, 1.0))
+	var g: Dictionary = gun_spec()
+	var speed: float = CROUCH if crouching else (RUN if _sprint else WALK)
+	speed *= float(g["move"]) * lerpf(1.0, 0.62, _ads)
+	if prone:
+		speed = 0.95
+	if _grab_t >= 0.0:
+		speed *= 0.15
 	if chute:
 		speed = CHUTE_DRIFT          # under canopy you steer a drift, not a run
 	var flat := Vector3(vel.x, 0, vel.z)
-	flat = flat.lerp(wish * speed, clampf(delta * (13.0 if on_floor else 2.2), 0.0, 1.0))
+	if _slide > 0.0:
+		# carried, not walked: the speed bleeds off and he can barely steer it
+		var k: float = _slide / 0.85
+		flat = (_slide_dir + wish * 0.12).normalized() * lerpf(CROUCH, RUN * 1.12, k * k)
+	else:
+		flat = flat.lerp(wish * speed, clampf(delta * (13.0 if on_floor else 2.2), 0.0, 1.0))
 	vel.x = flat.x
 	vel.z = flat.z
 	vel.y -= GRAV * delta
@@ -243,24 +427,59 @@ func _tick_walk_p(delta: float) -> void:
 		# A canopy is a terminal velocity, not a force to fight: whatever the
 		# seat threw you out with bleeds away and you settle to a steady sink.
 		vel.y = lerpf(vel.y, CHUTE_FALL, clampf(delta * 1.6, 0.0, 1.0))
-	if on_floor and not crouching and Sim.tapped(&"jump"):
-		vel.y = JUMP
-		on_floor = false
+	# A ladder within reach: walk onto it, or jump at it.
+	near_ladder = TownSet.ladder_at(global_position)
+	if not near_ladder.is_empty() and on_floor and _grab_t < 0.0 \
+			and (Sim.tapped(&"interact") or (wish.dot(-(near_ladder[1] as Vector3)) > 0.6
+				and Sim.held(&"jump"))):
+		_take_ladder(near_ladder)
+		return
+	# Jump at something and he goes over it or up it rather than into it.
+	if on_floor and Sim.tapped(&"jump") and _grab_t < 0.0:
+		if stance > 0:
+			# getting up comes first
+			stance -= 1
+		elif _begin_traverse(wish if wish.length() > 0.3 else fwd, false):
+			return
+		else:
+			_slide = 0.0
+			vel.y = JUMP
+			on_floor = false
 	var was := global_position
 	global_position += vel * delta
 
 	# Buildings are solid. Try the move; if it puts you inside a wall, keep
 	# whichever axis of it is clear, so you slide along the face instead of
-	# sticking to it.
-	if Obstacles.hit(global_position, BODY_R) >= 0:
+	# sticking to it. Anything low enough to get a foot on top of is not a
+	# wall, which is what lets a barricade be jumped.
+	var held_by: int = Obstacles.blocks(was, BODY_R)
+	if held_by >= 0 and Obstacles.blocks(global_position, BODY_R) >= 0:
+		# Already inside something's margin before he moved -- set down a hand's
+		# breadth too close to a wall by a climb, say. Every step from there is
+		# "into a wall", so he could not take one. Let him walk out: any move
+		# that takes him further from what is holding him is allowed.
+		var away: Vector3 = was - Obstacles.centre_of(held_by)
+		away.y = 0.0
+		if away.dot(Vector3(vel.x, 0.0, vel.z)) <= 0.0:
+			var out: Vector3 = (Obstacles.face_of(held_by, was)["n"] as Vector3)
+			global_position = Vector3(was.x, global_position.y, was.z) + out * delta * 1.5
+	elif Obstacles.blocks(global_position, BODY_R) >= 0:
 		var try_x := Vector3(global_position.x, global_position.y, was.z)
 		var try_z := Vector3(was.x, global_position.y, global_position.z)
-		if Obstacles.hit(try_x, BODY_R) < 0:
+		if Obstacles.blocks(try_x, BODY_R) < 0:
 			global_position = try_x
-		elif Obstacles.hit(try_z, BODY_R) < 0:
+		elif Obstacles.blocks(try_z, BODY_R) < 0:
 			global_position = try_z
 		else:
 			global_position = Vector3(was.x, global_position.y, was.z)
+		# flat out into something waist high: he does not stop and think
+		if (_sprint or _slide > 0.0) and on_floor and wish.dot(fwd) > 0.5 \
+				and _begin_traverse(fwd, true):
+			return
+		# and jumped at a wall, he catches it
+		if not on_floor and Sim.held(&"jump") and wish.dot(fwd) > 0.3 and not chute \
+				and _begin_traverse(fwd, false):
+			return
 
 	# ground contact, with a landing that can hurt
 	_fall_peak = minf(_fall_peak, vel.y)
@@ -268,13 +487,17 @@ func _tick_walk_p(delta: float) -> void:
 	# footprint, and you cannot walk into the side of one, so this only ever
 	# catches you coming down onto it.
 	var ground := maxf(Sim.height_at(global_position.x, global_position.z),
-		Obstacles.top_at(global_position.x, global_position.z))
+		Obstacles.floor_under(global_position.x, global_position.z, global_position.y))
 	if global_position.y <= ground:
 		global_position.y = ground
 		if not on_floor and _fall_peak < -13.0 and not chute:
 			var hurt: float = (-_fall_peak - 13.0) * 7.5
 			take_hit(hurt)
 			Sfx.play_at(get_tree().current_scene, "thump", global_position, -10.0, 1.4)
+		elif not on_floor and _fall_peak < -3.0:
+			Sfx.play_at(get_tree().current_scene, "land", global_position,
+				clampf(-16.0 - _fall_peak * 1.2, -16.0, -4.0), randf_range(0.9, 1.1), 50.0)
+			_recoil -= 0.03
 		if chute:
 			set_chute(false)
 			Sim.report("down safe — canopy cut", Sim.Ev.GOOD)
@@ -285,79 +508,12 @@ func _tick_walk_p(delta: float) -> void:
 		on_floor = global_position.y - ground < 0.05
 	if dead:
 		return
-
-	_shoot(delta)
-
-	# pose selection
-	var moving := flat.length() > 0.4
-	_anim += delta * clampf(flat.length() / WALK, 0.0, 2.2)
 	rotation.y = yaw
-	# Weapons, sights, reload.
-	for wi in KIT.size():
-		if Sim.tapped(StringName("weapon_%d" % (wi + 1))) and wi != kit_idx:
-			kit_idx = wi
-			ammo = int(gun_spec()["mag"])
-			reloading = 0.0
-			_shot_cd = 0.35                     # bringing it up takes a moment
-			Sim.report(String(gun_spec()["name"]), Sim.Ev.INFO)
-	if Sim.tapped(&"reload") and reloading <= 0.0 \
-			and ammo < int(gun_spec()["mag"]):
-		reloading = float(gun_spec()["reload"])
-		Sfx.play_at(get_tree().current_scene, "servo", global_position, -12.0, 1.4)
-	# Down the sights while the button is held, and never while reloading or
-	# sprinting -- both of which take the weapon off the shoulder.
-	var want_ads: float = 1.0 if (Sim.held(&"ads") and on_floor
-		and reloading <= 0.0 and not (moving and running)) else 0.0
-	_ads = move_toward(_ads, want_ads, delta * 6.5)
-	if is_instance_valid(cam):
-		cam.fov = lerpf(BASE_FOV, float(gun_spec()["fov"]), _ads)
-	var aiming: bool = _ads > 0.25 or Sim.held(&"gun") or Sim.held(&"foot_fire")
-	if not on_floor:
-		body.pose_air(vel.y > 0.0)
-	elif crouching:
-		body.pose_crouch(_anim, moving)
-	elif moving and running:
-		body.pose_run(_anim)
-	elif moving:
-		body.pose_walk(_anim * 1.5)
-	else:
-		body.pose_idle()
-	if aiming and on_floor:
-		body.pose_aim(pitch)
-	else:
-		body.aim_weapon(pitch * 0.35)
-	# Working the action: the weapon drops out of the aim and comes back up as
-	# the magazine goes home, which is the whole of the reload as far as anyone
-	# watching is concerned.
-	if is_instance_valid(weapon):
-		var span: float = maxf(float(gun_spec()["reload"]), 0.01)
-		var work: float = clampf(reloading / span, 0.0, 1.0)
-		var dip: float = sin(clampf(work, 0.0, 1.0) * PI)
-		weapon.position.y = -0.16 * dip
-		weapon.rotation.x = deg_to_rad(-34.0) * dip
-	_bob = lerpf(_bob, sin(_anim * 10.8) * (0.05 if (moving and running) else (0.03 if moving else 0.0)),
-		clampf(delta * 8.0, 0, 1))
-	# plant the feet: lift the body by however far the lowest foot has sunk, so
-	# the figure never hovers and crouch height falls out of the pose itself
-	body.position.y = lerpf(body.position.y, -body.lowest_foot(), clampf(delta * 18.0, 0, 1))
-	_eye = lerpf(_eye, EYE_CROUCH if crouching else EYE, clampf(delta * 9.0, 0, 1))
 
-	_recoil = lerpf(_recoil, 0.0, clampf(delta * 7.0, 0, 1))
-
-	# One body, one animation set, both views. First person simply puts the eye
-	# inside the head joint and hides the head so it does not fill the screen.
-	body.visible = true
-	body.set_head_visible(third)
-	if third:
-		var back := Vector3(sin(yaw), 0, cos(yaw))
-		var want := global_position + Vector3(0, 1.9, 0) + back * 4.4 - Vector3(0, sin(pitch) * 2.4, 0)
-		want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.7)
-		cam.global_position = want
-		cam.look_at(global_position + Vector3(0, _eye * 0.85, 0), Vector3.UP)
-	else:
-		var eye: Vector3 = body.head.global_transform * Vector3(0.0, 0.15, -0.08)
-		cam.global_position = eye
-		cam.global_transform.basis = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch + _recoil)
+	_reach_for(delta)
+	_fight(delta)
+	_animate(delta, flat, true)
+	_view(delta, Basis.IDENTITY)
 
 	_scan()
 	if target_jet and Sim.tapped(&"interact"):
@@ -372,13 +528,8 @@ func _step_in_frame(delta: float) -> void:
 	if Sim.tapped(&"camera"):
 		third = not third
 	crouching = Sim.held(&"crouch")
-	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
-	var right := Vector3(cos(yaw), 0, -sin(yaw))
-	var wish := Vector3.ZERO
-	wish += fwd * (Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up"))
-	wish += right * (Sim.strength(&"roll_right") - Sim.strength(&"roll_left"))
-	if wish.length() > 1.0:
-		wish = wish.normalized()
+	_sprint = false
+	var wish := _wish()
 	var speed: float = CROUCH if crouching else (RUN * 0.6 if Sim.held(&"throttle_up") else WALK * 0.8)
 	var flat := Vector3(vel.x, 0, vel.z).lerp(wish * speed, clampf(delta * 14.0, 0.0, 1.0))
 	vel.x = flat.x
@@ -407,30 +558,9 @@ func _step_in_frame(delta: float) -> void:
 			exit_frame(get_tree().current_scene)
 			return
 		position.z = aft
-	_shoot(delta)
-	var moving := flat.length() > 0.4
-	_anim += delta * clampf(flat.length() / WALK, 0.0, 2.2)
-	if not on_floor:
-		body.pose_air(vel.y > 0.0)
-	elif crouching:
-		body.pose_crouch(_anim, moving)
-	elif moving:
-		body.pose_walk(_anim * 1.5)
-	else:
-		body.pose_idle()
-	if Sim.held(&"gun"):
-		body.pose_aim(pitch)
-	_eye = lerpf(_eye, EYE_CROUCH if crouching else EYE, clampf(delta * 9.0, 0, 1))
-	body.visible = true
-	body.set_head_visible(third)
-	if third:
-		var back := Vector3(sin(yaw), 0, cos(yaw))
-		cam.position = position + Vector3(0, 1.9, 0) + back * 3.2
-		cam.look_at(global_transform * Vector3(0, _eye * 0.85, 0), frame.global_transform.basis.y)
-	else:
-		cam.global_position = body.head.global_transform * Vector3(0.0, 0.15, -0.08)
-		cam.global_transform.basis = frame.global_transform.basis \
-			* (Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch))
+	_fight(delta)
+	_animate(delta, flat, false)
+	_view(delta, frame.global_transform.basis.orthonormalized())
 	# G takes the gun station on a gunship; U steps back out of the hold
 	if Sim.tapped(&"gunner_station") and is_instance_valid(frame_owner) \
 			and frame_owner.spec.get("gunship", false):
@@ -438,47 +568,677 @@ func _step_in_frame(delta: float) -> void:
 	elif Sim.tapped(&"interact"):
 		exit_frame(get_tree().current_scene)
 
-## Carbine: real projectiles with travel time and drop, fired from the muzzle.
-func _shoot(delta: float) -> void:
+func _trigger() -> bool:
+	return Sim.held(&"foot_fire") or Sim.held(&"gun")
+
+# ------------------------------------------------------- over, up, and down for
+## Is there something in the way that he can get over or onto? `auto` is the
+## version that happens without being asked -- running flat out into a low
+## wall -- and only ever vaults: nobody climbs a container by accident.
+func _begin_traverse(dir_in: Vector3, auto: bool) -> bool:
+	var dir := Vector3(dir_in.x, 0.0, dir_in.z).normalized()
+	var feet := global_position
+	var id := -1
+	var face := 0.0
+	for step in 5:
+		face = 0.3 + step * 0.2
+		id = Obstacles.blocks(feet + dir * face + Vector3(0, 0.25, 0), 0.05)
+		if id >= 0:
+			break
+	if id < 0 and not auto:
+		# nothing at his shins: perhaps something to catch hold of overhead
+		face = 0.6
+		id = Obstacles.blocks(feet + dir * face + Vector3(0, 2.0, 0), 0.05)
+	if id < 0:
+		return false
+	var top: float = Obstacles.top_of(id)
+	var rise: float = top - feet.y
+	if rise < 0.45 or (auto and rise > VAULT_MAX):
+		return false
+	if rise > CLIMB_MAX:
+		# too tall to haul up onto in one go, so it is a climb in the other
+		# sense: onto the face of it, and up
+		return _take_wall(id, feet + dir * face)
+	var world := get_tree().current_scene
+	_trav_top = top
+	_trav_a = feet
+	_trav_grip = feet + dir * face + Vector3(0, rise, 0)
+	if rise <= VAULT_MAX:
+		# Over it, if it is thin enough to get over: look for clear ground on
+		# the far side within a stride and a half.
+		for step in 9:
+			var reach: float = face + 0.7 + step * 0.25
+			var land: Vector3 = feet + dir * reach
+			land.y = Sim.height_at(land.x, land.z)
+			if land.y > feet.y + 0.5 or land.y < feet.y - 2.5:
+				continue
+			if Obstacles.blocks(land, BODY_R) < 0 \
+					and Obstacles.floor_under(land.x, land.z, land.y + 1.0) < land.y + 0.3:
+				# whatever is tallest along the way is what has to be cleared,
+				# and if that is more than a vault this is not one
+				var crest: float = top
+				for k in 5:
+					var q: Vector3 = feet.lerp(land, (k + 1) / 6.0)
+					crest = maxf(crest, Obstacles.floor_under(q.x, q.z, feet.y + CLIMB_MAX))
+				if crest - feet.y > VAULT_MAX:
+					break
+				_trav_top = crest
+				_trav = "vault"
+				_trav_b = land
+				_trav_span = 0.42 + reach * 0.09
+				_trav_t = 0.0
+				vel = dir * (reach / _trav_span)
+				Sfx.play_at(world, "cloth", feet, -9.0, 0.8, 40.0)
+				return true
+	if auto:
+		return false
+	# Onto it. There has to be somewhere to stand once he is up.
+	# Whatever is a pace in from the edge is what he ends up standing on, and
+	# that is not always the thing his shins found: a car's bonnet is the way
+	# onto its roof.
+	var up: Vector3 = feet + dir * (face + 0.55)
+	up.y = Obstacles.floor_under(up.x, up.z, feet.y + CLIMB_MAX)
+	rise = up.y - feet.y
+	if rise < 0.45 or rise > CLIMB_MAX or Obstacles.blocks(up, BODY_R * 0.6) >= 0:
+		return false
+	_trav_top = up.y
+	_trav_grip = feet + dir * face + Vector3(0, rise, 0)
+	_trav = "climb"
+	_trav_b = up
+	_trav_span = 0.55 + rise * 0.36
+	_trav_t = 0.0
+	vel = Vector3.ZERO
+	Sfx.play_at(world, "cloth", feet, -8.0, 0.7, 40.0)
+	return true
+
+## Carry him along the move. A vault is one arc over the top; a climb is up
+## the face and then forward onto the edge.
+func _traverse(delta: float) -> void:
+	_trav_t += delta / _trav_span
+	var t: float = clampf(_trav_t, 0.0, 1.0)
+	var p: Vector3
+	if _trav == "vault":
+		var s: float = t * t * (3.0 - 2.0 * t)
+		p = _trav_a.lerp(_trav_b, s)
+		# straight line between the two ends, lifted to clear the top
+		var base_y: float = lerpf(_trav_a.y, _trav_b.y, s)
+		p.y = base_y + maxf(_trav_top + 0.12 - base_y, 0.0) * sin(t * PI)
+	else:
+		var lift: float = smoothstep(0.0, 0.68, t)
+		var over: float = smoothstep(0.55, 1.0, t)
+		var face: Vector3 = _trav_a.lerp(Vector3(_trav_b.x, _trav_a.y, _trav_b.z), 0.25)
+		p = Vector3(lerpf(face.x, _trav_b.x, over), lerpf(_trav_a.y, _trav_b.y, lift),
+			lerpf(face.z, _trav_b.z, over))
+	global_position = p
+	rotation.y = yaw
+	on_floor = false
+	crouching = false
+	_slide = 0.0
+	_sprint = false
+	_shot_cd = maxf(_shot_cd, 0.15)
+	_fight_idle(delta)
+	body.in_action = _trav
+	body.in_action_t = t
+	body.in_point = _trav_grip
+	_animate(delta, vel, false)
+	_view(delta, Basis.IDENTITY)
+	if t >= 1.0:
+		var done := _trav
+		_trav = ""
+		body.in_action = ""
+		on_floor = true
+		_fall_peak = 0.0
+		vel = Vector3(vel.x, 0.0, vel.z) * (0.6 if done == "vault" else 0.0)
+		Sfx.play_at(get_tree().current_scene, "land", global_position, -13.0,
+			randf_range(0.95, 1.1), 40.0)
+		if done == "climb":
+			_shot_cd = 0.3
+			body._draw = 0.8         # the weapon comes back off the sling
+
+# ------------------------------------------------------------------ on a wall
+## Take hold of a face. Anything built can be climbed: a building, a crane's
+## mast, a container stack. He goes where the keys say -- up, down, along --
+## for as long as he stays on that face, and comes off it over the top, onto
+## the ground, or by letting go.
+func _take_wall(id: int, at: Vector3) -> bool:
+	var f: Dictionary = Obstacles.face_of(id, at)
+	var n: Vector3 = f["n"]
+	var foot: Vector3 = f["foot"]
+	# onto the plane of the face, a shoulder's width out from it
+	var rel: Vector3 = global_position - foot
+	var p: Vector3 = global_position - n * (rel.dot(n) - (BODY_R + 0.06))
+	p.y = global_position.y
+	_wall = id
+	_wall_n = n
+	_ladder = false
+	_third_was = third
+	third = true                    # you climb by looking at the wall, not out of it
+	global_position = p
+	vel = Vector3.ZERO
+	on_floor = false
+	stance = 0
+	_slide = 0.0
+	_sprint = false
+	reloading = 0.0
+	Sfx.play_at(get_tree().current_scene, "cloth", p, -8.0, 0.8, 40.0)
+	return true
+
+## Step onto a ladder: [where its foot is, which way it faces, structure].
+func _take_ladder(l: Array) -> void:
+	var foot: Vector3 = l[0]
+	var n: Vector3 = l[1]
+	var keep_y: float = global_position.y
+	global_position = Vector3(foot.x, keep_y, foot.z) + n * 0.3
+	if _take_wall(int(l[2]), foot - n * 0.2):
+		_ladder = true
+		# square on to it, whatever part of the face that is
+		global_position = Vector3(foot.x, keep_y, foot.z) + n * (BODY_R + 0.06)
+
+func _leave_wall() -> void:
+	body.position = Vector3.ZERO
+	_ladder = false
+	_wall = -1
+	third = _third_was
+	body.in_action = ""
+	body._draw = 0.8
+	_shot_cd = 0.35
+	_fall_peak = 0.0
+
+func _on_wall(delta: float) -> void:
+	var n := _wall_n
+	var right := Vector3(n.z, 0.0, -n.x)            # his right, facing the wall
+	var up_in: float = Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up") + test_climb
+	var side_in: float = Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
+	var fast: bool = Sim.held(&"throttle_up") and stamina > 0.05
+	stamina = clampf(stamina + delta * (-1.0 / 9.0 if fast else 1.0 / 12.0), 0.0, 1.0)
+	var rate: float = 3.3 if fast else 2.2
+	if _ladder:
+		side_in = 0.0
+		rate *= 1.3
+	var p := global_position
+	var f: Dictionary = Obstacles.face_of(_wall, p - n * (BODY_R + 0.06))
+	var top: float = f["top"]
+	var step: Vector3 = Vector3.UP * up_in * rate * delta + right * side_in * rate * 0.8 * delta
+	# stay on the face: at its edge there is no more wall to hold
+	var along: float = float(f["along"])
+	var half: float = float(f["half"]) - 0.25
+	var q: Vector3 = p + step
+	var f2: Dictionary = Obstacles.face_of(_wall, q - n * (BODY_R + 0.06))
+	if absf(float(f2["along"])) > half and absf(float(f2["along"])) > absf(along):
+		q = p + Vector3.UP * up_in * rate * delta
+	# something else built against this wall is in the way
+	var other: int = Obstacles.blocks(q + Vector3(0, 0.9, 0), 0.2)
+	if other >= 0 and other != _wall:
+		q = p
+		# Unless it is something overhead he can get onto: a crane's jib
+		# across the top of its mast, a deck. Then that is the top.
+		var lip: float = Obstacles.top_of(other)
+		if up_in > 0.1 and lip > p.y and lip - p.y < 4.3:
+			_trav_a = p
+			_trav_b = Vector3(p.x, lip, p.z) - n * 0.25
+			_trav_top = lip
+			_trav_grip = Vector3(p.x, lip, p.z) - n * 0.3
+			_trav = "climb"
+			_trav_span = 1.3
+			_trav_t = 0.0
+			_leave_wall()
+			body.in_action = "climb"
+			return
+	_wall_speed = (q - p).length() / maxf(delta, 0.001)
+	global_position = q
+	rotation.y = atan2(n.x, n.z)                     # chest to the wall
+	# in close: the figure's arms are not long enough to climb at arm's length
+	body.position = Vector3(0.0, 0.0, -0.17)
+	crouching = false
+	prone = false
+	_fight_idle(delta)
+	var world := get_tree().current_scene
+	# over the top
+	if q.y + 1.5 >= top and up_in > 0.1:
+		var roof: Vector3 = q - n * (BODY_R + 0.7)
+		roof.y = top
+		_trav_a = q
+		_trav_b = roof
+		_trav_top = top
+		_trav_grip = Vector3(q.x, top, q.z) - n * (BODY_R + 0.06)
+		_trav = "climb"
+		_trav_span = 0.75
+		_trav_t = 0.0
+		_leave_wall()
+		body.in_action = "climb"
+		return
+	# back on the ground
+	var floor_y: float = maxf(Sim.height_at(q.x, q.z), Obstacles.floor_under(q.x, q.z, q.y + 0.2))
+	if q.y <= floor_y + 0.02 and up_in < 0.0:
+		global_position.y = floor_y
+		on_floor = true
+		vel = Vector3.ZERO
+		_leave_wall()
+		return
+	if Sim.tapped(&"jump"):
+		# kicked off backwards
+		vel = n * 4.6 + Vector3.UP * 4.2
+		_leave_wall()
+		Sfx.play_at(world, "cloth", q, -8.0, 1.0, 40.0)
+		return
+	if Sim.tapped(&"crouch"):
+		vel = n * 0.6
+		_leave_wall()
+		return
+	if _wall_speed > 0.4 and fmod(Time.get_ticks_msec() * 0.001, 0.42) < delta:
+		Sfx.play_at(world, "step_a", q + Vector3(0, 1.6, 0) - n * 0.4, -17.0,
+			randf_range(1.2, 1.5), 30.0)
+	body.in_action = "ladder" if _ladder else "wall"
+	body.in_action_t = 0.0
+	body.in_point = q + Vector3(0, 1.70, 0) - n * (BODY_R + 0.04)
+	body.in_move = Vector2(0.0, _wall_speed * (signf(up_in) if absf(up_in) > 0.05
+		else (1.0 if absf(side_in) > 0.05 else 0.0)))
+	body.in_crouch = false
+	body.in_prone = false
+	body.in_air = 0
+	body.in_ready = 0.0
+	body.in_ads = 0.0
+	body.in_lean = 0.0
+	body.in_reload = -1.0
+	body.in_foot_ik = false
+	_ads = 0.0
+	body.animate(delta)
+	_view(delta, Basis.IDENTITY)
+
+## The timers that run whether or not the hands are free.
+func _fight_idle(delta: float) -> void:
 	_shot_cd = maxf(_shot_cd - delta, 0.0)
-	if reloading > 0.0:
-		reloading -= delta
-		if reloading <= 0.0:
-			ammo = int(gun_spec()["mag"])
+	_recoil = lerpf(_recoil, 0.0, clampf(delta * 8.0, 0, 1))
+	hit_t = maxf(hit_t - delta, 0.0)
+	kill_t = maxf(kill_t - delta, 0.0)
+	hurt_t = maxf(hurt_t - delta, 0.0)
+	_since_hit += delta
+	_trigger_was = _trigger()
+
+## Weapons lying about. Find the nearest in reach; F goes down for it.
+func _reach_for(delta: float) -> void:
+	if _grab_t >= 0.0:
+		_grab_t += delta / 0.75
+		if _grab_t >= 0.5 and is_instance_valid(_grab_item):
+			_take(_grab_item)
+			_grab_item = null
+		if _grab_t >= 1.0:
+			_grab_t = -1.0
 		return
-	if _flash.visible and _shot_cd < 0.085:
-		_flash.visible = false
-	# The left button, or the gun key for anyone who prefers it.
-	if not (Sim.held(&"foot_fire") or Sim.held(&"gun")):
-		return
+	_near_drop = null
+	var best := 2.1
+	for n in get_tree().get_nodes_in_group("pickups"):
+		if not is_instance_valid(n):
+			continue
+		var d: float = (n as Node3D).global_position.distance_to(global_position)
+		if d < best:
+			best = d
+			_near_drop = n
+	if _near_drop != null and on_floor and reloading <= 0.0 and Sim.tapped(&"pickup"):
+		_grab_t = 0.0
+		_grab_item = _near_drop
+		_shot_cd = 0.8
+		Sfx.play_at(get_tree().current_scene, "cloth", global_position, -9.0, 0.9, 40.0)
+
+## It is in his hand now. A weapon he already carries is ammunition for it;
+## anything else replaces what he was holding, which goes on the road in turn.
+func _take(item: Node3D) -> void:
+	var world := get_tree().current_scene
+	var id: int = Firearm.index_of(String(item.get("kit")))
+	var g: Dictionary = Firearm.KIT[id]
+	var got: int = int(item.get("rounds"))
+	_rounds[kit_idx] = ammo
+	_spare[kit_idx] = spare
+	if slots.has(id):
+		_spare[id] = int(_spare[id]) + got
+		spare = int(_spare[kit_idx])
+		Sim.report("+%d rounds for the %s" % [got, String(g["name"])], Sim.Ev.INFO)
+		Sfx.play_ui(world, "mag_in", -8.0)
+	else:
+		# a sidearm goes where the sidearm is, a long gun where a long gun is
+		var into: int = slot
+		if bool(g.get("hand", false)) != bool(Firearm.KIT[int(slots[into])].get("hand", false)):
+			for i in slots.size():
+				if bool(Firearm.KIT[int(slots[i])].get("hand", false)) == bool(g.get("hand", false)):
+					into = i
+					break
+		var old: int = int(slots[into])
+		Firearm.drop(world, String(Firearm.KIT[old]["id"]), int(_rounds[old]),
+			global_position + Vector3(-sin(yaw), 0, -cos(yaw)) * 0.9)
+		_spare[old] = 0
+		_rounds[old] = 0
+		slots[into] = id
+		slot = into
+		_rounds[id] = mini(got, int(g["mag"]))
+		_spare[id] = int(_spare[id]) + maxi(got - int(g["mag"]), 0) \
+			+ (int(g["mag"]) * 2 if not g.get("shells", false) else 10)
+		_take_up(id)
+		Sim.report("picked up the %s" % String(g["name"]), Sim.Ev.GOOD)
+		Sfx.play_ui(world, String(g["work"]), -8.0)
+	item.queue_free()
+
+# -------------------------------------------------------------------- weapons
+## Everything the hands do in a tick: change weapon, reload, throw, shoot.
+func _fight(delta: float) -> void:
+	_shot_cd = maxf(_shot_cd - delta, 0.0)
+	_queued = maxf(_queued - delta, 0.0)
+	_bloom = maxf(_bloom - delta * 0.035, 0.0)
+	_recoil = lerpf(_recoil, 0.0, clampf(delta * 8.0, 0, 1))
+	hit_t = maxf(hit_t - delta, 0.0)
+	kill_t = maxf(kill_t - delta, 0.0)
+	hurt_t = maxf(hurt_t - delta, 0.0)
+	_since_hit += delta
+	if regen and _since_hit > 5.0 and health < 100.0:
+		health = minf(health + delta * 22.0, 100.0)
+	var world := get_tree().current_scene
 	var g: Dictionary = gun_spec()
-	if ammo <= 0:
-		reloading = float(g["reload"])
-		Sfx.play_at(get_tree().current_scene, "servo", global_position, -12.0, 1.4)
+
+	for wi in slots.size():
+		if Sim.tapped(StringName("weapon_%d" % (wi + 1))) and wi != slot and _grab_t < 0.0:
+			_rounds[kit_idx] = ammo
+			_spare[kit_idx] = spare
+			slot = wi
+			_take_up(int(slots[wi]))
+			return
+	if Sim.tapped(&"grenade") and grenades > 0 and _shot_cd < 0.2:
+		_throw()
+
+	# The shotgun has to be worked between shots.
+	if _pump_in > 0.0:
+		_pump_in -= delta
+		if _pump_in <= 0.0:
+			Sfx.play_at(world, "pump", global_position + Vector3(0, 1.4, 0), -8.0,
+				randf_range(0.95, 1.05), 60.0)
+
+	var full: int = int(g["mag"])
+	var pulled: bool = _trigger()
+	var edge: bool = pulled and not _trigger_was
+	_trigger_was = pulled
+	if Sim.tapped(&"reload") and reloading <= 0.0 and ammo < full and spare > 0:
+		_begin_reload(g)
+	if reloading > 0.0:
+		_work_reload(delta, g, edge)
 		return
-	if _shot_cd > 0.0:
+
+	# Down the sights it goes where it is pointed; from the hip it does not.
+	var s: float = lerpf(float(g["hip"]), float(g["ads"]), _ads)
+	var loose: float = 1.0 - 0.75 * _ads
+	if prone:
+		s *= 0.45
+	elif crouching:
+		s *= 0.7
+	s += clampf(Vector2(vel.x, vel.z).length() / RUN, 0.0, 1.0) * float(g["hip"]) * 1.4 * loose
+	if not on_floor:
+		s += float(g["hip"]) * 2.0
+	s += _bloom * loose
+	spread_now = s
+
+	if edge:
+		_queued = 0.12
+	_seek(delta, g)
+	var want: bool = pulled if g["auto"] else _queued > 0.0
+	if not want or _shot_cd > 0.0 or body._ready_s < 0.75:
+		return
+	_queued = 0.0
+	if ammo <= 0:
+		if edge or not g["auto"]:
+			Sfx.play_ui(world, "dry", -6.0)
+		if spare > 0:
+			_begin_reload(g)
+		else:
+			_shot_cd = 0.25
 		return
 	_shot_cd = float(g["cd"])
 	ammo -= 1
-	var muzzle: Vector3 = _flash.global_position
-	var aim := -cam.global_transform.basis.z
-	# Down the sights it goes where it is pointed; from the hip it does not.
-	var spread: float = lerpf(float(g["hip"]), float(g["ads"]), _ads)
-	if crouching:
-		spread *= 0.55
-	if vel.length() > 3.0:
-		spread *= 2.1
-	aim = (aim + Vector3(randf_range(-spread, spread), randf_range(-spread, spread),
-		randf_range(-spread, spread))).normalized()
-	Effects.tracer(get_tree().current_scene, muzzle, aim * float(g["muzzle"]),
-		self, float(g["dmg"]), 0)
-	_flash.visible = true
-	Effects.muzzle_flash(get_tree().current_scene, muzzle, aim, 0.55)
-	_flash.scale = Vector3.ONE * randf_range(0.8, 1.3)
-	# steadier in the shoulder than at the hip
-	_recoil = minf(_recoil + float(g["kick"]) * (1.0 - 0.45 * _ads), 0.14)
-	Sfx.play_at(get_tree().current_scene, String(g["sound"]), muzzle, -6.0,
-		randf_range(0.94, 1.08), 420.0)
+	_rounds[kit_idx] = ammo
+	var from: Vector3 = body.muzzle_pos()
+	# The round leaves the muzzle but it goes where the eye is looking: find
+	# what is under the crosshair and send it there. Fired parallel to the
+	# view instead, a rifle held beside the head puts every shot a hand's
+	# width off, and a camera over the shoulder puts them a pace off.
+	var look := -cam.global_transform.basis.z
+	var eye := cam.global_position
+	var skip: float = maxf((body.eye_pos() - eye).dot(look), 0.0) + 0.6
+	var mark: Vector3 = eye + look * (skip + Firearm.sight_range(eye + look * skip, look, 600.0))
+	var aim: Vector3 = (mark - from).normalized()
+	if mark.distance_to(from) < 1.6 or aim.dot(look) < 0.5:
+		aim = look
+	var quiet: bool = suppressed and Firearm.can_suppress(g)
+	if g.has("launcher"):
+		if String(g["launcher"]) == "sam":
+			if not is_instance_valid(lock_target) or lock_t < LOCK_TIME:
+				# no tone, no shot: it will not leave the tube without a lock
+				ammo += 1
+				_rounds[kit_idx] = ammo
+				_shot_cd = 0.3
+				Sfx.play_ui(world, "dry", -6.0)
+				Sim.report("no lock — hold the sights on an aircraft", Sim.Ev.BAD)
+				return
+			Firearm.sam(world, self, side, from, look, lock_target)
+			lock_t = 0.0
+		else:
+			Firearm.rocket(world, self, side, g, from, aim)
+	else:
+		Firearm.fire(world, self, side, g, from, aim, s, 1.0, quiet)
+	if is_instance_valid(arena) and arena.has_method("heard"):
+		# a suppressed shot is heard by whoever is in the same yard, no further
+		arena.heard(from, side, 14.0 if quiet else 75.0)
+	# The kick: most of it comes back on its own, some of it you have to pull
+	# down yourself, and it never climbs quite straight.
+	var k: float = float(g["kick"]) * (1.0 - 0.35 * _ads) \
+		* (0.55 if prone else (0.8 if crouching else 1.0))
+	pitch = minf(pitch + k * 0.45, 1.35)
+	_recoil = minf(_recoil + k * 0.9, 0.12)
+	yaw += randf_range(-1.0, 1.0) * float(g["side"]) * (1.0 - 0.3 * _ads)
+	_bloom = minf(_bloom + float(g["hip"]) * 0.22, float(g["hip"]) * 1.6)
+	body.kick(clampf(float(g["kick"]) * 34.0, 0.3, 1.5))
+	if g.get("shells", false):
+		_pump_in = 0.24
+
+## The seeker. With the missile up and the sights on something that flies,
+## it takes a moment to settle; look away and it lets go.
+func _seek(delta: float, g: Dictionary) -> void:
+	if String(g.get("launcher", "")) != "sam" or _ads < 0.6 or ammo <= 0:
+		lock_target = null
+		lock_t = 0.0
+		return
+	var eye := cam.global_position
+	var look := -cam.global_transform.basis.z
+	var best: Node3D = null
+	var best_a := deg_to_rad(7.0)
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or not (n is Aircraft) or not n.is_alive():
+			continue
+		if "team" in n and n.team == side:
+			continue
+		var to: Vector3 = (n as Node3D).global_position - eye
+		if to.length() > 5500.0 or to.length() < 60.0:
+			continue
+		var ang: float = look.angle_to(to)
+		if ang < best_a and Firearm.can_see(eye, (n as Node3D).global_position) \
+				and Sim.line_of_sight(eye, (n as Node3D).global_position):
+			best_a = ang
+			best = n
+	if best != lock_target:
+		lock_t = 0.0
+	lock_target = best
+	if best != null:
+		var before := lock_t
+		lock_t += delta
+		if before < LOCK_TIME and lock_t >= LOCK_TIME:
+			Sfx.play_ui(get_tree().current_scene, "killmark", -6.0, 1.4)
+
+func _begin_reload(g: Dictionary) -> void:
+	_reload_span = maxf(float(g["reload"]), 0.05)
+	reloading = _reload_span
+	_reload_mark = 0
+	_reload_empty = ammo <= 0
+	_pump_in = 0.0
+
+## A reload is something the hands do in stages, each of which you can hear.
+func _work_reload(delta: float, g: Dictionary, trigger_edge: bool) -> void:
+	var world := get_tree().current_scene
+	var at := global_position + Vector3(0, 1.35, 0)
+	reloading -= delta
+	var p: float = 1.0 - clampf(reloading / _reload_span, 0.0, 1.0)
+	if g.get("shells", false):
+		# one at a time into the tube, and the trigger breaks off the loading
+		if _reload_mark == 0 and p > 0.55:
+			_reload_mark = 1
+			ammo += 1
+			spare -= 1
+			Sfx.play_at(world, "shell", at, -9.0, randf_range(0.95, 1.1), 40.0)
+		if reloading <= 0.0:
+			_rounds[kit_idx] = ammo
+			_spare[kit_idx] = spare
+			if ammo < int(g["mag"]) and spare > 0 and not trigger_edge and not _trigger():
+				reloading = _reload_span
+				_reload_mark = 0
+			else:
+				reloading = 0.0
+				if _reload_empty:
+					Sfx.play_at(world, "pump", at, -8.0, 1.0, 60.0)
+					_shot_cd = 0.3
+		return
+	if _reload_mark == 0 and p > 0.22:
+		_reload_mark = 1
+		Sfx.play_at(world, "mag_out", at, -9.0, randf_range(0.95, 1.05), 40.0)
+	elif _reload_mark == 1 and p > 0.66:
+		_reload_mark = 2
+		Sfx.play_at(world, "mag_in", at, -8.0, randf_range(0.95, 1.05), 40.0)
+	elif _reload_mark == 2 and p > 0.86:
+		_reload_mark = 3
+		if _reload_empty:
+			Sfx.play_at(world, String(g["work"]), at, -8.0, randf_range(0.95, 1.05), 40.0)
+	if reloading <= 0.0:
+		reloading = 0.0
+		var take: int = mini(int(g["mag"]) - ammo, spare)
+		ammo += take
+		spare -= take
+		_rounds[kit_idx] = ammo
+		_spare[kit_idx] = spare
+
+func _throw() -> void:
+	grenades -= 1
+	_shot_cd = 0.55
+	var world := get_tree().current_scene
+	var look := -cam.global_transform.basis.z
+	var f := Firearm.Frag.new()
+	f.team = side
+	f.thrower = self
+	f.vel = look * 17.0 + Vector3(0, 3.2, 0) + Vector3(vel.x, 0, vel.z) * 0.6
+	world.add_child(f)
+	f.global_position = body.eye_pos() + look * 0.5 + Vector3(0, -0.1, 0)
+	Sfx.play_ui(world, "pin", -6.0)
+	body.kick(0.8)
+
+## A round of yours landed.
+func hit_confirm(head: bool, killed: bool) -> void:
+	hit_t = 0.22
+	hit_head = head
+	var world := get_tree().current_scene
+	if killed:
+		kill_t = 0.6
+		Sfx.play_ui(world, "killmark", -9.0)
+	else:
+		Sfx.play_ui(world, "hitmark", -9.0, 1.25 if head else 1.0)
+
+## True while looking through glass rather than over iron.
+func scoped() -> bool:
+	return not third and _ads > 0.9 and gun_spec().get("scope", false)
+
+# ------------------------------------------------------------------ the figure
+func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
+	var g: Dictionary = gun_spec()
+	var moving := flat.length() > 0.4
+	# Down the sights while the button is held, and never while reloading or
+	# sprinting -- both of which take the weapon off the shoulder.
+	var want_ads: float = 1.0 if ((Sim.held(&"ads") or hold_ads) and reloading <= 0.0
+		and not _sprint and not chute) else 0.0
+	_ads = move_toward(_ads, want_ads, delta * (7.5 if not g.get("scope", false) else 5.0))
+	# Leaning out round a corner. Q and E are the rudder in a cockpit and
+	# nothing at all on the ground.
+	var want_lean: float = 0.0 if (_sprint or not on_floor or prone) else \
+		Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
+	_lean = lerpf(_lean, clampf(want_lean, -1.0, 1.0), clampf(delta * 9.0, 0.0, 1.0))
+	if is_instance_valid(cam):
+		var zoom: float = float(g["fov"])
+		if third:
+			zoom = maxf(zoom, 44.0)
+		# the world opens out a little at a run
+		cam.fov = lerpf(BASE_FOV + 6.0 * _sprint_s, zoom, _ads * _ads * (3.0 - 2.0 * _ads))
+	# his own frame: x to the right, y forward
+	var right := Vector3(cos(yaw), 0, -sin(yaw))
+	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
+	body.in_move = Vector2(flat.dot(right), flat.dot(fwd))
+	body.in_crouch = crouching and on_floor
+	body.in_prone = prone and _slide <= 0.0
+	body.in_air = 0 if on_floor else (1 if vel.y > 0.0 else -1)
+	body.in_pitch = pitch + _recoil * 0.5
+	body.in_ready = 0.0 if (_sprint and moving) or chute or _grab_t >= 0.0 else 1.0
+	body.in_ads = _ads
+	body.in_lean = _lean
+	body.in_reload = (1.0 - clampf(reloading / _reload_span, 0.0, 1.0)) if reloading > 0.0 else -1.0
+	if _trav == "":
+		if _grab_t >= 0.0:
+			body.in_action = "grab"
+			body.in_action_t = _grab_t
+			if is_instance_valid(_grab_item):
+				body.in_point = _grab_item.global_position + Vector3(0, 0.08, 0)
+		elif _slide > 0.0:
+			body.in_action = "slide"
+			body.in_action_t = 1.0 - _slide / 0.85
+		else:
+			body.in_action = ""
+	body.in_turn = Vector2(wrapf(yaw - _yaw_was, -PI, PI), pitch - _pitch_was) / maxf(delta, 0.001)
+	body.in_foot_ik = on_ground_ik
+	_yaw_was = yaw
+	_pitch_was = pitch
+	body.position = Vector3.ZERO
+	body.animate(delta)
+	_eye = lerpf(_eye, 0.55 if prone else (EYE_CROUCH + 0.25 if crouching else EYE),
+		clampf(delta * 9.0, 0, 1))
+	# your own boots on the road
+	if body.steps != _steps_seen:
+		_steps_seen = body.steps
+		if on_floor and moving:
+			var loud: float = -9.0 if _sprint else (-22.0 if crouching else -15.0)
+			Sfx.play_at(get_tree().current_scene, ["step_a", "step_b", "step_c"][randi() % 3],
+				global_position, loud, randf_range(0.9, 1.12), 45.0)
+			if _sprint and is_instance_valid(arena) and arena.has_method("heard"):
+				arena.heard(global_position, side, 14.0)
+
+## Where the camera is. `ref` is the frame the view angles are measured in:
+## the world, or the hold of whatever he is riding in.
+func _view(_delta: float, ref: Basis) -> void:
+	body.visible = not scoped()
+	body.set_head_visible(third)
+	var up: Basis = ref * Basis(Vector3.UP, yaw)
+	var look: Basis = up * Basis(Vector3.RIGHT, pitch + _recoil)
+	if third:
+		# Over the right shoulder, close enough to shoot from. A camera four
+		# metres back and centred looked at the back of his head: the thing
+		# you were aiming at was behind him.
+		var pivot: Vector3 = global_position + ref * Vector3(0, _eye - 0.05, 0) \
+			+ up * Vector3(_lean * 0.35, 0, 0)
+		var boom := Vector3(0.62, 0.22, lerpf(2.6, 1.55, _ads))
+		var want: Vector3 = pivot + look * boom
+		# walls stop cameras too
+		var clear: float = Obstacles.segment(pivot, want)
+		if clear < 1.0:
+			want = pivot.lerp(want, maxf(clear - 0.12, 0.08))
+		if frame == null:
+			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.25)
+		cam.global_transform = Transform3D(look, want)
+	else:
+		# One body, one animation set, both views: the eye is in the head.
+		# Set a hand's breadth back along the line of sight, though. The
+		# figure's arms are only so long, so the weapon sits closer to his
+		# face than a screen can show without it filling the bottom third;
+		# moving the eye straight back along its own axis keeps the sights on
+		# the line and puts the rifle at the distance it looks right at.
+		var roll: Basis = look * Basis(Vector3.BACK, -_lean * 0.10)
+		cam.global_transform = Transform3D(roll, body.eye_pos() + look.z * EYE_BACK)
 
 func hit_radius() -> float:
 	return 0.9
@@ -486,20 +1246,36 @@ func hit_radius() -> float:
 func is_alive() -> bool:
 	return not dead
 
-func take_hit(amount: float, _from: Node = null) -> void:
+## Rifle rounds ask this instead of `hit_radius`: a body and a head, not a ball
+## at the ankles.
+func bullet_hit(from: Vector3, to: Vector3) -> Vector2:
+	if prone:
+		return Firearm.prone_hit(global_position, yaw, from, to)
+	return Firearm.body_hit(global_position, crouching, from, to)
+
+func take_hit(amount: float, from: Node = null) -> void:
 	if dead:
 		return
 	health -= amount
+	_since_hit = 0.0
+	if from != null and is_instance_valid(from) and from is Node3D and from != self:
+		last_attacker = from
+		hurt_from = (from as Node3D).global_position
+		hurt_t = 1.1
+	if amount > 2.0 and is_inside_tree():
+		Sfx.play_ui(get_tree().current_scene, "hurt", -5.0, randf_range(0.9, 1.1))
+		_recoil += randf_range(0.01, 0.025)
 	if health <= 0.0:
 		_go_ragdoll(vel)
 
 func _go_ragdoll(v: Vector3) -> void:
 	dead = true
 	var rd := Ragdoll.new()
-	rd.spawn_from(global_transform, v * 0.8 + Vector3(0, 1.5, 0))
+	rd.spawn_standing(global_transform, Vector3(v.x, 0.0, v.z) * 0.7)
 	get_parent().add_child(rd)
 	body.visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if not is_instance_valid(arena):
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	died.emit(global_position)
 
 ## Closest boardable jet within reach and roughly in front of you.
@@ -520,6 +1296,13 @@ func _scan() -> void:
 			target_jet = n
 
 func prompt() -> String:
+	if frame == null and not near_ladder.is_empty() and _wall < 0:
+		return "U   climb the ladder   (or SPACE while walking into it)"
+	if frame == null and is_instance_valid(_near_drop) and _grab_t < 0.0:
+		var id: int = Firearm.index_of(String(_near_drop.get("kit")))
+		if slots.has(id):
+			return "F   take the rounds from the %s" % String(Firearm.KIT[id]["name"])
+		return "F   swap for the %s" % String(Firearm.KIT[id]["name"])
 	if frame != null:
 		if is_instance_valid(frame_owner) and frame_owner.spec.get("gunship", false):
 			return "G   gun station        U   step out"
