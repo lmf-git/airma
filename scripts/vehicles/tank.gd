@@ -1246,6 +1246,15 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 	# same way. Shove the hull clear along the shortest axis out of the
 	# footprint and kill the part of the velocity that was driving into it,
 	# which stops a tank climbing a tower block one frame at a time.
+	# What gives way first. Thirty tonnes at a walking pace goes through a
+	# garden wall, over a parked car and through a lamp post without noticing;
+	# only what is built to stay -- a building, a container -- stops it.
+	if absf(speed) > 1.2 and alive:
+		var broke: int = TownSet.crush(xf.origin, hull_radius(), state.linear_velocity)
+		if Scenery.current != null and is_instance_valid(Scenery.current):
+			broke += Scenery.current.knock(xf.origin, hull_radius() * 0.8, state.linear_velocity)
+		if broke > 0:
+			state.linear_velocity *= 0.93
 	var struck := Obstacles.hit(xf.origin, hull_radius())
 	if struck >= 0:
 		var out := xf.origin - Obstacles.centre_of(struck)

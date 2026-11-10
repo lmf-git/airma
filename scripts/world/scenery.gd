@@ -712,6 +712,62 @@ func _town_detail() -> void:
 		_stats["town_faction_" + faction] = int(_stats.get("town_faction_" + faction, 0)) + 1
 	_stats["street_props"] = made
 
+## Street furniture, so that something driving down the pavement can find
+## what it has just hit: [multimesh, transforms] per batch, and a coarse hash
+## of where every piece stands. The hash is built the first time anybody asks
+## -- thirty-six thousand entries is forty milliseconds nobody flying an
+## aeroplane should pay at boot.
+var _furniture: Array = []
+var _furn_hash: Dictionary = {}
+var _furn_down: Dictionary = {}
+const FURN_CELL := 12.0
+
+func _furn_key(x: float, z: float) -> int:
+	return int(floor(x / FURN_CELL)) * 1048576 + int(floor(z / FURN_CELL))
+
+## Flatten whatever street furniture is within `r` of `at`: a lamp post goes
+## over the way it was pushed, a bench or a kiosk is driven into the ground.
+## Returns how many went.
+func knock(at: Vector3, r: float, push: Vector3) -> int:
+	if _furniture.is_empty():
+		return 0
+	if _furn_hash.is_empty():
+		for bi in _furniture.size():
+			var xs: Array = _furniture[bi][1]
+			for ii in xs.size():
+				var o: Vector3 = (xs[ii] as Transform3D).origin
+				var k := _furn_key(o.x, o.z)
+				if not _furn_hash.has(k):
+					_furn_hash[k] = PackedInt32Array()
+				var arr: PackedInt32Array = _furn_hash[k]
+				arr.append(bi * 65536 + ii)
+				_furn_hash[k] = arr
+	var n := 0
+	for dz in [-1, 0, 1]:
+		for dx in [-1, 0, 1]:
+			var k2 := _furn_key(at.x + dx * FURN_CELL, at.z + dz * FURN_CELL)
+			if not _furn_hash.has(k2):
+				continue
+			for code in (_furn_hash[k2] as PackedInt32Array):
+				if _furn_down.has(code):
+					continue
+				var bi2: int = code >> 16
+				var ii2: int = code & 65535
+				var xf: Transform3D = (_furniture[bi2][1] as Array)[ii2]
+				if Vector2(xf.origin.x - at.x, xf.origin.z - at.z).length() > r + 0.5 \
+						or absf(xf.origin.y - at.y) > 4.0:
+					continue
+				_furn_down[code] = true
+				# over, along the way it was pushed
+				var dir := Vector3(push.x, 0.0, push.z)
+				dir = dir.normalized() if dir.length() > 0.1 else Vector3.FORWARD
+				var axis := Vector3.UP.cross(dir).normalized()
+				var fallen := Transform3D(Basis(axis, deg_to_rad(86.0)) * xf.basis,
+					xf.origin + Vector3(0, 0.12, 0))
+				(_furniture[bi2][0] as MultiMesh).set_instance_transform(ii2, fallen)
+				n += 1
+	return n
+
 func _detail_batch(mesh: Mesh, xforms: Array, nm: String) -> int:
 	if xforms.is_empty() or mesh == null:
 		return 0
@@ -724,6 +780,7 @@ func _detail_batch(mesh: Mesh, xforms: Array, nm: String) -> int:
 	for i in xforms.size():
 		mm.set_instance_transform(i, xforms[i])
 	mmi.multimesh = mm
+	_furniture.append([mm, xforms])
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# the LOD itself: nothing at all beyond half a kilometre
 	mmi.visibility_range_end = PROP_FADE
@@ -734,7 +791,12 @@ func _detail_batch(mesh: Mesh, xforms: Array, nm: String) -> int:
 
 func _lamp_mesh(tone: Color) -> ArrayMesh:
 	var st := MeshKit.begin()
-	MeshKit.cone(st, 0.09, 0.06, 0.0, 5.4, Vector3.ZERO, 6, true)
+	# A box, stood up. It was a cone, and `MeshKit.cone` runs along z: the
+	# column was lying flat along the pavement, under the surface more often
+	# than not, with the arm and the lantern hanging in the air where the top
+	# of it should have been.
+	MeshKit.box(st, Vector3(0.15, 5.4, 0.15), Vector3(0, 2.7, 0))
+	MeshKit.box(st, Vector3(0.30, 0.35, 0.30), Vector3(0, 0.17, 0))
 	MeshKit.box(st, Vector3(0.14, 0.10, 1.1), Vector3(0, 5.4, -0.45))
 	MeshKit.box(st, Vector3(0.34, 0.16, 0.62), Vector3(0, 5.28, -0.95))
 	return MeshKit.finish(st, MeshKit.mat(tone.darkened(0.45), 0.6, 0.35))
@@ -762,7 +824,8 @@ func _kiosk_mesh(tone: Color, faction: String) -> ArrayMesh:
 			MeshKit.box(st, Vector3(3.0, 0.14, 2.6), Vector3(0, 2.72, 0))
 		"uk", "usa":
 			# a pitched roof and a hanging sign
-			MeshKit.cone(st, 1.7, 0.1, 2.6, 3.5, Vector3.ZERO, 4, true)
+			MeshKit.box(st, Vector3(2.7, 0.30, 2.4), Vector3(0, 2.75, 0))
+			MeshKit.box(st, Vector3(1.7, 0.30, 1.5), Vector3(0, 3.05, 0))
 			MeshKit.box(st, Vector3(1.3, 0.5, 0.08), Vector3(0, 2.1, -1.0))
 		_:
 			# an awning, angled out over the front
@@ -771,20 +834,26 @@ func _kiosk_mesh(tone: Color, faction: String) -> ArrayMesh:
 
 func _planter_mesh(tone: Color, biome: String) -> ArrayMesh:
 	var st := MeshKit.begin()
-	MeshKit.cone(st, 0.75, 0.62, 0.0, 0.75, Vector3.ZERO, 8, true)
+	# Boxes, every part: a cone here runs along z, so the tub, the stem and
+	# the crown were all lying on their sides.
+	MeshKit.box(st, Vector3(1.4, 0.75, 1.4), Vector3(0, 0.37, 0))
 	match biome:
 		"desert":
 			# a palm: a bare stem and a crown
-			MeshKit.cone(st, 0.13, 0.09, 0.75, 4.4, Vector3.ZERO, 6, true)
+			MeshKit.box(st, Vector3(0.22, 3.7, 0.22), Vector3(0, 2.6, 0))
 			for k in 6:
 				var a := TAU * float(k) / 6.0
 				MeshKit.box(st, Vector3(2.0, 0.07, 0.34),
 					Vector3(cos(a) * 0.9, 4.3, sin(a) * 0.9))
 		"snow", "rock":
-			MeshKit.cone(st, 0.9, 0.05, 0.75, 3.8, Vector3.ZERO, 7, true)
+			MeshKit.box(st, Vector3(0.20, 1.0, 0.20), Vector3(0, 1.2, 0))
+			for lvl in 4:
+				var w: float = 1.7 - lvl * 0.4
+				MeshKit.box(st, Vector3(w, 0.62, w), Vector3(0, 1.7 + lvl * 0.6, 0))
 		_:
-			MeshKit.cone(st, 0.16, 0.11, 0.75, 2.6, Vector3.ZERO, 6, true)
-			MeshKit.cone(st, 1.25, 0.2, 2.4, 4.6, Vector3.ZERO, 8, true)
+			MeshKit.box(st, Vector3(0.26, 2.0, 0.26), Vector3(0, 1.7, 0))
+			MeshKit.box(st, Vector3(2.2, 1.5, 2.2), Vector3(0, 3.3, 0))
+			MeshKit.box(st, Vector3(1.4, 0.8, 1.4), Vector3(0, 4.3, 0))
 	return MeshKit.finish(st, MeshKit.mat(tone.lerp(Color(0.22, 0.36, 0.18), 0.6),
 		0.85, 0.0))
 

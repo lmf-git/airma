@@ -52,6 +52,11 @@ var deaths := 0
 var headshots := 0
 
 var _nav := AStarGrid2D.new()
+## The streets, for anything on tracks: [`VCELL`] metre cells.
+var _vnav := AStarGrid2D.new()
+var _vn := 0
+const VCELL := 6.0
+var _drive_t := 0.0
 var _n := 0
 var _corner := Vector2.ZERO
 var _teams := {0: [], 1: []}
@@ -162,6 +167,31 @@ func _survey() -> void:
 			if tight:
 				_nav.set_point_weight_scale(id, 1.6)
 	stats["free_cells"] = free
+	# And the same again for things too wide for an alley: a coarser grid
+	# that only the streets and the squares are open on. Anything a tank
+	# would simply drive through does not count as in its way.
+	_vn = int(HALF * 2.0 / VCELL)
+	_vnav.region = Rect2i(0, 0, _vn, _vn)
+	_vnav.cell_size = Vector2(VCELL, VCELL)
+	_vnav.offset = _corner + Vector2(VCELL, VCELL) * 0.5
+	_vnav.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	_vnav.update()
+	var open_v := 0
+	for j in _vn:
+		for i in _vn:
+			var vx: float = _corner.x + (i + 0.5) * VCELL
+			var vz: float = _corner.y + (j + 0.5) * VCELL
+			var hit_id: int = Obstacles.hit(Vector3(vx, _ground(vx, vz) + 1.5, vz), 4.2)
+			var soft: bool = hit_id >= 0 and is_instance_valid(dressing) \
+				and dressing._breaks.has(hit_id)
+			if hit_id >= 0 and not soft:
+				_vnav.set_point_solid(Vector2i(i, j), true)
+			else:
+				open_v += 1
+				if soft:
+					# passable, but the open road is preferred to somebody's wall
+					_vnav.set_point_weight_scale(Vector2i(i, j), 2.5)
+	stats["vehicle_cells"] = open_v
 	# The same survey, as a picture: what is solid and what is street. This
 	# is the map in the corner of the screen.
 	var img := Image.create(_n, _n, false, Image.FORMAT_RGBA8)
@@ -357,6 +387,100 @@ func vehicle_down(team: int, what: String) -> void:
 	if is_instance_valid(mode) and mode.running:
 		mode.register_kill(team)
 
+## Anything on tracks or wheels, moving, kills whoever it drives over: the
+## other side's men, and you if you are standing in front of it. Not its own
+## side -- the AI does not look where it is going well enough for that to be
+## anything but a way of losing your own squad.
+func _under_wheels() -> void:
+	if not armour:
+		return
+	for v in get_tree().get_nodes_in_group("hittable"):
+		var t := v as Tank
+		if t == null or not t.alive or t.linear_velocity.length() < 2.2:
+			continue
+		var reach: float = t.hull_radius() + 0.3
+		var driver: Node = player if (is_instance_valid(world) and world.get("tank") == t) else null
+		for s in enemies_of(t.team).duplicate():
+			if not is_instance_valid(s) or not s.is_alive():
+				continue
+			var rel: Vector3 = (s as Node3D).global_position - t.global_position
+			if absf(rel.y) > 2.5 or Vector2(rel.x, rel.z).length() > reach:
+				continue
+			# in front of the way it is going, not merely beside it
+			if rel.dot(t.linear_velocity) < 0.0:
+				continue
+			if s is Soldier:
+				s.take_hit(600.0, driver)
+				if world.get("tank") == t:
+					# the man who would be credited is inside the vehicle
+					run_over += 1
+					kills += 1
+					streak += 1
+					Sim.report("you ran over %s" % (s as Soldier).callsign, Sim.Ev.GOOD)
+					Sim.score += 100
+			else:
+				s.take_hit(600.0, t)
+
+var run_over := 0
+
+func _vcell(p: Vector3) -> Vector2i:
+	var id := Vector2i(clampi(int(floor((p.x - _corner.x) / VCELL)), 0, _vn - 1),
+		clampi(int(floor((p.z - _corner.y) / VCELL)), 0, _vn - 1))
+	if not _vnav.is_point_solid(id):
+		return id
+	for r in range(1, 6):
+		for dj in range(-r, r + 1):
+			for di in range(-r, r + 1):
+				var q := Vector2i(id.x + di, id.y + dj)
+				if _vnav.is_in_boundsv(q) and not _vnav.is_point_solid(q):
+					return q
+	return id
+
+## Take the AI's vehicles round by the streets. Left to itself a tank points
+## at where it was told to go and drives, which in a town is into the first
+## building in the way, where it stays. So it is given the next corner
+## instead, a route at a time, and somewhere new to go when it arrives.
+func _drive_armour(delta: float) -> void:
+	if not armour:
+		return
+	_drive_t -= delta
+	if _drive_t > 0.0:
+		return
+	_drive_t = 0.35
+	for v in get_tree().get_nodes_in_group("hittable"):
+		var t := v as Tank
+		if t == null or not t.alive or not t.ai or t.occupied:
+			continue
+		var goal: Vector3 = t.get_meta("cqb_goal", Vector3.INF)
+		var here: Vector3 = t.global_position
+		if goal == Vector3.INF or Vector2(here.x - goal.x, here.z - goal.z).length() < 14.0:
+			# arrived, or never sent: another street corner, anywhere in town
+			var pick: Vector3 = _spots[_rng.randi() % _spots.size()]
+			if _rng.randf() < 0.5:
+				pick = Vector3(centre.x + [-128.0, 0.0, 128.0][_rng.randi() % 3], 0.0,
+					centre.y + _rng.randf_range(-118.0, 118.0))
+			goal = _vcell_pos(_vcell(pick))
+			t.set_meta("cqb_goal", goal)
+		var route: PackedVector2Array = _vnav.get_point_path(_vcell(here), _vcell(goal), true)
+		if route.size() < 2:
+			t.set_meta("cqb_goal", Vector3.INF)
+			continue
+		# aim a couple of cells along it, so corners are cut no finer than
+		# the street allows
+		var wp: Vector2 = route[mini(2, route.size() - 1)]
+		var dir := Vector3(wp.x - here.x, 0.0, wp.y - here.z)
+		if dir.length() < 0.5:
+			continue
+		# The driver stops short of wherever he is told to go by a long way --
+		# that is right for a sector and no use for a street corner -- so the
+		# point he is given is well beyond the one that is meant.
+		t.ai_goal = here + dir.normalized() * 400.0
+
+func _vcell_pos(id: Vector2i) -> Vector3:
+	var x: float = _corner.x + (id.x + 0.5) * VCELL
+	var z: float = _corner.y + (id.y + 0.5) * VCELL
+	return Vector3(x, _ground(x, z), z)
+
 ## The player went down. The world brings him back; this keeps the score.
 func player_down() -> void:
 	deaths += 1
@@ -375,6 +499,8 @@ func _process(delta: float) -> void:
 	if over:
 		return
 	_support(delta)
+	_under_wheels()
+	_drive_armour(delta)
 	for q in _queue:
 		q[0] = float(q[0]) - delta
 	while not _queue.is_empty() and float(_queue[0][0]) <= 0.0:

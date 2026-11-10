@@ -165,6 +165,108 @@ static func bullet_impact(world: Node, pos: Vector3, hard: bool) -> void:
 			("impact_hard" if hard else "impact_soft"), pos, -9.0,
 			randf_range(0.85, 1.25), 90.0)
 
+## One piece of something, thrown: a box that flies, bounces and stays.
+static func chunk(world: Node, at: Vector3, vel: Vector3, size: Vector3, col: Color,
+		life := 30.0) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	var st := MeshKit.begin()
+	MeshKit.box(st, size, Vector3.ZERO)
+	var d := Debris.new()
+	d.add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(col, 0.7, 0.0)), "Bit"))
+	d.vel = vel
+	d.spin = Vector3(randf_range(-9, 9), randf_range(-9, 9), randf_range(-9, 9))
+	d.rest_offset = maxf(size.y * 0.5, 0.04)
+	d.bounce = 0.2
+	d.life = life
+	world.add_child(d)
+	d.global_position = at
+
+static var _pools := 0
+const POOL_BUDGET := 48
+
+## What is left on the road. It spreads for a couple of seconds and stays.
+static func blood_pool(world: Node, at: Vector3, size := 1.0) -> void:
+	if world == null or not world.is_inside_tree() or _pools >= POOL_BUDGET:
+		return
+	var p := Pool.new()
+	p.size = size
+	world.add_child(p)
+	p.global_position = Vector3(at.x, Sim.height_at(at.x, at.z) + 0.03, at.z)
+
+class Pool extends MeshInstance3D:
+	var size := 1.0
+	var age := 0.0
+	const LIFE := 50.0
+
+	func _ready() -> void:
+		Effects._pools += 1
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.5
+		cm.bottom_radius = 0.5
+		cm.height = 0.01
+		cm.radial_segments = 9
+		cm.rings = 1
+		var m := StandardMaterial3D.new()
+		m.albedo_color = Color(0.30, 0.02, 0.02, 0.92)
+		m.roughness = 0.25
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		cm.material = m
+		mesh = cm
+		cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		rotation.y = randf() * TAU
+		scale = Vector3(0.05, 1.0, 0.05)
+		physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+
+	func _exit_tree() -> void:
+		Effects._pools -= 1
+
+	func _process(delta: float) -> void:
+		age += delta
+		var k: float = clampf(age / 2.5, 0.0, 1.0)
+		k = 1.0 - (1.0 - k) * (1.0 - k)
+		scale = Vector3(size * (0.2 + 1.3 * k), 1.0, size * (0.2 + 1.0 * k))
+		if age > LIFE:
+			queue_free()
+
+## A spray of it: where a round came out, or where a limb was.
+static func gore_burst(world: Node, at: Vector3, dir: Vector3, bits := 5, speed := 4.0) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	for i in bits:
+		var v: Vector3 = dir * randf_range(0.4, 1.0) * speed + Vector3(randf_range(-1.5, 1.5),
+			randf_range(0.5, 3.0), randf_range(-1.5, 1.5))
+		var s: float = randf_range(0.03, 0.09)
+		chunk(world, at, v, Vector3(s, s, s), Color(0.42, 0.03, 0.03), 14.0)
+	var e := Boom.new()
+	e.radius = 0.32
+	e.tint = Color(0.60, 0.04, 0.03)
+	e.smoke = false
+	e.lit = false
+	e.life_max = 0.35
+	world.add_child(e)
+	e.global_position = at
+
+## Nothing left to fall down: what a shell, a grenade or a tank track leaves.
+static func gib(world: Node, at: Vector3, vel: Vector3, suit: Color) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	var mid := at + Vector3(0, 1.0, 0)
+	var parts := [[Vector3(0.26, 0.28, 0.27), suit.darkened(0.3)], [Vector3(0.12, 0.50, 0.12), suit],
+		[Vector3(0.12, 0.50, 0.12), suit], [Vector3(0.16, 0.42, 0.16), suit],
+		[Vector3(0.16, 0.42, 0.16), suit], [Vector3(0.36, 0.30, 0.22), Color(0.45, 0.05, 0.04)],
+		[Vector3(0.14, 0.09, 0.28), Color(0.12, 0.12, 0.13)], [Vector3(0.20, 0.16, 0.16), Color(0.5, 0.06, 0.05)],
+		[Vector3(0.18, 0.12, 0.12), Color(0.55, 0.08, 0.06)], [Vector3(0.10, 0.10, 0.10), Color(0.6, 0.1, 0.08)]]
+	for p in parts:
+		var v: Vector3 = vel * 0.5 + Vector3(randf_range(-5, 5), randf_range(2.5, 8.0), randf_range(-5, 5))
+		chunk(world, mid + Vector3(randf_range(-0.3, 0.3), randf_range(-0.5, 0.5), randf_range(-0.3, 0.3)),
+			v, p[0], p[1], 40.0)
+	gore_burst(world, mid, Vector3.UP, 10, 6.0)
+	for k in 3:
+		blood_pool(world, at + Vector3(randf_range(-1.2, 1.2), 0, randf_range(-1.2, 1.2)),
+			randf_range(0.6, 1.4))
+	Sfx.play_at(world, "hit_body", mid, 2.0, 0.6, 120.0)
+
 ## A round going into a man.
 static func blood(world: Node, pos: Vector3) -> void:
 	if world == null or not world.is_inside_tree():
@@ -178,6 +280,8 @@ static func blood(world: Node, pos: Vector3) -> void:
 	world.add_child(e)
 	e.global_position = pos
 	Sfx.play_at(world, "hit_body", pos, -7.0, randf_range(0.9, 1.15), 60.0)
+	if randf() < 0.5:
+		gore_burst(world, pos, Vector3.ZERO, 2, 2.0)
 
 ## A nuclear detonation: white flash, a fireball that expands and rises, and a
 ## column with a cap on it. Scaled off the lethal radius so a bigger weapon

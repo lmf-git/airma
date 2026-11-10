@@ -1249,14 +1249,25 @@ func is_alive() -> bool:
 ## Rifle rounds ask this instead of `hit_radius`: a body and a head, not a ball
 ## at the ankles.
 func bullet_hit(from: Vector3, to: Vector3) -> Vector2:
-	if prone:
-		return Firearm.prone_hit(global_position, yaw, from, to)
-	return Firearm.body_hit(global_position, crouching, from, to)
+	var r: Vector2 = Firearm.prone_hit(global_position, yaw, from, to) if prone \
+		else Firearm.body_hit(global_position, crouching, from, to)
+	if r.x > 0.0:
+		_last_head = r.x > 1.5
+		_last_low = r.x < 0.9
+	return r
+
+## What the last thing to hit him was, for what is left of him afterwards.
+var _last_amount := 0.0
+var _last_head := false
+var _last_low := false
 
 func take_hit(amount: float, from: Node = null) -> void:
 	if dead:
 		return
 	health -= amount
+	_last_amount = amount
+	if amount >= 120.0:
+		_last_head = false
 	_since_hit = 0.0
 	if from != null and is_instance_valid(from) and from is Node3D and from != self:
 		last_attacker = from
@@ -1270,10 +1281,15 @@ func take_hit(amount: float, from: Node = null) -> void:
 
 func _go_ragdoll(v: Vector3) -> void:
 	dead = true
-	var rd := Ragdoll.new()
-	rd.spawn_standing(global_transform, Vector3(v.x, 0.0, v.z) * 0.7)
-	get_parent().add_child(rd)
+	# The same as anybody else: what killed him decides what is left.
+	var from_dir := Vector3.ZERO
+	if is_instance_valid(last_attacker) and last_attacker is Node3D and last_attacker != self:
+		from_dir = (global_position - (last_attacker as Node3D).global_position).normalized()
+	Ragdoll.fall(get_parent(), global_transform, Vector3(v.x, 0.0, v.z), Pilot.SUIT, Pilot.HELMET,
+		_last_amount, _last_head, _last_low, from_dir, 26.0)
 	body.visible = false
+	# and he sees it: the view goes out over the shoulder as he goes down
+	third = true
 	if not is_instance_valid(arena):
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	died.emit(global_position)

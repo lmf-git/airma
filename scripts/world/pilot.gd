@@ -147,9 +147,12 @@ func _gait(t: float, freq: float, hip_amp: float, knee_amp: float,
 	# after the foot leaves the ground rather than at full stride
 	var ka: float = knee_amp * pow(clampf(sin(ph + 2.0), 0.0, 1.0), 1.25)
 	var kb: float = knee_amp * pow(clampf(sin(ph + 2.0 + PI), 0.0, 1.0), 1.25)
-	_rot(hips, lean * 0.6, 0, sin(ph * 2.0) * 0.03)
-	_rot(torso, lean, -a * 0.10, 0)          # shoulders counter-rotate the hips
-	_rot(head, -lean * 0.7, a * 0.05, 0)
+	# Forward is a NEGATIVE turn about x here: the figure faces -z, so a
+	# positive one tips the head back over the heels. These were positive,
+	# and he ran leaning backwards like a man being pulled along by a dog.
+	_rot(hips, -lean * 0.6, 0, sin(ph * 2.0) * 0.03)
+	_rot(torso, -lean, -a * 0.10, 0)         # shoulders counter-rotate the hips
+	_rot(head, lean * 0.7, a * 0.05, 0)
 	_rot(leg_l, a * hip_amp, 0, 0.02)
 	_rot(leg_r, b * hip_amp, 0, -0.02)
 	_rot(shin_l, -ka - 0.06, 0, 0)
@@ -182,9 +185,9 @@ func pose_run(t: float) -> void:
 ## Crouched: hips down, knees folded, weapon tucked in.
 func pose_crouch(t: float, moving: bool) -> void:
 	var a := sin(t * 4.4) * (1.0 if moving else 0.0)
-	_rot(hips, 0.22, 0, 0)
-	_rot(torso, 0.12, 0, 0)
-	_rot(head, -0.30, 0, 0)
+	_rot(hips, 0.10, 0, 0)
+	_rot(torso, -0.30, 0, 0)
+	_rot(head, 0.22, 0, 0)
 	_rot(leg_l, 1.05 + a * 0.35, 0, 0.10)
 	_rot(leg_r, 1.05 - a * 0.35, 0, -0.10)
 	_rot(shin_l, -1.55, 0, 0)
@@ -495,9 +498,9 @@ func _k(delta: float, rate: float) -> float:
 
 ## Feet apart, one ahead of the other, weight forward: standing to shoot.
 func pose_stance() -> void:
-	_rot(hips, 0.04, 0, 0)
-	_rot(torso, 0.07, 0, 0)
-	_rot(head, 0, 0, 0)
+	_rot(hips, -0.03, 0, 0)
+	_rot(torso, -0.08, 0, 0)
+	_rot(head, 0.05, 0, 0)
 	_rot(leg_l, 0.20, 0, 0.07)
 	_rot(leg_r, -0.13, 0, -0.08)
 	_rot(shin_l, -0.24, 0, 0)
@@ -508,9 +511,9 @@ func pose_kneel(t: float, moving: bool) -> void:
 	if moving:
 		pose_crouch(t, true)
 		return
-	_rot(hips, 0.10, 0, 0)
-	_rot(torso, 0.10, 0, 0)
-	_rot(head, 0, 0, 0)
+	_rot(hips, 0.0, 0, 0)
+	_rot(torso, -0.14, 0, 0)
+	_rot(head, 0.08, 0, 0)
 	_rot(leg_l, 1.30, 0, 0.10)
 	_rot(shin_l, -1.50, 0, 0)
 	_rot(leg_r, 0.22, 0, -0.12)
@@ -560,7 +563,7 @@ func animate(delta: float) -> void:
 		# one hand on the top, both knees up and through
 		pose_air(true)
 		_rot(hips, 0.25, 0, -0.30 * sin(act * PI))
-		_rot(torso, 0.40 * sin(act * PI), 0, 0)
+		_rot(torso, -0.40 * sin(act * PI), 0, 0)
 		_rot(leg_l, 1.25, 0, 0.10)
 		_rot(leg_r, 1.05, 0, -0.10)
 		_rot(shin_l, -1.50, 0, 0)
@@ -573,14 +576,14 @@ func animate(delta: float) -> void:
 			var over: float = smoothstep(0.62, 1.0, act)
 			_rot(leg_l, lerpf(0.75, 1.55, over), 0, 0.15)
 			_rot(shin_l, -1.65, 0, 0)
-			_rot(torso, 0.10 + 0.45 * sin(over * PI), 0, 0)
+			_rot(torso, -0.10 - 0.45 * sin(over * PI), 0, 0)
 		_gait_ph = 0.0
 	elif in_action == "slide":
 		# on one hip with the lead leg out, weapon still up
-		_rot(hips, -0.62, 0, 0.16)
-		_rot(torso, 0.50, 0, 0)
-		_rot(head, 0.10, 0, 0)
-		_rot(leg_l, 1.50, 0, 0.06)
+		_rot(hips, 0.55, 0, 0.16)
+		_rot(torso, -0.30, 0, 0)
+		_rot(head, -0.20, 0, 0)
+		_rot(leg_l, 1.20, 0, 0.06)
 		_rot(shin_l, -0.22, 0, 0)
 		_rot(leg_r, 1.15, 0, -0.30)
 		_rot(shin_r, -1.70, 0, 0)
@@ -588,7 +591,7 @@ func animate(delta: float) -> void:
 	elif in_action == "grab":
 		# down on a knee and a hand to the ground
 		pose_kneel(0.0, false)
-		_rot(torso, 0.10 + 0.55 * sin(act * PI), 0, 0)
+		_rot(torso, -0.10 - 0.55 * sin(act * PI), 0, 0)
 		_gait_ph = 0.0
 	elif in_air != 0:
 		pose_air(in_air > 0)
@@ -634,7 +637,7 @@ func animate(delta: float) -> void:
 	# still over legs that are doing all of it.
 	if armed and not in_prone and in_action == "":
 		var still: float = _ready_s * 0.8
-		torso.quaternion = torso.quaternion.slerp(Quaternion(Vector3.RIGHT, 0.07), still)
+		torso.quaternion = torso.quaternion.slerp(Quaternion(Vector3.RIGHT, -0.08), still)
 		var hq: Quaternion = hips.quaternion
 		hips.quaternion = hq.slerp(Quaternion(Vector3.RIGHT, hq.get_euler().x), still * 0.7)
 	var long_gun: bool = armed and not gun.get("hand", false)

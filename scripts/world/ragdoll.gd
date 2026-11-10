@@ -28,6 +28,49 @@ var life := 26.0
 ## out of an aeroplane that has just come apart, and on someone standing in a
 ## street it is a body that spins on the spot like a dropped firework.
 var calm := false
+## Limbs he no longer has: "head", "arm_l", "arm_r", "leg_l", "leg_r".
+var lost: Array = []
+
+## What is left of a man who has just been killed, and where it goes.
+##
+## What did it decides. A shell, a grenade or a tank track leaves nothing to
+## fall over. A round through the head takes the head. A round low down takes
+## a leg and one higher up an arm, when it was heavy enough to or some of the
+## time when it was not. Otherwise he falls whole. The player and the AI both
+## come through here, so the same thing happens to either.
+static func fall(world: Node, feet: Transform3D, velocity: Vector3, suit: Color, helmet: Color,
+		amount: float, head: bool, low: bool, from_dir: Vector3, lasts := 16.0) -> void:
+	if world == null or not world.is_inside_tree():
+		return
+	var at: Vector3 = feet.origin
+	var right: Vector3 = feet.basis.orthonormalized().x
+	if amount >= 120.0 and not head:
+		Effects.gib(world, at, velocity + from_dir * 4.0, suit)
+		return
+	var rd := Ragdoll.new()
+	rd.set_meta("suit", suit)
+	rd.set_meta("helmet", helmet)
+	rd.life = lasts
+	if head:
+		rd.lost = ["head"]
+		Effects.chunk(world, at + Vector3(0, 1.75, 0), from_dir * 5.0 + Vector3(0, 3.5, 0),
+			Vector3(0.26, 0.28, 0.27), helmet, 30.0)
+		Effects.gore_burst(world, at + Vector3(0, 1.6, 0), from_dir + Vector3.UP, 8, 5.0)
+	elif amount >= 40.0 or randf() < 0.3:
+		var sgn: float = -1.0 if randf() < 0.5 else 1.0
+		var leg: bool = low or randf() < 0.25
+		var limb: String = ("leg" if leg else "arm") + ("_l" if sgn < 0.0 else "_r")
+		rd.lost = [limb]
+		var stump: Vector3 = at + right * sgn * (0.12 if leg else 0.28) \
+			+ Vector3(0, 0.8 if leg else 1.35, 0)
+		Effects.chunk(world, stump, from_dir * 3.0 + right * sgn * 2.5 + Vector3(0, 2.5, 0),
+			Vector3(0.16, 0.84, 0.16) if leg else Vector3(0.12, 0.56, 0.12), suit, 30.0)
+		Effects.gore_burst(world, stump, from_dir + right * sgn, 6, 4.0)
+	else:
+		Effects.gore_burst(world, at + Vector3(0, 1.2, 0), from_dir, 4, 3.5)
+	Effects.blood_pool(world, at, randf_range(0.8, 1.3))
+	rd.spawn_standing(feet, velocity * 0.7 + from_dir * 1.5)
+	world.add_child(rd)
 
 ## For a figure whose origin is at its feet. `spawn_from` wants the pelvis:
 ## handed the feet, the legs start a metre underground and the solver throws
@@ -49,6 +92,8 @@ func _ready() -> void:
 	global_transform = Transform3D(Basis(), xf.origin)
 	_ground_patch(xf.origin)
 	for l in LIMBS:
+		if lost.has(l[0]):
+			continue
 		var b := RigidBody3D.new()
 		b.name = str(l[0])
 		b.mass = float(l[3])
@@ -86,6 +131,15 @@ func _ready() -> void:
 			b.angular_velocity = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
 		bodies[l[0]] = b
 	for j in JOINTS:
+		if bodies.has(j[0]) and not bodies.has(j[1]):
+			# the raw end of it, on whatever it used to be joined to
+			var owner_body: RigidBody3D = bodies[j[0]]
+			var cap := MeshKit.mi(_box_mesh(Vector3(0.15, 0.07, 0.15) if j[1] != "head"
+				else Vector3(0.16, 0.06, 0.16), Color(0.40, 0.03, 0.03)), "Stump")
+			owner_body.add_child(cap)
+			cap.global_position = xf.origin + xf.basis * (j[2] as Vector3)
+		if not bodies.has(j[0]) or not bodies.has(j[1]):
+			continue
 		var joint := ConeTwistJoint3D.new()
 		# Turned with the body. The anchors were laid out for a figure facing
 		# north and left there, so anyone facing another way had his shoulders
@@ -118,7 +172,15 @@ func _ground_patch(at: Vector3) -> void:
 	add_child(sb)
 	sb.global_position = Vector3(at.x, maxf(Sim.height_at(at.x, at.z), Sim.sea_at(at.x, at.z)) - 2.0, at.z)
 
+var _bled := false
+var _age := 0.0
+
 func _process(delta: float) -> void:
+	_age += delta
+	if not _bled and _age > 2.2 and (calm or not lost.is_empty()) and bodies.has("torso"):
+		# where he has come to rest, not where he was hit
+		_bled = true
+		Effects.blood_pool(get_parent(), (bodies["torso"] as Node3D).global_position, 1.2)
 	life -= delta
 	if life <= 0.0:
 		queue_free()

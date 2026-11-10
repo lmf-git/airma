@@ -67,13 +67,81 @@ const CAR_TONES := {
 	"iran": [Color(0.84, 0.82, 0.76), Color(0.28, 0.40, 0.52), Color(0.42, 0.40, 0.36), Color(0.20, 0.36, 0.28)],
 }
 
-func _solid(at: Vector3, size: Vector3, yaw: float) -> void:
-	_boxes.append(Obstacles.add_box(at, size.x * 0.5, size.y, size.z * 0.5, yaw))
+## The last mesh put down, so the boxes that follow it know what they belong to.
+var _last_mesh: MeshInstance3D = null
+## Structure id -> [mesh, kind]: what goes when something heavy drives into it.
+var _breaks: Dictionary = {}
+const UNBREAKABLE := ["container", "bus", "crane", "scaffold"]
+
+func _solid(at: Vector3, size: Vector3, yaw: float, kind := "") -> void:
+	var id: int = Obstacles.add_box(at, size.x * 0.5, size.y, size.z * 0.5, yaw)
+	_boxes.append(id)
+	if kind != "" and not UNBREAKABLE.has(kind) and is_instance_valid(_last_mesh):
+		_breaks[id] = [_last_mesh, kind]
 
 func _mesh(at: Vector3, yaw: float, st: SurfaceTool, mat: Material) -> void:
 	var mi := MeshKit.mi(MeshKit.finish(st, mat), "Prop")
 	add_child(mi)
 	mi.global_transform = Transform3D(Basis(Vector3.UP, yaw), at)
+	_last_mesh = mi
+
+## Something heavy is driving through `at`. Whatever of this town's clutter
+## it is touching gives way: walls and stalls come apart, a car is flattened,
+## a tree goes over. Buildings, containers and the crane do not.
+static func crush(at: Vector3, r: float, push: Vector3) -> int:
+	var n := 0
+	for t in live:
+		if not is_instance_valid(t) \
+				or Vector2(at.x - t.centre.x, at.z - t.centre.y).length() > HALF + 40.0:
+			continue
+		for tries in 3:
+			var id: int = Obstacles.hit(at, r)
+			if id < 0 or not t._breaks.has(id):
+				break
+			t._smash(id, push)
+			n += 1
+	return n
+
+func _smash(id: int, push: Vector3) -> void:
+	var entry: Array = _breaks[id]
+	var mi: MeshInstance3D = entry[0]
+	var kind: String = entry[1]
+	# every box that belongs to the same thing goes with it
+	for other in _breaks.keys():
+		if (_breaks[other] as Array)[0] == mi:
+			Obstacles.remove(other)
+			_breaks.erase(other)
+	if not is_instance_valid(mi):
+		return
+	var world := get_tree().current_scene
+	var at: Vector3 = mi.global_position
+	var dir := Vector3(push.x, 0.0, push.z)
+	dir = dir.normalized() if dir.length() > 0.1 else Vector3.FORWARD
+	Effects.dust(world, at + Vector3(0, 0.8, 0), 2.2)
+	Sfx.play_at(world, "thump", at, -4.0, randf_range(1.2, 1.6), 300.0)
+	if kind == "car":
+		# flattened where it stands
+		mi.scale = Vector3(1.08, 0.42, 1.05)
+		return
+	if kind == "tree":
+		mi.global_transform = Transform3D(Basis(Vector3.UP.cross(dir).normalized(), deg_to_rad(84.0))
+			* mi.global_transform.basis, at + Vector3(0, 0.2, 0))
+		return
+	# everything else comes apart
+	var mat: Material = mi.mesh.surface_get_material(0) if mi.mesh != null else null
+	for k in 6:
+		var st := MeshKit.begin()
+		MeshKit.box(st, Vector3(randf_range(0.3, 0.9), randf_range(0.2, 0.6), randf_range(0.3, 0.9)),
+			Vector3.ZERO)
+		var d := Effects.Debris.new()
+		d.add_child(MeshKit.mi(MeshKit.finish(st, mat), "Bit"))
+		d.vel = dir * randf_range(2.0, 6.0) + Vector3(randf_range(-2, 2), randf_range(2.0, 5.0), randf_range(-2, 2))
+		d.spin = Vector3(randf_range(-5, 5), randf_range(-5, 5), randf_range(-5, 5))
+		d.rest_offset = 0.15
+		d.life = 40.0
+		world.add_child(d)
+		d.global_position = at + Vector3(randf_range(-1.0, 1.0), randf_range(0.3, 1.2), randf_range(-1.0, 1.0))
+	mi.queue_free()
 
 ## Is there room for something `r` across here, with space to walk round it?
 func _room(x: float, z: float, r: float) -> bool:
@@ -128,7 +196,7 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			MeshKit.box(st, Vector3(3.2, 0.55 + DEEP, 0.62), Vector3(0, 0.275, 0) + d)
 			MeshKit.box(st, Vector3(3.2, 0.55, 0.30), Vector3(0, 0.80, 0))
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.62, 0.61, 0.58), 0.9, 0.0))
-			_solid(at, Vector3(3.2, 1.08, 0.62), yaw)
+			_solid(at, Vector3(3.2, 1.08, 0.62), yaw, kind)
 		"sandbags":
 			MeshKit.box(st, Vector3(2.8, DEEP, 0.80), d)
 			for row in 4:
@@ -136,12 +204,12 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 				MeshKit.box(st, Vector3(w, 0.27, 0.80 - row * 0.08), Vector3(0, 0.135 + row * 0.27, 0))
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.60, 0.53, 0.38) if biome == "desert"
 				else Color(0.50, 0.47, 0.36), 1.0, 0.0))
-			_solid(at, Vector3(2.8, 1.08, 0.80), yaw)
+			_solid(at, Vector3(2.8, 1.08, 0.80), yaw, kind)
 		"crates":
 			MeshKit.box(st, Vector3(1.3, 1.1 + DEEP, 1.3), Vector3(0, 0.55, 0) + d)
 			MeshKit.box(st, Vector3(1.0, 0.8, 1.0), Vector3(0.1, 1.5, -0.05))
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.40, 0.33, 0.22), 0.9, 0.0))
-			_solid(at, Vector3(1.3, 1.9, 1.3), yaw)
+			_solid(at, Vector3(1.3, 1.9, 1.3), yaw, kind)
 		"car":
 			# The same four wheels everywhere, and a body that says where: a
 			# pickup, a hatchback, a van, a three-box saloon.
@@ -172,9 +240,9 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 					MeshKit.box(st, Vector3(0.24, 0.62 + DEEP, 0.62), Vector3(wx, 0.31, wz) + d)
 			var tones: Array = CAR_TONES.get(faction, CAR_TONES["usa"])
 			_mesh(at, yaw, st, MeshKit.mat(tones[_rng.randi() % tones.size()], 0.5, 0.35))
-			_solid(at, Vector3(1.85, 0.94, 4.3), yaw)
+			_solid(at, Vector3(1.85, 0.94, 4.3), yaw, kind)
 			_solid(at + Basis(Vector3.UP, yaw) * Vector3(0, 0, cab_z),
-				Vector3(1.65, 0.93 + cab_h, cab_len), yaw)
+				Vector3(1.65, 0.93 + cab_h, cab_len), yaw, kind)
 		"bus":
 			# what every street fight in a British town has lying across it
 			var tall: float = 4.3 if faction == "uk" else 3.1
@@ -188,20 +256,20 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			for lvl in (2 if faction == "uk" else 1):
 				MeshKit.box(glass, Vector3(2.54, 0.75, 9.4), Vector3(0, 1.75 + lvl * 1.85, 0))
 			_mesh(at, yaw, glass, MeshKit.mat(Color(0.07, 0.09, 0.11), 0.2, 0.6))
-			_solid(at, Vector3(2.5, tall, 10.4), yaw)
+			_solid(at, Vector3(2.5, tall, 10.4), yaw, kind)
 		"container":
 			MeshKit.box(st, Vector3(2.44, 2.6 + DEEP, 6.06), Vector3(0, 1.3, 0) + d)
 			for rib in 9:
 				MeshKit.box(st, Vector3(2.50, 2.5, 0.10), Vector3(0, 1.3, -2.7 + rib * 0.675))
 			var paint := [Color(0.50, 0.20, 0.12), Color(0.14, 0.30, 0.42), Color(0.30, 0.36, 0.24)]
 			_mesh(at, yaw, st, MeshKit.mat(paint[_rng.randi() % paint.size()], 0.7, 0.3))
-			_solid(at, Vector3(2.44, 2.6, 6.06), yaw)
+			_solid(at, Vector3(2.44, 2.6, 6.06), yaw, kind)
 		"wall":
 			# the garden wall of wherever this is
 			MeshKit.box(st, Vector3(4.0, 1.25 + DEEP, 0.40), Vector3(0, 0.625, 0) + d)
 			MeshKit.box(st, Vector3(4.1, 0.10, 0.50), Vector3(0, 1.28, 0))
 			_mesh(at, yaw, st, MeshKit.mat(_masonry(), 0.95, 0.0))
-			_solid(at, Vector3(4.0, 1.25, 0.40), yaw)
+			_solid(at, Vector3(4.0, 1.25, 0.40), yaw, kind)
 		"panel":
 			# precast concrete fencing, by the kilometre
 			for seg in 2:
@@ -209,11 +277,11 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			for post in 3:
 				MeshKit.box(st, Vector3(0.22, 2.55 + DEEP, 0.26), Vector3(-2.0 + post * 2.0, 1.27, 0) + d)
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.60, 0.60, 0.58), 0.95, 0.0))
-			_solid(at, Vector3(4.2, 2.4, 0.26), yaw)
+			_solid(at, Vector3(4.2, 2.4, 0.26), yaw, kind)
 		"hedge":
 			MeshKit.box(st, Vector3(4.0, 1.35 + DEEP, 0.9), Vector3(0, 0.67, 0) + d)
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.16, 0.30, 0.14), 1.0, 0.0))
-			_solid(at, Vector3(4.0, 1.35, 0.9), yaw)
+			_solid(at, Vector3(4.0, 1.35, 0.9), yaw, kind)
 		"stall":
 			# a market stall: a counter to get behind and an awning over it
 			MeshKit.box(st, Vector3(2.6, 0.95 + DEEP, 1.0), Vector3(0, 0.47, 0) + d)
@@ -221,13 +289,16 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 				for pz in [-0.9, 0.9]:
 					MeshKit.box(st, Vector3(0.07, 2.3 + DEEP, 0.07), Vector3(px, 1.15, pz) + d)
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.42, 0.32, 0.20), 0.9, 0.0))
+			_solid(at, Vector3(2.6, 0.95, 1.0), yaw, kind)
+			var counter := _last_mesh
 			var aw := MeshKit.begin()
 			MeshKit.box(aw, Vector3(3.0, 0.06, 2.3), Vector3(0, 2.32, 0))
 			var cloth: Color = {"china": Color(0.70, 0.08, 0.06), "iran": Color(0.16, 0.42, 0.36),
 				"france": Color(0.80, 0.74, 0.60), "russia": Color(0.20, 0.30, 0.52)}.get(
 				faction, Color(0.64, 0.46, 0.18))
 			_mesh(at, yaw, aw, MeshKit.mat(cloth, 0.95, 0.0))
-			_solid(at, Vector3(2.6, 0.95, 1.0), yaw)
+			# the awning goes when the counter does
+			_last_mesh.reparent(counter)
 		"small":
 			# one thing that belongs on this country's pavements
 			var size := Vector3(1.9, 1.3, 1.2)
@@ -252,7 +323,7 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			if faction == "uk":
 				MeshKit.box(st, Vector3(1.05, 0.12, 1.05), Vector3(0, 2.56, 0))
 			_mesh(at, yaw, st, MeshKit.mat(col, 0.6, 0.2))
-			_solid(at, size, yaw)
+			_solid(at, size, yaw, kind)
 		"stack":
 			# what the climate stacks by the road: firewood, bales, sacks
 			var sz := Vector3(2.2, 1.2, 1.2)
@@ -265,7 +336,7 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			MeshKit.box(st, sz + Vector3(0, DEEP, 0), Vector3(0, sz.y * 0.5, 0) + d)
 			MeshKit.box(st, Vector3(sz.x * 0.62, 0.5, sz.z * 0.8), Vector3(0, sz.y + 0.25, 0))
 			_mesh(at, yaw, st, MeshKit.mat(sc, 1.0, 0.0))
-			_solid(at, sz, yaw)
+			_solid(at, sz, yaw, kind)
 		"tree":
 			# a street tree of the right kind; the trunk stops a round
 			if biome == "desert":
@@ -284,7 +355,8 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			add_child(mi)
 			# cones are lofted along z, so stand it up
 			mi.global_transform = Transform3D(Basis(Vector3.RIGHT, -PI * 0.5), at)
-			_solid(at, Vector3(0.5, 3.0, 0.5), 0.0)
+			_last_mesh = mi
+			_solid(at, Vector3(0.5, 3.0, 0.5), 0.0, kind)
 		_:
 			return false
 	stats["props"] = int(stats["props"]) + 1
@@ -295,8 +367,12 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 ## and ways in. The only rooms in town, and so the only place the fight goes
 ## properly indoors. Walls stand on route grid lines and doors on grid points,
 ## for the same reason the clutter does.
+var _ruin_mat: Material = null
+
 func _ruin(cx: float, cz: float) -> void:
 	var o := Vector3(cx, _seat(cx, cz, 6.5), cz)
+	if _ruin_mat == null:
+		_ruin_mat = MeshKit.mat(_masonry().lightened(0.08), 0.95, 0.0)
 	var st := MeshKit.begin()
 	var e := 6.0
 	var doors := {"n": -2.0, "s": 2.0, "w": 4.0, "e": -4.0}
@@ -319,9 +395,6 @@ func _ruin(cx: float, cz: float) -> void:
 	# the partition, with its own doorway
 	_ruin_wall(st, o, o, false, -e, 0.8, 2.9)
 	_ruin_wall(st, o, o, false, 3.2, e, 2.9)
-	var mi := MeshKit.mi(MeshKit.finish(st, MeshKit.mat(_masonry().lightened(0.08), 0.95, 0.0)), "Ruin")
-	add_child(mi)
-	mi.global_position = o
 	stats["ruins"] = int(stats["ruins"]) + 1
 
 func _ruin_wall(st: SurfaceTool, o: Vector3, base: Vector3, along_x: bool, from: float,
@@ -331,8 +404,14 @@ func _ruin_wall(st: SurfaceTool, o: Vector3, base: Vector3, along_x: bool, from:
 	var mid: float = (from + to) * 0.5
 	var size := Vector3(to - from, h, 0.5) if along_x else Vector3(0.5, h, to - from)
 	var at: Vector3 = base + (Vector3(mid, 0, 0) if along_x else Vector3(0, 0, mid))
-	MeshKit.box(st, size + Vector3(0, DEEP, 0), at - o + Vector3(0, (h - DEEP) * 0.5, 0))
-	_solid(at, size, 0.0)
+	# its own mesh, not a part of the building's: a wall that can be driven
+	# through has to be able to go without taking the other three with it
+	var seg := MeshKit.begin()
+	MeshKit.box(seg, size + Vector3(0, DEEP, 0), Vector3(0, (h - DEEP) * 0.5, 0))
+	_mesh(at, 0.0, seg, _ruin_mat)
+	_solid(at, size, 0.0, "wall")
+	if st == null or o == Vector3.INF:
+		return
 
 ## A building site: a tower crane you can climb and walk out along, and the
 ## stacks it was lifting. The mast is a wall like any other -- take hold of it

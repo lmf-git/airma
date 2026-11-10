@@ -9826,6 +9826,7 @@ var _cqb_test := false
 var _cqb_view := ""
 var _cqb_sup := 0
 var _cqb_los_said := false
+var _cqb_moved_said := false
 var _cqb_dummy: Tank = null
 var _cqb_dummy_hp := 0.0
 var _cqb_t := 0.0
@@ -9885,6 +9886,7 @@ func _setup_cqb(kind := "cqb") -> void:
 		_reset_interp.call_deferred(player)
 		Sim.report("the town is seven kilometres off the nose; armour in the streets, their aircraft above it",
 			Sim.Ev.INFO)
+		player.died.connect(_on_cqb_air_down)
 		return
 	if _drive_kind != "":
 		var start: Vector3 = _cqb_vehicle_spot(c3, 0)
@@ -10019,11 +10021,34 @@ func _cqb_armour(c3: Vector3) -> void:
 			var t := _spawn_tank(at, 0.0 if team == 0 else PI, team, String(kit[i]))
 			_cqb_parked_at.append(at)
 			t.ai = true
-			t.ai_goal = c3 + Vector3(-30.0 + i * 60.0, 0.0, -z_sign * 110.0)
+			# the match routes it there by the streets; see `_drive_armour`
+			t.set_meta("cqb_goal", c3 + Vector3(-30.0 + i * 60.0, 0.0, -z_sign * 110.0))
 			t.name = "%s %s" % ["Blue" if team == 0 else "Red", String(kit[i])]
 			t.died.connect(_on_cqb_vehicle_down)
 
 var _cqb_parked_at: Array = []
+
+## Shot down over the town. The match goes on, so you go on in it: back at
+## your side's start line on foot, with the deploy screen up. It used to leave
+## you looking at a wreck with nothing to do, which reads as the game having
+## stopped.
+func _on_cqb_air_down(_who: Variant = null) -> void:
+	var fight := cqb
+	if not is_instance_valid(fight):
+		return
+	fight.vehicle_down(0, "aircraft")
+	await get_tree().create_timer(4.0).timeout
+	if not is_instance_valid(fight) or fight != cqb or not running:
+		return
+	if on_foot and is_instance_valid(walker):
+		# got out in time: he is already on the ground somewhere
+		fight.set_player(walker)
+		return
+	_spawn_walker(fight.spawn_point(0, 0))
+	walker.yaw = 0.0
+	fight.set_player(walker)
+	hud.aircraft = null
+	_cqb_deploy(false)
 
 ## Somewhere on a side's own street to put a vehicle down where nothing on
 ## the other side's street can see it. They were stood at fixed points, and
@@ -16824,8 +16849,20 @@ func _tick_cqb_test(delta: float) -> void:
 	if not is_instance_valid(walker):
 		# in a vehicle or an aeroplane: nothing of his to measure, so just
 		# watch the fight
+		if _cqb_t > 38.0 and not _cqb_moved_said:
+			_cqb_moved_said = true
+			for n in get_tree().get_nodes_in_group("hittable"):
+				if n is Tank and (n as Tank).ai and n.has_meta("cqb_from"):
+					var tk := n as Tank
+					print("[cqb] %s: %.0f m from where it started, %.1f m/s, alive=%s, in a building=%s" % [
+						tk.name, tk.global_position.distance_to(tk.get_meta("cqb_from")),
+						tk.linear_velocity.length(), str(tk.alive),
+						str(Obstacles.hit(tk.global_position, 1.0) >= 0)])
 		if not _cqb_los_said and _cqb_t > 0.3:
 			_cqb_los_said = true
+			for n in get_tree().get_nodes_in_group("hittable"):
+				if n is Tank:
+					n.set_meta("cqb_from", (n as Tank).global_position)
 			var sees := 0
 			var pairs := 0
 			for a in get_tree().get_nodes_in_group("hittable"):
@@ -16849,7 +16886,8 @@ func _tick_cqb_test(delta: float) -> void:
 			print("[cqb] t=%3.0f  kills us %d them %d   %d men, %d vehicles and %d aircraft up; in a %s" % [
 				_cqb_t, int((sv["kills"] as Dictionary).get(0, 0)), int((sv["kills"] as Dictionary).get(1, 0)),
 				cqb.soldiers.size(), tanks, planes,
-				tank.display_name() if is_instance_valid(tank) else String(player.spec["name"])])
+				tank.display_name() if is_instance_valid(tank) else (String(player.spec["name"])
+				if is_instance_valid(player) else "nothing: shot down")])
 		if _cqb_t > 62.0:
 			get_tree().quit()
 		return
@@ -17056,6 +17094,23 @@ func _tick_cqb_test(delta: float) -> void:
 		print("[cqb] gunsmith: carbine with scope, grip and long magazine: fov %.0f, magazine %d, kick %.4f (stock %.4f)" % [
 			float(mk4["fov"]), int(mk4["mag"]), float(mk4["kick"]), float(Firearm.spec("carbine")["kick"])])
 		walker.apply_class(CqbMatch.kit_classes()[0])
+		# What is left of a man, each way of killing him.
+		var before_nodes: int = get_child_count()
+		for case in [["blast", 300.0, false, false], ["head shot", 60.0, true, false],
+				["heavy round, low", 64.0, false, true], ["heavy round, high", 64.0, false, false],
+				["rifle round", 26.0, false, false]]:
+			var n0: int = get_child_count()
+			Ragdoll.fall(self, Transform3D(Basis(Vector3.UP, 1.1), walker.global_position + Vector3(6, 0, 0)),
+				Vector3.ZERO, Pilot.SUIT, Pilot.HELMET, float(case[1]), bool(case[2]), bool(case[3]),
+				Vector3(0, 0, -1))
+			var doll: Ragdoll = null
+			for ch in get_children():
+				if ch is Ragdoll and ch.get_index() >= n0:
+					doll = ch
+			print("[cqb] killed by %-18s -> %s, %d pieces thrown" % [String(case[0]) + ":",
+				("a body missing %s" % str(doll.lost) if not doll.lost.is_empty() else "a whole body")
+				if doll != null else "nothing left to fall", get_child_count() - n0 - (1 if doll != null else 0)])
+		print("[cqb] %d things on the ground after five deaths" % (get_child_count() - before_nodes))
 		# and a weapon off the road
 		var home: Vector3 = cqb.spawn_point(0, 0)
 		walker.global_position = home

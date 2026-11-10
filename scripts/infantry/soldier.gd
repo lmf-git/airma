@@ -67,6 +67,8 @@ var _steps_seen := 0
 var _hurt_recent := 0.0
 var _last_head := false
 var _kneel := false
+var _last_amount := 0.0
+var _last_low := false
 ## Seconds since he last fired, near enough: a shot gives a man away.
 var loud := 0.0
 ## What he carries on his back for the things a rifle does nothing to: "law"
@@ -100,7 +102,9 @@ func hit_radius() -> float:
 
 func bullet_hit(from: Vector3, to: Vector3) -> Vector2:
 	var r: Vector2 = Firearm.body_hit(global_position, crouching, from, to)
-	_last_head = r.x > 1.5
+	if r.x > 0.0:
+		_last_head = r.x > 1.5
+		_last_low = r.x < 0.9
 	return r
 
 func eye() -> Vector3:
@@ -117,6 +121,9 @@ func take_hit(amount: float, from: Node = null) -> void:
 	if not alive:
 		return
 	health -= amount
+	_last_amount = amount
+	if amount >= 120.0:
+		_last_head = false
 	_hurt_recent = 2.5
 	_alert = 8.0
 	if from != null and is_instance_valid(from) and from is Node3D:
@@ -131,14 +138,14 @@ func _die(killer: Node) -> void:
 	alive = false
 	remove_from_group("infantry")
 	var u: Array = UNIFORM.get(team, UNIFORM[1])
-	var rd := Ragdoll.new()
-	rd.set_meta("suit", u[0])
-	rd.set_meta("helmet", u[1])
-	rd.life = 14.0
-	rd.spawn_standing(global_transform, vel * 0.7)
-	get_parent().add_child(rd)
-	Firearm.drop(get_parent(), kit, maxi(_rounds, int(float(gun["mag"]) * 0.5)),
+	var world := get_parent()
+	Firearm.drop(world, kit, maxi(_rounds, int(float(gun["mag"]) * 0.5)),
 		global_position + Vector3(randf_range(-0.5, 0.5), 0.0, randf_range(-0.5, 0.5)))
+	var from_dir := Vector3.ZERO
+	if is_instance_valid(killer) and killer is Node3D:
+		from_dir = (global_position - (killer as Node3D).global_position).normalized()
+	Ragdoll.fall(world, global_transform, vel, u[0], u[1], _last_amount, _last_head, _last_low,
+		from_dir)
 	died.emit(self, killer if is_instance_valid(killer) else null, _last_head)
 	queue_free()
 
