@@ -1322,7 +1322,12 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 		f += lat_dir * clampf(-pv.dot(lat_dir) * mass * 1.6, -mu_lat * fn, mu_lat * fn)
 		var side_cmd: float = in_throttle
 		if _skid:
-			side_cmd += in_steer * _w_side[i] * 0.85
+			# Right is the LEFT track running on. This added the command to
+			# the side it was asked for, which speeds up the right track for a
+			# right turn and puts the nose to the left: every tracked vehicle
+			# steered backwards, and the AI -- which gives the same command --
+			# found its heading by going the long way round to it.
+			side_cmd -= in_steer * _w_side[i] * 0.85
 		side_cmd = clampf(side_cmd, -1.0, 1.0)
 		var v_roll := pv.dot(roll_dir)
 		# power limited tractive effort: strong off the mark, tailing off with

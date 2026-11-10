@@ -484,7 +484,7 @@ func _eye_target() -> Vector3:
 		return global_transform.affine_inverse() * (head.global_transform * EYE_AT)
 	var e := Vector3(0.0, 1.74, -0.07)
 	if in_prone:
-		e = Vector3(0.0, 0.36, -0.10)
+		e = Vector3(0.0, 0.46, -0.10)
 	elif in_action == "slide":
 		e = Vector3(0.0, 0.80, 0.02)
 	elif in_crouch:
@@ -537,7 +537,22 @@ func animate(delta: float) -> void:
 
 	var armed: bool = has_gun()
 	var act: float = clampf(in_action_t, 0.0, 1.0)
-	if in_action == "wall" or in_action == "ladder":
+	if in_action == "chute":
+		# Hanging in the harness: legs together and a little forward, knees
+		# soft for the landing, head up to the canopy. It was the jump pose --
+		# arms out, one knee up -- held for the whole descent, with a rifle at
+		# the shoulder.
+		var sway: float = sin(_breath * 1.3) * 0.05
+		_rot(hips, 0.10, 0, sway)
+		_rot(torso, -0.06, in_lean * -0.25, -in_lean * 0.18)
+		_rot(head, -0.30, 0, 0)
+		_rot(leg_l, 0.30, 0, 0.03)
+		_rot(leg_r, 0.24, 0, -0.03)
+		_rot(shin_l, -0.42, 0, 0)
+		_rot(shin_r, -0.36, 0, 0)
+		_breath += delta
+		_gait_ph = 0.0
+	elif in_action == "wall" or in_action == "ladder":
 		# On a wall or a ladder. The pose is only where the limbs start from:
 		# every hand and foot is then solved onto the face, or onto a rung.
 		_climb_ph += delta * clampf(speed, 0.0, 3.5) * 1.5 * signf(in_move.y + 0.001)
@@ -631,6 +646,11 @@ func animate(delta: float) -> void:
 		_blend[n] = q
 		(n as Node3D).quaternion = q
 
+	if in_action == "throw":
+		var wind: float = sin(clampf(act / 0.5, 0.0, 1.0) * PI * 0.5) if act < 0.5 \
+			else 1.0 - smoothstep(0.5, 0.75, act) * 1.6
+		torso.quaternion = torso.quaternion * Quaternion(Vector3.UP, wind * 0.45) \
+			* Quaternion(Vector3.RIGHT, -0.18 * maxf(-wind, 0.0))
 	_ready_s = lerpf(_ready_s, in_ready if armed else 0.0, _k(delta, 9.0))
 	# With the weapon up the top half stops swinging. A walk throws the
 	# shoulders about, and a man carrying a rifle at the ready holds his chest
@@ -674,6 +694,20 @@ func animate(delta: float) -> void:
 
 	if not armed:
 		return
+	if in_action == "chute":
+		# weapon on its sling, hands up on the risers: the one he is pulling
+		# down on comes lower than the other
+		_sling_weapon()
+		var to_t := torso.global_transform.affine_inverse()
+		var up: Vector3 = global_transform.basis.y
+		var rt: Vector3 = global_transform.basis.x
+		for sgn in [-1.0, 1.0]:
+			var pull: float = clampf(in_lean * sgn, 0.0, 1.0)
+			var riser: Vector3 = global_transform.origin + up * (2.02 - pull * 0.22) \
+				+ rt * sgn * 0.27 - global_transform.basis.z * 0.02
+			_two_bone(arm_r if sgn > 0.0 else arm_l, fore_r if sgn > 0.0 else fore_l,
+				to_t * riser, ARM_1, ARM_2, Vector3(sgn * 0.9, -0.3, -0.5))
+		return
 	if in_action == "wall" or in_action == "ladder":
 		_sling_weapon()
 		_climb_limbs()
@@ -684,6 +718,25 @@ func animate(delta: float) -> void:
 		return
 	_place_weapon(delta, look, moving, speed)
 	_hold_weapon()
+	if in_action == "throw":
+		# The support hand: off the weapon, to the pouch, back past the ear,
+		# and through. The rifle stays in the other one.
+		var tt := torso.global_transform.affine_inverse()
+		var held: Vector3 = tt * (weapon_mount.global_transform * _grip_l())
+		var pouch := Vector3(-0.17, 0.04, -0.15)
+		var cocked := Vector3(-0.34, 0.60, 0.24)
+		var thrown := Vector3(-0.10, 0.52, -0.56)
+		var hand: Vector3
+		if act < 0.22:
+			hand = held.lerp(pouch, smoothstep(0.0, 0.22, act))
+		elif act < 0.50:
+			hand = pouch.lerp(cocked, smoothstep(0.22, 0.50, act))
+		elif act < 0.68:
+			hand = cocked.lerp(thrown, smoothstep(0.50, 0.68, act))
+		else:
+			hand = thrown.lerp(held, smoothstep(0.68, 1.0, act))
+		_two_bone(arm_l, fore_l, hand, ARM_1, ARM_2,
+			Vector3(-0.8, -0.2 if act > 0.3 and act < 0.7 else -1.0, 0.4))
 	if in_action == "vault" or in_action == "grab":
 		# the support hand leaves the weapon for the wall, or the ground
 		var w: float = sin(act * PI)
@@ -761,8 +814,11 @@ func _hands_to_ledge(act: float) -> void:
 ## air as if the ground were a table; this finds the ground under each foot,
 ## drops the pelvis until the lower one reaches, and bends the other knee.
 func _plant_feet(delta: float) -> void:
-	if in_action in ["wall", "ladder"]:
+	if in_action in ["wall", "ladder", "chute"]:
 		hips.position.y = HIP_Y
+		for f in [foot_l, foot_r]:
+			(f as Node3D).transform.basis = Basis(Vector3.RIGHT, -0.3) if in_action == "chute" \
+				else Basis.IDENTITY
 		return
 	if in_air != 0 or not is_inside_tree() or in_action in ["vault", "climb", "slide"]:
 		_pelvis = lerpf(_pelvis, 0.0, _k(delta, 12.0))
@@ -820,6 +876,11 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	var hip := Vector3(0.09, -0.15, -0.36) if hand else Vector3(0.125, -0.150, -0.25)
 	var ads := Vector3(0.0, -sight, -0.40) if hand else Vector3(0.0, -sight, -0.235)
 	var low := Vector3(0.10, -0.42, -0.22) if hand else Vector3(0.03, -0.37, -0.20)
+	if in_prone:
+		# propped on the elbows: the weapon is up at the eye, not down at a
+		# hip he is lying on, or the muzzle is in the dirt
+		hip.y = -0.09
+		low.y = -0.12
 	var a: float = clampf(in_ads, 0.0, 1.0)
 	a = a * a * (3.0 - 2.0 * a)
 	var r: float = _ready_s

@@ -9826,6 +9826,9 @@ var _cqb_test := false
 var _cqb_view := ""
 var _cqb_sup := 0
 var _cqb_los_said := false
+var _steer_test := false
+var _steer_t0 := -1.0
+var _steer_h0 := 0.0
 var _cqb_moved_said := false
 var _cqb_dummy: Tank = null
 var _cqb_dummy_hp := 0.0
@@ -9968,10 +9971,29 @@ func _cqb_deploy(first: bool) -> void:
 		deploy_ui = DeployMenu.new()
 		deploy_ui.name = "Deploy"
 		menu.get_parent().add_child(deploy_ui)
+		# under the pause menu, never over it
+		menu.get_parent().move_child(deploy_ui, menu.get_index())
 		deploy_ui.deploy.connect(_on_cqb_deploy)
 	walker.set_physics_process(false)
 	cqb.set_away(true)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	# Somewhere to look from while choosing. The man is not being ticked, so
+	# his camera was never put anywhere: it sat at his own origin, which is the
+	# soles of his boots, looking along the ground from inside it -- and what
+	# you see from inside the ground is the sea. Up behind the start line
+	# instead, looking over the town he is about to go into.
+	var mid := Vector3(cqb.centre.x, Sim.height_at(cqb.centre.x, cqb.centre.y), cqb.centre.y)
+	var back: Vector3 = walker.global_position - mid
+	back.y = 0.0
+	back = back.normalized() if back.length() > 1.0 else Vector3(0, 0, 1)
+	var eye: Vector3 = walker.global_position + back * 34.0 + Vector3(0, 30.0, 0)
+	eye.y = maxf(eye.y, Sim.height_at(eye.x, eye.z) + 12.0)
+	walker.cam.global_transform = Transform3D(Basis.looking_at(
+		(mid + Vector3(0, 6.0, 0) - eye).normalized(), Vector3.UP), eye)
+	walker.cam.fov = 62.0
+	walker.cam.current = true
+	walker.body.visible = true
+	walker.body.set_head_visible(true)
 	var takes: String = {"ground": "ground", "arms": "any"}.get(String(Sim.mission), "none")
 	deploy_ui.open(takes, first, String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa")))
 
@@ -13535,10 +13557,33 @@ func _watch_landing(delta: float) -> void:
 func _resume() -> void:
 	menu.visible = false
 	get_tree().paused = false
-	if is_instance_valid(player):
+	if on_foot and is_instance_valid(walker):
+		# his own eyes, not the camera on the aeroplane parked back at the field
+		walker.activate()
+	elif is_instance_valid(player):
 		cam.current = true
 		if player.mouse_fly:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_deploy_yield(false)
+
+## The deploy screen and the pause menu cannot both be up: the deploy screen
+## sat over the top of the menu and took every click meant for it, so with it
+## open there was no getting at the menu at all. The pause menu wins. The
+## deploy screen steps aside while it is up and comes back when it goes.
+var _deploy_held := false
+
+func _deploy_yield(to_menu: bool) -> void:
+	if not is_instance_valid(deploy_ui):
+		_deploy_held = false
+		return
+	if to_menu:
+		if deploy_ui.visible:
+			_deploy_held = true
+			deploy_ui.visible = false
+	elif _deploy_held:
+		_deploy_held = false
+		deploy_ui.visible = true
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 ## What the radar page would draw for one contact: the same masking test the
 ## scope itself applies.
@@ -13736,8 +13781,11 @@ func _shell_input(e: InputEvent) -> void:
 				audio.set_paused(menu.visible)
 			if menu.visible:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			elif on_foot and is_instance_valid(walker):
+				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 			elif is_instance_valid(player) and player.mouse_fly:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+			_deploy_yield(menu.visible)
 		elif k == KEY_P and running and not on_foot and not _at_conn():
 			cam.cycle()
 		elif k == KEY_J and running and is_instance_valid(_station_walker):
@@ -13817,6 +13865,10 @@ func _parse_cmdline() -> void:
 		elif a.begins_with("--cqbview="):
 			# with --preset=cqb --shot=: fp, ads, tp, tpads, reload, dmr, pistol, run
 			_cqb_view = a.substr(10)
+		elif a == "--steertest":
+			# with --preset=ground:veh:KIND --cqbtest: which way does right turn it
+			_steer_test = true
+			_cqb_test = true
 		elif a == "--cqbtest":
 			# with --preset=cqb: watch a street fight run and say what happened
 			_cqb_test = true
@@ -16846,6 +16898,24 @@ func _run_faction_test() -> void:
 ## stands at its start line for ever and the match simply never begins.
 func _tick_cqb_test(delta: float) -> void:
 	_cqb_t += delta
+	if _steer_test and is_instance_valid(tank):
+		# Which way does "right" turn it? Hold the key and watch the nose.
+		if _steer_t0 < 0.0 and _cqb_t > 4.0:
+			_steer_t0 = _cqb_t
+			var f0: Vector3 = -tank.global_transform.basis.z
+			_steer_h0 = atan2(f0.x, -f0.z)
+			Input.action_press(&"roll_right")
+			Input.action_press(&"pitch_down")
+		elif _steer_t0 >= 0.0 and _cqb_t > _steer_t0 + 1.5:
+			var f1: Vector3 = -tank.global_transform.basis.z
+			var turned: float = rad_to_deg(wrapf(atan2(f1.x, -f1.z) - _steer_h0, -PI, PI))
+			Input.action_release(&"roll_right")
+			Input.action_release(&"pitch_down")
+			print("[steer] %s, forward and RIGHT held for 4 s: nose went %+.0f degrees (%s), %.1f m/s" % [
+				tank.display_name(), turned, "to the right" if turned > 0.0 else "TO THE LEFT",
+				tank.linear_velocity.length()])
+			get_tree().quit()
+		return
 	if not is_instance_valid(walker):
 		# in a vehicle or an aeroplane: nothing of his to measure, so just
 		# watch the fight
@@ -17094,6 +17164,32 @@ func _tick_cqb_test(delta: float) -> void:
 		print("[cqb] gunsmith: carbine with scope, grip and long magazine: fov %.0f, magazine %d, kick %.4f (stock %.4f)" % [
 			float(mk4["fov"]), int(mk4["mag"]), float(mk4["kick"]), float(Firearm.spec("carbine")["kick"])])
 		walker.apply_class(CqbMatch.kit_classes()[0])
+		# Lying down and shooting level: how high the muzzle is, and whether a
+		# round fired along the sight line clears the ground for 80 metres.
+		walker.global_position = cqb.spawn_point(0, 0)
+		body.equip(walker.gun_spec())
+		body.in_prone = true
+		body.in_crouch = true
+		body.in_air = 0
+		body.in_ads = 1.0
+		body.in_pitch = 0.0
+		body.in_move = Vector2.ZERO
+		body.in_action = ""
+		for settle2 in 240:
+			body.animate(1.0 / 120.0)
+		var mz: Vector3 = body.muzzle_pos()
+		var ey: Vector3 = body.eye_pos()
+		var fwdp := Vector3(-sin(walker.yaw), 0, -cos(walker.yaw))
+		var clear_m := 0.0
+		for stepp in 80:
+			var q3: Vector3 = mz + fwdp * float(stepp)
+			if q3.y < Sim.height_at(q3.x, q3.z):
+				break
+			clear_m = float(stepp)
+		print("[cqb] prone: eye %.2f m and muzzle %.2f m above the ground; a level round clears the ground for %.0f m" % [
+			ey.y - Sim.height_at(ey.x, ey.z), mz.y - Sim.height_at(mz.x, mz.z), clear_m])
+		body.in_prone = false
+		body.in_crouch = false
 		# What is left of a man, each way of killing him.
 		var before_nodes: int = get_child_count()
 		for case in [["blast", 300.0, false, false], ["head shot", 60.0, true, false],

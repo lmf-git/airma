@@ -192,6 +192,12 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 	# the curve of the ground does.
 	var to := to_in
 	var full: float = from.distance_to(to_in)
+	# Something that has left the world -- an aeroplane whose physics has gone
+	# to infinity on its way into a hillside -- has a position that is not a
+	# number, and a line to it has no length to walk. Asked anyway, the walk
+	# below ran for ever, and the match stopped with it.
+	if not is_finite(full) or not from.is_finite() or not to_in.is_finite():
+		return 1.0
 	var part := 1.0
 	if full > MAX_SEGMENT:
 		part = MAX_SEGMENT / full
@@ -201,7 +207,7 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 	# The cells the line passes through, not the box it spans: a diagonal
 	# across a town is forty cells, where its bounding box is eight hundred.
 	var flat: float = Vector2(d.x, d.z).length()
-	var steps: int = int(ceil(flat / (CELL * 0.5))) + 1
+	var steps: int = clampi(int(ceil(flat / (CELL * 0.5))) + 1, 1, 160)
 	var seen: Dictionary = {}
 	var keys: Array = []
 	for i in steps + 1:

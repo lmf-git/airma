@@ -137,13 +137,22 @@ func _gpws() -> bool:
 	var run := role == "cas" and state == ATTACK
 	if v.length() < 30.0:
 		return agl < (90.0 if run else 200.0)
-	var horizon: Array = [0.8, 1.6, 2.6] if run else [1.2, 2.4, 4.0, 6.0, 8.5]
+	# A run-in is flown at the dirt on purpose, so its margins are thin -- but
+	# they were thinner than the pull-out. At two hundred metres a second a
+	# five g recovery from a twenty degree dive uses a hundred and fifty metres
+	# of height once the wings are level, and seventy was what it was given.
+	# And the ground was all it looked at: a tower block is seventy metres of
+	# ground the height field does not know about.
+	var horizon: Array = [0.9, 1.8, 2.8] if run else [1.2, 2.4, 4.0, 6.0, 8.5]
 	for t in horizon:
 		var p: Vector3 = global_position + v * t
-		var margin: float = (70.0 + t * 22.0) if run else (220.0 + t * 55.0)
-		if p.y < Sim.height_at(p.x, p.z) + margin:
+		var margin: float = (95.0 + t * 30.0) if run else (220.0 + t * 55.0)
+		var floor_y: float = Sim.height_at(p.x, p.z)
+		if t < 3.0:
+			floor_y = maxf(floor_y, Obstacles.top_at(p.x, p.z))
+		if p.y < floor_y + margin:
 			return true
-	return agl < (110.0 if run else 260.0)
+	return agl < (150.0 if run else 260.0)
 
 # ------------------------------------------------------------ close air support
 ## A gun and bomb aircraft works a target rather than circling it: roll in from
@@ -198,7 +207,7 @@ func _cas(delta: float) -> void:
 			# is pointed the wrong way and this fired every single time, so no
 			# attack ever got past the first second.
 			var closing := (-global_transform.basis.z).dot(rel.normalized())
-			if slant < 550.0 or (slant < 3200.0 and closing < 0.15) or agl < 90.0:
+			if slant < 750.0 or (slant < 3200.0 and closing < 0.15) or agl < 150.0:
 				state = EGRESS
 				_state_t = 0.0
 				_runs += 1

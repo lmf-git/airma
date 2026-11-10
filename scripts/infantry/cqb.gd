@@ -461,6 +461,36 @@ func _drive_armour(delta: float) -> void:
 					centre.y + _rng.randf_range(-118.0, 118.0))
 			goal = _vcell_pos(_vcell(pick))
 			t.set_meta("cqb_goal", goal)
+		# Somebody else's hull in the way, whoever's it is. Nothing in a
+		# driver's head says another vehicle is there, so two of them sent
+		# down the same street drove into each other and stayed. The one
+		# that finds the other in front of it stops and lets it by; if it is
+		# still there after a few seconds, it goes somewhere else.
+		var ahead: Vector3 = -t.global_transform.basis.z
+		var blocked := false
+		for o in get_tree().get_nodes_in_group("hittable"):
+			var ot := o as Tank
+			if ot == null or ot == t or not ot.alive:
+				continue
+			var gap: Vector3 = ot.global_position - here
+			gap.y = 0.0
+			var dist: float = gap.length()
+			if dist < 15.0 and gap.dot(ahead) > dist * 0.45:
+				# two nose to nose: the one that was made later gives way
+				if (-ot.global_transform.basis.z).dot(ahead) < -0.3 \
+						and ot.ai and not ot.occupied \
+						and t.get_instance_id() < ot.get_instance_id():
+					continue
+				blocked = true
+		if blocked:
+			var waited: float = float(t.get_meta("cqb_wait", 0.0)) + 0.35
+			t.set_meta("cqb_wait", waited)
+			t.ai_goal = here                     # which is "stop"
+			if waited > 4.0:
+				t.set_meta("cqb_wait", 0.0)
+				t.set_meta("cqb_goal", Vector3.INF)
+			continue
+		t.set_meta("cqb_wait", 0.0)
 		var route: PackedVector2Array = _vnav.get_point_path(_vcell(here), _vcell(goal), true)
 		if route.size() < 2:
 			t.set_meta("cqb_goal", Vector3.INF)

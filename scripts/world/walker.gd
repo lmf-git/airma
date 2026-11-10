@@ -178,6 +178,10 @@ var chute := false
 const CHUTE_FALL := -6.0
 const CHUTE_DRIFT := 7.0
 var _canopy: MeshInstance3D = null
+var _chute_turn := 0.0
+var _chute_sink := -6.0
+## Throwing: how far through, or negative.
+var _throw_t := -1.0
 # When standing inside an aircraft the walker becomes a child of that hold and
 # all of its movement is solved in the hold's local frame. Riding the parent
 # transform is what keeps occupants stable no matter what the jet does.
@@ -414,7 +418,20 @@ func _tick_walk_p(delta: float) -> void:
 	if chute:
 		speed = CHUTE_DRIFT          # under canopy you steer a drift, not a run
 	var flat := Vector3(vel.x, 0, vel.z)
-	if _slide > 0.0:
+	if chute:
+		# A canopy flies. It goes forward the way he is facing whether he
+		# likes it or not, turns with the risers, and trades height for
+		# distance: W lets it run and sink, S brakes it and holds it up.
+		# It was a hover that drifted the way the keys said -- sideways and
+		# backwards as readily as forwards -- which is a balloon.
+		var ahead_in: float = Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up")
+		var turn_in: float = Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
+		_chute_turn = lerpf(_chute_turn, turn_in, clampf(delta * 3.0, 0.0, 1.0))
+		yaw -= _chute_turn * 1.1 * delta
+		var glide: float = 6.5 + ahead_in * 3.5
+		flat = flat.lerp(Vector3(-sin(yaw), 0, -cos(yaw)) * glide, clampf(delta * 1.8, 0.0, 1.0))
+		_chute_sink = CHUTE_FALL * (1.0 + ahead_in * 0.45) * (1.0 + absf(_chute_turn) * 0.35)
+	elif _slide > 0.0:
 		# carried, not walked: the speed bleeds off and he can barely steer it
 		var k: float = _slide / 0.85
 		flat = (_slide_dir + wish * 0.12).normalized() * lerpf(CROUCH, RUN * 1.12, k * k)
@@ -426,7 +443,7 @@ func _tick_walk_p(delta: float) -> void:
 	if chute:
 		# A canopy is a terminal velocity, not a force to fight: whatever the
 		# seat threw you out with bleeds away and you settle to a steady sink.
-		vel.y = lerpf(vel.y, CHUTE_FALL, clampf(delta * 1.6, 0.0, 1.0))
+		vel.y = lerpf(vel.y, _chute_sink, clampf(delta * 1.6, 0.0, 1.0))
 	# A ladder within reach: walk onto it, or jump at it.
 	near_ladder = TownSet.ladder_at(global_position)
 	if not near_ladder.is_empty() and on_floor and _grab_t < 0.0 \
@@ -940,8 +957,20 @@ func _fight(delta: float) -> void:
 			slot = wi
 			_take_up(int(slots[wi]))
 			return
-	if Sim.tapped(&"grenade") and grenades > 0 and _shot_cd < 0.2:
-		_throw()
+	if Sim.tapped(&"grenade") and grenades > 0 and _shot_cd < 0.2 and _throw_t < 0.0 \
+			and reloading <= 0.0:
+		_throw_t = 0.0
+		_shot_cd = 0.75
+		Sfx.play_ui(world, "pin", -6.0)
+	if _throw_t >= 0.0:
+		# it leaves the hand when the arm comes through, not when the key
+		# goes down
+		var was_t := _throw_t
+		_throw_t += delta / 0.62
+		if was_t < 0.62 and _throw_t >= 0.62:
+			_throw()
+		if _throw_t >= 1.0:
+			_throw_t = -1.0
 
 	# The shotgun has to be worked between shots.
 	if _pump_in > 0.0:
@@ -999,7 +1028,18 @@ func _fight(delta: float) -> void:
 	var look := -cam.global_transform.basis.z
 	var eye := cam.global_position
 	var skip: float = maxf((body.eye_pos() - eye).dot(look), 0.0) + 0.6
-	var mark: Vector3 = eye + look * (skip + Firearm.sight_range(eye + look * skip, look, 600.0))
+	var start: Vector3 = eye + look * skip
+	var to_wall: float = Obstacles.segment(start, start + look * 600.0) * 600.0
+	var seen: float = Firearm.sight_range(start, look, 600.0)
+	# Only something built counts as "what is under the crosshair" up close.
+	# The ground does not: lying down, the eye is a hand's breadth above it,
+	# and the first fold in the road a few metres out is "under the crosshair"
+	# as far as a ray is concerned -- so every round was sent at the road just
+	# in front of him instead of at what he was looking at over it. Past a
+	# rise in the ground the rounds converge on the line of sight well out.
+	if seen < to_wall - 0.5:
+		seen = maxf(seen, 60.0)
+	var mark: Vector3 = start + look * seen
 	var aim: Vector3 = (mark - from).normalized()
 	if mark.distance_to(from) < 1.6 or aim.dot(look) < 0.5:
 		aim = look
@@ -1120,7 +1160,6 @@ func _work_reload(delta: float, g: Dictionary, trigger_edge: bool) -> void:
 
 func _throw() -> void:
 	grenades -= 1
-	_shot_cd = 0.55
 	var world := get_tree().current_scene
 	var look := -cam.global_transform.basis.z
 	var f := Firearm.Frag.new()
@@ -1128,9 +1167,11 @@ func _throw() -> void:
 	f.thrower = self
 	f.vel = look * 17.0 + Vector3(0, 3.2, 0) + Vector3(vel.x, 0, vel.z) * 0.6
 	world.add_child(f)
-	f.global_position = body.eye_pos() + look * 0.5 + Vector3(0, -0.1, 0)
-	Sfx.play_ui(world, "pin", -6.0)
-	body.kick(0.8)
+	# out of the hand that threw it
+	var hand: Vector3 = body.fore_l.global_transform * Vector3(0, -Pilot.ARM_2, 0)
+	f.global_position = hand if hand.distance_to(body.eye_pos()) < 1.2 \
+		else body.eye_pos() + look * 0.5
+	Sfx.play_at(world, "cloth", f.global_position, -8.0, 1.3, 30.0)
 
 ## A round of yours landed.
 func hit_confirm(head: bool, killed: bool) -> void:
@@ -1177,7 +1218,10 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	body.in_pitch = pitch + _recoil * 0.5
 	body.in_ready = 0.0 if (_sprint and moving) or chute or _grab_t >= 0.0 else 1.0
 	body.in_ads = _ads
-	body.in_lean = _lean
+	body.in_lean = _lean if not chute else _chute_turn
+	if is_instance_valid(_canopy) and chute:
+		# the canopy banks into the turn
+		_canopy.rotation = Vector3(0.0, 0.0, -_chute_turn * 0.28)
 	body.in_reload = (1.0 - clampf(reloading / _reload_span, 0.0, 1.0)) if reloading > 0.0 else -1.0
 	if _trav == "":
 		if _grab_t >= 0.0:
@@ -1188,6 +1232,11 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 		elif _slide > 0.0:
 			body.in_action = "slide"
 			body.in_action_t = 1.0 - _slide / 0.85
+		elif chute:
+			body.in_action = "chute"
+		elif _throw_t >= 0.0:
+			body.in_action = "throw"
+			body.in_action_t = _throw_t
 		else:
 			body.in_action = ""
 	body.in_turn = Vector2(wrapf(yaw - _yaw_was, -PI, PI), pitch - _pitch_was) / maxf(delta, 0.001)

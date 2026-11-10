@@ -1936,6 +1936,7 @@ func _foot_keys() -> Array:
 			["SHIFT", "sprint  ( weapon down, spends wind )"],
 			["C / CTRL", "crouch on and off  ( from a sprint: slide )"],
 			["Z", "prone on and off"],
+			["under canopy", "A D turn, W run on and sink, S brake and hold up"],
 			["SPACE", "jump  /  vault  /  climb  —  at a tall wall: take hold of it"],
 			["on a wall", "W S A D climb, SHIFT faster, SPACE kick off, C let go"],
 			["F", "pick up a dropped weapon"],

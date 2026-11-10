@@ -443,7 +443,12 @@ func _animate(delta: float) -> void:
 		for r in _rotors:
 			var rn: Node3D = r["node"]
 			if is_instance_valid(rn):
-				rn.rotate_y(delta * float(r["rate"]) * (0.25 + power * 0.85))
+				# About its OWN shaft. `rotate_y` turns a node about its
+				# parent's upright, which is the shaft only for a rotor that
+				# stands upright: the tail rotor's hub is laid on its side, so
+				# it was being swung round the fin like a weathercock instead
+				# of spinning on its axle.
+				rn.rotate_object_local(Vector3.UP, delta * float(r["rate"]) * (0.25 + power * 0.85))
 			var dsc: MeshInstance3D = r["disc"]
 			if is_instance_valid(dsc):
 				dsc.visible = power > 0.35
@@ -1858,6 +1863,23 @@ func fire_gun(world: Node) -> bool:
 	var muzzle := global_transform * gun_muzzle()
 	var dir := -global_transform.basis.z
 	var v: float = g["muzzle"]
+	# A helicopter's gun is on a turret under the chin and it looks where the
+	# sight looks. With the sensor up and holding something, the rounds go
+	# there -- raised for the drop over the distance -- as long as it is
+	# somewhere the mount can reach: not up through the disc, and not behind.
+	if bool(spec.get("rotary", false)) and "pod" in self:
+		var sight: Variant = get("pod")
+		if sight != null and is_instance_valid(sight) and bool(sight.get("active")) \
+				and sight.get("platform") == self:
+			var mark: Vector3 = sight.call("aim_point")
+			if mark != Vector3.INF:
+				var to: Vector3 = mark - muzzle
+				var tof: float = to.length() / maxf(v, 1.0)
+				to += Vector3.UP * 4.9 * tof * tof - linear_velocity * tof
+				var want: Vector3 = to.normalized()
+				var b := global_transform.basis.orthonormalized()
+				if want.dot(-b.z) > -0.35 and want.dot(b.y) < 0.2:
+					dir = want
 	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * 4.0,
 		team, float(g.get("he", 0.0)))
 	Effects.muzzle_flash(world, muzzle, dir, 1.1)
