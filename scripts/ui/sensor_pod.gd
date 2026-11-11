@@ -91,14 +91,14 @@ const CH_WHOT := 2
 const CH_BHOT := 3
 const CH_SONAR := 4
 const CHANNEL_NAMES := ["TV", "NIGHT", "WHOT", "BHOT", "SONAR"]
-var channel := CH_WHOT
+var channel := CH_TV
 
 func _flir_material() -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type canvas_item;
 uniform float scan_strength : hint_range(0.0, 1.0) = 0.16;
-uniform int channel = 2;      // 0 TV, 1 night, 2 white hot, 3 black hot, 4 sonar
+uniform int channel = 0;      // 0 TV, 1 night, 2 white hot, 3 black hot, 4 sonar
 uniform float grain_t = 0.0;
 
 float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }

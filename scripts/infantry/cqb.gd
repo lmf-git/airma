@@ -918,7 +918,9 @@ func _picked(id: String, at: Vector3) -> void:
 class CarpetRun extends Node3D:
 	const SPEED := 230.0
 	const HEIGHT := 1100.0
-	const SPACING := 12.0
+	## Between canisters. Each one opens over the line and covers sixty metres
+	## of it with bomblets, so the footprints overlap at this.
+	const SPACING := 24.0
 	const LONGEST := 600.0
 	const RUN_IN := 7000.0
 	var arena: CqbMatch = null
@@ -950,10 +952,10 @@ class CarpetRun extends Node3D:
 		var flown := 0.0
 		var t := 0.0
 		while p.y > base and t < 60.0:
-			v = Ballistics.step(p, v, CarpetBomb.DRAG, 1.0 / 30.0, flown)
-			p += v / 30.0
-			flown += v.length() / 30.0
-			t += 1.0 / 30.0
+			v = Ballistics.step(p, v, CarpetBomb.DRAG, 1.0 / 120.0, flown)
+			p += v / 120.0
+			flown += v.length() / 120.0
+			t += 1.0 / 120.0
 		var lead: float = -p.z
 		_start = from - _dir * (lead + RUN_IN)
 		_start.y = base + HEIGHT
@@ -962,14 +964,14 @@ class CarpetRun extends Node3D:
 			_drops.append(RUN_IN + s)
 		_end = RUN_IN + lead + length + RUN_IN
 		eta = (RUN_IN + lead) / SPEED
-		# A carpet is iron and cluster bombs. The B-2 as it is set out carries
+		# A carpet is cluster bombs, every one. The B-2 as it is set out carries
 		# a B83 and a B61 in its bays; this one is loaded for the job, and
 		# flies it with the doors open and the load showing.
 		var spec: Dictionary = JetSpec.get_spec("b2").duplicate(true)
 		for bay in spec["bays"]:
 			var st: Array = bay["stations"]
 			for i in st.size():
-				st[i]["weapon"] = "cbu97" if i % 2 == 0 else "gbu32"
+				st[i]["weapon"] = "cbu97"
 		var m: Dictionary = JetFactory.build(spec)
 		var root: Node3D = m["root"]
 		for g in m["gear"]:
@@ -996,44 +998,41 @@ class CarpetRun extends Node3D:
 			var b := CarpetBomb.new()
 			b.arena = arena
 			b.vel = _dir * SPEED
-			# every other one a cluster canister
-			b.cluster = _drops.size() % 2 == 1
+			b.cluster = true
 			get_parent().add_child(b)
 			b.place(global_position + Vector3(0.0, -3.0, 0.0))
 		if _along >= _end:
 			queue_free()
 
-## One of the carpet. It falls in the same flight model a round flies, and goes
-## off on whatever it meets first -- a roof or the road.
+## One of the carpet: a cluster canister that falls, opens over the line and
+## lets its bomblets go, each of which goes off on whatever it meets first -- a
+## roof or the road. All of it falls in the same flight model a round flies.
 class CarpetBomb extends Node3D:
-	## What the air takes off it per metre. This was a shell's figure, a
-	## twelfth of this: a streamlined round that kept all two hundred and
-	## thirty metres a second of the bomber's speed the whole way down, so the
-	## stick went across the sky like a burst of cannon fire rather than
-	## falling out of it. A finned iron bomb sheds its forward speed and comes
-	## down steepening, which is the thing you recognise as bombs falling. The
-	## run works its release point out with this same figure, so the carpet
-	## still lands where it was drawn.
-	const DRAG := 0.00025
-	## The streak each one trails, so a stick can be seen coming from the
-	## ground: one mesh and one material for all of them.
+	## What the air takes off it per metre. A canister with its fins out is a
+	## draggy thing: it sheds the bomber's two hundred and thirty metres a
+	## second inside the first few hundred metres and comes down steepening, at
+	## about eighty a second and most of the way to vertical by the time it
+	## opens -- which is the thing you recognise as bombs falling. At a sixth
+	## of this it kept its forward speed all the way down and came in flat and
+	## fast like a missile. The run works its release point out with this same
+	## figure, so the carpet still lands where it was drawn.
+	const DRAG := 0.0015
+	## The short streak a bomblet trails: one mesh and one material for all of
+	## them. The canisters trail nothing -- a long white line behind a falling
+	## bomb is what made a stick of them read as rockets.
 	static var trail_mesh: BoxMesh = null
 
 	## Put it where it starts. Set down and left, a new body is drawn for its
 	## first tick somewhere between the middle of the world and where it was
-	## put -- every bomb of the stick arrived as a line flashed across the map,
-	## which is the other half of why they looked like bullets.
+	## put -- every bomb of the stick arrived as a line flashed across the map.
 	func place(at: Vector3) -> void:
 		global_position = at
 		if vel.length_squared() > 1.0:
 			look_at(at + vel, Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD)
 		reset_physics_interpolation()
-		# and the ribbon starts here, not wherever the body was before
-		if _ribbon != null:
-			_ribbon.call(&"clear")
 	## Where a cluster canister opens, above the ground, and what is in it.
 	const OPEN_AT := 250.0
-	const BOMBLETS := 10
+	const BOMBLETS := 12
 	var arena: CqbMatch = null
 	var vel := Vector3.ZERO
 	var cluster := false
@@ -1045,27 +1044,16 @@ class CarpetBomb extends Node3D:
 		top_level = true
 		var st := MeshKit.begin()
 		if bomblet:
-			MeshKit.cone(st, 0.05, 0.05, -0.1, 0.1, Vector3.ZERO, 6)
+			MeshKit.cone(st, 0.09, 0.09, -0.18, 0.18, Vector3.ZERO, 6)
 		else:
-			# a five hundred pounder: body, and the fins that slow it
-			MeshKit.cone(st, 0.2, 0.2, -1.1, 0.9, Vector3.ZERO, 8)
+			# the canister: body, and the fins that slow it
+			MeshKit.cone(st, 0.2, 0.2, -1.2, 1.1, Vector3.ZERO, 8)
 			MeshKit.box(st, Vector3(0.7, 0.03, 0.5), Vector3(0, 0, 1.0))
 			MeshKit.box(st, Vector3(0.03, 0.7, 0.5), Vector3(0, 0, 1.0))
 		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
 			Color(0.42, 0.40, 0.22) if cluster or bomblet else Color(0.22, 0.23, 0.22), 0.6, 0.3)), "Bomb"))
-		# What it leaves behind it, so a stick can be seen coming. The engine
-		# has a ribbon for exactly this as of 4.8 -- `Trail3D`, which lays a
-		# camera-facing strip along wherever its node has been -- so a bomb
-		# draws the curve it actually fell along. Asked for by name: on an
-		# engine without one, and for the bomblets, which are out for two
-		# seconds and come two hundred at a time, it is a plain streak instead.
 		if not bomblet:
-			var ribbon := Effects.ribbon(Color(0.93, 0.94, 0.96, 0.38), 0.5, 1.4, 4.0)
-			if ribbon != null:
-				ribbon.position = Vector3(0.0, 0.0, 1.2)
-				add_child(ribbon)
-				_ribbon = ribbon
-				return
+			return
 		if CarpetBomb.trail_mesh == null:
 			var tm := BoxMesh.new()
 			tm.size = Vector3(0.16, 0.16, 1.0)
@@ -1079,12 +1067,9 @@ class CarpetBomb extends Node3D:
 		trail.mesh = CarpetBomb.trail_mesh
 		trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		# behind it: the body points down -Z along the way it is falling
-		var long: float = 4.0 if bomblet else 22.0
-		trail.scale = Vector3(0.5 if bomblet else 1.0, 0.5 if bomblet else 1.0, long)
-		trail.position = Vector3(0.0, 0.0, long * 0.5 + 1.0)
+		trail.scale = Vector3(0.5, 0.5, 3.0)
+		trail.position = Vector3(0.0, 0.0, 1.8)
 		add_child(trail)
-
-	var _ribbon: GeometryInstance3D = null
 
 	func _physics_process(delta: float) -> void:
 		vel = Ballistics.step(global_position, vel, DRAG, delta, _flown)
@@ -1093,15 +1078,15 @@ class CarpetBomb extends Node3D:
 		var floor_y: float = maxf(Sim.height_at(nxt.x, nxt.z), Obstacles.top_at(nxt.x, nxt.z))
 		if cluster and nxt.y - floor_y < OPEN_AT:
 			# the canister opens and the bomblets go their own ways over the
-			# street, a few dozen metres across by the time they are down
+			# street, sixty-odd metres across by the time they are down
 			for i in BOMBLETS:
 				var c := CarpetBomb.new()
 				c.arena = arena
 				c.bomblet = true
-				c.vel = vel + Vector3(randf_range(-11, 11), randf_range(-3, 3), randf_range(-11, 11))
+				c.vel = vel + Vector3(randf_range(-14, 14), randf_range(-4, 4), randf_range(-14, 14))
 				get_parent().add_child(c)
 				c.place(nxt)
-			Effects.dust(get_tree().current_scene, nxt, 1.5)
+			Effects.dust(get_tree().current_scene, nxt, 4.0)
 			queue_free()
 			return
 		if nxt.y <= floor_y:

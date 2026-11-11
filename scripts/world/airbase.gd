@@ -28,6 +28,12 @@ var watcher: Node3D = null
 ## and the hangars, which burn.
 static var _shared: Dictionary = {}
 
+## Whose field this is. Set before `build`: the hangars stand on this side.
+## They were all on the player's, on every field in the world, so the patrol
+## at a foreign base spent the first seconds of every session shooting up its
+## own hangars and the menu reported each one as a kill.
+var team := 0
+
 func build() -> void:
 	_pavement()
 	_markings()
@@ -184,14 +190,15 @@ func _buildings() -> void:
 	add_child(MeshKit.mi(_shared["glass"], "TowerGlass"))
 	for i in 4:
 		var t := GroundTarget.new()
-		t.team = 0
+		t.team = team
 		t.setup("hangar")
 		# Behind the apron, not on it. These sat at x=150, which is exactly the
 		# line the ramp start parks its aircraft along -- so a jet spawned
 		# inside a hangar and the two clipped through each other.
 		t.position = Vector3(268.0, 0, -300.0 + i * 40.0)
 		t.rotation_degrees = Vector3(0, 90, 0)
-		# friendly, so the target cycler skips them, but they still burn
+		# the base's own side: at home the target cycler skips them, but they
+		# still burn; on someone else's field they are theirs to lose
 		add_child(t)
 
 func _process(_dt: float) -> void:

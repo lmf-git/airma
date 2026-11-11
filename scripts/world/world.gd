@@ -12459,11 +12459,13 @@ func _build_country_bases() -> void:
 		var tilt := Basis() if ax.length() < 1e-6 else Basis(ax.normalized(), lean)
 		ab.transform = Transform3D(tilt * Basis(Vector3.UP, float(f["yaw"])), pos)
 		add_child(ab)
+		var home: bool = who == Sim.home_faction or (who == "" and f == Sim.fields[0])
+		ab.team = 0 if home else 1
 		var _tb := Time.get_ticks_msec()
 		ab.build()
 		_t_build += Time.get_ticks_msec() - _tb
 		bases.append(ab)
-		if who == Sim.home_faction or (who == "" and f == Sim.fields[0]):
+		if home:
 			base = ab
 		else:
 			var _td := Time.get_ticks_msec()
