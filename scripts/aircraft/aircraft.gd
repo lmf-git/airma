@@ -158,6 +158,24 @@ func make_ghost() -> void:
 
 func setup(id: String) -> void:
 	spec = JetSpec.get_spec(id)
+	# Nothing nuclear over a street fight. A B-2 came to a match about one town
+	# with a B83 in the bay, and one release ended it for both sides. The same
+	# stations carry cluster bombs there instead -- what the carpet-bombing
+	# B-2 is loaded with -- on every aeroplane, either side's.
+	if Sim.mission in [&"cqb", &"ground", &"arms"]:
+		var swapped := false
+		for bay in spec["bays"]:
+			for st in bay["stations"]:
+				if bool(WeaponSpec.get_spec(String(st["weapon"])).get("nuclear", false)):
+					if not swapped:
+						# its own copy: the table is everybody's
+						spec = spec.duplicate(true)
+						swapped = true
+		if swapped:
+			for bay in spec["bays"]:
+				for st in bay["stations"]:
+					if bool(WeaponSpec.get_spec(String(st["weapon"])).get("nuclear", false)):
+						st["weapon"] = "cbu97"
 	_model = JetFactory.build(spec)
 	add_child(_model["root"])
 	# A flying wing has no tailplane: it controls in pitch on the elevons along
@@ -1831,7 +1849,13 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 		var node := mounts.get_child(pick) as Node3D
 		if node != null:
 			dir = _bore(node)
-	if dir.length() < 1.0:
+	# Was `dir.length() < 1.0`, written for the hundred-kilometre solution
+	# vector. The bore is a unit vector, and a unit vector is 0.99999994 long
+	# about as often as it is 1.0: every such shot was refused *after* the
+	# loader had been started, so the 105 sat through six seconds for a round
+	# that never left, on the mark the whole time.
+	if dir.length_squared() < 1e-6:
+		gun_cd = 0.0
 		return false
 	dir = dir.normalized()
 	var sp: float = g["spread"]
@@ -1843,6 +1867,7 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	shell.drag = 0.0
 	shell.damage = float(g["damage"])
 	shell.blast = float(g["blast"])
+	shell.frag = float(g.get("frag", 0.0))
 	shell.shooter = self
 	shell.team = team
 	# what it was sent at, so --debugweapons can say how far off it landed
@@ -2526,6 +2551,9 @@ class Shell extends Node3D:
 	var vel := Vector3.ZERO
 	var damage := 120.0
 	var blast := 8.0
+	## How far its fragments reach men in the open, where that is further than
+	## the fireball: nothing, unless whoever fires it says so.
+	var frag := 0.0
 	var shooter: Node = null
 	var team := 0
 	var life := 140.0          # artillery arcs can be a minute in the air
@@ -2688,6 +2716,14 @@ class Shell extends Node3D:
 				Vector2(at.x - org.x, at.z - org.z).length(),
 				str(at.round()), str(aim.round()), 140.0 - life])
 		Effects.explosion(get_tree().current_scene, at, blast)
+		# The fireball is not what a shell kills men with. A soldier is not in
+		# the list below -- he is not a radar contact -- so all he ever took was
+		# the explosion's own share, which reaches four fifths of the blast and
+		# falls away from the middle: a 105 killed inside ten metres and a
+		# forty inside four, and a gunship put round after round among men who
+		# walked out of it.
+		if frag > 0.0:
+			Effects._blast_infantry(get_tree().current_scene, at, frag)
 		for n in get_tree().get_nodes_in_group("hittable"):
 			if not is_instance_valid(n) or n == shooter:
 				continue

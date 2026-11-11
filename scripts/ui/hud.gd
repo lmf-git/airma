@@ -730,6 +730,56 @@ func _draw_on_foot() -> void:
 		# the screen, and a scope tube or a crosshair over the ride marks
 		# nothing.
 		pass
+	elif w.glassing():
+		# Field glasses: two tubes side by side, and what is outside them is
+		# the inside of them. The outline is the two circles run together.
+		var br: float = minf(vp.y * 0.46, vp.x * 0.31)
+		var off: float = br * 0.5
+		var cut: float = acos(off / br)
+		var bdark := Color(0, 0, 0, 1)
+		draw_rect(Rect2(0, 0, c.x - off - br, vp.y), bdark)
+		draw_rect(Rect2(c.x + off + br, 0, vp.x - c.x - off - br, vp.y), bdark)
+		var top := PackedVector2Array([Vector2(c.x - off - br, 0.0)])
+		var bot := PackedVector2Array([Vector2(c.x - off - br, vp.y)])
+		var rim := PackedVector2Array()
+		for i in 25:
+			var ta: float = lerpf(PI, TAU - cut, float(i) / 24.0)
+			var q := Vector2(cos(ta), sin(ta)) * br
+			top.append(c + Vector2(-off, 0) + q)
+			bot.append(c + Vector2(-off, 0) + Vector2(q.x, -q.y))
+		# from 1: the first point of this arc is the last of the other, and a
+		# polygon with the same corner twice running does not triangulate
+		for i in range(1, 25):
+			var tb: float = lerpf(PI + cut, TAU, float(i) / 24.0)
+			var q2 := Vector2(cos(tb), sin(tb)) * br
+			top.append(c + Vector2(off, 0) + q2)
+			bot.append(c + Vector2(off, 0) + Vector2(q2.x, -q2.y))
+		rim.append_array(top.slice(1))
+		var back := bot.slice(1)
+		back.reverse()
+		rim.append_array(back)
+		rim.append(rim[0])
+		top.append(Vector2(c.x + off + br, 0.0))
+		bot.append(Vector2(c.x + off + br, vp.y))
+		draw_colored_polygon(top, bdark)
+		draw_colored_polygon(bot, bdark)
+		draw_polyline(rim, bdark, 7.0, true)
+		# a mil scale across the middle, and a short post under it
+		var bink := Color(0.03, 0.03, 0.03, 0.9)
+		draw_line(c + Vector2(-br * 0.5, 0), c + Vector2(-10, 0), bink, 1.4)
+		draw_line(c + Vector2(10, 0), c + Vector2(br * 0.5, 0), bink, 1.4)
+		draw_line(c + Vector2(0, 10), c + Vector2(0, br * 0.22), bink, 1.4)
+		for k in range(-5, 6):
+			if k == 0:
+				continue
+			var tx: float = float(k) * br * 0.1
+			var th: float = 9.0 if k % 5 == 0 else 5.0
+			draw_line(c + Vector2(tx, -th), c + Vector2(tx, th), bink, 1.2)
+		var rng: float = w.glass_range()
+		var brg: int = int(round(fposmod(-rad_to_deg(w.yaw), 360.0))) % 360
+		_txt(Vector2(c.x - 150.0, c.y + br * 0.62), "%03d°   %s" % [brg,
+			("%d m" % int(round(rng))) if rng >= 0.0 else "--- m"], 16,
+			Color(0.75, 1.0, 0.8, 0.95), HORIZONTAL_ALIGNMENT_CENTER, 300.0)
 	elif w.scoped():
 		# through the glass: everything outside the tube is the inside of it.
 		# A 2x shows most of the screen, a prism a little less, a long scope
@@ -2206,6 +2256,7 @@ func _foot_keys() -> Array:
 			["R", "reload"],
 			["G", "grenade"],
 			["P", "first person / over the shoulder"],
+			["B", "binoculars"],
 			["N", "night vision"],
 			["U", "board what you are standing at"],
 		]],

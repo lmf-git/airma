@@ -1096,11 +1096,30 @@ class CarpetRun extends Node3D:
 ## every hostile man and vehicle boxed. Left alone it goes where it was sent.
 class CruiseMissile extends Node3D:
 	const SPEED := 240.0
-	const HEIGHT := 1500.0
 	const RANGE := 5200.0
 	## How far out, over the ground, the player is given it.
-	const HANDOVER := 1500.0
+	const HANDOVER := 2100.0
+	## It comes down a straight slope onto the mark from the start, this steep,
+	## so that it is already flying the line when it is handed over.
+	const DIVE := 0.74
 	const BLAST := 2.4
+	## The aeroplane it is. It was a point pushed along a direction at a fixed
+	## speed, turned by the mouse: no wings, no weight, no bank, and nothing it
+	## did cost it anything. It flies now -- lift from the angle the wing meets
+	## the air at, drag that grows with the lift, a small engine, gravity -- and
+	## it is flown the way everything else here is: a stick, bank to turn, pull
+	## to tighten. All of these are accelerations, per unit of what they act on.
+	const LIFT := 0.00394          # per (m/s)^2 per radian: six g at 240 m/s
+	const SIDE := 0.0016
+	const DRAG0 := 0.000052        # three metres a second squared at 240
+	const INDUCED := 200.0
+	const STALL := 0.27
+	const THRUST_MAX := 4.5
+	const ROLL_RATE := 3.0
+	var vel := Vector3.ZERO
+	var stick := Vector2.ZERO
+	var _mouse := Vector2.ZERO
+	var _roll_p := 0.0
 	var arena: CqbMatch = null
 	var target := Vector3.ZERO
 	var from_dir := Vector3.BACK
@@ -1129,31 +1148,58 @@ class CruiseMissile extends Node3D:
 		_cam.fov = 58.0
 		_cam.near = 0.5
 		_cam.far = 45000.0
-		_cam.position = Vector3(0.0, 0.0, -3.3)
+		# Behind and a little above, looking the way it is going. The camera
+		# was on the tip of the nose: a view of the ground coming up with
+		# nothing in it to say what you were flying, or that you were flying
+		# anything. From here the missile is in the bottom of the picture and
+		# the cross above it is still where it is pointed -- the two lines are
+		# parallel and two metres apart.
+		_cam.position = Vector3(0.0, 2.0, 11.5)
 		add_child(_cam)
-		dir = -from_dir
+		# and something burning at the back of it, which from behind is most of
+		# what there is to see
+		var fm := StandardMaterial3D.new()
+		fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		fm.albedo_color = Color(1.0, 0.72, 0.35)
+		fm.emission_enabled = true
+		fm.emission = Color(1.0, 0.6, 0.25)
+		fm.emission_energy_multiplier = 4.0
+		var fc := CylinderMesh.new()
+		fc.top_radius = 0.16
+		fc.bottom_radius = 0.02
+		fc.height = 1.6
+		fc.radial_segments = 8
+		fc.material = fm
+		var flame := MeshInstance3D.new()
+		flame.mesh = fc
+		flame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# the cylinder stands on Y; laid along the body, wide end at the nozzle
+		flame.rotation = Vector3(-PI * 0.5, 0.0, 0.0)
+		flame.position = Vector3(0.0, 0.0, 3.4)
+		_body.add_child(flame)
 		var start: Vector3 = target + from_dir * RANGE
-		start.y = target.y + HEIGHT
+		start.y = target.y + RANGE * tan(DIVE)
+		dir = (target - start).normalized()
+		vel = dir * SPEED
 		global_position = start
 		look_at(start + dir, Vector3.UP)
 		reset_physics_interpolation()
-		eta = (RANGE - HANDOVER) / SPEED
+		eta = (RANGE - HANDOVER) / cos(DIVE) / (SPEED * 1.15)
 		Sfx.play_at(get_parent(), "roar", start, 8.0, 1.1, 9000.0)
 
 	func _unhandled_input(e: InputEvent) -> void:
 		if not guided or _done >= 0.0 or not (e is InputEventMouseMotion):
 			return
-		var mm: Vector2 = Sim.mouse_rel(e as InputEventMouseMotion) * 0.0011
-		var b := global_transform.basis
-		dir = (dir - b.x * -mm.x - b.y * mm.y).normalized()
-		# never back up into the sky: it is a bomb with wings by now
-		if dir.y > -0.12:
-			dir = Vector3(dir.x, -0.12, dir.z).normalized()
+		# the mouse is the stick, the way it is in a cockpit: off centre holds
+		# it over, and it comes back to the middle by itself
+		var vp := get_viewport().get_visible_rect().size
+		_mouse += Sim.mouse_rel(e as InputEventMouseMotion) / (vp.y * 0.42)
+		_mouse.x = clampf(_mouse.x, -1.0, 1.0)
+		_mouse.y = clampf(_mouse.y, -1.0, 1.0)
 
 	func _take() -> void:
 		guided = true
-		# pointed at the mark as it is handed over: doing nothing hits it
-		dir = (target - global_position).normalized()
+		# already on the line to the mark, and trimmed: doing nothing hits it
 		var p: Walker = arena.player if is_instance_valid(arena) else null
 		if p == null or not is_instance_valid(p) or p.dead or not p.cam.current:
 			return                      # nobody to give it to: it flies itself in
@@ -1166,7 +1212,7 @@ class CruiseMissile extends Node3D:
 		v.missile = self
 		_view.add_child(v)
 		add_child(_view)
-		Sim.report("CRUISE MISSILE — you have it. Mouse steers.", Sim.Ev.GOOD)
+		Sim.report("CRUISE MISSILE — you have it. Mouse or W/S/A/D flies it: bank to turn.", Sim.Ev.GOOD)
 
 	func _physics_process(delta: float) -> void:
 		if _done >= 0.0:
@@ -1179,7 +1225,8 @@ class CruiseMissile extends Node3D:
 			var flat := Vector2(target.x - here.x, target.z - here.z).length()
 			if flat <= HANDOVER:
 				_take()
-		var nxt: Vector3 = here + dir * SPEED * delta
+		_fly(delta)
+		var nxt: Vector3 = here + vel * delta
 		var wall: float = Obstacles.segment(here, nxt)
 		var hit := wall < 1.0
 		if hit:
@@ -1192,8 +1239,80 @@ class CruiseMissile extends Node3D:
 			_go_off(nxt)
 			return
 		global_position = nxt
-		var up := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
-		look_at(nxt + dir, up)
+		# The camera trails it now, and a camera eleven metres behind a missile
+		# going down a street is inside the building it has just passed.
+		if is_instance_valid(_cam):
+			var want: Vector3 = global_transform * Vector3(0.0, 2.0, 11.5)
+			var clear: float = Obstacles.segment(nxt, want)
+			if clear < 1.0:
+				want = nxt.lerp(want, maxf(clear - 0.1, 0.15))
+			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.6)
+			_cam.global_position = want
+
+	## What the stick is asked for when nobody is holding it: bank towards the
+	## mark, pull or push the nose onto it.
+	func _autopilot(b: Basis) -> Vector3:
+		var e: Vector3 = b.inverse() * (target - global_position).normalized()
+		# Where it is *going* against where the mark is, not where the nose is:
+		# the nose rides a couple of degrees above the flight path, and a nose
+		# held on the mark is a missile landing short of it.
+		var vb: Vector3 = b.inverse() * vel.normalized()
+		var yaw_err: float = atan2(e.x, -e.z) - atan2(vb.x, -vb.z)
+		var pitch_err: float = atan2(e.y, -e.z) - atan2(vb.y, -vb.z)
+		var bank: float = atan2(-b.x.y, b.y.y)
+		return Vector3(clampf((clampf(yaw_err * 3.0, -1.0, 1.0) - bank) * 2.5, -1.0, 1.0),
+			clampf(pitch_err * 5.0, -1.0, 1.0), clampf(yaw_err * 2.0, -1.0, 1.0))
+
+	func _fly(delta: float) -> void:
+		var b: Basis = global_transform.basis.orthonormalized()
+		var rudder := 0.0
+		if guided and _held:
+			var want := Vector2(
+				clampf(_mouse.x + Sim.strength(&"roll_right") - Sim.strength(&"roll_left"), -1.0, 1.0),
+				clampf(-_mouse.y + Sim.strength(&"pitch_up") - Sim.strength(&"pitch_down"), -1.0, 1.0))
+			_mouse = _mouse.lerp(Vector2.ZERO, delta * 0.9)
+			stick = stick.lerp(want, clampf(delta * 14.0, 0.0, 1.0))
+			rudder = Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
+		else:
+			var ap := _autopilot(b)
+			stick = stick.lerp(Vector2(ap.x, ap.y), clampf(delta * 8.0, 0.0, 1.0))
+			rudder = ap.z
+		var v: float = maxf(vel.length(), 1.0)
+		var vdir: Vector3 = vel / v
+		var vb: Vector3 = b.inverse() * vdir
+		# how the wing meets the air: nose above the flight path, and beside it
+		var alpha: float = atan2(-vb.y, -vb.z)
+		var beta: float = atan2(vb.x, -vb.z)
+		var q: float = v * v
+		var up: Vector3 = b.y - vdir * b.y.dot(vdir)
+		up = up.normalized() if up.length() > 0.01 else b.y
+		var side: Vector3 = b.x - vdir * b.x.dot(vdir)
+		side = side.normalized() if side.length() > 0.01 else b.x
+		var lift: float = LIFT * q * clampf(alpha, -0.20, STALL)
+		var slip: float = -SIDE * q * clampf(beta, -0.3, 0.3)
+		var drag: float = DRAG0 * q + INDUCED * (lift * lift + slip * slip) / q
+		# a small engine on a governor: flat out it holds its cruise, and it
+		# comes back to idle on the way down
+		var thrust: float = clampf(3.0 + (SPEED - v) * 0.08, 0.2, THRUST_MAX)
+		var acc: Vector3 = up * lift + side * slip - vdir * drag - b.z * thrust \
+			+ Vector3.DOWN * 9.81
+		vel += acc * delta
+		dir = vel.normalized()
+		# Trimmed for where it is: stick in the middle carries its own weight
+		# across the wing, no more. Wings level that is a straight line; banked
+		# over it is not enough, and the nose falls into the turn until pulled.
+		var trim: float = 9.81 * b.y.y / (LIFT * q)
+		var want_a: float = clampf(trim + stick.y * 0.22, -0.16, STALL)
+		# less air over the fins, less of everything they do
+		var auth: float = clampf(v / 200.0, 0.3, 1.3)
+		var pitch_r: float = clampf((want_a - alpha) * 6.0, -1.6, 1.6) * auth \
+			+ (lift - 9.81 * b.y.y) / v
+		var yaw_r: float = beta * 4.0 + rudder * 0.35 * auth
+		_roll_p = lerpf(_roll_p, stick.x * ROLL_RATE * auth, clampf(delta * 8.0, 0.0, 1.0))
+		b = b.rotated(b.x, pitch_r * delta)
+		b = b.rotated(b.y, -yaw_r * delta)
+		b = b.rotated(b.z, -_roll_p * delta)
+		global_transform = Transform3D(b.orthonormalized(), global_position)
 
 	func _go_off(at: Vector3) -> void:
 		_body.visible = false
@@ -1206,6 +1325,8 @@ class CruiseMissile extends Node3D:
 		var back: Vector3 = at - dir * 70.0 + Vector3(0, 25.0, 0)
 		global_position = back
 		look_at(at, Vector3.UP)
+		# the stand-off view is from this point itself, not from behind it
+		_cam.position = Vector3.ZERO
 		reset_physics_interpolation()
 		_done = 1.4 if _held else 0.05
 
@@ -1272,7 +1393,8 @@ class CruiseView extends Control:
 		_mark(cam, missile.target, 3.0, Color(1, 1, 1, 0.6), "MARK")
 		var gy: float = Sim.height_at(missile.global_position.x, missile.global_position.z)
 		draw_string(ThemeDB.fallback_font, Vector2(28, size.y - 60),
-			"CRUISE MISSILE    ALT %d m    mouse steers" % int(missile.global_position.y - gy),
+			"CRUISE MISSILE    ALT %d m    %d km/h    mouse or W/S/A/D: bank to turn" % [
+				int(missile.global_position.y - gy), int(missile.vel.length() * 3.6)],
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, w)
 
 ## The drone a UAV streak puts up. It is there: it circles the town where it

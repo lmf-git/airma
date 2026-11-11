@@ -185,13 +185,31 @@ func open(takes: String, first: bool, faction: String) -> void:
 	_ride_ids.clear()
 	_add_ride("foot", "ON FOOT — as the class on the left")
 	if takes == "ground" or takes == "any":
+		# Every tank, fighting vehicle, gun carrier and scout car there is,
+		# his own country's first. It was his own country's alone, which was
+		# four vehicles; the heavy end of the list is the same on every side
+		# and there is no reason a man cannot be handed somebody else's.
+		var mine: Array = []
+		var theirs: Array = []
 		for k in Tank.KINDS:
 			var kd: Dictionary = Tank.KINDS[k]
-			if String(kd.get("faction", "")) != faction:
-				continue
 			if String(kd.get("class", "")) in ["tel", "asat", "sam", "mlrs", "spg"]:
 				continue            # nothing that fights from twenty kilometres away
-			_add_ride("veh:" + String(k), String(kd["name"]))
+			if String(kd.get("faction", "")) == faction:
+				mine.append(k)
+			else:
+				theirs.append(k)
+		var order := ["mbt", "ifv", "spaag", "lav"]
+		var by_class := func(x, y) -> bool:
+			return order.find(String(Tank.KINDS[x].get("class", ""))) \
+				< order.find(String(Tank.KINDS[y].get("class", "")))
+		mine.sort_custom(by_class)
+		theirs.sort_custom(by_class)
+		var tags := {"mbt": "tank", "ifv": "fighting vehicle", "spaag": "anti-air gun", "lav": "scout car"}
+		for k in mine + theirs:
+			var kd2: Dictionary = Tank.KINDS[k]
+			_add_ride("veh:" + String(k), "%s — %s" % [String(kd2["name"]),
+				String(tags.get(String(kd2.get("class", "")), ""))])
 	if takes == "any" and first:
 		for id in JetSpec.ids_for(faction):
 			var sp := JetSpec.get_spec(id)

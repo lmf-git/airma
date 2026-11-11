@@ -438,7 +438,12 @@ static func _db() -> Dictionary:
 	"manpads": {
 		"name": "Shoulder-launched SAM", "short": "MAN", "kind": "ir",
 		"mass": 11.0, "length": 1.52, "dia": 0.072, "fin": 0.16,
-		"boost": 150.0, "burn": 2.0, "max_g": 22.0, "drag": 0.000048, "ref_speed": 600.0,
+		# Off the shoulder at thirty metres a second and past six hundred two
+		# seconds later, which is what the real one does. At 150 it peaked near
+		# three hundred, climbing: a quarter of the speed its fins are rated
+		# at, so a sixteenth of the turn -- under two g -- and it went past a
+		# drone circling at walking pace by fifty metres, eight hundred out.
+		"boost": 340.0, "burn": 2.0, "max_g": 22.0, "drag": 0.000048, "ref_speed": 600.0,
 		"life": 22.0, "range": 6000.0, "seeker_fov": 40.0, "lock_time": 0.7,
 		"arm_time": 0.4, "fuse": 5.0, "damage": 150.0, "lethal": 8.0,
 		"colour": Color(0.26, 0.27, 0.25), "band": Color(0.72, 0.66, 0.22),

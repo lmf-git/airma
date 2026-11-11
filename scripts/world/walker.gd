@@ -128,6 +128,38 @@ func shelter(on: bool) -> void:
 var hold_ads := false
 ## How far into the sights he is, 0 hip and 1 shouldered.
 var _ads := 0.0
+## Field glasses, on B: the bomb bay lever in a cockpit and nothing at all out
+## here. Up to the eyes they are eight power, and they come down again for
+## anything the hands are wanted for -- the trigger, the sights, a reload, a run.
+const BINO_FOV := 9.0
+var binos := false
+var _bino := 0.0
+var _glass_rng := -1.0
+var _glass_t := 0.0
+
+## True while looking through the glasses.
+func glassing() -> bool:
+	return _bino > 0.9 and not dead
+
+## How far off the ground under the cross is, or -1 for sky. Asked a few times
+## a second, not every frame.
+func glass_range() -> float:
+	return _glass_rng
+
+func _range_glass() -> void:
+	var from: Vector3 = cam.global_position
+	var dir: Vector3 = -cam.global_transform.basis.z
+	var t := 4.0
+	_glass_rng = -1.0
+	while t < 12000.0:
+		var q := from + dir * t
+		if q.y <= maxf(Sim.height_at(q.x, q.z), Sim.sea_at(q.x, q.z)):
+			_glass_rng = t
+			break
+		t += maxf(2.0, t * 0.03)
+	var wall: float = Obstacles.segment(from, from + dir * 600.0)
+	if wall < 1.0 and (_glass_rng < 0.0 or wall * 600.0 < _glass_rng):
+		_glass_rng = wall * 600.0
 ## 1 with the weapon lifted clear of a wall it would otherwise be stuck into.
 var _block := 0.0
 var _lean := 0.0
@@ -293,7 +325,7 @@ func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var mm := Sim.mouse_rel(e as InputEventMouseMotion)
 		# slower through the sights, in proportion to how far they magnify
-		var k: float = 0.0032 * lerpf(1.0, cam.fov / BASE_FOV, _ads)
+		var k: float = 0.0032 * lerpf(1.0, cam.fov / BASE_FOV, maxf(_ads, _bino))
 		yaw -= mm.x * k
 		pitch = clampf(pitch - mm.y * k, -1.4, 1.35)
 
@@ -384,6 +416,8 @@ func _tick_walk_p(delta: float) -> void:
 			Sim.report("canopy", Sim.Ev.GOOD)
 	if Sim.tapped(&"camera"):
 		third = not third
+	if Sim.tapped(&"bay"):
+		binos = not binos
 	# Halfway over a wall there is nothing to decide: the move finishes.
 	if _trav != "":
 		_traverse(delta)
@@ -564,6 +598,8 @@ func _tick_walk_p(delta: float) -> void:
 func _step_in_frame(delta: float) -> void:
 	if Sim.tapped(&"camera"):
 		third = not third
+	if Sim.tapped(&"bay"):
+		binos = not binos
 	crouching = Sim.held(&"crouch")
 	_sprint = false
 	var wish := _wish()
@@ -891,6 +927,8 @@ func _on_wall(delta: float) -> void:
 	body.in_reload = -1.0
 	body.in_foot_ik = false
 	_ads = 0.0
+	binos = false
+	_bino = 0.0
 	body.animate(delta)
 	_view(delta, Basis.IDENTITY)
 
@@ -1012,6 +1050,10 @@ func _fight(delta: float) -> void:
 				randf_range(0.95, 1.05), 60.0)
 
 	var full: int = int(g["mag"])
+	if binos and _trigger():
+		# the first pull puts the glasses down; it takes a second to shoot
+		binos = false
+		_ui_click = true
 	var pulled: bool = _trigger() and _block < 0.4
 	var edge: bool = pulled and not _trigger_was
 	_trigger_was = pulled
@@ -1324,6 +1366,12 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	body.in_block = _block
 	var want_ads: float = 1.0 if ((Sim.held(&"ads") or hold_ads) and reloading <= 0.0
 		and not _sprint and not chute and _block < 0.3) else 0.0
+	if binos and (want_ads > 0.0 or _sprint or chute or reloading > 0.0 or _trav != ""
+			or _throw_t >= 0.0):
+		binos = false
+	if binos:
+		want_ads = 0.0
+	_bino = move_toward(_bino, 1.0 if binos else 0.0, delta * 5.0)
 	_ads = move_toward(_ads, want_ads, delta * (7.5 if not g.get("scope", false) else 5.0))
 	# Leaning out round a corner. Q and E are the rudder in a cockpit and
 	# nothing at all on the ground.
@@ -1336,6 +1384,12 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 			zoom = maxf(zoom, 44.0)
 		# the world opens out a little at a run
 		cam.fov = lerpf(BASE_FOV + 6.0 * _sprint_s, zoom, _ads * _ads * (3.0 - 2.0 * _ads))
+		if _bino > 0.0:
+			cam.fov = lerpf(cam.fov, BINO_FOV, _bino * _bino * (3.0 - 2.0 * _bino))
+			_glass_t -= delta
+			if _glass_t <= 0.0 and _bino > 0.9:
+				_glass_t = 0.2
+				_range_glass()
 	# his own frame: x to the right, y forward
 	var right := Vector3(cos(yaw), 0, -sin(yaw))
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
@@ -1388,11 +1442,13 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 ## Where the camera is. `ref` is the frame the view angles are measured in:
 ## the world, or the hold of whatever he is riding in.
 func _view(_delta: float, ref: Basis) -> void:
-	body.visible = not scoped()
-	body.set_head_visible(third)
+	# through the glasses there is no rifle in the way, and no shoulder either
+	var glass: bool = _bino > 0.5
+	body.visible = not scoped() and not glass
+	body.set_head_visible(third and not glass)
 	var up: Basis = ref * Basis(Vector3.UP, yaw)
 	var look: Basis = up * Basis(Vector3.RIGHT, pitch + _recoil)
-	if third:
+	if third and not glass:
 		# Over the right shoulder, close enough to shoot from. A camera four
 		# metres back and centred looked at the back of his head: the thing
 		# you were aiming at was behind him.

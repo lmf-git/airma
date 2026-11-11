@@ -792,6 +792,7 @@ func _fuse_check(from: Vector3, to: Vector3) -> bool:
 	# step straight past a 9 m fuse radius
 	var best: Node = null
 	var best_gap := 1e9
+	var best_at: Vector3 = to
 	# Only what the step could conceivably reach is asked anything. Every round
 	# in the air used to put six questions to every contact on the map every
 	# tick; the picture `Sim` keeps answers "is it anywhere near" with a
@@ -829,17 +830,20 @@ func _fuse_check(from: Vector3, to: Vector3) -> bool:
 		if gap < best_gap:
 			best_gap = gap
 			best = n
+			best_at = near
 	# ...and always the thing it was actually sent at, even when that is not a
 	# radar contact. An interceptor is fired at a missile, and a missile is
 	# deliberately not in the contact list.
 	if is_instance_valid(target) and not target.is_in_group("hittable") \
 			and target.has_method("hit_radius"):
 		var tp2: Vector3 = target.global_position
-		var d2 := Geometry3D.get_closest_point_to_segment(tp2, from, to).distance_to(tp2)
+		var near2: Vector3 = Geometry3D.get_closest_point_to_segment(tp2, from, to)
+		var d2 := near2.distance_to(tp2)
 		var gap2: float = d2 - float(target.call("hit_radius"))
 		if gap2 < best_gap:
 			best_gap = gap2
 			best = target
+			best_at = near2
 	if best == null or best_gap >= float(ws["fuse"]):
 		_last_gap = 1e9
 		return false
@@ -856,6 +860,12 @@ func _fuse_check(from: Vector3, to: Vector3) -> bool:
 			and to.y > sea:
 		_last_gap = best_gap
 		return false
+	# It goes off where it was nearest, not at the end of the step. The round
+	# had already been moved on to the far end -- five or ten metres past at
+	# these speeds, and the fuse waits a step for the closest approach besides
+	# -- so the burst was drawn beyond the thing it killed, beside it in the
+	# sky rather than on it.
+	global_position = best_at
 	# the gap to the skin, which is what the fuse just measured
 	_hit(best, maxf(best_gap, 0.0))
 	return true

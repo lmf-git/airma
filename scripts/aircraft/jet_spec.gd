@@ -991,14 +991,14 @@ static func _db() -> Dictionary:
 		"stealth": 2.4,
 		"gunship": true,
 		"guns": [
-			{"id": "g105", "name": "105 mm M102", "rpm": 10.0, "damage": 620.0, "blast": 22.0,
+			{"id": "g105", "name": "105 mm M102", "rpm": 10.0, "damage": 620.0, "blast": 22.0, "frag": 45.0,
 			 "muzzle": 494.0, "spread": 0.004},
-			{"id": "g40", "name": "40 mm Bofors", "rpm": 100.0, "damage": 150.0, "blast": 9.0,
+			{"id": "g40", "name": "40 mm Bofors", "rpm": 100.0, "damage": 150.0, "blast": 9.0, "frag": 16.0,
 			 "muzzle": 881.0, "spread": 0.008},
 			# Five milliradians, not sixteen: about twelve metres either way at
 			# two and a half kilometres. At sixteen the burst covered a football
 			# pitch and hit what it was aimed at by chance.
-			{"id": "g25", "name": "25 mm GAU-12", "rpm": 1800.0, "damage": 34.0, "blast": 3.5,
+			{"id": "g25", "name": "25 mm GAU-12", "rpm": 1800.0, "damage": 34.0, "blast": 3.5, "frag": 7.0,
 			 "muzzle": 1040.0, "spread": 0.005},
 		],
 		"gun": {"rounds": 0, "rpm": 600, "muzzle": 1000.0, "damage": 10.0,

@@ -400,6 +400,8 @@ class _NukeBall extends Node3D:
 	var sun_node: Node3D = null
 	var _fire: ShaderMaterial
 	var _smoke: ShaderMaterial
+	static var _fire_sh: Shader = null
+	static var _smoke_sh: Shader = null
 
 	func _ready() -> void:
 		top_level = true
@@ -412,8 +414,11 @@ class _NukeBall extends Node3D:
 		# of it, and falls away at the limb. That falloff, a boiling surface and
 		# a temperature that cools from white through orange is the whole
 		# effect.
-		var fsh := Shader.new()
-		fsh.code = """
+		# Built once and kept. Each burst made its own pair of shaders, so
+		# each burst compiled them, on the frame it went off.
+		if _fire_sh == null:
+			_fire_sh = Shader.new()
+			_fire_sh.code = """
 shader_type spatial;
 render_mode unshaded, blend_add, cull_back, depth_draw_never;
 
@@ -462,7 +467,7 @@ void fragment() {
 }
 """
 		_fire = ShaderMaterial.new()
-		_fire.shader = fsh
+		_fire.shader = _fire_sh
 		var sm := SphereMesh.new()
 		sm.radius = 1.0
 		sm.height = 2.0
@@ -480,8 +485,9 @@ void fragment() {
 		# that it has no surface. This is a box with the cloud raymarched
 		# inside it: the density field is the mushroom, and what you see is how
 		# much of it the light got through.
-		var ssh := Shader.new()
-		ssh.code = """
+		if _smoke_sh == null:
+			_smoke_sh = Shader.new()
+			_smoke_sh.code = """
 shader_type spatial;
 // Back faces, so the volume still draws when the camera is inside the box, and
 // no depth written because a cloud is not a surface to occlude against.
@@ -499,6 +505,8 @@ uniform float cap_y = 0.6;
 uniform float cap_r = 0.4;
 uniform float cap_h = 0.15;
 uniform float stem_r = 0.08;
+// How many steps the march takes: fewer when the cloud fills the screen.
+uniform int steps = 34;
 uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
 
 varying vec3 wpos;
@@ -528,8 +536,9 @@ float fbm(vec3 p) {
 	return v;
 }
 
-// The cloud, in the box's own space: the unit cube, ground at y = -0.5.
-float density(vec3 p) {
+// The outline of the cloud, in the box's own space: the unit cube, ground at
+// y = -0.5. One noise lookup; the billows, which are eight, are `density`.
+float shape(vec3 p) {
 	float h = clamp(p.y + 0.5, 0.0, 1.0);
 	float r = length(p.xz);
 	// The column: narrow at the base, widening as it rises, and thinning out
@@ -554,7 +563,11 @@ float density(vec3 p) {
 	float dome = smoothstep(1.0, 0.55, length(vec2(rr, dy)) + lump * 0.40);
 	float tube = length(vec2((rr - 0.80) / 0.32, (dy + 0.25) / 0.55)) + lump * 0.55;
 	float roll = smoothstep(1.0, 0.35, tube);
-	float d = max(stem, max(dome, roll * 0.95));
+	return max(stem, max(dome, roll * 0.95));
+}
+
+float density(vec3 p) {
+	float d = shape(p);
 	if (d <= 0.002) {
 		return 0.0;
 	}
@@ -604,8 +617,7 @@ void fragment() {
 	if (t1 <= t0) {
 		discard;
 	}
-	const int STEPS = 34;
-	float dt = (t1 - t0) / float(STEPS);
+	float dt = (t1 - t0) / float(steps);
 	// How much cloud one step crosses, in the box's units. The march runs in
 	// metres, and the opacity used to be taken straight from that: a step a
 	// hundred metres long made anything above a two-hundred-and-fiftieth of
@@ -617,8 +629,9 @@ void fragment() {
 	float jit = fract(sin(dot(SCREEN_UV, vec2(41.7, 289.1))) * 43758.5453);
 	vec4 acc = vec4(0.0);
 	float first = -1.0;
-	for (int i = 0; i < STEPS; i++) {
-		if (acc.a > 0.985) {
+	vec3 sl = normalize(mat3(inv_model) * normalize(sun_dir));
+	for (int i = 0; i < 34; i++) {
+		if (i >= steps || acc.a > 0.985) {
 			break;
 		}
 		float ti = t0 + (float(i) + jit) * dt;
@@ -633,12 +646,18 @@ void fragment() {
 		// How much sun reaches this lump, marched a few steps towards it. This
 		// is what gives the cap a lit top and a dark underside instead of one
 		// flat tone.
-		vec3 sl = normalize(mat3(inv_model) * normalize(sun_dir));
+		//
+		// Against the outline, not the billowed density. Each of these was
+		// the full nine noise lookups, four times over at every one of
+		// thirty-four steps: fifteen hundred a pixel. From fifteen kilometres
+		// that is a few thousand pixels. A tactical one goes off eighty
+		// metres away and is the whole screen, and the frame rate went with
+		// it for as long as the column stood.
 		float shade = 1.0;
 		float ls = 0.05;
-		for (int j = 1; j <= 4; j++) {
-			shade *= exp(-density(sp + sl * ls * float(j)) * 2.6);
-			ls *= 1.6;
+		for (int j = 1; j <= 3; j++) {
+			shade *= exp(-shape(sp + sl * ls * float(j)) * 2.8);
+			ls *= 1.9;
 		}
 		vec3 col = mix(tint, lit, clamp(shade, 0.0, 1.0) * 0.85);
 		// Extinction over the step: crossing the full cap through its core
@@ -661,7 +680,7 @@ void fragment() {
 }
 """
 		_smoke = ShaderMaterial.new()
-		_smoke.shader = ssh
+		_smoke.shader = _smoke_sh
 		# after the air, which is 0 to 2: see the note on the haze above
 		_smoke.render_priority = 3
 		var bx := BoxMesh.new()
@@ -710,6 +729,15 @@ void fragment() {
 		_smoke.set_shader_parameter("cap_h", clampf(cap_th / box_h, 0.02, 0.45))
 		_smoke.set_shader_parameter("stem_r",
 			clampf(lethal * 0.10 * (1.0 + grow) / box_w, 0.01, 0.20))
+		# Half the steps from underneath it, all of them from across the map:
+		# the nearer it is the more of the screen it is, and the less any one
+		# step shows.
+		var eye := get_viewport().get_camera_3d()
+		if eye != null:
+			var away: float = eye.global_position.distance_to(_vol.global_position) \
+				/ maxf(maxf(box_w, box_h), 1.0)
+			_smoke.set_shader_parameter("steps",
+				int(lerpf(16.0, 34.0, clampf((away - 1.0) / 4.0, 0.0, 1.0))))
 		if is_instance_valid(sun_node):
 			_smoke.set_shader_parameter("sun_dir",
 				-sun_node.global_transform.basis.z)

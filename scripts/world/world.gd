@@ -15351,7 +15351,12 @@ func _shell_input(e: InputEvent) -> void:
 			# it took the key from both sensor branches below it, so O never
 			# raised the sensor anywhere: not in a cockpit, not on a bridge,
 			# not in a turret.
-			if on_foot:
+			if gunning:
+				# At the guns the sensor *is* the station. O stowed it, which
+				# dropped a man called up to a gunship back to the camera in
+				# the street with the guns still his; J is the way out.
+				pass
+			elif on_foot:
 				# nothing to look through on foot; the map is what it did
 				map.toggle_globe()
 			elif is_instance_valid(ship) or is_instance_valid(tank) or _at_conn():
