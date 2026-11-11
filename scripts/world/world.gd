@@ -9918,7 +9918,7 @@ func cqb_gunship(centre: Vector3) -> bool:
 	j.name = "Spooky"
 	add_child(j)
 	# Northbound with the town off the port wing, which is where the guns are.
-	j.global_transform = Transform3D(Basis(), centre + Vector3(2300.0, 1500.0, 0.0))
+	j.global_transform = Transform3D(Basis(), centre + Vector3(3000.0, 1500.0, 0.0))
 	j.linear_velocity = Vector3(0, 0, -105.0)
 	j.gear_down = false
 	j.gear_anim = 0.0
@@ -14249,6 +14249,58 @@ func _run_streak_test() -> void:
 		if landed.size() < want or worst > 12.0 or hi - lo < ln * 0.8:
 			bad.append("the carpet did not land along the line")
 	get_tree().node_added.disconnect(watch_new)
+	# the drone: it is in the sky, it is a contact, and shooting it down takes
+	# the picture away
+	cqb.bank["uav"] = 1
+	cqb._call("uav")
+	var drones: Array = get_tree().get_nodes_in_group("drones")
+	if drones.is_empty() or cqb.uav_t <= 0.0:
+		bad.append("calling the UAV put no drone up")
+	else:
+		var dr: Node3D = drones[0]
+		var up: float = dr.global_position.y - Sim.height_at(dr.global_position.x, dr.global_position.z)
+		dr.call("take_hit", 500.0, null)
+		print("[streak] UAV: a drone %.0f m up, in the lock list %s; shot down, the map has %.0f s left" % [
+			up, str(dr.is_in_group("hittable") or not dr.call("is_alive")), cqb.uav_t])
+		if cqb.uav_t > 0.0:
+			bad.append("the drone was shot down and the map stayed lit")
+	# the small warhead: on the far side of town from him, and what was
+	# standing there is not standing afterwards
+	var away_dir := Vector3(cqb.centre.x - walker.global_position.x, 0.0,
+		cqb.centre.y - walker.global_position.z)
+	away_dir = away_dir.normalized() if away_dir.length() > 1.0 else Vector3(0, 0, -1)
+	var gz: Vector3 = walker.global_position + away_dir * 170.0
+	gz.y = Sim.height_at(gz.x, gz.z)
+	var standing := func() -> int:
+		var n := 0
+		for ts in _town_sets.values():
+			for c in (ts as Node).get_children():
+				if c is MeshInstance3D and not c.has_meta("flat") \
+						and (c as Node3D).global_position.distance_to(gz) < CqbMatch.TAC_LETHAL:
+					n += 1
+		return n
+	var men_near := func() -> int:
+		var n := 0
+		for sd in cqb.soldiers:
+			if is_instance_valid(sd) and (sd as Node3D).global_position.distance_to(gz) < CqbMatch.TAC_LETHAL * 0.9:
+				n += 1
+		return n
+	var props_before: int = standing.call()
+	cqb.bank["tacnuke"] = 1
+	cqb._picked("tacnuke", gz)
+	var hp_before: float = walker.health
+	for i in int(11.5 * 120.0):
+		await get_tree().physics_frame
+	var men_before: int = men_near.call()
+	for i in 240:
+		await get_tree().physics_frame
+	print("[streak] tactical nuke %.0f m from him: %d props standing inside it before and %d after, %d men inside it at the flash and %d after; his health %.0f -> %.0f, bank %s" % [
+		walker.global_position.distance_to(gz), props_before, int(standing.call()),
+		men_before, int(men_near.call()), hp_before, walker.health, str(cqb.bank["tacnuke"])])
+	if int(cqb.bank["tacnuke"]) != 0 or int(standing.call()) > 0 or int(men_near.call()) > 0:
+		bad.append("the tactical nuke left something standing inside its radius")
+	if Obstacles.segment(gz + Vector3(-60, 1.5, 0.3), gz + Vector3(60, 1.5, 0.3)) < 1.0:
+		bad.append("something inside the nuke's radius still stops a round")
 	# the deploy screen
 	var dm := DeployMenu.new()
 	add_child(dm)
@@ -15411,6 +15463,12 @@ func _parse_cmdline() -> void:
 			_zoom_test = true
 		elif a == "--armstest":
 			_arms_test = true
+		elif a.begins_with("--teams="):
+			# --teams=8v12: how many a side in a street fight, ours then theirs
+			var tv := a.substr(8).split("v")
+			if tv.size() == 2:
+				CqbMatch.size_us = maxi(int(tv[0]), 1)
+				CqbMatch.size_them = maxi(int(tv[1]), 1)
 		elif a == "--streaktest":
 			_streak_test = true
 		elif a == "--hgeartest":

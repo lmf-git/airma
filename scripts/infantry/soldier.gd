@@ -157,6 +157,13 @@ func _die(killer: Node) -> void:
 	died.emit(self, killer if is_instance_valid(killer) else null, _last_head)
 	queue_free()
 
+## The side has a new plan. Drop whatever street he was wandering to and ask
+## where his fire team is going now.
+func new_orders() -> void:
+	if state == ROAM:
+		_goal = Vector3.INF
+		_hold = 0.0
+
 ## Something loud happened over there.
 func hear(at: Vector3) -> void:
 	if not alive or target != null:
@@ -261,7 +268,11 @@ func _heavy(delta: float) -> bool:
 			if not Firearm.can_see(eye(), (n as Node3D).global_position + Vector3(0, 1.6, 0)):
 				continue
 		else:
-			if not (n is Aircraft) or Sim.no_air_threat or d2 > 4000.0 or d2 < 150.0:
+			# A drone is fair game even where the aeroplanes are left alone:
+			# it is the other side's eyes, and it is why he carries the tube.
+			var drone: bool = n.is_in_group("drones")
+			if not (n is Aircraft or drone) or (Sim.no_air_threat and not drone) \
+					or d2 > 4000.0 or d2 < 150.0:
 				continue
 			var up: float = (n as Node3D).global_position.y - Sim.height_at(
 				(n as Node3D).global_position.x, (n as Node3D).global_position.z)

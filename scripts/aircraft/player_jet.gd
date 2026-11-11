@@ -447,13 +447,23 @@ func _auto_pilot(delta: float) -> void:
 			# of the time -- the guns can only train forty-five degrees either
 			# side of the port beam.
 			var mark := _orbit_mark()
+			in_yaw = 0.0
 			if mark != Vector3.INF:
 				want_bank = _pylon_bank(mark)
-			in_roll = clampf((want_bank - bank) * 1.6, -1.0, 1.0)
+				# The rudder keeps the mark on the beam; the bank only holds
+				# the circle. Everything was done with roll, so every small
+				# drift of the mark fore or aft was a change of bank, and the
+				# aeroplane spent the whole orbit rocking from one to another
+				# with the sight swinging under the gunner's hand. Positive is
+				# nose right: the mark drawing ahead wants the turn eased.
+				in_yaw = clampf(_pylon_err * 1.4, -0.6, 0.6)
+			# and against its own rate of roll, so it settles on a bank
+			# instead of wallowing through it
+			var roll_rate: float = angular_velocity.dot(-b.z)
+			in_roll = clampf((want_bank - bank) * 1.6 - roll_rate * 0.9, -1.0, 1.0)
 			var err := orbit_alt - global_position.y
 			var want_vs := clampf(err * 0.16, -12.0, 12.0)
 			in_pitch = clampf((want_vs - linear_velocity.y) * 0.09 + 0.10, -0.4, 0.6)
-			in_yaw = 0.0
 			throttle = clampf(0.45 + (orbit_speed - linear_velocity.length()) * 0.02, 0.1, 1.0)
 		"wait":
 			throttle = 0.0
@@ -479,6 +489,8 @@ func _orbit_mark() -> Vector3:
 ## this speed, tightened while the mark is falling behind the port beam -- too
 ## little bank, the circle is wider than the range -- and eased off while it is
 ## drawing ahead, so it settles abeam, where the battery points.
+var _pylon_err := 0.0
+
 func _pylon_bank(mark: Vector3) -> float:
 	var to := mark - global_position
 	to.y = 0.0
@@ -504,12 +516,19 @@ func _pylon_bank(mark: Vector3) -> float:
 	# with bank left over to steer with. Asked for a circle it could not hold,
 	# it sat at the stop, overshot, and swung wide for half a lap at a time.
 	var r_fly: float = v * v / (9.81 * tan(deg_to_rad(28.0)))
-	var r0: float = maxf(clampf(above * 1.2, 1500.0, 4500.0), r_fly)
+	#
+	# Twice its height out, and never inside three kilometres. At 1.2 times
+	# and a floor of fifteen hundred metres the circle was as tight as the
+	# aeroplane could fly at all: held at the bank stop the whole way round
+	# with nothing left to correct with. At three kilometres and a hundred
+	# metres a second it is nineteen degrees of bank and a lap in three minutes.
+	var r0: float = maxf(clampf(above * 2.0, 3000.0, 5000.0), r_fly)
 	var want_ahead: float = clampf((r - r0) / r0, -0.5, 1.0) * deg_to_rad(60.0)
+	_pylon_err = ahead - want_ahead
 	# Right bank allowed too, a little: with the mark dead ahead the way round
 	# to having it on the port bow is a turn to starboard, and a left-only
 	# orbit flew straight over it and took a whole lap to come back.
-	var want: float = clampf(hold - (ahead - want_ahead) * 0.9,
+	var want: float = clampf(hold - (ahead - want_ahead) * 0.5,
 		deg_to_rad(-25.0), deg_to_rad(35.0))
 	return -want
 

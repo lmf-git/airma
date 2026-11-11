@@ -14,9 +14,17 @@ extends Node3D
 
 const HALF := 132.0               # the arena, either side of the crossroads
 const CELL := 2.0                 # route grid
-const SQUAD := 6                  # a side, the player included
+const SQUAD := 6                  # a side, the player included, unless chosen otherwise
+## How many a side, chosen in the hangar: ours (the player is one of them) and
+## theirs. They need not be the same.
+static var size_us := SQUAD
+static var size_them := SQUAD
+const SIZES := [2, 3, 4, 6, 8, 10, 12, 16]
+
+static func side_size(team: int) -> int:
+	return clampi(size_us if team == 0 else size_them, 1, 24)
 const RESPAWN := 4.5
-const KILL_GOAL := 40
+const KILL_GOAL := 60
 const KITS := ["carbine", "smg", "carbine", "shotgun", "dmr", "carbine", "smg"]
 
 ## Chosen in the hangar before the match: which town.
@@ -81,6 +89,10 @@ const STREAK_POOL := [
 		"note": "Two points on the map set the line; a B-2 comes over and lays a carpet along it."},
 	{"id": "missile", "name": "FIRE MISSION", "at": 9,
 		"note": "A launcher out of town lays rounds on your mark."},
+	{"id": "tacnuke", "name": "TACTICAL NUKE", "at": 20,
+		"note": "A small warhead on a spot you pick. Nothing within eighty metres lives and nothing there is left standing — you included."},
+	{"id": "stratnuke", "name": "STRATEGIC NUKE", "at": 30,
+		"note": "The town, everything in it and the match. Twenty seconds' warning and nowhere to go."},
 ]
 const MAX_STREAKS := 4
 ## What he carries into the next life, by id. The four the game always had,
@@ -101,7 +113,13 @@ static func chosen_streaks() -> Array:
 const UAV_TIME := 30.0
 var streak := 0
 var bank := {"uav": 0, "mortar": 0, "strike": 0, "jdam": 0, "gunship": 0, "carpet": 0,
-	"missile": 0}
+	"missile": 0, "tacnuke": 0, "stratnuke": 0}
+## Warheads on their way: [seconds left, where, lethal radius, strategic].
+var _nukes: Array = []
+const TAC_LETHAL := 80.0
+const STRAT_LETHAL := 1500.0
+## The drone a UAV streak puts up, while it is up.
+var _uav: UavDrone = null
 ## The first end of a carpet's line, while the map waits for the second.
 var _carpet_from := Vector3.INF
 var uav_t := 0.0
@@ -140,7 +158,7 @@ func setup(at: Vector2, game: GameMode, owner_world: Node, town_set: TownSet) ->
 			_spots.append(p)
 	Sfx.warm(Firearm.SOUNDS)
 	for t in [0, 1]:
-		for i in SQUAD:
+		for i in side_size(t):
 			if t == 0 and i == 0:
 				continue                    # that one is you
 			_spawn(t, i)
@@ -415,7 +433,7 @@ func spawn_point(team: int, slot := -1) -> Vector3:
 			continue
 		var score: float = _rng.randf_range(0.0, 12.0)
 		if slot >= 0:
-			score -= absf(float(k - 4) - (float(slot) - SQUAD * 0.5) * 1.5) * 3.0
+			score -= absf(float(k - 4) - (float(slot) - float(side_size(team)) * 0.5) * 1.5) * 3.0
 		for e in enemies_of(team):
 			if not is_instance_valid(e) or not e.is_alive():
 				continue
@@ -452,7 +470,9 @@ func _spawn(team: int, slot: int) -> void:
 	if armour and slot == 2:
 		s.launcher = "law"
 		s.callsign += " (AT)"
-	elif air and slot == 4:
+	elif slot == 4 or (slot == 1 and side_size(team) < 5):
+		# always one, air or no air: the other side can put a drone up, and a
+		# drone is a thing a man with a missile can do something about
 		s.launcher = "stinger"
 		s.rounds_heavy = 2
 		s.callsign += " (AA)"
@@ -732,6 +752,14 @@ func contact(team: int, at: Vector3) -> void:
 	list.append([at, 0.0])
 	if list.size() > 6:
 		list.pop_front()
+	# Something new. The men near it turn to it, and a side that was sweeping
+	# for want of anything better stops and works out what to do about it.
+	for m in _teams[team]:
+		if is_instance_valid(m) and m is Soldier \
+				and (m as Soldier).global_position.distance_to(at) < 55.0:
+			(m as Soldier).hear(at)
+	if String(plan[team]) == "sweep":
+		_plan_t[team] = minf(float(_plan_t[team]), 0.6)
 
 ## A shot, or a man running: everyone on the other side within earshot turns.
 func heard(at: Vector3, by_team: int, radius := 75.0) -> void:
@@ -740,32 +768,21 @@ func heard(at: Vector3, by_team: int, radius := 75.0) -> void:
 				and (s as Soldier).global_position.distance_to(at) < radius:
 			(s as Soldier).hear(at)
 
-## Where a man with nothing to shoot at should go.
+## Where a man with nothing to shoot at should go: wherever his fire team has
+## been sent, and near the others in it rather than on top of them.
 func objective_for(s: Soldier) -> Vector3:
-	# towards the last place anyone on his side saw the enemy
-	var list: Array = _contacts[s.team]
-	if not list.is_empty() and _rng.randf() < 0.8:
-		var c: Array = list[_rng.randi() % list.size()]
-		var p: Vector3 = _free_near((c[0] as Vector3)
-			+ Vector3(_rng.randf_range(-8, 8), 0, _rng.randf_range(-8, 8)))
-		if p != Vector3.INF:
-			return p
-	# some of your own side stay with you, which is what makes it a squad
-	if s.team == 0 and is_instance_valid(player) and player.is_alive() \
-			and int(s.get_meta("slot", 0)) % 2 == 1:
+	var ft: int = fireteam_of(s)
+	# the fire team you are in stays with you, which is what makes it yours
+	if s.team == 0 and ft == 0 and is_instance_valid(player) and player.is_alive() \
+			and not away and String(plan[0]) != "hold":
 		var back := Vector3(_rng.randf_range(-7, 7), 0, _rng.randf_range(-7, 7))
 		var near: Vector3 = _free_near(player.global_position + back)
 		if near != Vector3.INF:
 			return near
-	# otherwise push: the crossroads, the yards, and the other side's half
-	var pick: Vector3 = _spots[_rng.randi() % _spots.size()]
-	var push: float = -1.0 if s.team == 0 else 1.0
-	if _rng.randf() < 0.45:
-		var deep: Vector3 = _free_near(Vector3(centre.x + _rng.randf_range(-90, 90), 0,
-			centre.y + push * _rng.randf_range(40.0, 105.0)))
-		if deep != Vector3.INF:
-			return deep
-	return pick
+	var goal: Vector3 = _team_goal(s.team, ft)
+	var spot: Vector3 = _free_near(goal
+		+ Vector3(_rng.randf_range(-6, 6), 0, _rng.randf_range(-6, 6)))
+	return spot if spot != Vector3.INF else goal
 
 # ------------------------------------------------------------------ support
 ## Take the player out of the fight, or put him back. He is still the one the
@@ -796,6 +813,18 @@ func _support(delta: float) -> void:
 	Effects.credit = player if (is_instance_valid(player) and not armour) else null
 	Effects.spare_team = -1 if armour else 0
 	uav_t = maxf(uav_t - delta, 0.0)
+	if uav_t <= 0.0 and is_instance_valid(_uav):
+		_uav.queue_free()
+		_uav = null
+	var still: Array = []
+	for nk in _nukes:
+		nk[0] = float(nk[0]) - delta
+		if float(nk[0]) > 0.0:
+			still.append(nk)
+		else:
+			_nuke(nk[1], float(nk[2]), bool(nk[3]))
+	_nukes = still
+	_plan_tick(delta)
 	if _picking and world.get("map") != null and is_instance_valid(world.map) \
 			and not world.map.pick_cb.is_valid():
 		_picking = false
@@ -817,7 +846,34 @@ func _call(id: String) -> bool:
 	match id:
 		"uav":
 			uav_t = UAV_TIME
-			Sim.report("UAV overhead — hostiles on the map for %d seconds" % int(UAV_TIME), Sim.Ev.GOOD)
+			# A drone, in the sky, where it can be seen and shot at: the map
+			# shows what it sees for as long as it is still flying.
+			if not is_instance_valid(_uav):
+				_uav = UavDrone.new()
+				_uav.arena = self
+				_uav.team = 0
+				_uav.name = "UAV"
+				world.add_child(_uav)
+				_uav.station(Vector3(centre.x, _ground(centre.x, centre.y), centre.y))
+			Sim.report("UAV overhead — hostiles on the map for %d seconds, unless they shoot it down" % int(UAV_TIME), Sim.Ev.GOOD)
+			return true
+		"tacnuke", "stratnuke":
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				world.map.pick("TACTICAL NUKE" if id == "tacnuke" else "STRATEGIC NUKE",
+					func(p: Vector3): _picked(id, p))
+			return false
+		"tacnuke_at":
+			var at3: Vector3 = _pick_at
+			_nukes.append([12.0, Vector3(at3.x, _ground(at3.x, at3.z), at3.z), TAC_LETHAL, false])
+			Sim.report("TACTICAL NUKE inbound — twelve seconds, get eighty metres clear of the mark", Sim.Ev.BAD)
+			Sfx.play_at(world, "roar", at3 + Vector3(0, 900, 0), 9.0, 0.7, 9000.0)
+			return true
+		"stratnuke_at":
+			var at4: Vector3 = _pick_at
+			_nukes.append([20.0, Vector3(at4.x, _ground(at4.x, at4.z), at4.z), STRAT_LETHAL, true])
+			Sim.report("STRATEGIC NUKE inbound — twenty seconds. It has been an honour.", Sim.Ev.BAD)
+			Sfx.play_at(world, "roar", at4 + Vector3(0, 2000, 0), 10.0, 0.55, 12000.0)
 			return true
 		"strike":
 			# On the map, not down the sights: what you want hit is usually
@@ -1004,6 +1060,77 @@ class CarpetRun extends Node3D:
 		if _along >= _end:
 			queue_free()
 
+## The drone a UAV streak puts up. It is there: it circles the town where it
+## can be seen, it is a contact like any other aircraft, and anything that can
+## reach it -- a man with a missile, a gun, another aeroplane -- can bring it
+## down, which takes the picture off the map with it.
+class UavDrone extends Node3D:
+	const HEIGHT := 650.0
+	const RADIUS := 520.0
+	const SPEED := 58.0
+	var arena: CqbMatch = null
+	var team := 0
+	var health := 30.0
+	var alive := true
+	var linear_velocity := Vector3.ZERO
+	var _mid := Vector3.ZERO
+	var _a := 0.0
+
+	func _init() -> void:
+		top_level = true
+
+	func _ready() -> void:
+		add_to_group("hittable")
+		add_to_group("drones")
+		var m: Dictionary = JetFactory.build(JetSpec.get_spec("mq9"))
+		for g in m["gear"]:
+			(g as Node3D).visible = false
+		add_child(m["root"])
+
+	func station(over: Vector3) -> void:
+		_mid = over
+		_a = randf() * TAU
+		_fly(0.0)
+		reset_physics_interpolation()
+
+	func display_name() -> String:
+		return "UAV"
+
+	func is_alive() -> bool:
+		return alive
+
+	func hit_radius() -> float:
+		return 6.0
+
+	func get_velocity() -> Vector3:
+		return linear_velocity
+
+	func _fly(delta: float) -> void:
+		_a += SPEED / RADIUS * delta
+		var at := _mid + Vector3(cos(_a) * RADIUS, HEIGHT, sin(_a) * RADIUS)
+		linear_velocity = Vector3(-sin(_a), 0.0, cos(_a)) * SPEED
+		global_position = at
+		look_at(at + linear_velocity, Vector3.UP)
+		# banked into its circle
+		rotate_object_local(Vector3.FORWARD, -atan(SPEED * SPEED / (9.81 * RADIUS)))
+
+	func _physics_process(delta: float) -> void:
+		if alive:
+			_fly(delta)
+
+	func take_hit(amount: float, _from: Node = null) -> void:
+		if not alive:
+			return
+		health -= amount
+		if health > 0.0:
+			return
+		alive = false
+		remove_from_group("hittable")
+		Effects.explosion(get_tree().current_scene, global_position, 9.0)
+		if is_instance_valid(arena):
+			arena.uav_lost()
+		queue_free()
+
 ## One of the carpet: a cluster canister that falls, opens over the line and
 ## lets its bomblets go, each of which goes off on whatever it meets first -- a
 ## roof or the road. All of it falls in the same flight model a round flies.
@@ -1078,12 +1205,19 @@ class CarpetBomb extends Node3D:
 		var floor_y: float = maxf(Sim.height_at(nxt.x, nxt.z), Obstacles.top_at(nxt.x, nxt.z))
 		if cluster and nxt.y - floor_y < OPEN_AT:
 			# the canister opens and the bomblets go their own ways over the
-			# street, sixty-odd metres across by the time they are down
+			# street below
+			var fwd := Vector3(vel.x, 0.0, vel.z)
+			fwd = fwd.normalized() if fwd.length() > 0.5 else Vector3.FORWARD
+			var side: Vector3 = fwd.cross(Vector3.UP)
 			for i in BOMBLETS:
 				var c := CarpetBomb.new()
 				c.arena = arena
 				c.bomblet = true
-				c.vel = vel + Vector3(randf_range(-14, 14), randf_range(-4, 4), randf_range(-14, 14))
+				# strung out along the run and kept narrow across it: thrown
+				# evenly all round, each canister made a patch ninety metres
+				# wide and the carpet was broader than the line it was drawn on
+				c.vel = vel + fwd * randf_range(-12.0, 12.0) + side * randf_range(-3.5, 3.5) \
+					+ Vector3(0.0, randf_range(-4.0, 4.0), 0.0)
 				get_parent().add_child(c)
 				c.place(nxt)
 			Effects.dust(get_tree().current_scene, nxt, 4.0)
@@ -1099,6 +1233,162 @@ class CarpetBomb extends Node3D:
 		global_position = nxt
 		if vel.length_squared() > 1.0:
 			look_at(nxt + vel, Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD)
+
+## The drone went down: the picture goes with it.
+func uav_lost() -> void:
+	uav_t = 0.0
+	_uav = null
+	Sim.report("UAV shot down — the map is dark again", Sim.Ev.BAD)
+
+## A warhead going off at `at`. Everything that can be hurt inside `lethal`
+## is, whoever's side it is on and the man who called it included; every
+## building and everything standing in the street inside it comes down. The
+## strategic one ends the match as well: there is nobody left to play it.
+func _nuke(at: Vector3, lethal: float, strategic: bool) -> void:
+	var scn: Variant = world.get("scenery")
+	var flat := lethal * 1.2
+	if scn != null and is_instance_valid(scn) and scn.has_method("damage_area"):
+		scn.damage_area(at, flat)
+	else:
+		Obstacles.kill_near(at, flat)
+	for t in TownSet.live:
+		if is_instance_valid(t):
+			(t as TownSet).flatten(at, flat)
+	Effects.mute_blast = true
+	Effects.nuke(world, at, lethal)
+	Effects.mute_blast = false
+	var seen := {}
+	var hurt: Array = soldiers.duplicate()
+	hurt.append_array(get_tree().get_nodes_in_group("hittable"))
+	if is_instance_valid(player) and not away:
+		hurt.append(player)
+	var credit: Node = player if is_instance_valid(player) else null
+	for n in hurt:
+		if not is_instance_valid(n) or not (n is Node3D) or seen.has(n) \
+				or not n.has_method("take_hit"):
+			continue
+		seen[n] = true
+		var d: float = (n as Node3D).global_position.distance_to(at)
+		if d < lethal:
+			n.take_hit(4000.0 * clampf(1.0 - d / lethal, 0.3, 1.0), credit)
+		elif d < lethal * 1.6:
+			# outside it, the blast: hurt, not killed
+			n.take_hit(70.0 * (1.0 - (d - lethal) / (lethal * 0.6)), credit)
+	if strategic and is_instance_valid(mode) and mode.running:
+		mode._finish(true, "STRATEGIC STRIKE")
+
+# ----------------------------------------------------------------- team plans
+## What each side is doing as a side. Every man used to choose for himself: a
+## place somebody had seen the enemy, or a street picked at random. Twelve men
+## doing that are twelve men, not a team -- they arrive one at a time and are
+## shot one at a time. A side now has a plan, looked at again every quarter of
+## a minute, and is split into fire teams of three that move together:
+##
+##   assault  there is a contact. One fire team goes straight at it and fixes
+##            it; the others go round, one each side, and arrive on its flanks.
+##   sweep    nobody has seen anything. The fire teams go forward in line
+##            abreast, a street apart, so nothing is walked past.
+##   hold     outnumbered three to two or worse. Back to their own end, each
+##            fire team on a corner of it, until the numbers come back.
+const FIRETEAM := 3
+const PLAN_EVERY := 14.0
+var plan := {0: "sweep", 1: "sweep"}
+var _plan_t := {0: 1.0, 1: 2.5}
+var _plan_at := {0: Vector3.INF, 1: Vector3.INF}
+## Where each fire team is going: team -> {fire team -> [where, seconds left]}.
+var _ft_goal := {0: {}, 1: {}}
+const PLAN_SAY := {
+	"assault": "squad: contact — one team fixing it, the others going round",
+	"sweep": "squad: nothing seen — sweeping forward in line",
+	"hold": "squad: outnumbered — holding our end until they are back up",
+}
+
+func fireteam_of(s: Soldier) -> int:
+	return floori(float(int(s.get_meta("slot", 0))) / float(FIRETEAM))
+
+func _alive_on(team: int) -> int:
+	var n := 0
+	for m in _teams[team]:
+		if is_instance_valid(m) and m.is_alive():
+			n += 1
+	return n
+
+func _plan_tick(delta: float) -> void:
+	for t in [0, 1]:
+		for ft in (_ft_goal[t] as Dictionary):
+			_ft_goal[t][ft][1] = float(_ft_goal[t][ft][1]) - delta
+		_plan_t[t] = float(_plan_t[t]) - delta
+		if float(_plan_t[t]) <= 0.0:
+			_plan_t[t] = PLAN_EVERY + _rng.randf_range(-3.0, 3.0)
+			_replan(t)
+
+func _replan(t: int) -> void:
+	var mine: int = _alive_on(t)
+	var theirs: int = _alive_on(1 - t)
+	# the freshest thing anyone on the side has seen
+	var focus := Vector3.INF
+	var age := 1e9
+	for c in _contacts[t]:
+		if float(c[1]) < age:
+			age = float(c[1])
+			focus = c[0]
+	var was: String = plan[t]
+	var now := "sweep"
+	if mine * 3 <= theirs * 2 and theirs >= 3:
+		now = "hold"
+	elif focus != Vector3.INF:
+		now = "assault"
+	plan[t] = now
+	_plan_at[t] = focus
+	_ft_goal[t] = {}
+	if t == 0 and now != was:
+		Sim.report(String(PLAN_SAY[now]), Sim.Ev.INFO)
+	# Whoever is standing about with nothing to do takes the new orders now
+	# rather than when he next gets round to asking.
+	for m in _teams[t]:
+		if is_instance_valid(m) and m is Soldier and (m as Soldier).state == Soldier.ROAM:
+			(m as Soldier).new_orders()
+
+## Where a fire team is going under the side's plan. Worked out once and kept
+## for a few seconds, so the three of them are given the same place.
+func _team_goal(t: int, ft: int) -> Vector3:
+	var have: Dictionary = _ft_goal[t]
+	if have.has(ft) and float(have[ft][1]) > 0.0:
+		return have[ft][0]
+	# towards the other side's end is -z for us and +z for them
+	var fwd: float = -1.0 if t == 0 else 1.0
+	var teams_n: int = maxi(ceili(float(side_size(t)) / float(FIRETEAM)), 1)
+	var lane: float = (float(ft) - float(teams_n - 1) * 0.5) * minf(52.0, 180.0 / float(teams_n))
+	var at := Vector3.INF
+	match String(plan[t]):
+		"assault":
+			var focus: Vector3 = _plan_at[t]
+			if focus != Vector3.INF:
+				# the line from our end to the contact, and the two sides of it
+				var from := Vector3(centre.x, 0.0, centre.y - fwd * 110.0)
+				var axis := Vector3(focus.x - from.x, 0.0, focus.z - from.z)
+				axis = axis.normalized() if axis.length() > 1.0 else Vector3(0, 0, fwd)
+				var side := Vector3(-axis.z, 0.0, axis.x)
+				match ft % 3:
+					0:
+						at = focus - axis * 22.0          # short of it: the base of fire
+					1:
+						at = focus + side * 30.0 + axis * 6.0
+					_:
+						at = focus - side * 30.0 + axis * 6.0
+		"hold":
+			at = Vector3(centre.x + lane, 0.0,
+				centre.y - fwd * _rng.randf_range(45.0, 85.0))
+	if at == Vector3.INF:
+		# the sweep, and whatever could not be placed: forward in its own lane
+		at = Vector3(centre.x + lane, 0.0, centre.y + fwd * _rng.randf_range(10.0, 100.0))
+	at.x = clampf(at.x, centre.x - HALF + 8.0, centre.x + HALF - 8.0)
+	at.z = clampf(at.z, centre.y - HALF + 8.0, centre.y + HALF - 8.0)
+	var p: Vector3 = _free_near(at)
+	if p == Vector3.INF:
+		p = _spots[_rng.randi() % _spots.size()]
+	have[ft] = [p, _rng.randf_range(7.0, 11.0)]
+	return p
 
 ## One bomb of the stick, one mortar round, or the one big bomb: `big` is
 ## how much bigger or smaller than a stick bomb it is. It does not care about

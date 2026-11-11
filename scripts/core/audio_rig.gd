@@ -26,7 +26,7 @@ func _ready() -> void:
 	_wind = _loop("wind", -60.0)
 	_tyres = _loop("tyres", -60.0)
 	_gun = _loop("gun", -60.0, false, &"Effects")
-	_warn = _loop("beep", -60.0, false, &"Interface")
+	_warn = _loop("pip", -60.0, false, &"Interface")
 	_buffet = _loop("buffet", -60.0)
 
 func _loop(id: String, db: float, autoplay := true, bus := &"Engines") -> AudioStreamPlayer:
@@ -96,13 +96,21 @@ func _process(delta: float) -> void:
 	elif not aircraft.stalling and _buffet.playing and _buffet.volume_db < -70.0:
 		_buffet.stop()
 
-	# warning tone: missile inbound beats low fuel
-	var warn := aircraft.missile_warn > 0.0 and alive
-	if warn and not _warn.playing:
-		_warn.play()
-	elif not warn and _warn.playing:
-		_warn.stop()
+	# Warning tone: a pip that comes faster the nearer the round is to
+	# arriving. It was one steady beep for two seconds after a launch and then
+	# silence, which said that something had been fired and nothing about how
+	# long there was left to do anything about it.
+	var tti: float = _time_to_impact() if alive else INF
+	aircraft.missile_tti = tti
+	var warn: bool = alive and (aircraft.missile_warn > 0.0 or tti < INF)
 	_warn.volume_db = _db(0.75 if warn else 0.0)
+	_pip_t -= delta
+	if warn and _pip_t <= 0.0:
+		_warn.play()
+		# a steady half second with nothing known, closing to a rattle
+		_pip_t = 0.5 if tti == INF else clampf(tti * 0.05, 0.07, 0.6)
+	elif not warn:
+		_pip_t = 0.0
 
 	# gun buzz while the trigger is down
 	var firing: bool = alive and aircraft.gun_cd > 0.0 and aircraft.ammo > 0
@@ -126,6 +134,27 @@ func _process(delta: float) -> void:
 		Sfx.play_at(get_tree().current_scene, "thump", aircraft.global_position,
 			clampf(-14.0 + absf(aircraft.vspeed) * 1.6, -18.0, 2.0))
 	_was_ground = aircraft.on_ground
+
+var _pip_t := 0.0
+
+## Seconds until the nearest round guiding on this aircraft gets here, at the
+## rate it is closing now, or INF if nothing is.
+func _time_to_impact() -> float:
+	var best := INF
+	var at: Vector3 = aircraft.global_position
+	for m in get_tree().get_nodes_in_group("missiles"):
+		if not is_instance_valid(m) or m.target != aircraft:
+			continue
+		if is_instance_valid(m.shooter) and m.shooter == aircraft:
+			continue
+		var rel: Vector3 = at - (m as Node3D).global_position
+		var far: float = rel.length()
+		if far < 1.0:
+			return 0.0
+		var closing: float = ((m.vel as Vector3) - aircraft.linear_velocity).dot(rel / far)
+		if closing > 5.0:
+			best = minf(best, far / closing)
+	return best
 
 func set_paused(p: bool) -> void:
 	for c in get_children():

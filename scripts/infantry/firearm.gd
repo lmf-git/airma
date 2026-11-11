@@ -369,6 +369,22 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		return
 	var n: int = int(g["pellets"])
 	var basis := Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT)
+	# A rifle is longer than a wall is thick. A man pressed up against one has
+	# his muzzle inside it or out the far side, and a round that starts there
+	# has no wall left to meet: every shot went through. So the stretch from
+	# the man to his own muzzle is looked at first, and if something is
+	# standing in it the round goes into that, a hand's breadth from the
+	# barrel, and no further.
+	var foul := 1.0
+	var chest := muzzle
+	if shooter is Node3D:
+		var sp: Vector3 = (shooter as Node3D).global_position
+		chest = Vector3(sp.x, muzzle.y, sp.z)
+		if chest.distance_squared_to(muzzle) > 0.01:
+			foul = Obstacles.segment(chest, muzzle)
+	if foul < 1.0:
+		Effects.bullet_impact(world, chest.lerp(muzzle, foul) - dir * 0.05, true)
+		n = 0
 	for i in n:
 		# a disc, not a box: the corners of a square spread are 40% further
 		# out than its sides, and a shotgun pattern does not have corners

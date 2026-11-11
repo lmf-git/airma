@@ -191,6 +191,17 @@ static func _bake(id: String) -> AudioStreamWAV:
 				var env: float = pow(1.0 - t, 4.0)
 				b[i] = (sin(TAU * 62.0 * float(i) / RATE) * 0.8 + noise[i] * 0.5) * env
 			return _wav(_norm(b, 0.9), false)
+		"pip":
+			# one pulse of the missile warning, short enough to be repeated
+			# a dozen times a second without running into itself
+			var n := int(RATE * 0.055)
+			var b := PackedFloat32Array()
+			b.resize(n)
+			for i in n:
+				var t := float(i) / float(n)
+				var env: float = minf(minf(t * 12.0, (1.0 - t) * 6.0), 1.0)
+				b[i] = sin(TAU * 880.0 * float(i) / RATE) * 0.6 * env
+			return _wav(b, false)
 		"beep":
 			var n := int(RATE * 0.5)
 			var b := PackedFloat32Array()

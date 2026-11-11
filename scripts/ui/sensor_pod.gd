@@ -514,10 +514,26 @@ func _stow() -> void:
 				and plane().target == _marker:
 			plane().target = null
 
+## The render layer the beam is drawn on, and that layer as a mask.
+const BEAM_LAYER := 12
+const BEAM_LAYER_BIT := 1 << (BEAM_LAYER - 1)
+
+## Where a point in the world is on the page. The sensor's picture is rendered
+## at no more than 1280 across and stretched to the page, so the camera's own
+## answer is in the picture's pixels, not the page's: on anything wider every
+## mark drawn from it sat up and to the left of the thing it was marking.
+func _on_page(wp: Vector3) -> Vector2:
+	var sp: Vector2 = _cam.unproject_position(wp)
+	var page: Vector2 = size if fullscreen else SIZE
+	var px := Vector2(_vp.size)
+	if px.x < 1.0 or px.y < 1.0:
+		return sp
+	return sp * (page / px)
+
 func _update_laser() -> void:
 	if _beam == null:
 		var st := MeshKit.begin()
-		MeshKit.cone(st, 0.12, 0.12, 0.0, -1.0, Vector3.ZERO, 5, false)
+		MeshKit.cone(st, 0.025, 0.025, 0.0, -1.0, Vector3.ZERO, 5, false)
 		var m := StandardMaterial3D.new()
 		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -525,6 +541,11 @@ func _update_laser() -> void:
 		m.albedo_color = Color(1.0, 0.25, 0.18, 0.5)
 		_beam = MeshKit.mi(MeshKit.finish(st, m), "LaserBeam")
 		_beam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# On a layer of its own. A designator is infra-red: there is no red
+		# line through the air to the naked eye or on a television picture,
+		# only through night vision or a thermal channel. Each camera is told
+		# below whether it can see that layer.
+		_beam.layers = BEAM_LAYER_BIT
 		get_tree().current_scene.add_child(_beam)
 	var p := aim_point()
 	_beam.visible = lasing and active and p != Vector3.INF
@@ -538,6 +559,12 @@ func _update_laser() -> void:
 		# raises, and the raise takes the rest of this function with it.
 		_beam.visible = false
 		return
+	if _cam != null:
+		_cam.set_cull_mask_value(BEAM_LAYER, channel != CH_TV and channel != CH_SONAR)
+	var eye := get_viewport().get_camera_3d()
+	if eye != null:
+		eye.set_cull_mask_value(BEAM_LAYER,
+			bool(get_tree().current_scene.get("nvg_on")))
 	_beam.global_position = origin
 	_beam.look_at(p, Vector3.UP)
 	_beam.scale = Vector3(1, 1, reach)
@@ -873,7 +900,7 @@ func _draw_contacts(frame: Vector2) -> void:
 		var d: float = me.global_position.distance_to(wp)
 		if d > reach or _cam.is_position_behind(wp):
 			continue
-		var sp: Vector2 = _cam.unproject_position(wp)
+		var sp: Vector2 = _on_page(wp)
 		if sp.x < 4.0 or sp.y < 4.0 or sp.x > frame.x - 4.0 or sp.y > frame.y - 4.0:
 			continue
 		var hostile: bool = ("team" in n) and int(n.team) != my_team
@@ -899,7 +926,7 @@ func _draw_bomb_mark(frame: Vector2) -> void:
 		return
 	var p := aim_point()
 	if p != Vector3.INF and not _cam.is_position_behind(p):
-		var sp: Vector2 = _cam.unproject_position(p)
+		var sp: Vector2 = _on_page(p)
 		if sp.x > 2.0 and sp.y > 2.0 and sp.x < frame.x - 2.0 and sp.y < frame.y - 2.0:
 			var col := Color(1.0, 0.35, 0.28) if lasing else Color(1.0, 0.82, 0.35)
 			var r := 15.0
@@ -926,7 +953,7 @@ func _draw_bomb_mark(frame: Vector2) -> void:
 			break
 	if _cam.is_position_behind(q):
 		return
-	var fp: Vector2 = _cam.unproject_position(q)
+	var fp: Vector2 = _on_page(q)
 	if fp.x < 2.0 or fp.y < 2.0 or fp.x > frame.x - 2.0 or fp.y > frame.y - 2.0:
 		return
 	draw_arc(fp, 10.0, 0.0, TAU, 18, Color(0.55, 1.0, 0.72), 1.8)

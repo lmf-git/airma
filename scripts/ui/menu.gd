@@ -20,9 +20,9 @@ const MISSIONS := [
 	["conquest", "CONQUEST", "Hostile. Five sectors across the valley — hold more than they do and their tickets bleed away."],
 	["rush", "RUSH", "Hostile. Sectors open one at a time; smash the garrison or hold the ring to advance."],
 	["warlords", "WARLORDS", "Hostile. Sequential sectors that pay command points as you take them."],
-	["cqb", "CQB", "Hostile, and on foot. Two squads of six in the streets of Kestrel — no vehicles, no air. Rifles, corners and whatever is lying in the road to get behind. First side to forty kills."],
-	["ground", "GROUND COMBAT", "Hostile. The same streets with armour in them: two squads and two vehicles a side. Take a tank, a fighting vehicle or anything else off the ground list — or go on foot and stay out of their way. First side to forty kills."],
-	["arms", "COMBAT", "Hostile. Everything over one town: infantry in the streets, armour among them and both sides' aircraft overhead. Take an aeroplane, a helicopter, a vehicle, or go on foot. First side to forty kills."],
+	["cqb", "CQB", "Hostile, and on foot. Two squads in the streets of a town, as many a side as you choose — no vehicles, no air. Rifles, corners and whatever is lying in the road to get behind. First side to sixty kills."],
+	["ground", "GROUND COMBAT", "Hostile. The same streets with armour in them: two squads and two vehicles a side. Take a tank, a fighting vehicle or anything else off the ground list — or go on foot and stay out of their way. First side to sixty kills."],
+	["arms", "COMBAT", "Hostile. Everything over one town: infantry in the streets, armour among them and both sides' aircraft overhead. Take an aeroplane, a helicopter, a vehicle, or go on foot. First side to sixty kills."],
 	["tdm", "TEAM DEATHMATCH", "Hostile. Two sides, first to twenty kills."],
 	["ffa", "FREE FOR ALL", "Hostile. Everyone shoots everyone; twelve kills wins."],
 	["carrier", "CARRIER TRAP", "No threats. Three miles behind the boat with the hook down."],
@@ -203,6 +203,18 @@ func _ready() -> void:
 	_mode_box.add_child(_cqb_row)
 	_cqb_town = _cqb_pick("TOWN", [])
 	_cqb_town.item_selected.connect(func(i: int): CqbMatch.town = _cqb_town.get_item_id(i))
+	# how many a side: ours, the player among them, and theirs
+	var sizes: Array = []
+	for n in CqbMatch.SIZES:
+		sizes.append("%d" % int(n))
+	var us := _cqb_pick("OUR SIDE", sizes)
+	var them := _cqb_pick("THEIR SIDE", sizes)
+	for ob in [us, them]:
+		(ob as OptionButton).custom_minimum_size = Vector2(64, 30)
+	us.select(maxi(CqbMatch.SIZES.find(CqbMatch.size_us), 0))
+	them.select(maxi(CqbMatch.SIZES.find(CqbMatch.size_them), 0))
+	us.item_selected.connect(func(i: int): CqbMatch.size_us = int(CqbMatch.SIZES[i]))
+	them.item_selected.connect(func(i: int): CqbMatch.size_them = int(CqbMatch.SIZES[i]))
 
 	var mdesc := Label.new()
 	mdesc.name = "MissionDesc"

@@ -143,6 +143,36 @@ func _smash(id: int, push: Vector3) -> void:
 		d.global_position = at + Vector3(randf_range(-1.0, 1.0), randf_range(0.3, 1.2), randf_range(-1.0, 1.0))
 	mi.queue_free()
 
+## Something very large has gone off at `at`. Everything of this town's that
+## is standing within `r` of it is flattened where it stands -- cars, stalls,
+## walls, and the things nothing else can break: containers, the scaffolding,
+## the crane -- and none of it stops a round or a man afterwards.
+func flatten(at: Vector3, r: float) -> int:
+	if Vector2(at.x - centre.x, at.z - centre.y).length() > HALF + r + 60.0:
+		return 0
+	var down := {}
+	for c in get_children():
+		var mi := c as MeshInstance3D
+		if mi == null or mi.has_meta("flat"):
+			continue
+		var p: Vector3 = mi.global_position
+		if Vector2(p.x - at.x, p.z - at.z).length() > r:
+			continue
+		mi.set_meta("flat", true)
+		down[mi] = true
+		# pressed into its own footprint, and thrown a little out of true
+		var b: Basis = mi.global_transform.basis.rotated(Vector3.UP, randf_range(-0.3, 0.3))
+		mi.global_transform = Transform3D(b.scaled(Vector3(1.08, 0.1, 1.08)), p)
+	for id in _breaks.keys():
+		var m: Variant = (_breaks[id] as Array)[0]
+		if not is_instance_valid(m) or down.has(m):
+			_breaks.erase(id)
+	for id in _boxes:
+		var c2: Vector3 = Obstacles.centre_of(id)
+		if Vector2(c2.x - at.x, c2.z - at.z).length() <= r:
+			Obstacles.remove(id)
+	return down.size()
+
 ## Is there room for something `r` across here, with space to walk round it?
 func _room(x: float, z: float, r: float) -> bool:
 	return Obstacles.hit(Vector3(x, _ground(x, z) + 1.0, z), r) < 0

@@ -46,6 +46,9 @@ var locked := false
 var designated := Vector3.INF    # laser spot from the pod, world space
 var designated_node: Node3D = null  # and the thing it is on, when point tracking
 var missile_warn := 0.0
+## Seconds until the nearest round guiding on this aircraft arrives, kept by
+## the audio rig of whichever one is being flown; INF when nothing is.
+var missile_tti := INF
 
 # ---- telemetry -----------------------------------------------------------
 var aoa := 0.0

@@ -1944,7 +1944,7 @@ func _draw_warnings(vp: Vector2, c: Vector2) -> void:
 		_txt(Vector2(0, c.y - 40), "AIRCRAFT DESTROYED", 34, RED, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		_txt(Vector2(0, c.y + 6), "ESC for the menu", 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		return
-	if aircraft.missile_warn > 0.0 and blink:
+	if (aircraft.missile_warn > 0.0 or aircraft.missile_tti < INF) and blink:
 		_txt(Vector2(0, y), "MISSILE  —  BREAK AND FLARE", 26, RED, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		y += 34.0
 	if aircraft.stalling and blink:
