@@ -89,6 +89,9 @@ func apply_class(c: Dictionary) -> void:
 var lock_target: Node3D = null
 var lock_t := 0.0
 const LOCK_TIME := 1.3
+## Half the angle the seeker sees, in degrees: what the ring in the sight is.
+const SEEK_CONE := 7.0
+var _tone_t := 0.0
 
 var cam: Camera3D
 var body: Pilot
@@ -1174,11 +1177,13 @@ func _seek(delta: float, g: Dictionary) -> void:
 	var eye := cam.global_position
 	var look := -cam.global_transform.basis.z
 	var best: Node3D = null
-	var best_a := deg_to_rad(7.0)
-	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or not (n is Aircraft) or not n.is_alive():
+	var best_a := deg_to_rad(SEEK_CONE)
+	Sim.hit_scan()
+	for i in Sim.hit_nodes.size():
+		if Sim.hit_team[i] == side:
 			continue
-		if "team" in n and n.team == side:
+		var n: Variant = Sim.hit_nodes[i]
+		if not is_instance_valid(n) or not (n is Aircraft) or not n.is_alive():
 			continue
 		var to: Vector3 = (n as Node3D).global_position - eye
 		if to.length() > 5500.0 or to.length() < 60.0:
@@ -1196,6 +1201,17 @@ func _seek(delta: float, g: Dictionary) -> void:
 		lock_t += delta
 		if before < LOCK_TIME and lock_t >= LOCK_TIME:
 			Sfx.play_ui(get_tree().current_scene, "killmark", -6.0, 1.4)
+		# The seeker's tone: a slow tick while it is working on something,
+		# quick and higher once it has it. The eye is on the aeroplane, not on
+		# the words under the ring, and this is what says "now".
+		_tone_t -= delta
+		if _tone_t <= 0.0:
+			var has_it: bool = lock_t >= LOCK_TIME
+			_tone_t = 0.27 if has_it else 0.6
+			Sfx.play_ui(get_tree().current_scene, "beep", -14.0 if has_it else -20.0,
+				2.0 if has_it else 1.0)
+	else:
+		_tone_t = 0.0
 
 func _begin_reload(g: Dictionary) -> void:
 	_reload_span = maxf(float(g["reload"]), 0.05)

@@ -235,6 +235,10 @@ func _close_in(delta: float) -> void:
 			bd = d
 			best = m as Node3D
 	if best == null:
+		# Nothing inbound: look again in a tenth of a second, not in a
+		# hundred-and-twentieth. The fastest thing in the game covers a
+		# twentieth of this mount's reach in that time.
+		_ciws_cd = 0.1
 		return
 	_ciws_cd = 0.16
 	ciws_bursts += 1
@@ -1211,6 +1215,8 @@ func _physics_process(delta: float) -> void:
 	_tick_ship_p(delta)
 	Sim.prof_end(&"ship.tick", _pt)
 
+var _shore_look := randf() * 0.5
+
 func _tick_ship_p(delta: float) -> void:
 	_t += delta
 	# A ship somebody else is simulating is a picture: the host does the moving
@@ -1326,11 +1332,22 @@ func _tick_ship_p(delta: float) -> void:
 	# amidships, and then fore/aft and port/starboard to read the slope
 	# the swell as the sea under her is drawn from where it is being watched
 	# from: see `Sim.wave_seen`
-	var h_mid: float = Sim.wave_seen(px, pz)
-	var h_bow: float = Sim.wave_seen(px + fwd2.x * half_l, pz + fwd2.y * half_l)
-	var h_stern: float = Sim.wave_seen(px - fwd2.x * half_l, pz - fwd2.y * half_l)
-	var h_stbd: float = Sim.wave_seen(px + rgt2.x * half_b, pz + rgt2.y * half_b)
-	var h_port: float = Sim.wave_seen(px - rgt2.x * half_b, pz - rgt2.y * half_b)
+	#
+	# ...and where it is being watched from is usually a long way off. Past
+	# three and a half kilometres the drawn sea carries no swell at all, every
+	# one of these comes back nought, and a fleet over the horizon was asking
+	# for them fifty times a tick.
+	var h_mid := 0.0
+	var h_bow := 0.0
+	var h_stern := 0.0
+	var h_stbd := 0.0
+	var h_port := 0.0
+	if fade > 0.0 and not Sim.swell_gone(px, pz):
+		h_mid = Sim.wave_seen(px, pz)
+		h_bow = Sim.wave_seen(px + fwd2.x * half_l, pz + fwd2.y * half_l)
+		h_stern = Sim.wave_seen(px - fwd2.x * half_l, pz - fwd2.y * half_l)
+		h_stbd = Sim.wave_seen(px + rgt2.x * half_b, pz + rgt2.y * half_b)
+		h_port = Sim.wave_seen(px - rgt2.x * half_b, pz - rgt2.y * half_b)
 	# A long hull bridges the swell instead of following it: she pitches to the
 	# average slope over her length, which is why a corvette bucks where a
 	# carrier barely nods.
@@ -1345,9 +1362,18 @@ func _tick_ship_p(delta: float) -> void:
 	# authored square left telling ships where the sea stops. What a ship should
 	# actually turn away from is the ground, so that is what it turns away from:
 	# a look ahead at where she would be in a minute, and about if it is dry.
-	var minute: Vector3 = global_position + Vector3(sin(heading), 0.0,
-		-cos(heading)) * maxf(speed, 4.0) * 60.0
-	if Sim.height_at(minute.x, minute.z) > Sim.sea_at(minute.x, minute.z) - 12.0:
+	#
+	# Looked for twice a second. A minute's steaming ahead does not change in a
+	# hundred-and-twentieth of one, and asked every tick it was two crossings
+	# into the extension per hull for the same answer.
+	_shore_look -= delta
+	var dry_ahead := false
+	if _shore_look <= 0.0:
+		_shore_look = 0.5
+		var minute: Vector3 = global_position + Vector3(sin(heading), 0.0,
+			-cos(heading)) * maxf(speed, 4.0) * 60.0
+		dry_ahead = Sim.height_at(minute.x, minute.z) > Sim.sea_at(minute.x, minute.z) - 12.0
+	if dry_ahead:
 		heading = wrapf(heading + PI, -PI, PI)
 	elif not Sim.globe and (absf(global_position.x) > Sim.WORLD_HALF - 3000.0
 			or absf(global_position.z) > Sim.WORLD_HALF - 3000.0):

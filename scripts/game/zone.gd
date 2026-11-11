@@ -85,6 +85,21 @@ func _build_ring() -> void:
 	_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_ring)
 
+## One thing a frame, not all nine in one.
+##
+## A garrison is three vehicles and six emplacements, each of them a few dozen
+## nodes and a handful of meshes built from nothing, and all of it was made in
+## the frame somebody first came within reach of the sector: three hundred and
+## thirty nodes arriving at once and a frame of twenty-seven milliseconds to
+## pay for them, every time you flew toward a new objective. Laid out over nine
+## frames it is the same garrison, in the same order with the same slot
+## numbers, and nobody is close enough to watch it arrive.
+func _settle() -> bool:
+	if not is_inside_tree():
+		return false
+	await get_tree().process_frame
+	return is_inside_tree()
+
 func _build_garrison() -> void:
 	# Only a sector that actually belongs to someone gets a crewed garrison. An
 	# unclaimed sector with hostile armour parked in it flips to them the moment
@@ -110,6 +125,8 @@ func _build_garrison() -> void:
 		t.set_meta("zone_asset", [label, assets.size()])
 		t.global_transform = Tank.ground_pose(global_position + off, a, t.rest_height())
 		assets.append(t)
+		if not await _settle():
+			return
 	# A battery cannot hold anything down in the clutter, so it pushes you low —
 	# and this is what is waiting when you get there. The pair works: neither
 	# altitude is safe from both.
@@ -126,6 +143,8 @@ func _build_garrison() -> void:
 		g.name = "%s %s" % [label, kinds[i]]
 		g.set_meta("zone_asset", [label, assets.size()])
 		assets.append(g)
+		if i < kinds.size() - 1 and not await _settle():
+			return
 
 func alive_assets() -> int:
 	var n := 0

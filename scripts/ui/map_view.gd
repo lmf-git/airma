@@ -350,6 +350,9 @@ func _refresh_contacts() -> void:
 			_contacts.append({"n": n, "hostile": false, "neutral": true})
 	for f in mine:
 		_contacts.append({"n": f, "hostile": false, "neutral": false})
+	# Everything in `mine` is side 0, so the side's reach is one number: asked
+	# inside the loops it was three walks of the tree for every pair of units.
+	var air_reach: float = maxf(Sim.coverage(0), 26000.0)
 	for h in theirs:
 		var p: Vector3 = (h as Node3D).global_position
 		var seen := false
@@ -360,9 +363,7 @@ func _refresh_contacts() -> void:
 			# The side's whole picture, not just this airframe's own set: a
 			# satellite or an early warning aircraft widens what the map shows,
 			# which is most of the reason for having either.
-			var reach: float = maxf(Sim.coverage(
-				int(f2.team) if ("team" in f2) else 0), 26000.0) if f2 is Aircraft \
-				else 14000.0
+			var reach: float = air_reach if f2 is Aircraft else 14000.0
 			if d > reach:
 				continue
 			if d > 1800.0 and not Sim.line_of_sight(fp + Vector3(0, 6, 0),

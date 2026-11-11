@@ -140,6 +140,12 @@ static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: fl
 	t.he = he
 	world.add_child(t)
 	t.global_position = pos
+	# A cannon round draws the line it flew, while there are ribbons to spare:
+	# the streak is where it is this frame, and this is where it has been.
+	var rb := ribbon(Color(1.0, 0.72, 0.36, 0.5), 0.2, 0.12, 4.0, true, 1)
+	if rb != null:
+		t.add_child(rb)
+		rb.call(&"clear")
 	watch(t, owner)
 	return t
 
@@ -848,6 +854,50 @@ static func dust(world: Node, pos: Vector3, scale := 3.0) -> void:
 const SMOKE_BUDGET := 40
 static var _smoking := 0
 
+## A ribbon laid along wherever a thing has been: the engine's `Trail3D`,
+## which arrived in 4.8.
+##
+## Puffs of smoke are the right picture of a fire and the wrong one of a
+## rocket. Forty-eight of them over two seconds behind a round doing eight
+## hundred metres a second are thirty metres apart -- a dotted line -- where
+## what a motor actually leaves is one unbroken thread, curved the way the
+## round turned. A ribbon is that thread, and the puffs go on doing the first
+## few metres behind the nozzle where there is something to billow.
+##
+## Not free, and measured rather than assumed: about twenty microseconds of
+## the frame for each one alive, whatever its length, because the strip is
+## rebuilt as it moves. So they are counted, like the plumes above, in two
+## pools -- one for what flies for seconds and is worth watching, a smaller
+## one for cannon rounds, of which there can be a great many -- and past the
+## count a round simply flies without one. Sections are kept long: at the
+## default a fifth of a metre a missile's trail is ten thousand of them.
+##
+## One colour and one width along its length. The node takes a gradient and
+## a width curve as well, but at beta 3 neither is documented and neither did
+## what its name says when it was tried, so nothing here leans on them.
+const RIBBON_BUDGET := [56, 16]
+static var ribbons := [0, 0]
+
+static func ribbon(colour: Color, width: float, life: float, section := 6.0,
+		additive := false, pool := 0) -> GeometryInstance3D:
+	if int(ribbons[pool]) >= int(RIBBON_BUDGET[pool]) or not ClassDB.class_exists(&"Trail3D"):
+		return null
+	var r := ClassDB.instantiate(&"Trail3D") as GeometryInstance3D
+	if r == null:
+		return null
+	r.set(&"limit_mode", 0)                     # by time
+	r.set(&"lifetime", life)
+	r.set(&"width", width)
+	r.set(&"min_section_length", section)
+	r.set(&"mesh_alignment", 1)                 # facing the camera
+	r.set(&"material_mode", 1 if additive else 0)
+	r.set(&"color", colour)
+	r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	ribbons[pool] = int(ribbons[pool]) + 1
+	r.tree_exited.connect(func() -> void:
+		ribbons[pool] = maxi(int(ribbons[pool]) - 1, 0), CONNECT_ONE_SHOT)
+	return r
+
 static func smoke_slot() -> bool:
 	if _smoking >= SMOKE_BUDGET:
 		return false
@@ -1027,21 +1077,6 @@ class Flash extends Node3D:
 ## alongside another.
 static var streaks := {}
 static var streak_mats := {}
-
-## What a round can hit, read once a physics tick rather than twice per round
-## per tick. A list going stale inside one tick costs nothing: whatever died in
-## it says so through `is_alive`, and whatever was made in it is a tick late.
-static var _grp_tick := -1
-static var _grp_inf: Array = []
-static var _grp_hit: Array = []
-
-static func _targets(tree: SceneTree) -> void:
-	var tick := Engine.get_physics_frames()
-	if tick == _grp_tick:
-		return
-	_grp_tick = tick
-	_grp_inf = tree.get_nodes_in_group("infantry")
-	_grp_hit = tree.get_nodes_in_group("hittable")
 
 ## Further than this from a round's step and nothing can be touched by it: the
 ## widest thing that can be hit is a carrier, about 27 m either side.
@@ -1264,34 +1299,46 @@ class Tracer extends Node3D:
 			look_at(end + vel, Vector3.UP)
 		# men on foot as well as everything on the radar picture: a coaxial
 		# machine gun that could not hit a rifleman was no use in a street
-		Effects._targets(get_tree())
+		#
+		# Read from the picture `Sim` keeps for the tick: where everything is,
+		# how big and whose, as plain arrays. This used to join the two groups
+		# into a fresh array for every round on every tick and then ask each
+		# thing in it five questions; now what the step cannot reach, and what
+		# is on the round's own side, costs a subtraction and a compare.
+		Sim.hit_scan()
 		var mid: Vector3 = (from + end) * 0.5
-		var reach: float = from.distance_to(end) * 0.5 + Effects.REACH_HIT
-		reach *= reach
-		for n in Effects._grp_hit + Effects._grp_inf:
-			if n == shooter or not is_instance_valid(n):
-				continue
-			if (n as Node3D).global_position.distance_squared_to(mid) > reach:
-				continue
-			if n.has_method("is_alive") and not n.is_alive():
-				continue
-			if "team" in n and n.team == team:
-				continue
-			# a man on foot carries his side as `side`, so that nothing which
-			# hunts by `team` mistakes him for a vehicle
-			if "side" in n and n.side == team:
-				continue
-			var r: float = n.hit_radius() if n.has_method("hit_radius") else 6.0
-			if Geometry3D.get_closest_point_to_segment(n.global_position, from, end).distance_to(n.global_position) < r:
-				if n.has_method("take_hit"):
-					n.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
-				ended_at = end
-				if he > 0.0:
-					Effects.he_impact(get_tree().current_scene, end, he)
-				else:
-					Effects.dust(get_tree().current_scene, end, 1.2)
-				queue_free()
-				return
+		var half_step: float = from.distance_to(end) * 0.5
+		for pass_i in 2:
+			var men: bool = pass_i == 1
+			var pos: PackedVector3Array = Sim.man_pos if men else Sim.hit_pos
+			var whose: PackedInt32Array = Sim.man_team if men else Sim.hit_team
+			var nodes: Array = Sim.man_nodes if men else Sim.hit_nodes
+			var rads: PackedFloat32Array = Sim.hit_rad
+			for i in pos.size():
+				if whose[i] == team:
+					continue
+				var r: float = Effects.REACH_MAN if men else rads[i]
+				var reach: float = half_step + r
+				if pos[i].distance_squared_to(mid) > reach * reach:
+					continue
+				var n: Variant = nodes[i]
+				if not is_instance_valid(n) or n == shooter:
+					continue
+				if n.has_method("is_alive") and not n.is_alive():
+					continue
+				if men:
+					r = n.hit_radius() if n.has_method("hit_radius") else 6.0
+				var np: Vector3 = n.global_position
+				if Geometry3D.get_closest_point_to_segment(np, from, end).distance_to(np) < r:
+					if n.has_method("take_hit"):
+						n.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
+					ended_at = end
+					if he > 0.0:
+						Effects.he_impact(get_tree().current_scene, end, he)
+					else:
+						Effects.dust(get_tree().current_scene, end, 1.2)
+					queue_free()
+					return
 		if wall_t < 1.0 and wall_t <= dirt_t:
 			ended_at = end
 			# just short of the face, so the burst is on this side of it
@@ -1328,23 +1375,25 @@ class Tracer extends Node3D:
 		var best: Node = null
 		var best_t := 2.0
 		var best_k := 0.0
-		Effects._targets(get_tree())
+		Sim.hit_scan()
 		var step_mid: Vector3 = (from + stop) * 0.5
 		var half_len: float = from.distance_to(stop) * 0.5
-		for grp in ["infantry", "hittable"]:
-			var near: float = half_len + (Effects.REACH_MAN if grp == "infantry" else Effects.REACH_HIT)
+		for pass_i in 2:
+			var men: bool = pass_i == 0
+			var pos: PackedVector3Array = Sim.man_pos if men else Sim.hit_pos
+			var whose: PackedInt32Array = Sim.man_team if men else Sim.hit_team
+			var nodes: Array = Sim.man_nodes if men else Sim.hit_nodes
+			var near: float = half_len + (Effects.REACH_MAN if men else Effects.REACH_HIT)
 			near *= near
-			for n in (Effects._grp_inf if grp == "infantry" else Effects._grp_hit):
-				if n == shooter or not is_instance_valid(n):
+			for i in pos.size():
+				# its own side, and everything the step cannot reach, before
+				# anything is asked of it
+				if whose[i] == team or pos[i].distance_squared_to(step_mid) > near:
 					continue
-				# everything the step cannot reach, before anything is asked of it
-				if (n as Node3D).global_position.distance_squared_to(step_mid) > near:
+				var n: Variant = nodes[i]
+				if not is_instance_valid(n) or n == shooter:
 					continue
 				if n.has_method("is_alive") and not n.is_alive():
-					continue
-				if "team" in n and n.team == team:
-					continue
-				if "side" in n and n.side == team:
 					continue
 				var k := 0.0
 				var at := 0.0
@@ -1352,8 +1401,8 @@ class Tracer extends Node3D:
 					var r: Vector2 = n.bullet_hit(from, stop)
 					k = r.x
 					at = r.y
-				elif grp == "hittable":
-					var rad: float = n.hit_radius() if n.has_method("hit_radius") else 6.0
+				elif not men:
+					var rad: float = Sim.hit_rad[i]
 					var c: Vector3 = Geometry3D.get_closest_point_to_segment(
 						n.global_position, from, stop)
 					if c.distance_to(n.global_position) < rad:

@@ -395,8 +395,16 @@ func _move(delta: float) -> void:
 				wish -= Vector3(to.x, 0.0, to.z).normalized() * 0.8
 	else:
 		if _goal != Vector3.INF and not _at_goal(1.0):
+			# The same route to the same place, asked for again every couple of
+			# seconds by every man who was walking anywhere: the town has not
+			# moved, and from a point on the route the answer is the route. It
+			# is only worth asking again when he is no longer on it -- pushed
+			# off by the man beside him, or stepped round a corner -- and being
+			# properly stuck has its own check below.
 			if _repath <= 0.0 and state != COVER:
-				_set_goal(_goal)
+				_repath = randf_range(2.0, 3.2)
+				if _off_route():
+					_set_goal(_goal)
 			wish = _along_path()
 		speed = RUN if state == COVER else (WALK + 0.8 if (state == HUNT and _at_goal(14.0)) else JOG)
 		if wish.length() > 0.1:
@@ -460,6 +468,13 @@ func _move(delta: float) -> void:
 		var aim: Vector3 = Soldier.chest_of(target) - eye()
 		want_pitch = atan2(aim.y, Vector2(aim.x, aim.z).length())
 	pitch = lerpf(pitch, clampf(want_pitch, -1.2, 1.2), clampf(delta * 8.0, 0.0, 1.0))
+
+## Has he strayed from the route he was given? True with no route at all.
+func _off_route() -> bool:
+	if _path_i >= _path.size():
+		return true
+	var wp: Vector2 = _path[_path_i]
+	return Vector2(wp.x - global_position.x, wp.y - global_position.z).length() > 5.0
 
 ## The next stretch of the route, as a direction to walk in.
 func _along_path() -> Vector3:

@@ -404,6 +404,11 @@ func setup(t := 0, k := "m1a2") -> void:
 	team = t
 	kind = k if KINDS.has(k) else "m1a2"
 	var kd: Dictionary = KINDS[kind]
+	_cls = String(kd.get("class", "mbt"))
+	_indirect = _cls == "spg" or _cls == "mlrs" or _cls == "tel"
+	_air_def = _cls == "sam" or _cls == "spaag"
+	_top = float(kd.get("top", 18.0))
+	_power = float(kd.get("power", 1_000_000.0))
 	health = float(kd["hp"])
 	# a launcher carries canisters, not a salvo of rockets
 	rounds_left = int(kd.get("rounds", kd.get("salvo", 1)))
@@ -707,6 +712,73 @@ var _unstick_steer := 1.0
 var _pivot_t := 0.0
 var _push_t := 0.0
 
+## Which way to go from here, looked for four times a second.
+##
+## A driver pointed his hull at where he had been told to go and drove. All he
+## knew about the country was one look forty-five metres off the nose, a
+## hundred and twenty times a second: water there and he stopped, for good, on
+## the shore of whatever was between him and his sector; a bank there and he
+## turned on the spot until it was not, then turned back to it. A column sent
+## round a lake arrived at the lake.
+##
+## So he looks about him instead -- straight at the goal first, then a little
+## either side of it, then further round -- and takes the first way that is
+## dry and not a cliff. Having gone round something to one side he keeps to
+## that side for a while, which is what gets him round it rather than back and
+## forth in front of it. It is a dozen questions to the height field every
+## quarter of a second at the very worst and four when the way is clear, where
+## the single look cost three every tick.
+const NAV_FAN := [25.0, 50.0, 80.0, 115.0, 150.0]
+var _nav_t := 0.0
+var _nav_way := Vector3.FORWARD
+var _nav_shut := false
+var _nav_nose_shut := false
+var _nav_side := 0.0
+var _nav_hold := 0.0
+
+## Dry and drivable for forty-five metres that way?
+func _way_clear(from: Vector3, ground: float, dir: Vector3) -> bool:
+	var near: Vector3 = from + dir * 22.0
+	var far: Vector3 = from + dir * 45.0
+	var h1: float = Sim.height_at(near.x, near.z)
+	if h1 < Sim.sea_at(near.x, near.z) + 1.0 or absf(h1 - ground) > 10.0:
+		return false
+	var h2: float = Sim.height_at(far.x, far.z)
+	return h2 >= Sim.sea_at(far.x, far.z) + 1.0 and absf(h2 - ground) <= 18.0
+
+func _pick_way(to_goal: Vector3) -> void:
+	var from: Vector3 = global_position
+	var ground: float = Sim.height_at(from.x, from.z)
+	var nose := -global_transform.basis.z
+	nose.y = 0.0
+	_nav_nose_shut = nose.length_squared() > 0.01 \
+		and not _way_clear(from, ground, nose.normalized())
+	_nav_shut = false
+	# Straight at it, unless he is in the middle of going round something:
+	# then the straight way has to be open a good deal further before he
+	# believes it, or he turns back into the bay he has just driven out of.
+	if _way_clear(from, ground, to_goal):
+		var beyond: Vector3 = from + to_goal * 110.0
+		if _nav_hold <= 0.0 or Sim.height_at(beyond.x, beyond.z) \
+				>= Sim.sea_at(beyond.x, beyond.z) + 1.0:
+			_nav_way = to_goal
+			if _nav_hold <= 0.0:
+				_nav_side = 0.0
+			return
+	for deg in NAV_FAN:
+		for sgn in ([_nav_side] if _nav_side != 0.0 else [1.0, -1.0]):
+			var way: Vector3 = to_goal.rotated(Vector3.UP, deg_to_rad(float(deg)) * float(sgn))
+			if _way_clear(from, ground, way):
+				_nav_way = way
+				_nav_side = float(sgn)
+				_nav_hold = 8.0
+				return
+	if _nav_side != 0.0:
+		# nothing on the side he was working: next look, either
+		_nav_side = 0.0
+		_nav_hold = 0.0
+	_nav_shut = true
+
 ## Drive for the goal, and stop to fight when there is something in reach: a
 ## vehicle firing on the move hits nothing, and one that drives past what it is
 ## shooting at is not fighting it.
@@ -744,7 +816,23 @@ func _ai_drive(delta: float) -> void:
 	if fwd.length() < 0.1 or right.length() < 0.1:
 		return
 	fwd = fwd.normalized()
-	var dirn := to / d
+	# The way to go, which is not always straight at it: see `_pick_way`.
+	_nav_t -= delta
+	_nav_hold = maxf(_nav_hold - delta, 0.0)
+	if _nav_t <= 0.0:
+		_nav_t = 0.22 + randf() * 0.06
+		_pick_way(to / d)
+	if _nav_shut:
+		# water or a drop on every side he looked: stop, and let the back-off
+		# below take him out the way he came
+		in_brake = absf(speed) > 1.0
+		_stuck_t += delta
+		if _stuck_t > 4.0:
+			_stuck_t = 0.0
+			_unstick_t = 2.5
+			_unstick_steer = 1.0 if randf() < 0.5 else -1.0
+		return
+	var dirn: Vector3 = _nav_way
 	var side: float = dirn.dot(right.normalized())
 	var ahead: float = dirn.dot(fwd)
 	# Measured, not guessed: on full lock with the throttle open a hull all but
@@ -771,15 +859,11 @@ func _ai_drive(delta: float) -> void:
 			_unstick_steer = 1.0 if in_steer >= 0.0 else -1.0
 	else:
 		_stuck_t = 0.0
-	# Not into the sea, and not off anything a vehicle cannot drive down: look
-	# a little way ahead and stop for water, swing away from a drop.
-	var probe := global_position + fwd * 45.0
-	var here := Sim.height_at(global_position.x, global_position.z)
-	var there := Sim.height_at(probe.x, probe.z)
-	if there < Sim.sea_at(probe.x, probe.z) + 1.0:
-		in_throttle = 0.0
-		in_brake = true
-	elif absf(there - here) > 18.0:
+	# Not into the sea, and not off anything a vehicle cannot drive down, even
+	# while the nose is still coming round onto the way that was picked: what
+	# is straight in front of the hull is looked at as well, with the same
+	# eyes and no oftener.
+	if _nav_nose_shut and not pivot:
 		# turned away on the spot: power on full lock is the one combination
 		# that neither drives nor turns
 		in_throttle = 0.0
@@ -808,82 +892,144 @@ func _ai_think(delta: float) -> void:
 		return
 	_ai_scan -= delta
 	if _ai_scan <= 0.0:
-		_ai_scan = 1.2
+		# Not all on the same tick. Every crew made at once looked round at
+		# once, every 1.2 seconds to the tick, and a garrison's worth of scans
+		# landed in one frame.
+		_ai_scan = 1.1 + randf() * 0.2
+		var had: Variant = _ai_target
 		_ai_target = null
 		var best := 1e9
-		var reach: float = 22000.0 if is_indirect() \
+		var reach: float = 22000.0 if _indirect \
 			else float(KINDS[kind].get("reach", 2600.0))
-		if is_air_defence():
+		if _air_def:
 			reach = float(KINDS[kind].get("reach", 30000.0))
+		# From the picture `Sim` keeps for the tick: where everything is and
+		# whose, as plain arrays. This walked both groups and asked each thing
+		# in them seven questions before it looked at how far away it was; now
+		# its own side and anything out of reach cost a compare each, and only
+		# what could actually be shot at is asked anything.
+		#
 		# Men on foot too, for anything with a gun to lay on them. They are
 		# not in "hittable" -- that is the radar picture -- so a tank crew
 		# drove through a squad of riflemen as if the street were empty.
-		var seen: Array = get_tree().get_nodes_in_group("hittable")
-		if not is_indirect() and not is_air_defence():
-			seen = seen + get_tree().get_nodes_in_group("infantry")
-		for n in seen:
-			if not is_instance_valid(n) or n == self:
-				continue
-			if ("team" in n) and n.team == team:
-				continue
-			# a man on foot carries his side as `side`
-			if ("side" in n) and n.side == team:
-				continue
-			if n.has_method("is_alive") and not n.is_alive():
-				continue
-			# an artillery piece does not shoot at aircraft
-			if is_indirect() and (n is Aircraft):
-				continue
-			# ...and on a range with no air threat, nothing does
-			if Sim.no_air_threat and (n is Aircraft):
-				continue
-			# ...and a battery shoots at nothing else. Everything about it —
-			# the rails, the radar, the round — is for what is overhead.
-			if is_air_defence() and not (n is Aircraft):
-				continue
-			var d: float = global_position.distance_to(n.global_position)
-			var agl: float = n.global_position.y - Sim.height_at(n.global_position.x,
-				n.global_position.z)
-			# A tank cannot reach an aeroplane at altitude; air defence exists
-			# precisely to, so the ceiling does not apply to it.
-			if n is Aircraft and agl > 900.0 and not is_air_defence():
-				continue
-			if d < reach and d < best:
+		Sim.hit_scan()
+		var here: Vector3 = global_position
+		for pass_i in (1 if (_indirect or _air_def) else 2):
+			var pos: PackedVector3Array = Sim.hit_pos if pass_i == 0 else Sim.man_pos
+			var whose: PackedInt32Array = Sim.hit_team if pass_i == 0 else Sim.man_team
+			var nodes: Array = Sim.hit_nodes if pass_i == 0 else Sim.man_nodes
+			for i in pos.size():
+				if whose[i] == team:
+					continue
+				var d: float = here.distance_to(pos[i])
+				if d >= reach or d >= best:
+					continue
+				var n: Variant = nodes[i]
+				if not is_instance_valid(n) or n == self:
+					continue
+				if n.has_method("is_alive") and not n.is_alive():
+					continue
+				var flying: bool = n is Aircraft
+				# an artillery piece does not shoot at aircraft, and on a range
+				# with no air threat nothing does
+				if flying and (_indirect or Sim.no_air_threat):
+					continue
+				# ...and a battery shoots at nothing else. Everything about it —
+				# the rails, the radar, the round — is for what is overhead.
+				if _air_def and not flying:
+					continue
+				# A tank cannot reach an aeroplane at altitude; air defence exists
+				# precisely to, so the ceiling does not apply to it.
+				if flying and not _air_def \
+						and pos[i].y - Sim.height_at(pos[i].x, pos[i].z) > 900.0:
+					continue
 				# A gun crew cannot shoot what a building is standing in front
 				# of. Asked last, and only of something already in reach: it is
 				# the one expensive question here, and asked of every contact
 				# on the map it was asked about targets in other countries.
-				if not is_indirect() and not is_air_defence() and not (n is Aircraft) \
-						and d < 4000.0 and Obstacles.segment(global_position + Vector3(0, 2.2, 0),
-							(n as Node3D).global_position + Vector3(0, 1.5, 0)) < 1.0:
+				if not _indirect and not _air_def and not flying \
+						and d < 4000.0 and Obstacles.segment(here + Vector3(0, 2.2, 0),
+							pos[i] + Vector3(0, 1.5, 0)) < 1.0:
 					continue
 				best = d
 				_ai_target = n
+		if not is_instance_valid(had) or had != _ai_target:
+			_ai_err = Vector3(randfn(0.0, 1.0), randfn(0.0, 0.6), randfn(0.0, 1.0))
 	if _ai_target == null or not is_instance_valid(_ai_target):
 		return
 	var tp: Vector3 = _ai_target.global_position
-	if "linear_velocity" in _ai_target:
-		var tof: float = global_position.distance_to(tp) / 1500.0
-		tp += (_ai_target.linear_velocity as Vector3) * tof
-	if is_indirect():
+	if _indirect:
+		if "linear_velocity" in _ai_target:
+			var tof0: float = global_position.distance_to(tp) / 1500.0
+			tp += (_ai_target.linear_velocity as Vector3) * tof0
 		aim_yaw = atan2(tp.x - global_position.x, -(tp.z - global_position.z))
 		map_target = Vector3(tp.x, Sim.height_at(tp.x, tp.z), tp.z)
-	else:
+		if lay_yaw_error() < 0.05 and _gun_cd <= 0.0:
+			fire_main(get_tree().current_scene)
+		return
+	if _cls == "sam":
+		# A battery sends its round once the rails are up and pointed at the
+		# right quarter of the sky; the round does the rest.
 		aim_at(tp)
 		aim_yaw = turret_yaw
 		aim_pitch = turret_pitch
-	var lay: float = absf(wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI))
-	# A battery sends its round once the rails are up and pointed at the right
-	# quarter of the sky; the round does the rest. A gun has to be laid.
-	if vclass() == "sam":
-		if lay < 0.25 and _erect > 0.9 and _gun_cd <= 0.0:
+		if lay_yaw_error() < 0.25 and _erect > 0.9 and _gun_cd <= 0.0:
 			fire_main(get_tree().current_scene)
 		return
-	if lay < 0.05 and _gun_cd <= 0.0:
+	# A gun has to be laid, and laid on where the round will come down rather
+	# than on where the target is.
+	#
+	# The crew pointed the barrel straight at the target, led by a round that
+	# did 1500 m/s whatever was in the breech, and fired once the turret was
+	# within three degrees. The rounds do between 560 and 1660, they fall, and
+	# three degrees is a hundred metres at two kilometres: at any range worth
+	# the name a garrison hit nothing but the ground in front of what it was
+	# shooting at. So: this gun's own muzzle velocity, the time the round
+	# actually takes with the air on it, the target carried on for that long,
+	# the fall over that time put back as elevation, the whole thing worked out
+	# in the hull's own frame so a vehicle on a slope lays where it means to --
+	# and the trigger held until the barrel is on it.
+	var flying_t: bool = _ai_target is Aircraft
+	var tv := Vector3.ZERO
+	if "linear_velocity" in _ai_target:
+		tv = _ai_target.linear_velocity
+	elif "vel" in _ai_target:
+		tv = _ai_target.vel
+	if not flying_t:
+		tp.y += 1.0                       # the middle of it, not where it stands
+	var from: Vector3 = _mantlet.global_position
+	var v0: float = maxf(float(KINDS[kind].get("muzzle", 1500.0)), 100.0)
+	var drag: float = shell_drag()
+	var mark: Vector3 = tp
+	var tof := 0.0
+	for it in 2:
+		var d2: float = from.distance_to(mark)
+		tof = d2 / v0 * (1.0 + 0.5 * drag * d2)
+		mark = tp + tv * tof
+	var rng: float = from.distance_to(mark)
+	# no crew is perfect: about a mil and a quarter, a new error for each target
+	mark += _ai_err * (rng * 0.00125)
+	mark.y += 0.5 * Ballistics.G0 * tof * tof
+	var want: Vector3 = (mark - from).normalized()
+	var local: Vector3 = global_transform.basis.orthonormalized().inverse() * want
+	turret_yaw = -(rotation.y + atan2(-local.x, -local.z))
+	turret_pitch = asin(clampf(local.y, -1.0, 1.0))
+	aim_yaw = turret_yaw
+	aim_pitch = turret_pitch
+	var off: float = (-_muzzle.global_transform.basis.z).angle_to(want)
+	# as close as the target is wide, and never finer than the drive can hold;
+	# something crossing the sky is hosed rather than sniped
+	var fine: float = 0.05 if flying_t else clampf(2.0 / maxf(rng, 1.0), 0.004, 0.05)
+	if off < fine and _gun_cd <= 0.0:
 		fire_main(get_tree().current_scene)
-	if has_coax() and lay < 0.08 \
+		_ai_err = Vector3(randfn(0.0, 1.0), randfn(0.0, 0.6), randfn(0.0, 1.0))
+	if has_coax() and off < maxf(fine, 0.03) \
 			and global_position.distance_to(_ai_target.global_position) < 1400.0:
 		fire_coax(get_tree().current_scene)
+
+## How far the turret ring still is from the bearing it was given, in radians.
+func lay_yaw_error() -> float:
+	return absf(wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI))
 
 ## An unmanned ASAT battery. It watches the sky, stands its tube up when
 ## something hostile is overhead, and sends its one round.
@@ -1043,11 +1189,71 @@ func _drive_input(delta: float) -> void:
 var scripted := false          # test harness drives the sticks directly
 var ai := false                # garrison crews traverse and shoot on their own
 var _ai_target: Node3D = null
-var _ai_scan := 0.0
+var _ai_scan := randf() * 1.2
+## How far off this crew's lay is on this target, in mils near enough.
+var _ai_err := Vector3.ZERO
+
+## Standing still, held there, and not being simulated.
+##
+## There is no world collision mesh: a hull is held up by its wheels asking the
+## height field where the ground is, 120 times a second, for ever. That is right
+## for a vehicle that is moving and a waste for one that is not -- and most of
+## them are not: a garrison sits in its sector, a wreck sits where it burned,
+## and each was a wheel-by-wheel suspension solve every tick to arrive back at
+## the position it started the tick in. A hull that has been at rest on its
+## springs for a few seconds with nothing asked of it is frozen where it stands,
+## and let go again the moment anything is: a driver, a command to move, a hit,
+## its own gun going off, or the ground under it turning out not to be where it
+## was.
+const PARK_AFTER := 3.0
+var _rest_t := 0.0
+var _parked := false
+var _park_ground := 0.0
+var _park_look := 0.0
+
+func _park() -> void:
+	if _parked or freeze:
+		return
+	_parked = true
+	_park_ground = Sim.height_at(global_position.x, global_position.z)
+	_park_look = 1.0
+	freeze = true
+
+## Back onto its springs. Safe to call whether or not it was parked.
+func unpark() -> void:
+	_rest_t = 0.0
+	if not _parked:
+		return
+	_parked = false
+	freeze = false
+
+func _may_park() -> bool:
+	if occupied or scripted or (alive and not ai):
+		return false
+	# a vehicle somebody else simulates is put where it is told to be
+	if Sim.net != null and Sim.net.active and not Sim.net.is_host:
+		return false
+	return true
 
 func _physics_process(delta: float) -> void:
 	var _pt := Sim.prof_at()
 	_tick_tank_p(delta)
+	if _parked:
+		if not freeze:
+			# somebody else let it go
+			_parked = false
+			_rest_t = 0.0
+		elif in_throttle != 0.0 or in_steer != 0.0 or not _may_park():
+			unpark()
+		else:
+			_park_look -= delta
+			if _park_look <= 0.0:
+				_park_look = 1.0
+				if absf(Sim.height_at(global_position.x, global_position.z)
+						- _park_ground) > 0.05:
+					unpark()
+	elif _rest_t > PARK_AFTER and _may_park():
+		_park()
 	Sim.prof_end(&"tank.tick", _pt)
 
 func _tick_tank_p(delta: float) -> void:
@@ -1335,8 +1541,8 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 		var v_roll := pv.dot(roll_dir)
 		# power limited tractive effort: strong off the mark, tailing off with
 		# road speed the way a real drivetrain does
-		var want: float = side_cmd * float(KINDS[kind]["top"]) * (0.65 if grip < 0.9 else 1.0)
-		var avail: float = minf(_drive_max, float(KINDS[kind]["power"]) / maxf(absf(v_roll), 3.0)) * per
+		var want: float = side_cmd * _top * (0.65 if grip < 0.9 else 1.0)
+		var avail: float = minf(_drive_max, _power / maxf(absf(v_roll), 3.0)) * per
 		var raw: float = (want - v_roll) * mass * 0.30
 		# Braking is not limited by engine power. A skid steer turns by holding
 		# the inside track back, and holding it back is a brake — it does not
@@ -1357,6 +1563,13 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 		f += roll_dir * drive
 		state.apply_force(f, arm)
 
+	# At rest: on the ground, nothing asked of it, and not going anywhere.
+	if contacts > 0 and in_throttle == 0.0 and in_steer == 0.0 \
+			and state.linear_velocity.length_squared() < 0.0025 \
+			and state.angular_velocity.length_squared() < 0.0004:
+		_rest_t += state.step
+	else:
+		_rest_t = 0.0
 	if contacts == 0:
 		return
 	# resist the hull trying to spin up on its own. A wheeled vehicle gets very
@@ -1649,8 +1862,18 @@ func add_child_turret_mesh(tu: SurfaceTool, dark: Material) -> void:
 func radar_range() -> float:
 	return float(KINDS[kind].get("radar", 0.0))
 
+## Settled once in `setup`. It was read out of the table every time it was
+## asked -- a dictionary lookup, a default and a string made from it -- and a
+## vehicle asks it a dozen times a tick: the driver, the gunner, the turret
+## drive and the hit test each want to know what kind of thing they are in.
+var _cls := "mbt"
+var _indirect := false
+var _air_def := false
+var _top := 18.0
+var _power := 1.0
+
 func vclass() -> String:
-	return String(KINDS[kind].get("class", "mbt"))
+	return _cls
 
 ## A multiple launcher ripples its pod; a howitzer loads one round at a time.
 ## What this vehicle can shoot with, in selection order.
@@ -1734,15 +1957,13 @@ func is_ripple() -> bool:
 ## down the barrel, and treating it as artillery gave a Humvee a fire mission
 ## page and a forty degree quadrant elevation.
 func is_indirect() -> bool:
-	var c := vclass()
-	return c == "spg" or c == "mlrs" or c == "tel"
+	return _indirect
 
 ## Vehicles whose whole job is shooting at aircraft. They elevate much higher
 ## than a tank, they lead a fast crossing target, and their AI looks up rather
 ## than along.
 func is_air_defence() -> bool:
-	var c := vclass()
-	return c == "sam" or c == "spaag"
+	return _air_def
 
 ## March the barrel line onto the ground: where the crosshair is pointing. The
 ## march samples the height field a hundred times, so the answer is cached for a
@@ -1928,6 +2149,7 @@ func fire_main(world: Node) -> bool:
 	_gun_cd = float(kd["reload"])
 	_lob(world, -_muzzle.global_transform.basis.z * float(kd["muzzle"]),
 		float(kd["gun"]), float(kd["blast"]), 3.4)
+	unpark()                    # a frozen hull would not rock to its own gun
 	apply_central_impulse(_muzzle.global_transform.basis.z * 34000.0)
 	return true
 
@@ -2424,6 +2646,7 @@ func take_hit(amount: float, _from: Node = null) -> void:
 func apply_damage(amount: float) -> void:
 	if not alive:
 		return
+	unpark()
 	health -= amount
 	if health <= 0.0:
 		alive = false

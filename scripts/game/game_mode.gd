@@ -167,15 +167,35 @@ func register_kill(team_of_victim: int) -> void:
 	if mode in ["conquest", "warlords"]:
 		tickets[team_of_victim] = maxi(int(tickets[team_of_victim]) - 5, 0)
 
-func _process(delta: float) -> void:
+## How often the match is counted. A sector takes four and a half seconds to
+## change hands with one vehicle standing in it, tickets bleed every two, and
+## reinforcements are looked at every nine: none of it is a thing that happens
+## in a frame, and all of it was being worked out at the frame rate -- a walk
+## of everything alive and then every sector against every one of them, a
+## quarter of a millisecond a frame in a conquest. Five times a second, with
+## the time that has actually passed, comes to the same match.
+const COUNT_EVERY := 0.2
+var _count_dt := COUNT_EVERY
+
+func _process(frame_dt: float) -> void:
 	if not running:
 		return
+	_count_dt += frame_dt
+	if _count_dt < COUNT_EVERY:
+		return
+	var _pm := Sim.prof_at()
+	_count(_count_dt)
+	_count_dt = 0.0
+	Sim.prof_end(&"mode.count", _pm)
+
+func _count(delta: float) -> void:
 	# Gathered once for the whole match. Every sector used to walk the entire
 	# hittable group for itself, so the cost of a conquest was the number of
 	# sectors times the number of things alive -- fine at five sectors, not at
 	# twenty.
 	var holders: Array = []
-	for n in get_tree().get_nodes_in_group("hittable"):
+	Sim.hit_scan()
+	for n in Sim.hit_nodes:
 		if not is_instance_valid(n) or (n.has_method("is_alive") and not n.is_alive()):
 			continue
 		if n is GroundTarget:

@@ -1163,6 +1163,23 @@ var _tracer_test := false
 var _cloud_test := false
 var _faction_test := false
 var _fps_test := 0.0
+var _fps_steps: Array = []
+var _fps_script: Array = []
+var _fps_tick_was := 0
+var _fps_script_was := 0.0
+## What joined the tree this frame, by the top-level thing it joined under.
+var _fps_new := {}
+var _fps_new_most := 0
+var _fps_new_worst := {}
+
+func _fps_arrived(n: Node) -> void:
+	var top: Node = n
+	while top.get_parent() != null and top.get_parent() != self:
+		top = top.get_parent()
+	var key := String(top.name) if top.get_parent() == self else "(elsewhere)"
+	# numbered siblings are one kind of thing
+	key = key.rstrip("0123456789 -@")
+	_fps_new[key] = int(_fps_new.get(key, 0)) + 1
 var _fps_clock := 0.0
 ## The engine's own two clocks, sampled every frame of the run alongside the
 ## frame time so the report can quote a median rather than whatever the last
@@ -3657,6 +3674,26 @@ func _tick_world(delta: float) -> void:
 			# "worst 96.83 ms" is a number with nobody's name on it.
 			_fps_nodes.append(
 				Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+			# How many physics ticks this frame carried, and what the tagged
+			# scripts cost in it: the two things that can make one frame
+			# dearer than its neighbours without anything arriving.
+			var tick_now: int = Engine.get_physics_frames()
+			_fps_steps.append(tick_now - _fps_tick_was)
+			_fps_tick_was = tick_now
+			var tagged := 0.0
+			for tg in Sim._prof:
+				if not String(tg).ends_with(".total"):
+					tagged += float(Sim._prof[tg])
+			_fps_script.append((tagged - _fps_script_was) * 0.001)
+			_fps_script_was = tagged
+			# ...and whose they were, for the frame that brought the most.
+			var came := 0
+			for k in _fps_new:
+				came += int(_fps_new[k])
+			if came > _fps_new_most:
+				_fps_new_most = came
+				_fps_new_worst = _fps_new.duplicate()
+		_fps_new.clear()
 		if _fps_clock > _fps_test + 1.0:
 			_fps_test = 0.0
 			_run_fps_test()
@@ -10167,17 +10204,27 @@ var _cqb_on_foot := false
 var _town_sets: Dictionary = {}
 var _town_tick := 0.0
 
-func town_set(i: int) -> TownSet:
+func town_set(i: int, unhurried := false) -> TownSet:
 	if _town_sets.has(i) and is_instance_valid(_town_sets[i]):
-		return _town_sets[i]
+		var have: TownSet = _town_sets[i]
+		if unhurried or not have.building:
+			return have
+		# Wanted whole and now, and it is only part built: start it again.
+		# The pieces it had put down go with it.
+		remove_child(have)
+		have.free()
+		_town_sets.erase(i)
 	if not is_instance_valid(scenery) or i < 0 or i >= scenery.sites.size():
 		return null
 	var st: Dictionary = scenery.sites[i]
 	var ts := TownSet.new()
 	ts.name = "TownSet %s" % String(st.get("name", str(i)))
+	ts.slow = unhurried
 	add_child(ts)
-	ts.build(st["c"], st)
 	_town_sets[i] = ts
+	# not waited for: with `slow` off it is finished when this returns, and
+	# with it on nobody here needs it to be
+	ts.build(st["c"], st)
 	return ts
 
 ## Stand a town's set up as you come to it and take it down once it is well
@@ -10197,7 +10244,7 @@ func _tick_town_sets(delta: float) -> void:
 		var d: float = Vector2(at.x - c.x, at.z - c.y).length()
 		var have: bool = _town_sets.has(i) and is_instance_valid(_town_sets[i])
 		if not have and d < 1300.0 and not built and running:
-			town_set(i)
+			town_set(i, true)
 			built = true
 		elif have and d > 3600.0:
 			var ts: TownSet = _town_sets[i]
@@ -15664,6 +15711,7 @@ func _parse_cmdline() -> void:
 			# Seconds to watch for, so a long look is one flag rather than a
 			# rebuild: --fpstest or --fpstest=20.
 			_fps_test = float(a.substr(10)) if a.length() > 9 else 12.0
+			get_tree().node_added.connect(_fps_arrived)
 			Sim.profiling = true
 			Sim.prof_reset()
 			# A benchmark must never be measuring the refresh rate. Pinned to
@@ -18202,6 +18250,29 @@ func _run_fps_test() -> void:
 		hitch, 100.0 * float(hitch) / float(n)])
 	for st in _fps_stalls:
 		print("[fps]   stall %s" % String(st))
+	# The dropped frames against the rest, by what was in them. "Ten per cent
+	# of frames take nearly twice as long" has three quite different causes --
+	# a second physics tick, a script that runs on a timer, or the renderer --
+	# and they want three different fixes.
+	if _fps_steps.size() == n and _fps_script.size() == n and _fps_rgpu.size() == n:
+		var slow := [[], [], [], []]
+		var rest := [[], [], [], []]
+		for i in range(1, n):
+			var into: Array = slow if float(_fps_times[i]) > p50 * 1.5 else rest
+			(into[0] as Array).append(float(_fps_steps[i]))
+			(into[1] as Array).append(float(_fps_script[i]))
+			(into[2] as Array).append(float(_fps_rgpu[i]))
+			(into[3] as Array).append(float(_fps_rcpu[i]))
+		var avg_of := func(a: Array) -> float:
+			var t := 0.0
+			for v in a:
+				t += float(v)
+			return t / maxf(float(a.size()), 1.0)
+		if not (slow[0] as Array).is_empty():
+			print("[fps]   the slow frames: %.2f physics ticks, %.2f ms of tagged script, %.2f ms GPU, %.2f ms render CPU" % [
+				avg_of.call(slow[0]), avg_of.call(slow[1]), _median(slow[2]), _median(slow[3])])
+			print("[fps]   the others:      %.2f physics ticks, %.2f ms of tagged script, %.2f ms GPU, %.2f ms render CPU" % [
+				avg_of.call(rest[0]), avg_of.call(rest[1]), _median(rest[2]), _median(rest[3])])
 	# ...and what the worst of them was doing.
 	if _fps_nodes.size() == n and n > 2:
 		var at := 0
@@ -18222,6 +18293,18 @@ func _run_fps_test() -> void:
 			was, now])
 		print("[fps] the biggest arrival was %+d nodes in one frame, and that frame took %.1f ms" % [
 			grew, float(_fps_times[grew_at]) * 1000.0])
+		# A count of nodes has nobody's name on it either. These are the
+		# things that were put into the tree in the frame that received the
+		# most, by the name of whatever they were put in under.
+		var who: Array = []
+		for k in _fps_new_worst:
+			who.append([int(_fps_new_worst[k]), String(k)])
+		who.sort_custom(func(a2: Array, b2: Array) -> bool: return int(a2[0]) > int(b2[0]))
+		var parts := PackedStringArray()
+		for w in who.slice(0, 6):
+			parts.append("%s x%d" % [String(w[1]), int(w[0])])
+		if not parts.is_empty():
+			print("[fps]   the fullest frame took in: %s" % ", ".join(parts))
 	# What the renderer was asked to do.
 	print("[fps] draw calls %d, primitives %d, video memory %.0f MB, objects %d" % [
 		int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),

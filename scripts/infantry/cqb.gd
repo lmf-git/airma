@@ -507,7 +507,7 @@ func vehicle_down(team: int, what: String) -> void:
 func _under_wheels() -> void:
 	if not armour:
 		return
-	for v in get_tree().get_nodes_in_group("hittable"):
+	for v in get_tree().get_nodes_in_group("vehicles"):
 		var t := v as Tank
 		if t == null or not t.alive or t.linear_velocity.length() < 2.2:
 			continue
@@ -560,10 +560,20 @@ func _drive_armour(delta: float) -> void:
 	if _drive_t > 0.0:
 		return
 	_drive_t = 0.35
-	for v in get_tree().get_nodes_in_group("hittable"):
-		var t := v as Tank
-		if t == null or not t.alive or not t.ai or t.occupied:
+	# The vehicles, gathered once. This walked everything on the radar picture
+	# to find the tanks, and then walked it again inside the loop for every
+	# tank it found to see whether another one was in the way.
+	var hulls: Array[Tank] = []
+	for v in get_tree().get_nodes_in_group("vehicles"):
+		var hv := v as Tank
+		if hv != null and is_instance_valid(hv) and hv.alive:
+			hulls.append(hv)
+	var live := {}
+	for t in hulls:
+		if not t.ai or t.occupied:
 			continue
+		var key: int = t.get_instance_id()
+		live[key] = true
 		var goal: Vector3 = t.get_meta("cqb_goal", Vector3.INF)
 		var here: Vector3 = t.global_position
 		if goal == Vector3.INF or Vector2(here.x - goal.x, here.z - goal.z).length() < 14.0:
@@ -581,9 +591,8 @@ func _drive_armour(delta: float) -> void:
 		# still there after a few seconds, it goes somewhere else.
 		var ahead: Vector3 = -t.global_transform.basis.z
 		var blocked := false
-		for o in get_tree().get_nodes_in_group("hittable"):
-			var ot := o as Tank
-			if ot == null or ot == t or not ot.alive:
+		for ot in hulls:
+			if ot == t:
 				continue
 			var gap: Vector3 = ot.global_position - here
 			gap.y = 0.0
@@ -602,24 +611,18 @@ func _drive_armour(delta: float) -> void:
 			if waited > 4.0:
 				t.set_meta("cqb_wait", 0.0)
 				t.set_meta("cqb_goal", Vector3.INF)
+				_routes.erase(key)
 			continue
 		t.set_meta("cqb_wait", 0.0)
-		var va := _vcell(here)
-		var vb := _vcell(goal)
-		if _vcomp.size() == _vn * _vn and _vcomp[vb.y * _vn + vb.x] != _vcomp[va.y * _vn + va.x]:
-			# a street it cannot reach from this one: the nearest it can, and
-			# that is where it is going now
-			var vnear := _in_piece(_vcomp, _vn, vb, _vcomp[va.y * _vn + va.x], 12)
-			if vnear.x >= 0:
-				vb = vnear
-				t.set_meta("cqb_goal", _vcell_pos(vb))
-		var route: PackedVector2Array = _vnav.get_point_path(va, vb, true)
+		var route: PackedVector2Array = _route_for(t, key, here, goal)
 		if route.size() < 2:
 			t.set_meta("cqb_goal", Vector3.INF)
+			_routes.erase(key)
 			continue
 		# aim a couple of cells along it, so corners are cut no finer than
 		# the street allows
-		var wp: Vector2 = route[mini(2, route.size() - 1)]
+		var at: int = int((_routes[key] as Array)[2])
+		var wp: Vector2 = route[mini(at + 2, route.size() - 1)]
 		var dir := Vector3(wp.x - here.x, 0.0, wp.y - here.z)
 		if dir.length() < 0.5:
 			continue
@@ -627,6 +630,55 @@ func _drive_armour(delta: float) -> void:
 		# that is right for a sector and no use for a street corner -- so the
 		# point he is given is well beyond the one that is meant.
 		t.ai_goal = here + dir.normalized() * 400.0
+	# routes of what has been knocked out or taken over since
+	if _routes.size() > live.size():
+		for k in _routes.keys():
+			if not live.has(k):
+				_routes.erase(k)
+
+## Each driver's route, kept: [the cell it leads to, the route, how far along it
+## he has got, how long he has had it].
+##
+## A route through the town was searched for afresh for every vehicle every
+## third of a second -- from wherever it had got to, to the same corner as last
+## time, giving the same streets less the one cell it had covered. The town
+## does not change under it. So the route is planned once, the driver's place
+## on it is found by looking a few cells on from where he last was, and it is
+## planned again only when he is sent somewhere else, has been pushed off it,
+## or has had it long enough that it is worth a second look.
+var _routes := {}
+const ROUTE_KEEP := 6.0
+
+func _route_for(t: Tank, key: int, here: Vector3, goal: Vector3) -> PackedVector2Array:
+	var va := _vcell(here)
+	var vb := _vcell(goal)
+	var flat := Vector2(here.x, here.z)
+	var kept: Array = _routes.get(key, [])
+	if not kept.is_empty() and kept[0] == vb:
+		var route: PackedVector2Array = kept[1]
+		var at: int = kept[2]
+		# where he is on it now: the nearest of the next few points
+		var best: int = at
+		var bd: float = flat.distance_squared_to(route[at])
+		for k in range(at + 1, mini(at + 5, route.size())):
+			var dk: float = flat.distance_squared_to(route[k])
+			if dk < bd:
+				bd = dk
+				best = k
+		kept[2] = best
+		kept[3] = float(kept[3]) + 0.35
+		if bd < (VCELL * 2.5) * (VCELL * 2.5) and float(kept[3]) < ROUTE_KEEP:
+			return route
+	if _vcomp.size() == _vn * _vn and _vcomp[vb.y * _vn + vb.x] != _vcomp[va.y * _vn + va.x]:
+		# a street it cannot reach from this one: the nearest it can, and
+		# that is where it is going now
+		var vnear := _in_piece(_vcomp, _vn, vb, _vcomp[va.y * _vn + va.x], 12)
+		if vnear.x >= 0:
+			vb = vnear
+			t.set_meta("cqb_goal", _vcell_pos(vb))
+	var fresh: PackedVector2Array = _vnav.get_point_path(va, vb, true)
+	_routes[key] = [vb, fresh, 0, 0.0]
+	return fresh
 
 func _vcell_pos(id: Vector2i) -> Vector3:
 	var x: float = _corner.x + (id.x + 0.5) * VCELL
@@ -931,6 +983,9 @@ class CarpetRun extends Node3D:
 		add_child(root)
 		global_position = _start
 		look_at(_start + _dir, Vector3.UP)
+		# put there, not flown there: without this the first frame is drawn
+		# part way between the middle of the world and the start of the run
+		reset_physics_interpolation()
 		Sfx.play_at(get_parent(), "roar", _start, 10.0, 0.8, 9000.0)
 
 	func _physics_process(delta: float) -> void:
@@ -944,14 +999,38 @@ class CarpetRun extends Node3D:
 			# every other one a cluster canister
 			b.cluster = _drops.size() % 2 == 1
 			get_parent().add_child(b)
-			b.global_position = global_position + Vector3(0.0, -3.0, 0.0)
+			b.place(global_position + Vector3(0.0, -3.0, 0.0))
 		if _along >= _end:
 			queue_free()
 
 ## One of the carpet. It falls in the same flight model a round flies, and goes
 ## off on whatever it meets first -- a roof or the road.
 class CarpetBomb extends Node3D:
-	const DRAG := 0.00002
+	## What the air takes off it per metre. This was a shell's figure, a
+	## twelfth of this: a streamlined round that kept all two hundred and
+	## thirty metres a second of the bomber's speed the whole way down, so the
+	## stick went across the sky like a burst of cannon fire rather than
+	## falling out of it. A finned iron bomb sheds its forward speed and comes
+	## down steepening, which is the thing you recognise as bombs falling. The
+	## run works its release point out with this same figure, so the carpet
+	## still lands where it was drawn.
+	const DRAG := 0.00025
+	## The streak each one trails, so a stick can be seen coming from the
+	## ground: one mesh and one material for all of them.
+	static var trail_mesh: BoxMesh = null
+
+	## Put it where it starts. Set down and left, a new body is drawn for its
+	## first tick somewhere between the middle of the world and where it was
+	## put -- every bomb of the stick arrived as a line flashed across the map,
+	## which is the other half of why they looked like bullets.
+	func place(at: Vector3) -> void:
+		global_position = at
+		if vel.length_squared() > 1.0:
+			look_at(at + vel, Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD)
+		reset_physics_interpolation()
+		# and the ribbon starts here, not wherever the body was before
+		if _ribbon != null:
+			_ribbon.call(&"clear")
 	## Where a cluster canister opens, above the ground, and what is in it.
 	const OPEN_AT := 250.0
 	const BOMBLETS := 10
@@ -968,9 +1047,44 @@ class CarpetBomb extends Node3D:
 		if bomblet:
 			MeshKit.cone(st, 0.05, 0.05, -0.1, 0.1, Vector3.ZERO, 6)
 		else:
-			MeshKit.cone(st, 0.18, 0.18, -0.9, 0.9, Vector3.ZERO, 8)
+			# a five hundred pounder: body, and the fins that slow it
+			MeshKit.cone(st, 0.2, 0.2, -1.1, 0.9, Vector3.ZERO, 8)
+			MeshKit.box(st, Vector3(0.7, 0.03, 0.5), Vector3(0, 0, 1.0))
+			MeshKit.box(st, Vector3(0.03, 0.7, 0.5), Vector3(0, 0, 1.0))
 		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
 			Color(0.42, 0.40, 0.22) if cluster or bomblet else Color(0.22, 0.23, 0.22), 0.6, 0.3)), "Bomb"))
+		# What it leaves behind it, so a stick can be seen coming. The engine
+		# has a ribbon for exactly this as of 4.8 -- `Trail3D`, which lays a
+		# camera-facing strip along wherever its node has been -- so a bomb
+		# draws the curve it actually fell along. Asked for by name: on an
+		# engine without one, and for the bomblets, which are out for two
+		# seconds and come two hundred at a time, it is a plain streak instead.
+		if not bomblet:
+			var ribbon := Effects.ribbon(Color(0.93, 0.94, 0.96, 0.38), 0.5, 1.4, 4.0)
+			if ribbon != null:
+				ribbon.position = Vector3(0.0, 0.0, 1.2)
+				add_child(ribbon)
+				_ribbon = ribbon
+				return
+		if CarpetBomb.trail_mesh == null:
+			var tm := BoxMesh.new()
+			tm.size = Vector3(0.16, 0.16, 1.0)
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.albedo_color = Color(0.92, 0.93, 0.95, 0.32)
+			tm.material = mat
+			CarpetBomb.trail_mesh = tm
+		var trail := MeshInstance3D.new()
+		trail.mesh = CarpetBomb.trail_mesh
+		trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# behind it: the body points down -Z along the way it is falling
+		var long: float = 4.0 if bomblet else 22.0
+		trail.scale = Vector3(0.5 if bomblet else 1.0, 0.5 if bomblet else 1.0, long)
+		trail.position = Vector3(0.0, 0.0, long * 0.5 + 1.0)
+		add_child(trail)
+
+	var _ribbon: GeometryInstance3D = null
 
 	func _physics_process(delta: float) -> void:
 		vel = Ballistics.step(global_position, vel, DRAG, delta, _flown)
@@ -986,7 +1100,7 @@ class CarpetBomb extends Node3D:
 				c.bomblet = true
 				c.vel = vel + Vector3(randf_range(-11, 11), randf_range(-3, 3), randf_range(-11, 11))
 				get_parent().add_child(c)
-				c.global_position = nxt
+				c.place(nxt)
 			Effects.dust(get_tree().current_scene, nxt, 1.5)
 			queue_free()
 			return

@@ -579,7 +579,36 @@ func _scaffold(lot: Vector2) -> void:
 
 ## Lay the town out. The same town always comes out the same: the seed is the
 ## town's own position, not the match's.
+## Stood up a little at a time, when nobody is waiting for it.
+##
+## A town's set is three hundred and twenty nodes -- every car, wall and stall
+## its own mesh, because each can be knocked down on its own -- and flying
+## toward a town built all of them in one frame: thirty-five milliseconds, the
+## worst hitch left in a battle, a mile and more before any of it could be
+## seen. With `slow` set the same build, in the same order off the same dice,
+## stops for a frame after every couple of dozen pieces. A street fight still
+## asks for the whole town at once, because it surveys routes through it
+## before the first frame, and gets it: with `slow` off this never waits.
+var slow := false
+var building := false
+var _paced := 0
+const PACE := 22
+
+func _pause() -> bool:
+	if not slow or get_child_count() - _paced < PACE:
+		return true
+	await get_tree().process_frame
+	if not is_inside_tree():
+		return false
+	_paced = get_child_count()
+	return true
+
 func build(at: Vector2, of_site: Dictionary) -> void:
+	building = true
+	await _build(at, of_site)
+	building = false
+
+func _build(at: Vector2, of_site: Dictionary) -> void:
 	centre = Vector2(snappedf(at.x, CELL), snappedf(at.y, CELL))
 	site = of_site
 	_rng.seed = 90210 + int(absf(centre.x) * 3.0 + absf(centre.y) * 7.0)
@@ -631,6 +660,8 @@ func build(at: Vector2, of_site: Dictionary) -> void:
 			_crane((l as Vector2).x, (l as Vector2).y)
 		else:
 			_ruin((l as Vector2).x, (l as Vector2).y)
+		if not await _pause():
+			return
 	if crane_at == Vector3.INF and not placed.is_empty():
 		# every lot went to a ruin: put the crane in the widest bit of street
 		_crane(centre.x + _snap(20.0), centre.y + _snap(40.0))
@@ -642,6 +673,8 @@ func build(at: Vector2, of_site: Dictionary) -> void:
 		_scaffold(l2)
 		if int(stats.get("scaffolds", 0)) > before:
 			scaf += 1
+		if not await _pause():
+			return
 
 	# Fire ladders on a few more: the ordinary way onto an ordinary roof.
 	var fire := 0
@@ -725,6 +758,8 @@ func build(at: Vector2, of_site: Dictionary) -> void:
 				if not (near_x < 9.0 and near_z < 9.0):
 					_prop(kind, px, pz, yaw)
 				s += _rng.randf_range(9.0, 16.0)
+				if not await _pause():
+					return
 	# The two start lines are the only places an army has been.
 	for sgn in [-1.0, 1.0]:
 		for k in 7:
@@ -741,4 +776,6 @@ func build(at: Vector2, of_site: Dictionary) -> void:
 			continue
 		_prop(["wall", "stack", "crates", "wall", "hedge" if biome != "desert" else "wall",
 			"small"][_rng.randi() % 6], ax, az, float(_rng.randi() % 2) * PI * 0.5)
+		if not await _pause():
+			return
 

@@ -320,6 +320,17 @@ func wave_seen(x: float, z: float) -> float:
 		+ _kept(sp, SWELL_KB) * SWELL_B * sin(SWELL_KB.x * x + SWELL_KB.y * z + sea_time * SWELL_WB) \
 		+ _kept(sp, SWELL_KC) * SWELL_C * sin(SWELL_KC.x * x + SWELL_KC.y * z + sea_time * SWELL_WC)
 
+## Is the sea drawn flat here? Far enough from the eye its vertices are too far
+## apart to carry even the longest swell, `wave_seen` is nought whatever the
+## clock says, and a hull out there need not ask five times a tick to be told.
+func swell_gone(x: float, z: float) -> bool:
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam == null:
+		return false
+	var d: float = Vector2(x - cam.global_position.x, z - cam.global_position.z).length()
+	var longest: float = TAU / minf(SWELL_KA.length(), minf(SWELL_KB.length(), SWELL_KC.length()))
+	return d * SEA_SPOKE_ANG >= 0.25 * longest and SEA_INNER_STEP < 0.25 * longest
+
 ## How much of a wave the drawn sea keeps where its vertices are `sp` apart:
 ## the shader's `keep`, all of it at eight points a wave, none at four.
 static func _kept(sp: float, k: Vector2) -> float:
@@ -597,6 +608,84 @@ func census(group: String) -> int:
 		if is_instance_valid(x):
 			n += 1
 	return n
+
+# ------------------------------------------------------- what can be hit
+## Everything a round, a fragment or a look-out might care about, gathered once
+## a physics tick and shared.
+##
+## Every shell in the air walked the whole "hittable" group on every tick, and
+## asked each thing in it whether it had an `is_alive`, whether it was, where it
+## was, whether it had a `hit_radius` and what that was -- six calls into the
+## engine per contact per round, 120 times a second. Thirty rounds of artillery
+## in flight over a battle was three quarters of a millisecond a frame, the
+## second largest script cost in the game, to learn that a shell four
+## kilometres up had not hit a tank. Asked once and kept as plain arrays, the
+## question each round asks of each contact is one subtraction and a compare,
+## and only what is actually near it is looked at properly.
+##
+## A tick stale at worst: whatever dies inside one still answers `is_alive`
+## for whoever gets as far as asking, and whatever is made inside one is a tick
+## late -- eight milliseconds.
+var hit_nodes: Array = []
+var hit_pos := PackedVector3Array()
+var hit_rad := PackedFloat32Array()
+## The side each belongs to, or -1 for something with none.
+var hit_team := PackedInt32Array()
+## Men on foot, who are kept off the radar picture and so are not "hittable".
+var man_nodes: Array = []
+var man_pos := PackedVector3Array()
+var man_team := PackedInt32Array()
+var _hit_tick := -1
+
+func hit_scan() -> void:
+	var tick := Engine.get_physics_frames()
+	if tick == _hit_tick:
+		return
+	_hit_tick = tick
+	var tree := Engine.get_main_loop() as SceneTree
+	hit_nodes.clear()
+	man_nodes.clear()
+	if tree == null:
+		hit_pos.resize(0)
+		hit_rad.resize(0)
+		hit_team.resize(0)
+		man_pos.resize(0)
+		man_team.resize(0)
+		return
+	var all: Array = tree.get_nodes_in_group("hittable")
+	hit_pos.resize(all.size())
+	hit_rad.resize(all.size())
+	hit_team.resize(all.size())
+	var k := 0
+	for n in all:
+		if not is_instance_valid(n) or not (n is Node3D):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		hit_nodes.append(n)
+		hit_pos[k] = (n as Node3D).global_position
+		hit_rad[k] = float(n.hit_radius()) if n.has_method("hit_radius") else 6.0
+		hit_team[k] = int(n.team) if "team" in n else (int(n.side) if "side" in n else -1)
+		k += 1
+	hit_pos.resize(k)
+	hit_rad.resize(k)
+	hit_team.resize(k)
+	var men: Array = tree.get_nodes_in_group("infantry")
+	man_pos.resize(men.size())
+	man_team.resize(men.size())
+	k = 0
+	for n in men:
+		if not is_instance_valid(n) or not (n is Node3D):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		man_nodes.append(n)
+		man_pos[k] = (n as Node3D).global_position
+		# a man on foot carries his side as `side`; a soldier as `team`
+		man_team[k] = int(n.team) if "team" in n else (int(n.side) if "side" in n else -1)
+		k += 1
+	man_pos.resize(k)
+	man_team.resize(k)
 
 # --------------------------------------------------------------- objective
 ## Somewhere the player has decided matters. Set with shift and click on the

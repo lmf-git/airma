@@ -85,6 +85,7 @@ func _refresh_seen(delta: float) -> void:
 	if _seen_t > 0.0 and not _seen.is_empty():
 		return
 	_seen_t = CONTACT_EVERY
+	_mode_state = mode.hud_state() if (mode != null and is_instance_valid(mode)) else {}
 	_seen = get_tree().get_nodes_in_group("hittable")
 	_seen_zones = get_tree().get_nodes_in_group("zones")
 	_seen_what.resize(_seen.size())
@@ -105,6 +106,7 @@ func _refresh_seen(delta: float) -> void:
 ## twenty-five metres between refreshes, against a march that steps a hundred
 ## and eighty.
 var _seen_clear := PackedByteArray()
+var _seen_los := PackedByteArray()
 
 func _refresh_masking() -> void:
 	if _seen.is_empty():
@@ -119,6 +121,19 @@ func _refresh_masking() -> void:
 		from[k] = eye
 		to[k] = (_seen[k] as Node3D).global_position + Vector3(0, 4, 0)
 	_seen_clear = Sim.lines_of_sight(from, to, 250.0)
+	# ...and the same question as the boxes on the glass ask it: from the
+	# aeroplane itself, to the contact itself. It was asked there once per
+	# contact per frame, one crossing of the extension boundary each -- the
+	# largest single cost in the display, 0.8 ms of a frame in a battle -- for
+	# an answer that changes no faster than the scope's does.
+	if is_instance_valid(aircraft):
+		var own: Vector3 = aircraft.global_position
+		for k in _seen.size():
+			from[k] = own
+			to[k] = (_seen[k] as Node3D).global_position
+		_seen_los = Sim.lines_of_sight(from, to)
+	else:
+		_seen_los = PackedByteArray()
 
 func _process(delta: float) -> void:
 	var _pp := Sim.prof_at()
@@ -783,16 +798,72 @@ func _draw_on_foot() -> void:
 				draw_line(c + d * gap, c + d * (gap + 7.0), col, 1.4)
 			draw_circle(c, 1.2, col)
 
+	# The missile's sight: a ring the size of what the seeker can see, and
+	# what the seeker is doing about it.
+	#
+	# All there was to aim a Stinger by was the tube itself and a box that
+	# appeared on an aeroplane once the seeker had already found it -- nothing
+	# said where to point to make that happen, how far along the lock was, or
+	# that the thing would not fire without one. The ring is the seeker's
+	# cone drawn to scale, so an aeroplane inside it is one it is looking at;
+	# it fills round as the lock builds, and goes red and steady with it.
+	var sam: bool = String(g.get("launcher", "")) == "sam"
+	if sam and w._ads > 0.5 and is_instance_valid(eye) and eye.current:
+		var px_s: float = vp.y * 0.5 / tan(deg_to_rad(eye.fov * 0.5))
+		var ring: float = clampf(tan(deg_to_rad(w.SEEK_CONE)) * px_s, 40.0, vp.y * 0.46)
+		var has: bool = is_instance_valid(w.lock_target)
+		var got: bool = has and w.lock_t >= w.LOCK_TIME
+		var sc := Color(0.55, 1.0, 0.62, 0.85)
+		if got:
+			sc = Color(1.0, 0.22, 0.16, 0.95)
+		elif has:
+			sc = Color(1.0, 0.74, 0.2, 0.95)
+		var fade_s: float = clampf((w._ads - 0.5) * 4.0, 0.0, 1.0)
+		sc.a *= fade_s
+		var under := Color(0, 0, 0, 0.45 * fade_s)
+		draw_arc(c, ring, 0.0, TAU, 72, under, 3.6)
+		draw_arc(c, ring, 0.0, TAU, 72, sc, 1.6)
+		# ticks at the quarters, and a pip to lay on it with
+		for d4 in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
+			draw_line(c + d4 * (ring - 10.0), c + d4 * (ring + 10.0), sc, 1.6)
+			draw_line(c + d4 * 6.0, c + d4 * 16.0, sc, 1.4)
+		draw_circle(c, 1.6, sc)
+		if has and not got:
+			# the lock, filling clockwise from the top
+			var f: float = clampf(w.lock_t / w.LOCK_TIME, 0.0, 1.0)
+			draw_arc(c, ring + 7.0, -PI * 0.5, -PI * 0.5 + TAU * f, 48, sc, 3.0)
+		elif got:
+			draw_arc(c, ring + 7.0, 0.0, TAU, 72, sc, 3.0)
+		var word := "NO TARGET"
+		if w.ammo <= 0:
+			word = "TUBE EMPTY"
+		elif got:
+			word = "LOCKED — FIRE" if fmod(_t, 0.3) < 0.2 else ""
+		elif has:
+			word = "SEEKING"
+		_txt(Vector2(c.x - 120.0, c.y + ring + 30.0), word, 16, sc,
+			HORIZONTAL_ALIGNMENT_CENTER, 240.0)
 	# the seeker: a box on what it is looking at, closed when it has it
 	if is_instance_valid(w.lock_target) and is_instance_valid(eye) \
 			and not eye.is_position_behind(w.lock_target.global_position):
-		var lp: Vector2 = eye.unproject_position(w.lock_target.global_position)
+		var tgt_at: Vector3 = w.lock_target.global_position
+		var lp: Vector2 = eye.unproject_position(tgt_at)
 		var locked: bool = w.lock_t >= w.LOCK_TIME
 		var lc := RED if locked else AMBER
 		var lh: float = 26.0 if locked else lerpf(60.0, 26.0, clampf(w.lock_t / w.LOCK_TIME, 0.0, 1.0))
-		_box(Rect2(lp.x - lh, lp.y - lh, lh * 2.0, lh * 2.0), lc, 2.0)
-		_txt(Vector2(lp.x - 60.0, lp.y + lh + 16.0), "LOCK" if locked else "SEEKING", 14, lc,
-			HORIZONTAL_ALIGNMENT_CENTER, 120.0)
+		if locked:
+			# a diamond on it, and a line from the pip so it can be followed
+			draw_polyline(PackedVector2Array([lp + Vector2(0, -lh), lp + Vector2(lh, 0),
+				lp + Vector2(0, lh), lp + Vector2(-lh, 0), lp + Vector2(0, -lh)]), lc, 2.2)
+			if lp.distance_to(c) > lh + 8.0:
+				draw_line(c + (lp - c).normalized() * 8.0,
+					lp - (lp - c).normalized() * lh, Color(lc.r, lc.g, lc.b, 0.5), 1.2)
+		else:
+			_box(Rect2(lp.x - lh, lp.y - lh, lh * 2.0, lh * 2.0), lc, 2.0)
+		_txt(Vector2(lp.x - 80.0, lp.y + lh + 16.0), "%s  %.1f km" % [
+			"LOCK" if locked else "SEEKING",
+			eye.global_position.distance_to(tgt_at) * 0.001], 14, lc,
+			HORIZONTAL_ALIGNMENT_CENTER, 160.0)
 	# a round of yours landing
 	if w.hit_t > 0.0:
 		var hc := Color(1.0, 0.25, 0.2, 1.0) if (w.kill_t > 0.0 or w.hit_head) else Color(1, 1, 1, 1)
@@ -1143,7 +1214,18 @@ func _draw_ladder() -> void:
 	var rt := head.cross(Vector3.UP).normalized() * -1.0
 	var cp := cam.global_position
 	const D := 900.0
+	# Only the rungs that can be on the screen. All thirty-three were turned,
+	# projected and tested every frame, and at any one moment two thirds of
+	# them are above or below the glass. Measured from where the camera is
+	# looking rather than where the nose is, so a freelook still finds them,
+	# and wide enough for the tallest field of view the game uses.
+	var look := -cam.global_transform.basis.z
+	var look_deg: float = rad_to_deg(asin(clampf(look.y, -1.0, 1.0)))
+	var span: float = cam.fov * 0.5 + 25.0
+	var width3: float = get_viewport_rect().size.x * 3.0
 	for p in range(-80, 85, 5):
+		if absf(float(p) - look_deg) > span:
+			continue
 		var a := deg_to_rad(float(p))
 		var d := head.rotated(rt, -a)
 		var mid := cp + d * D
@@ -1154,7 +1236,7 @@ func _draw_ladder() -> void:
 			continue
 		var s1 := _project(a1)
 		var s2 := _project(a2)
-		if s1.distance_to(s2) > get_viewport_rect().size.x * 3.0:
+		if s1.distance_to(s2) > width3:
 			continue
 		var col := DIM if p < 0 else GREEN
 		var gap := 0.16 if p != 0 else 0.0
@@ -1210,6 +1292,12 @@ func _draw_fpm() -> void:
 		draw_line(g - Vector2(0, 14), g - Vector2(0, 5), WHITE, 1.4)
 
 func _draw_targets() -> void:
+	# Asked once, not once per contact: the reach walks three groups and the
+	# rectangle is a call into the viewport, and neither depends on the contact.
+	var reach: float = maxf(Sim.coverage(aircraft.team), 26000.0)
+	var on_glass: Rect2 = get_viewport_rect().grow(-8.0)
+	var own: Vector3 = aircraft.global_position
+	var los_ok: bool = _seen_los.size() == _seen.size()
 	for k in _seen.size():
 		var seen_k: Variant = _seen[k]
 		if not is_instance_valid(seen_k):
@@ -1223,16 +1311,16 @@ func _draw_targets() -> void:
 		var p: Vector3 = n.global_position
 		if not _visible_pt(p):
 			continue
-		var d := aircraft.global_position.distance_to(p)
+		var d := own.distance_to(p)
 		# Reach follows the radar setting rather than a fixed 26 km. Shipping
 		# sits twenty-odd kilometres offshore and was falling off the edge of
 		# the old limit, so a warship you had locked simply had no box on it.
-		if d > maxf(Sim.coverage(aircraft.team), 26000.0):
+		if d > reach:
 			continue
 		var s := _project(p)
 		# Anywhere on the screen, not only inside the combiner glass: the radar
 		# holds them whether or not they are in front of the HUD.
-		if not get_viewport_rect().grow(-8.0).has_point(s):
+		if not on_glass.has_point(s):
 			continue
 		var r: float = clampf(900.0 / maxf(d, 1.0), 6.0, 40.0)
 		# Coloured by what the interrogation actually came back with, not by
@@ -1250,7 +1338,7 @@ func _draw_targets() -> void:
 			col = Color(0.85, 0.85, 0.55)
 		# A contact behind a ridge still shows -- the radar can see it -- but
 		# the box goes dashed so you know you have no line of sight to it.
-		var clear := _los_clear(aircraft.global_position, p)
+		var clear: bool = _seen_los[k] != 0 if los_ok else _los_clear(own, p)
 		if n == aircraft.target:
 			col = AMBER
 			var q := r + 9.0
@@ -1889,7 +1977,13 @@ func _draw_log(vp: Vector2) -> void:
 			continue
 		var col: Color = [WHITE, GREEN, RED][int(l["k"])]
 		col.a = a
-		for part in _wrap(str(l["t"]), w, PT):
+		# Broken into lines once, when it is first drawn at this width, and
+		# kept on the message. It was measured word by word every frame for
+		# as long as it was on screen -- a dozen shaped strings a message.
+		if float(l.get("wrap_w", -1.0)) != w:
+			l["wrap"] = _wrap(str(l["t"]), w, PT)
+			l["wrap_w"] = w
+		for part in (l["wrap"] as PackedStringArray):
 			_txt(Vector2(x, y), part, PT, col, HORIZONTAL_ALIGNMENT_RIGHT, w)
 			y += 18.0
 		y += 2.0
@@ -1927,8 +2021,15 @@ func _sector_colour(z: Dictionary) -> Color:
 	return Color(0.75, 0.75, 0.78)
 
 ## Tickets, sector strip and the mode banner.
+## The match as the banner draws it, asked for with the contact list rather
+## than every frame: it is a dictionary built per sector, eighteen of them in
+## a conquest, for numbers that change a few times a second.
+var _mode_state: Dictionary = {}
+
 func _draw_mode(vp: Vector2) -> void:
-	var st: Dictionary = mode.hud_state()
+	if _mode_state.is_empty():
+		_mode_state = mode.hud_state()
+	var st: Dictionary = _mode_state
 	var cx := vp.x * 0.5
 	var y := 96.0
 	var name_map := {"conquest": "CONQUEST", "rush": "RUSH", "warlords": "WARLORDS",

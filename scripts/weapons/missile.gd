@@ -76,6 +76,7 @@ const AXIS_HOLD := 45.0
 ## own seeker has to have it.
 const LOAL_FOR := 2.0
 var _trail: GPUParticles3D
+var _ribbon: GeometryInstance3D = null
 var _flame: MeshInstance3D
 var _glow: OmniLight3D
 var _seek_lost := 0.0
@@ -378,6 +379,14 @@ func _ready() -> void:
 		clampf(1.4 + bore * 9.0, 1.4, 5.5), int(clampf(64.0 + bore * 220.0, 64.0, 150.0)))
 	_trail.emitting = false
 	add_child(_trail)
+	# ...and the unbroken thread behind the puffs: see `Effects.ribbon`.
+	var smoke_col: Color = ws["trail"]
+	_ribbon = Effects.ribbon(Color(smoke_col.r, smoke_col.g, smoke_col.b, 0.42),
+		clampf(0.5 + bore * 3.5, 0.5, 2.4), 5.0, 8.0)
+	if _ribbon != null:
+		_ribbon.set(&"emitting", false)
+		_ribbon.position = Vector3(0.0, 0.0, float(ws.get("len", 3.0)) * 0.5)
+		add_child(_ribbon)
 	if ws["burn"] > 0.0:
 		var st := MeshKit.begin()
 		# a bigger motor makes a bigger flame
@@ -463,6 +472,9 @@ func _physics_process(delta: float) -> void:
 	else:
 		if not _trail.emitting:
 			_trail.emitting = true
+			if _ribbon != null:
+				_ribbon.call(&"clear")
+				_ribbon.set(&"emitting", true)
 			if _flame:
 				_flame.visible = ws["burn"] > 0.0
 		armed = age > ws["arm_time"]
@@ -780,7 +792,20 @@ func _fuse_check(from: Vector3, to: Vector3) -> bool:
 	# step straight past a 9 m fuse radius
 	var best: Node = null
 	var best_gap := 1e9
-	for n in get_tree().get_nodes_in_group("hittable"):
+	# Only what the step could conceivably reach is asked anything. Every round
+	# in the air used to put six questions to every contact on the map every
+	# tick; the picture `Sim` keeps answers "is it anywhere near" with a
+	# subtraction. The margin is a hull's half length and then some: a ship is
+	# measured to its skin below, which can be a long way from its middle.
+	Sim.hit_scan()
+	var pos: PackedVector3Array = Sim.hit_pos
+	var seg_mid: Vector3 = (from + to) * 0.5
+	var near_by: float = from.distance_to(to) * 0.5 + float(ws["fuse"]) + 400.0
+	near_by *= near_by
+	for i in pos.size():
+		if pos[i].distance_squared_to(seg_mid) > near_by:
+			continue
+		var n: Variant = Sim.hit_nodes[i]
 		if not is_instance_valid(n) or n == shooter:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():

@@ -681,20 +681,31 @@ class Rocket extends Node3D:
 		var struck: Node = null
 		var span: float = maxf(from.distance_to(to), 0.001)
 		var best := 2.0
-		for n in get_tree().get_nodes_in_group("hittable") + get_tree().get_nodes_in_group("infantry"):
-			if n == shooter or not is_instance_valid(n):
-				continue
-			if n.has_method("is_alive") and not n.is_alive():
-				continue
-			if ("team" in n and n.team == team) or ("side" in n and n.side == team):
-				continue
-			var r: float = 0.6 if n.has_method("bullet_hit") else \
-				(n.hit_radius() if n.has_method("hit_radius") else 4.0)
-			var mid: Vector3 = (n as Node3D).global_position + Vector3(0, 1.0, 0)
-			var c: Vector3 = Geometry3D.get_closest_point_to_segment(mid, from, to)
-			if c.distance_to(mid) < minf(r, 4.5) and from.distance_to(c) / span < best:
-				best = from.distance_to(c) / span
-				struck = n
+		# from the picture `Sim` keeps for the tick, and nothing further off
+		# than the step and the widest thing it can strike is asked anything
+		Sim.hit_scan()
+		var seg_mid: Vector3 = (from + to) * 0.5
+		var near_by: float = span * 0.5 + 6.0
+		near_by *= near_by
+		for pass_i in 2:
+			var pos: PackedVector3Array = Sim.hit_pos if pass_i == 0 else Sim.man_pos
+			var whose: PackedInt32Array = Sim.hit_team if pass_i == 0 else Sim.man_team
+			var nodes: Array = Sim.hit_nodes if pass_i == 0 else Sim.man_nodes
+			for i in pos.size():
+				if whose[i] == team or pos[i].distance_squared_to(seg_mid) > near_by:
+					continue
+				var n: Variant = nodes[i]
+				if n == shooter or not is_instance_valid(n):
+					continue
+				if n.has_method("is_alive") and not n.is_alive():
+					continue
+				var r: float = 0.6 if n.has_method("bullet_hit") else \
+					(n.hit_radius() if n.has_method("hit_radius") else 4.0)
+				var mid: Vector3 = (n as Node3D).global_position + Vector3(0, 1.0, 0)
+				var c: Vector3 = Geometry3D.get_closest_point_to_segment(mid, from, to)
+				if c.distance_to(mid) < minf(r, 4.5) and from.distance_to(c) / span < best:
+					best = from.distance_to(c) / span
+					struck = n
 		if struck != null:
 			_burst(from.lerp(to, clampf(best, 0.0, 1.0)), struck)
 			return

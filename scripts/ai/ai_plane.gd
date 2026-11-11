@@ -85,11 +85,15 @@ func _pilot(delta: float) -> void:
 			throttle = 0.62
 		ENGAGE:
 			if player:
+				var d := global_position.distance_to(player.global_position)
 				goal = _intercept(player)
+				# Inside gun range the nose goes where the rounds have to, not
+				# where a collision course would put it: see `_gun_point`.
+				if d < GUN_REACH and spec.has("gun") and ammo > 0:
+					goal = _gun_point(player)
 				goal.y = maxf(goal.y, Sim.height_at(goal.x, goal.z) + 450.0)
 				throttle = 0.95
 				_try_shoot(player, delta)
-				var d := global_position.distance_to(player.global_position)
 				if d < 500.0 and (-global_transform.basis.z).dot(
 						(player.global_position - global_position).normalized()) < -0.2:
 					state = EXTEND
@@ -132,7 +136,24 @@ func _pilot(delta: float) -> void:
 ## on a target is deliberately pointed at the dirt, so the margins come right
 ## down for the run — with the fighter's numbers it aborts every attack at four
 ## kilometres and never fires a shot.
+##
+## Asked thirty times a second on a run and twenty otherwise, not a hundred and
+## twenty: it looks between one and eight seconds ahead, five or six questions
+## to the height field each time, and the answer to "is there a hill four
+## seconds in front of me" does not change in eight milliseconds. The margins
+## are hundreds of metres; a twentieth of a second at full speed is fifteen.
+var _gpws_wait := randi() % 6
+var _gpws_last := false
+
 func _gpws() -> bool:
+	_gpws_wait -= 1
+	if _gpws_wait > 0:
+		return _gpws_last
+	_gpws_wait = 4 if (role == "cas" and state == ATTACK) else 6
+	_gpws_last = _gpws_now()
+	return _gpws_last
+
+func _gpws_now() -> bool:
 	var v := linear_velocity
 	var run := role == "cas" and state == ATTACK
 	if v.length() < 30.0:
@@ -488,6 +509,29 @@ func _intercept(p: Node3D) -> Vector3:
 	var t := clampf(rel.length() / maxf(linear_velocity.length(), 120.0), 0.0, 6.0)
 	return p.global_position + tv * t * _skill
 
+## Where to point so that rounds fired now arrive where the target will be.
+##
+## The pursuit point above is a collision course for the *aeroplane*: the
+## target carried on for as long as it would take to fly there, three or four
+## seconds of lead at gun range. A cannon round covers the same distance in
+## half a second, and it leaves with the shooter's own velocity on it, so what
+## matters is how the target moves relative to the shooter over the round's
+## flight -- a fraction of the pursuit lead, and often on the other side of
+## the target. Flown at the pursuit point and allowed to fire only when the
+## nose happened to cross the target itself, a bandit could not hit anything
+## that was not flying straight away from it. `_skill` still shortens the
+## lead, so a hard crossing shot is still one it tends to miss behind.
+const GUN_REACH := 1500.0
+
+func _gun_point(p: Node3D) -> Vector3:
+	var vm: float = maxf(float((spec.get("gun", {}) as Dictionary).get("muzzle", 1030.0)), 300.0)
+	var rel: Vector3 = p.global_position - global_position
+	var tv: Vector3 = p.linear_velocity if "linear_velocity" in p else Vector3.ZERO
+	var closing: Vector3 = tv - linear_velocity
+	var t: float = rel.length() / vm
+	t = (rel + closing * t).length() / vm
+	return p.global_position + closing * (t * _skill) + Vector3.UP * (0.5 * Ballistics.G0 * t * t)
+
 func _steer_to(goal: Vector3, _delta: float) -> void:
 	var b := global_transform.basis
 	var to := (goal - global_position)
@@ -514,7 +558,10 @@ func _try_shoot(p: Node3D, delta: float) -> void:
 	var rel: Vector3 = p.global_position - global_position
 	var d := rel.length()
 	var ang := rad_to_deg((-global_transform.basis.z).angle_to(rel))
-	if d < 900.0 and ang < 3.0:
+	# The trigger goes when the nose is on the *solution*, not on the target:
+	# on the target is where the rounds are not going.
+	if d < 900.0 and ang < 20.0 and spec.has("gun") and rad_to_deg(
+			(-global_transform.basis.z).angle_to(_gun_point(p) - global_position)) < 2.0:
 		fire_gun(get_tree().current_scene)
 	if _fire_wait > 0.0:
 		return

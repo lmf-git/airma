@@ -335,7 +335,7 @@ func _physics_process(delta: float) -> void:
 func _tick_physics(delta: float) -> void:
 	if ghost:
 		# remote aircraft still animate their moving parts, they just do not fly
-		_animate(delta)
+		_animate_paced(delta)
 		return
 	if wrecked:
 		_wreck_t += delta
@@ -351,7 +351,7 @@ func _tick_physics(delta: float) -> void:
 	_pilot(delta)
 	Sim.prof_end(&"air.pilot", _pp)
 	var _pn := Sim.prof_at()
-	_animate(delta)
+	_animate_paced(delta)
 	Sim.prof_end(&"air.animate", _pn)
 	# a shot held up by the doors goes as soon as they are open
 	if _pending_fire and alive:
@@ -382,6 +382,39 @@ func _tick_physics(delta: float) -> void:
 ## Override in subclasses to drive the stick.
 func _pilot(_delta: float) -> void:
 	pass
+
+## The moving parts, as often as anybody could see them move.
+##
+## Every aeroplane in the world set the angle of every door, flap, rudder,
+## nozzle, wheel and burner plume it has at 120 Hz -- forty-odd transforms an
+## airframe a tick, each one pushed through to the renderer -- including the
+## ones twenty kilometres away that are two pixels of a contact box. The one
+## being watched still gets every tick; the rest are done every second, fourth
+## or eighth, with the time that has passed, so a door takes exactly as long to
+## open and a bay is ready to fire at the same moment it always was.
+var _anim_dt := 0.0
+var _anim_wait := randi() % 8
+
+func _animate_paced(delta: float) -> void:
+	_anim_dt += delta
+	_anim_wait -= 1
+	if _anim_wait > 0:
+		return
+	_animate(_anim_dt)
+	_anim_dt = 0.0
+	_anim_wait = 1
+	var eye := get_viewport().get_camera_3d()
+	if eye == null:
+		return
+	# as far as it looks, not as far as it is: a long lens brings it closer
+	var far: float = eye.global_position.distance_to(global_position) \
+		* clampf(eye.fov / 70.0, 0.05, 1.0)
+	if far > 6000.0:
+		_anim_wait = 8
+	elif far > 2000.0:
+		_anim_wait = 4
+	elif far > 500.0:
+		_anim_wait = 2
 
 func _animate(delta: float) -> void:
 	# The cans follow the vector. A nose up demand deflects the exhaust upward,
@@ -2496,6 +2529,7 @@ class Shell extends Node3D:
 	var arm_dist := 12.0       # fuse arming distance: see _physics_process
 	var rocket := false        # launcher round: drawn as one, and pointed
 	var _flown := 0.0
+	var _ground_in := 0.0      # seconds before the ground is worth asking about
 	## What the air takes off it per metre: see `Ballistics`. A shell keeps its
 	## speed far better than a bullet does, but over twenty kilometres of
 	## artillery arc even this is the difference between hitting and not.
@@ -2553,9 +2587,31 @@ class Shell extends Node3D:
 			mi.mesh = sm
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(mi)
+		# The arc it flies, drawn: grey behind a rocket, a hot thread behind a
+		# shell, which until now was a dot you could not follow across the sky.
+		var rb: GeometryInstance3D = Effects.ribbon(Color(0.8, 0.8, 0.82, 0.4), 0.7, 4.0, 8.0) \
+			if rocket else Effects.ribbon(Color(1.0, 0.66, 0.3, 0.45), 0.3, 0.7, 6.0, true)
+		if rb != null:
+			add_child(rb)
+			_ribbon = rb
 		reset_physics_interpolation()
 
+	## The ribbon starts where the round does. Whoever makes one puts it in the
+	## tree first and at the muzzle second, and a strip begun in between runs
+	## from the middle of the world.
+	var _ribbon: GeometryInstance3D = null
+	var _ribbon_new := true
+
 	func _physics_process(delta: float) -> void:
+		if _ribbon_new:
+			_ribbon_new = false
+			if _ribbon != null:
+				_ribbon.call(&"clear")
+		var _ps := Sim.prof_at()
+		_fly(delta)
+		Sim.prof_end(&"fx.shell", _ps)
+
+	func _fly(delta: float) -> void:
 		life -= delta
 		var from := global_position
 		vel = Ballistics.step(from, vel, drag, delta, _flown)
@@ -2572,18 +2628,43 @@ class Shell extends Node3D:
 		# standing beside it, every single time it fired.
 		if _flown < arm_dist:
 			return
-		for n in get_tree().get_nodes_in_group("hittable"):
+		# Against the shared picture of what can be hit, and only what the step
+		# could reach is asked anything: see `Sim.hit_scan`.
+		Sim.hit_scan()
+		var pos: PackedVector3Array = Sim.hit_pos
+		var rad: PackedFloat32Array = Sim.hit_rad
+		var mid: Vector3 = (from + to) * 0.5
+		var fuse: float = blast * 0.4
+		var span: float = from.distance_to(to) * 0.5 + fuse
+		for i in pos.size():
+			var reach: float = rad[i] + span
+			if pos[i].distance_squared_to(mid) > reach * reach:
+				continue
+			var n: Variant = Sim.hit_nodes[i]
 			if not is_instance_valid(n) or n == shooter:
 				continue
 			if n.has_method("is_alive") and not n.is_alive():
 				continue
 			var np: Vector3 = n.global_position
-			var r: float = n.hit_radius() if n.has_method("hit_radius") else 6.0
-			if Geometry3D.get_closest_point_to_segment(np, from, to).distance_to(np) < r + blast * 0.4:
+			if Geometry3D.get_closest_point_to_segment(np, from, to).distance_to(np) < rad[i] + fuse:
 				_burst(to)
 				return
+		# The ground is not asked about while the round is nowhere near it. An
+		# artillery arc spends most of a minute kilometres up, and that was two
+		# crossings into the extension a tick to be told so. Clearance cannot
+		# close faster than the round flies plus the ground rising under it at
+		# forty-five degrees, so a round with height in hand is left alone for
+		# the time that would take, less a margin.
+		_ground_in -= delta
+		if _ground_in > 0.0:
+			if life <= 0.0:
+				queue_free()
+			return
 		var bed := Sim.height_at(to.x, to.z)
 		var sea_b: float = Sim.sea_at(to.x, to.z)
+		var clear_by: float = to.y - maxf(bed, sea_b)
+		if clear_by > 400.0:
+			_ground_in = (clear_by - 250.0) / maxf(vel.length() * 2.0, 50.0)
 		if to.y <= sea_b and bed < sea_b:
 			# a shell striking the sea goes off at the surface
 			Effects.splash(get_tree().current_scene,
