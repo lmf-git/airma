@@ -25,6 +25,9 @@ static func side_size(team: int) -> int:
 	return clampi(size_us if team == 0 else size_them, 1, 24)
 const RESPAWN := 4.5
 const KILL_GOAL := 60
+## What the match is played to, chosen on the mission screen.
+const GOALS := [20, 30, 40, 60, 80, 100, 150, 200]
+static var kill_goal := KILL_GOAL
 const KITS := ["carbine", "smg", "carbine", "shotgun", "dmr", "carbine", "smg"]
 
 ## Chosen in the hangar before the match: which town.
@@ -89,6 +92,8 @@ const STREAK_POOL := [
 		"note": "Two points on the map set the line; a B-2 comes over and lays a carpet along it."},
 	{"id": "missile", "name": "FIRE MISSION", "at": 9,
 		"note": "A launcher out of town lays rounds on your mark."},
+	{"id": "cruise", "name": "CRUISE MISSILE", "at": 10,
+		"note": "Launched at a spot you pick on the map. It flies itself in, then you steer it down from above the target with every hostile marked."},
 	{"id": "tacnuke", "name": "TACTICAL NUKE", "at": 20,
 		"note": "A small warhead on a spot you pick. Nothing within eighty metres lives and nothing there is left standing — you included."},
 	{"id": "stratnuke", "name": "STRATEGIC NUKE", "at": 30,
@@ -113,7 +118,9 @@ static func chosen_streaks() -> Array:
 const UAV_TIME := 30.0
 var streak := 0
 var bank := {"uav": 0, "mortar": 0, "strike": 0, "jdam": 0, "gunship": 0, "carpet": 0,
-	"missile": 0, "tacnuke": 0, "stratnuke": 0}
+	"missile": 0, "cruise": 0, "tacnuke": 0, "stratnuke": 0}
+## The cruise missile in the air, if there is one.
+var _cruise: CruiseMissile = null
 ## Warheads on their way: [seconds left, where, lethal radius, strategic].
 var _nukes: Array = []
 const TAC_LETHAL := 80.0
@@ -950,6 +957,29 @@ func _call(id: String) -> bool:
 			return false
 		"missile_at":
 			return world.has_method("cqb_fire_mission") and world.cqb_fire_mission(_pick_at)
+		"cruise":
+			if is_instance_valid(_cruise):
+				Sim.report("one cruise missile at a time", Sim.Ev.BAD)
+				return false
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				world.map.pick("CRUISE MISSILE", func(p: Vector3): _picked("cruise", p))
+			return false
+		"cruise_at":
+			if is_instance_valid(_cruise):
+				return false
+			_cruise = CruiseMissile.new()
+			_cruise.arena = self
+			_cruise.target = Vector3(_pick_at.x, _ground(_pick_at.x, _pick_at.z), _pick_at.z)
+			# in over his own shoulder, so it arrives going the way he is facing
+			var back := Vector3(player.global_position.x - _pick_at.x, 0.0,
+				player.global_position.z - _pick_at.z)
+			_cruise.from_dir = back.normalized() if back.length() > 5.0 \
+				else Vector3(sin(player.yaw), 0.0, cos(player.yaw))
+			world.add_child(_cruise)
+			Sim.report("cruise missile launched — it is yours in about %d seconds" % int(_cruise.eta),
+				Sim.Ev.GOOD)
+			return true
 	return false
 
 var _picking := false
@@ -976,7 +1006,7 @@ class CarpetRun extends Node3D:
 	const HEIGHT := 1100.0
 	## Between canisters. Each one opens over the line and covers sixty metres
 	## of it with bomblets, so the footprints overlap at this.
-	const SPACING := 24.0
+	const SPACING := 40.0
 	const LONGEST := 600.0
 	const RUN_IN := 7000.0
 	var arena: CqbMatch = null
@@ -999,7 +1029,7 @@ class CarpetRun extends Node3D:
 		var flat := Vector3(to.x - from.x, 0.0, to.z - from.z)
 		var length: float = minf(flat.length(), LONGEST)
 		_dir = flat.normalized() if flat.length() > 1.0 else Vector3.FORWARD
-		bombs = clampi(int(length / SPACING) + 1, 8, 51)
+		bombs = clampi(int(length / SPACING) + 1, 6, 16)
 		var base: float = from.y
 		# How far forward of its release a bomb lands from this height and speed,
 		# flown in the model the bombs fly.
@@ -1059,6 +1089,191 @@ class CarpetRun extends Node3D:
 			b.place(global_position + Vector3(0.0, -3.0, 0.0))
 		if _along >= _end:
 			queue_free()
+
+## A cruise missile sent at a mark on the map. It flies itself most of the way,
+## level and high; a kilometre and a half out and as far up, the picture is the
+## view from its nose and the mouse steers it the rest of the way down, with
+## every hostile man and vehicle boxed. Left alone it goes where it was sent.
+class CruiseMissile extends Node3D:
+	const SPEED := 240.0
+	const HEIGHT := 1500.0
+	const RANGE := 5200.0
+	## How far out, over the ground, the player is given it.
+	const HANDOVER := 1500.0
+	const BLAST := 2.4
+	var arena: CqbMatch = null
+	var target := Vector3.ZERO
+	var from_dir := Vector3.BACK
+	var eta := 0.0
+	var dir := Vector3.FORWARD
+	var guided := false
+	var _cam: Camera3D
+	var _view: CanvasLayer
+	var _body: Node3D
+	var _done := -1.0
+	var _held := false
+
+	func _init() -> void:
+		top_level = true
+
+	func _ready() -> void:
+		var st := MeshKit.begin()
+		MeshKit.cone(st, 0.26, 0.26, -2.2, 2.6, Vector3.ZERO, 10)
+		MeshKit.cone(st, 0.02, 0.26, -3.0, -2.2, Vector3.ZERO, 10)
+		MeshKit.box(st, Vector3(2.6, 0.04, 0.5), Vector3(0, -0.1, 0.2))
+		MeshKit.box(st, Vector3(0.9, 0.04, 0.35), Vector3(0, 0, 2.3))
+		MeshKit.box(st, Vector3(0.04, 0.6, 0.35), Vector3(0, 0.3, 2.3))
+		_body = MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.62, 0.64, 0.66), 0.5, 0.4)), "Body")
+		add_child(_body)
+		_cam = Camera3D.new()
+		_cam.fov = 58.0
+		_cam.near = 0.5
+		_cam.far = 45000.0
+		_cam.position = Vector3(0.0, 0.0, -3.3)
+		add_child(_cam)
+		dir = -from_dir
+		var start: Vector3 = target + from_dir * RANGE
+		start.y = target.y + HEIGHT
+		global_position = start
+		look_at(start + dir, Vector3.UP)
+		reset_physics_interpolation()
+		eta = (RANGE - HANDOVER) / SPEED
+		Sfx.play_at(get_parent(), "roar", start, 8.0, 1.1, 9000.0)
+
+	func _unhandled_input(e: InputEvent) -> void:
+		if not guided or _done >= 0.0 or not (e is InputEventMouseMotion):
+			return
+		var mm: Vector2 = Sim.mouse_rel(e as InputEventMouseMotion) * 0.0011
+		var b := global_transform.basis
+		dir = (dir - b.x * -mm.x - b.y * mm.y).normalized()
+		# never back up into the sky: it is a bomb with wings by now
+		if dir.y > -0.12:
+			dir = Vector3(dir.x, -0.12, dir.z).normalized()
+
+	func _take() -> void:
+		guided = true
+		# pointed at the mark as it is handed over: doing nothing hits it
+		dir = (target - global_position).normalized()
+		var p: Walker = arena.player if is_instance_valid(arena) else null
+		if p == null or not is_instance_valid(p) or p.dead or not p.cam.current:
+			return                      # nobody to give it to: it flies itself in
+		_held = true
+		arena.set_away(true)
+		_cam.current = true
+		_view = CanvasLayer.new()
+		_view.layer = 20
+		var v := CruiseView.new()
+		v.missile = self
+		_view.add_child(v)
+		add_child(_view)
+		Sim.report("CRUISE MISSILE — you have it. Mouse steers.", Sim.Ev.GOOD)
+
+	func _physics_process(delta: float) -> void:
+		if _done >= 0.0:
+			_done -= delta
+			if _done <= 0.0:
+				queue_free()
+			return
+		var here := global_position
+		if not guided:
+			var flat := Vector2(target.x - here.x, target.z - here.z).length()
+			if flat <= HANDOVER:
+				_take()
+		var nxt: Vector3 = here + dir * SPEED * delta
+		var wall: float = Obstacles.segment(here, nxt)
+		var hit := wall < 1.0
+		if hit:
+			nxt = here.lerp(nxt, wall)
+		var gy: float = Sim.height_at(nxt.x, nxt.z)
+		if nxt.y <= gy:
+			nxt.y = gy
+			hit = true
+		if hit:
+			_go_off(nxt)
+			return
+		global_position = nxt
+		var up := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
+		look_at(nxt + dir, up)
+
+	func _go_off(at: Vector3) -> void:
+		_body.visible = false
+		if is_instance_valid(_view):
+			_view.queue_free()
+		if is_instance_valid(arena):
+			arena._bomb(at, BLAST)
+			arena._bomb(at + Vector3(randf_range(-6, 6), 0, randf_range(-6, 6)), BLAST * 0.6)
+		# stand off and watch it for a moment before going back to the street
+		var back: Vector3 = at - dir * 70.0 + Vector3(0, 25.0, 0)
+		global_position = back
+		look_at(at, Vector3.UP)
+		reset_physics_interpolation()
+		_done = 1.4 if _held else 0.05
+
+	func _exit_tree() -> void:
+		if not _held:
+			return
+		_held = false
+		if is_instance_valid(arena):
+			arena.set_away(false)
+			var p: Walker = arena.player
+			if is_instance_valid(p) and is_instance_valid(p.cam) and _cam.current:
+				p.cam.current = true
+
+## What is drawn over the view from the nose: the aiming mark, the height, and
+## a box on everything of theirs that can be seen from up there.
+class CruiseView extends Control:
+	var missile: CruiseMissile = null
+
+	func _ready() -> void:
+		set_anchors_preset(Control.PRESET_FULL_RECT)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _process(_d: float) -> void:
+		queue_redraw()
+
+	func _mark(cam: Camera3D, at: Vector3, half: float, col: Color, tag: String) -> void:
+		if cam.is_position_behind(at):
+			return
+		var p: Vector2 = cam.unproject_position(at)
+		var d: float = cam.global_position.distance_to(at)
+		var px: float = clampf(half / maxf(d, 1.0) * size.y * 0.9, 7.0, 60.0)
+		draw_rect(Rect2(p - Vector2(px, px), Vector2(px, px) * 2.0), col, false, 2.0)
+		if tag != "":
+			draw_string(ThemeDB.fallback_font, p + Vector2(px + 4.0, 4.0), tag,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 12, col)
+
+	func _draw() -> void:
+		if not is_instance_valid(missile) or not is_instance_valid(missile.arena):
+			return
+		var cam: Camera3D = missile._cam
+		if not cam.current:
+			return
+		var mid := size * 0.5
+		var w := Color(1, 1, 1, 0.9)
+		for a in 4:
+			var u := Vector2.RIGHT.rotated(a * PI * 0.5)
+			draw_line(mid + u * 14.0, mid + u * 44.0, w, 2.0)
+		draw_arc(mid, 3.0, 0.0, TAU, 12, w, 2.0)
+		var arena: CqbMatch = missile.arena
+		var red := Color(1.0, 0.25, 0.2)
+		for s in arena.soldiers:
+			if is_instance_valid(s) and (s as Soldier).team != 0 and (s as Soldier).is_alive():
+				_mark(cam, (s as Node3D).global_position + Vector3(0, 1.0, 0), 1.6, red, "")
+		var amber := Color(1.0, 0.7, 0.2)
+		for v in get_tree().get_nodes_in_group("hittable"):
+			if not is_instance_valid(v) or not (v is Node3D) or v is Soldier or v is Walker \
+					or not ("team" in v) or int(v.team) == 0:
+				continue
+			if v.has_method("is_alive") and not v.is_alive():
+				continue
+			_mark(cam, (v as Node3D).global_position + Vector3(0, 1.5, 0), 5.0, amber,
+				String(v.call("display_name")) if v.has_method("display_name") else "VEHICLE")
+		# the mark it was sent at
+		_mark(cam, missile.target, 3.0, Color(1, 1, 1, 0.6), "MARK")
+		var gy: float = Sim.height_at(missile.global_position.x, missile.global_position.z)
+		draw_string(ThemeDB.fallback_font, Vector2(28, size.y - 60),
+			"CRUISE MISSILE    ALT %d m    mouse steers" % int(missile.global_position.y - gy),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, w)
 
 ## The drone a UAV streak puts up. It is there: it circles the town where it
 ## can be seen, it is a contact like any other aircraft, and anything that can
@@ -1159,7 +1374,7 @@ class CarpetBomb extends Node3D:
 		reset_physics_interpolation()
 	## Where a cluster canister opens, above the ground, and what is in it.
 	const OPEN_AT := 250.0
-	const BOMBLETS := 12
+	const BOMBLETS := 8
 	var arena: CqbMatch = null
 	var vel := Vector3.ZERO
 	var cluster := false
@@ -1225,7 +1440,7 @@ class CarpetBomb extends Node3D:
 			return
 		if nxt.y <= floor_y:
 			if is_instance_valid(arena):
-				arena._bomb(Vector3(nxt.x, floor_y, nxt.z), 0.5 if bomblet else 1.25)
+				arena._bomb(Vector3(nxt.x, floor_y, nxt.z), 1.0 if bomblet else 1.25, bomblet)
 			else:
 				Effects.explosion(get_tree().current_scene, Vector3(nxt.x, floor_y, nxt.z), 6.0)
 			queue_free()
@@ -1394,18 +1609,56 @@ func _team_goal(t: int, ft: int) -> Vector3:
 ## how much bigger or smaller than a stick bomb it is. It does not care about
 ## walls and it does not care whose side anyone is on, the man who called it
 ## included.
-func _bomb(at: Vector3, big := 1.0) -> void:
-	Effects.mute_blast = true
-	Effects.explosion(world, at + Vector3(0, 1.0, 0), 5.0 * big)
-	Effects.he_impact(world, at + Vector3(0, 0.6, 0), 4.5 * big)
-	Effects.mute_blast = false
+var _carpet_n := 0
+
+## `many` is one burst of a carpet: there are a hundred of them inside a few
+## seconds, and each drawn as a bomb is -- three fireballs, two of them lamps
+## reaching ninety metres, and a sound -- stopped the game while they went off
+## and did less than it looked. They are drawn cheaply and hit as hard.
+func _bomb(at: Vector3, big := 1.0, many := false) -> void:
+	if many:
+		_carpet_n += 1
+		var fb := Effects.Boom.new()
+		fb.radius = 6.0
+		fb.smoke = false
+		fb.life_max = 0.45
+		fb.lit = _carpet_n % 6 == 0
+		world.add_child(fb)
+		fb.global_position = at + Vector3(0, 1.0, 0)
+		var sm := Effects.Boom.new()
+		sm.radius = 7.0
+		sm.tint = Color(0.20, 0.19, 0.18)
+		sm.smoke = false
+		sm.lit = false
+		sm.life_max = 1.4
+		world.add_child(sm)
+		sm.global_position = at + Vector3(0, 2.5, 0)
+		if _carpet_n % 3 == 0:
+			Sfx.play_at(world, "boom", at, -4.0, randf_range(0.8, 1.1), 4500.0)
+	else:
+		Effects.mute_blast = true
+		Effects.explosion(world, at + Vector3(0, 1.0, 0), 5.0 * big)
+		Effects.he_impact(world, at + Vector3(0, 0.6, 0), 4.5 * big)
+		Effects.mute_blast = false
 	var kill_r: float = 14.0 * big
 	for n in soldiers.duplicate():
 		if not is_instance_valid(n) or (n as Soldier).team == 0:
 			continue
-		var d: float = (n as Soldier).global_position.distance_to(at)
+		# Height counts for less than distance along the street: a bomblet
+		# that goes off on a roof is still over the man under the eaves.
+		var off: Vector3 = (n as Soldier).global_position - at
+		off.y *= 0.35
+		var d: float = off.length()
 		if d < kill_r:
 			(n as Soldier).take_hit(320.0 * pow(1.0 - d / kill_r, 1.1), player)
+	# and whatever of theirs is parked in it
+	for v in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(v) or not (v is Node3D) or v is Soldier or v == player \
+				or not v.has_method("take_hit") or not ("team" in v) or int(v.team) == 0:
+			continue
+		var dv: float = (v as Node3D).global_position.distance_to(at)
+		if dv < kill_r * 0.7:
+			v.take_hit(140.0 * big * (1.0 - dv / (kill_r * 0.7)), player)
 	if is_instance_valid(player) and not away:
 		var dp: float = player.global_position.distance_to(at)
 		if dp < 9.0 * big:

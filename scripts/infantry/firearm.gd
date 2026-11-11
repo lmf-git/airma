@@ -750,6 +750,11 @@ class Rocket extends Node3D:
 		Effects.spare_team = team
 		Effects.explosion(world, at, blast, false)
 		Effects.he_impact(world, at, blast * 0.56)
+		if small:
+			# A 40 mm round kills inside five metres and hurts out to nine.
+			# Left to the two above it was lethal at three, and a round put
+			# through a window did nothing to the man beside it.
+			Effects._blast_infantry(world, at, 9.0)
 		Effects.credit = was_credit
 		Effects.spare_team = was_spare
 		if is_instance_valid(shooter) and shooter.has_method("hit_confirm") and struck != null:
@@ -780,7 +785,7 @@ static func grenade40(world: Node, shooter: Node, team: int, g: Dictionary, from
 	r.dmg = float(g["dmg"])
 	r.vel = dir * float(g["muzzle"])
 	r.fall = 9.81
-	r.blast = 3.4
+	r.blast = 4.8
 	r.arm = 10.0
 	r.small = true
 	r.life = 9.0

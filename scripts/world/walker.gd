@@ -23,7 +23,7 @@ const GRAV := 18.0
 const JUMP := 6.6
 const MAG := 30
 const BASE_FOV := 74.0
-const EYE_BACK := 0.13
+const EYE_BACK := 0.27
 ## Shoulder width, near enough, for deciding what he fits through.
 const BODY_R := 0.42
 
@@ -128,6 +128,8 @@ func shelter(on: bool) -> void:
 var hold_ads := false
 ## How far into the sights he is, 0 hip and 1 shouldered.
 var _ads := 0.0
+## 1 with the weapon lifted clear of a wall it would otherwise be stuck into.
+var _block := 0.0
 var _lean := 0.0
 var _eye := EYE
 var _shot_cd := 0.0
@@ -218,7 +220,7 @@ func _ready() -> void:
 	_take_up(int(slots[0]), false)
 	cam = Camera3D.new()
 	cam.far = 45000.0
-	cam.near = 0.06
+	cam.near = 0.03
 	cam.fov = BASE_FOV
 	cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	add_child(cam)
@@ -603,8 +605,20 @@ func _step_in_frame(delta: float) -> void:
 	elif Sim.tapped(&"interact"):
 		exit_frame(get_tree().current_scene)
 
+## A click on the map, or any other screen with a pointer, is not a pull of
+## the trigger -- and nor is the same click still held as that screen closes:
+## the button has to come up once before it counts again.
+var _ui_click := false
+
 func _trigger() -> bool:
-	return Sim.held(&"foot_fire") or Sim.held(&"gun")
+	var down: bool = Sim.held(&"foot_fire") or Sim.held(&"gun")
+	if Sim.ui_pointer:
+		_ui_click = true
+		return false
+	if _ui_click:
+		_ui_click = down
+		return false
+	return down
 
 # ------------------------------------------------------- over, up, and down for
 ## Is there something in the way that he can get over or onto? `auto` is the
@@ -998,7 +1012,7 @@ func _fight(delta: float) -> void:
 				randf_range(0.95, 1.05), 60.0)
 
 	var full: int = int(g["mag"])
-	var pulled: bool = _trigger()
+	var pulled: bool = _trigger() and _block < 0.4
 	var edge: bool = pulled and not _trigger_was
 	_trigger_was = pulled
 	if Sim.tapped(&"reload") and reloading <= 0.0 and ammo < full and spare > 0:
@@ -1299,8 +1313,17 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	var moving := flat.length() > 0.4
 	# Down the sights while the button is held, and never while reloading or
 	# sprinting -- both of which take the weapon off the shoulder.
+	# A muzzle that would be inside a wall is not pointed at it: the weapon
+	# comes up out of the way, and cannot be fired until there is room.
+	var jam := false
+	if frame == null and not dead and not g.get("hand", false):
+		var e0: Vector3 = body.eye_pos()
+		var ld: Vector3 = Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, pitch) * Vector3.FORWARD
+		jam = Obstacles.segment(e0, e0 + ld * (float(g["len"]) + 0.35)) < 1.0
+	_block = move_toward(_block, 1.0 if jam else 0.0, delta * 6.0)
+	body.in_block = _block
 	var want_ads: float = 1.0 if ((Sim.held(&"ads") or hold_ads) and reloading <= 0.0
-		and not _sprint and not chute) else 0.0
+		and not _sprint and not chute and _block < 0.3) else 0.0
 	_ads = move_toward(_ads, want_ads, delta * (7.5 if not g.get("scope", false) else 5.0))
 	# Leaning out round a corner. Q and E are the rudder in a cockpit and
 	# nothing at all on the ground.

@@ -52,10 +52,24 @@ func _ready() -> void:
 	root.add_theme_constant_override("separation", 14)
 	pad.add_child(root)
 	root.add_child(_head("DEPLOY", 30))
+	# The columns scroll. The killstreak list made the panel taller than a
+	# laptop screen, and a panel in a centre container just grows off both
+	# ends of it: the bottom ticks and the DEPLOY button could not be reached.
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	root.add_child(scroll)
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 26)
+	cols.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	root.add_child(cols)
+	scroll.add_child(cols)
+	var fit := func():
+		var vs: Vector2 = get_viewport_rect().size
+		panel.custom_minimum_size = Vector2(minf(980.0, vs.x - 40.0),
+			clampf(vs.y - 60.0, 320.0, 860.0))
+	resized.connect(fit)
+	fit.call()
 
 	# ---- the classes
 	var left := VBoxContainer.new()

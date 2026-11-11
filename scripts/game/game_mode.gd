@@ -84,7 +84,7 @@ func start(id: String) -> void:
 		"tdm", "ffa":
 			kill_goal = 12 if mode == "ffa" else 20
 		"cqb", "ground", "arms":
-			kill_goal = CqbMatch.KILL_GOAL
+			kill_goal = CqbMatch.kill_goal
 			Sim.no_air_threat = mode != "arms"
 		"strike":
 			# Nothing on this range shoots at an aeroplane, whatever it is.

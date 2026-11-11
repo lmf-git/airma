@@ -115,6 +115,13 @@ func set_head_visible(v: bool) -> void:
 	for m in _head_meshes:
 		if is_instance_valid(m):
 			m.visible = v
+	# The chest and hips are what the first-person camera sits inside; the
+	# arms and legs are separate joints and stay.
+	for j in [torso, hips]:
+		if is_instance_valid(j):
+			for m in j.get_children():
+				if m is MeshInstance3D:
+					m.visible = v
 
 # --------------------------------------------------------------------------
 func pose_idle() -> void:
@@ -402,6 +409,8 @@ var in_pitch := 0.0
 ## 1 with the weapon up and ready, 0 carried low: sprinting, or nothing to do.
 var in_ready := 1.0
 var in_ads := 0.0
+## 1 with the muzzle lifted clear of a wall in front of him.
+var in_block := 0.0
 ## -1 leaning left round a corner, +1 right.
 var in_lean := 0.0
 ## How far through a reload, 0 to 1, or negative when not reloading.
@@ -928,6 +937,11 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	var dr: float = _draw * _draw
 	off.y -= 0.26 * dr
 	pitch_r -= 0.9 * dr
+
+	# up against a wall: muzzle to the sky, weapon drawn in to the chest
+	var bl: float = in_block * in_block * (3.0 - 2.0 * in_block)
+	off += Vector3(-0.02, -0.10, 0.10) * bl
+	pitch_r += 1.15 * bl
 
 	var aim := Basis(Vector3.BACK, -in_lean * 0.10) * Basis(Vector3.RIGHT, look)
 	var wb: Basis = aim * Basis(Vector3.UP, yaw_r) * Basis(Vector3.RIGHT, pitch_r) \

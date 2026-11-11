@@ -70,6 +70,11 @@ const HANDOVER_IN := 4.6
 ## chart is handed to this as a point on the ground, and the map closes.
 var pick_cb: Callable = Callable()
 var pick_label := ""
+## The first end of a two click pick (a carpet's line), while the second is awaited.
+var pick_from := Vector3.INF
+## Where support has been called down: {at, from, label, until (msec)}.
+var pick_marks: Array = []
+var _close_tok := 0
 
 ## Chart zoom for a globe zoom at the same scale in the middle of the screen,
 ## and back. The chart is `0.86 * zoom` screens to its `2 * HALF` metres; the
@@ -133,6 +138,7 @@ func pick(label: String, cb: Callable) -> void:
 func cancel_pick() -> void:
 	pick_cb = Callable()
 	pick_label = ""
+	pick_from = Vector3.INF
 var centre := Vector2.ZERO     # world metres
 var follow := true
 var _tex: ImageTexture
@@ -509,13 +515,32 @@ func _gui_input(e: InputEvent) -> void:
 				var ppm1 := minf(vp1.x, vp1.y) * 0.86 * zoom / (HALF * 2.0)
 				var w1: Vector2 = centre + (mb.position - vp1 * 0.5) / ppm1
 				var cb := pick_cb
+				var what := pick_label
+				var from := pick_from
+				var at1 := Vector3(w1.x, Sim.height_at(w1.x, w1.y), w1.y)
 				cancel_pick()
-				toggle()
-				cb.call(Vector3(w1.x, Sim.height_at(w1.x, w1.y), w1.y))
+				cb.call(at1)
+				if pick_cb.is_valid():
+					# a second click is wanted: this one is the start of a line
+					pick_from = at1
+				else:
+					# Leave the mark where it was put and the map up for a
+					# moment. Closing on the click itself showed nothing: no
+					# way to tell where it had gone, or that it had gone.
+					pick_marks.append({"at": at1, "from": from, "label": what,
+						"until": Time.get_ticks_msec() + 30000})
+					_close_tok += 1
+					var tok := _close_tok
+					get_tree().create_timer(0.7).timeout.connect(func():
+						if tok == _close_tok and visible and not pick_cb.is_valid():
+							toggle())
+				queue_redraw()
 				return
 			_drag = mb.pressed
 			if mb.pressed:
 				follow = false
+	elif e is InputEventMouseMotion and pick_cb.is_valid() and not _drag:
+		queue_redraw()
 	elif e is InputEventMouseMotion and _drag:
 		var vp := get_viewport_rect().size
 		var px_per_m := minf(vp.x, vp.y) * 0.86 * zoom / (HALF * 2.0)
@@ -812,7 +837,39 @@ func _draw() -> void:
 		var bar: float = 50.0 * ppm
 		draw_line(Vector2(24, vp.y - 60), Vector2(24 + bar, vp.y - 60), Color(1, 1, 1, 0.9), 2.0)
 		_label(Vector2(24, vp.y - 78), "50 m", Color(1, 1, 1, 0.9), 12)
+	# where support has been called down, for as long as it matters
+	var now_ms := Time.get_ticks_msec()
+	var mkc := Color(1.0, 0.35, 0.2)
+	for i in range(pick_marks.size() - 1, -1, -1):
+		var pm: Dictionary = pick_marks[i]
+		if now_ms > int(pm["until"]):
+			pick_marks.remove_at(i)
+			continue
+		var at_m: Vector3 = pm["at"]
+		var q := _w2s(Vector2(at_m.x, at_m.z), org, ppm)
+		var fr: Vector3 = pm["from"]
+		if fr != Vector3.INF:
+			var q0 := _w2s(Vector2(fr.x, fr.z), org, ppm)
+			draw_line(q0, q, mkc, 3.0)
+			draw_arc(q0, 7.0, 0.0, TAU, 16, mkc, 2.0)
+		draw_arc(q, 12.0, 0.0, TAU, 24, mkc, 2.2)
+		draw_line(q - Vector2(18, 0), q + Vector2(18, 0), mkc, 1.6)
+		draw_line(q - Vector2(0, 18), q + Vector2(0, 18), mkc, 1.6)
+		_label(q + Vector2(16, -20), String(pm["label"]).get_slice(" — ", 0), mkc, 13)
 	if pick_cb.is_valid():
+		# the cursor is the aiming mark while a pick is waited for
+		var mq := get_local_mouse_position()
+		var pc := Color(1.0, 0.9, 0.3)
+		if pick_from != Vector3.INF:
+			var p0 := _w2s(Vector2(pick_from.x, pick_from.z), org, ppm)
+			draw_arc(p0, 7.0, 0.0, TAU, 16, pc, 2.0)
+			draw_line(p0, mq, pc, 2.5)
+			_label(mq + Vector2(16, 8), "%d m" % int(p0.distance_to(mq) / ppm), pc, 13)
+		draw_arc(mq, 14.0, 0.0, TAU, 24, pc, 2.0)
+		draw_line(mq - Vector2(22, 0), mq - Vector2(6, 0), pc, 1.6)
+		draw_line(mq + Vector2(6, 0), mq + Vector2(22, 0), pc, 1.6)
+		draw_line(mq - Vector2(0, 22), mq - Vector2(0, 6), pc, 1.6)
+		draw_line(mq + Vector2(0, 6), mq + Vector2(0, 22), pc, 1.6)
 		draw_rect(Rect2(0, 0, vp.x, 44), Color(0.5, 0.1, 0.05, 0.85))
 		_label(Vector2(24, 12), "%s — click where you want it.  M cancels." % pick_label,
 			Color(1, 0.95, 0.85), 18)

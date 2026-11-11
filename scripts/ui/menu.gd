@@ -20,9 +20,9 @@ const MISSIONS := [
 	["conquest", "CONQUEST", "Hostile. Five sectors across the valley — hold more than they do and their tickets bleed away."],
 	["rush", "RUSH", "Hostile. Sectors open one at a time; smash the garrison or hold the ring to advance."],
 	["warlords", "WARLORDS", "Hostile. Sequential sectors that pay command points as you take them."],
-	["cqb", "CQB", "Hostile, and on foot. Two squads in the streets of a town, as many a side as you choose — no vehicles, no air. Rifles, corners and whatever is lying in the road to get behind. First side to sixty kills."],
-	["ground", "GROUND COMBAT", "Hostile. The same streets with armour in them: two squads and two vehicles a side. Take a tank, a fighting vehicle or anything else off the ground list — or go on foot and stay out of their way. First side to sixty kills."],
-	["arms", "COMBAT", "Hostile. Everything over one town: infantry in the streets, armour among them and both sides' aircraft overhead. Take an aeroplane, a helicopter, a vehicle, or go on foot. First side to sixty kills."],
+	["cqb", "CQB", "Hostile, and on foot. Two squads in the streets of a town, as many a side as you choose — no vehicles, no air. Rifles, corners and whatever is lying in the road to get behind. First side to the kills you set."],
+	["ground", "GROUND COMBAT", "Hostile. The same streets with armour in them: two squads and two vehicles a side. Take a tank, a fighting vehicle or anything else off the ground list — or go on foot and stay out of their way. First side to the kills you set."],
+	["arms", "COMBAT", "Hostile. Everything over one town: infantry in the streets, armour among them and both sides' aircraft overhead. Take an aeroplane, a helicopter, a vehicle, or go on foot. First side to the kills you set."],
 	["tdm", "TEAM DEATHMATCH", "Hostile. Two sides, first to twenty kills."],
 	["ffa", "FREE FOR ALL", "Hostile. Everyone shoots everyone; twelve kills wins."],
 	["carrier", "CARRIER TRAP", "No threats. Three miles behind the boat with the hook down."],
@@ -215,6 +215,14 @@ func _ready() -> void:
 	them.select(maxi(CqbMatch.SIZES.find(CqbMatch.size_them), 0))
 	us.item_selected.connect(func(i: int): CqbMatch.size_us = int(CqbMatch.SIZES[i]))
 	them.item_selected.connect(func(i: int): CqbMatch.size_them = int(CqbMatch.SIZES[i]))
+	# and what it is played to
+	var goals: Array = []
+	for n in CqbMatch.GOALS:
+		goals.append("%d" % int(n))
+	var to_win := _cqb_pick("KILLS TO WIN", goals)
+	to_win.custom_minimum_size = Vector2(72, 30)
+	to_win.select(maxi(CqbMatch.GOALS.find(CqbMatch.kill_goal), 0))
+	to_win.item_selected.connect(func(i: int): CqbMatch.kill_goal = int(CqbMatch.GOALS[i]))
 
 	var mdesc := Label.new()
 	mdesc.name = "MissionDesc"

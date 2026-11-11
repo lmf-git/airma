@@ -174,11 +174,15 @@ static func bullet_impact(world: Node, pos: Vector3, hard: bool) -> void:
 	if world == null or not world.is_inside_tree():
 		return
 	var e := Boom.new()
-	e.radius = 0.16 if hard else 0.22
-	e.tint = Color(0.80, 0.76, 0.68) if hard else Color(0.62, 0.52, 0.40)
+	# A puff of dust or grit, not a flash. Drawn as every burst is -- a
+	# glowing ball that swells -- each round that landed read as a small
+	# explosive going off.
+	e.radius = 0.07 if hard else 0.11
+	e.tint = Color(0.70, 0.67, 0.61) if hard else Color(0.50, 0.43, 0.34)
 	e.smoke = false
 	e.lit = false
-	e.life_max = 0.28
+	e.dusty = true
+	e.life_max = 0.22
 	world.add_child(e)
 	e.global_position = pos
 	if randf() < 0.6:
@@ -1460,6 +1464,8 @@ class Boom extends Node3D:
 	## smoke left hanging behind one does not, and a grey lamp under a shell
 	## burst reads as fog rather than as soot.
 	var lit := true
+	## Dust rather than fire: laid over the picture, not added to it as light.
+	var dusty := false
 	var _mi: MeshInstance3D
 	var _light: OmniLight3D
 	var _mat: StandardMaterial3D
@@ -1482,7 +1488,8 @@ class Boom extends Node3D:
 		_mat = StandardMaterial3D.new()
 		_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		_mat.blend_mode = BaseMaterial3D.BLEND_MODE_MIX if dusty \
+			else BaseMaterial3D.BLEND_MODE_ADD
 		_mat.albedo_color = tint
 		_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		# Transparent surfaces do not write depth; they are sorted, and the sort
@@ -1517,8 +1524,11 @@ class Boom extends Node3D:
 		if is_instance_valid(_light):
 			_light.light_energy = (14.0 + radius * 2.6) * maxf(1.0 - t * t, 0.0)
 		_mi.scale = Vector3.ONE * radius * (0.25 + 1.4 * t)
-		_mat.albedo_color = tint * (1.0 - t) + Color(0, 0, 0, 0)
-		_mat.albedo_color.a = 1.0 - t
+		if dusty:
+			_mat.albedo_color = Color(tint.r, tint.g, tint.b, 0.4 * (1.0 - t))
+		else:
+			_mat.albedo_color = tint * (1.0 - t) + Color(0, 0, 0, 0)
+			_mat.albedo_color.a = 1.0 - t
 		if _light:
 			_light.light_energy = 12.0 * (1.0 - t) * (1.0 - t)
 
