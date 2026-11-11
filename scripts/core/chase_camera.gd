@@ -40,7 +40,15 @@ var _free := false
 var pod_slew := false
 var diag := false
 var clamped_frames := 0
-var weapon_cam: Node3D = null    # ride a round in flight
+var weapon_cam: Node3D = null:   # ride a round in flight
+	set(v):
+		weapon_cam = v
+		_wcam_live = v != null
+## Set while a ride is on, including the frames between the round going off and
+## this camera noticing and starting to hold on the spot. Without it there was
+## a frame in which nothing was being ridden and nothing held, and whoever was
+## waiting for the ride to end took the screen back before the impact.
+var _wcam_live := false
 ## How far across to the round the view has come, and what the draw distance
 ## was before it went out there.
 var _wcam_blend := 1.0
@@ -87,14 +95,18 @@ func cycle() -> void:
 	_boom = Vector3.ZERO
 	_aim = Vector3.ZERO
 
+## On a round, or holding on where the last one went off.
+func riding() -> bool:
+	return _wcam_live or _wcam_hold > 0.0
+
 func shake(amount: float) -> void:
 	_shake = minf(_shake + amount, 1.2)
 
 func _unhandled_input(e: InputEvent) -> void:
 	if _free and not pod_slew and e is InputEventMouseMotion:
-		var mm2 := e as InputEventMouseMotion
-		free_yaw = clampf(free_yaw - mm2.relative.x * 0.0042, -2.7, 2.7)
-		free_pitch = clampf(free_pitch - mm2.relative.y * 0.0042, -1.25, 1.25)
+		var mm2 := Sim.mouse_rel(e as InputEventMouseMotion)
+		free_yaw = clampf(free_yaw - mm2.x * 0.0042, -2.7, 2.7)
+		free_pitch = clampf(free_pitch - mm2.y * 0.0042, -1.25, 1.25)
 		return
 	if mode == Mode.ORBIT and e is InputEventMouseMotion \
 			and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
@@ -153,7 +165,13 @@ func _carry(held: Vector3, axis: Vector3, target: Vector3, delta: float) -> Vect
 
 func _process(delta: float) -> void:
 	# Weapon cam: ride whatever was last let go, until it goes off.
-	if weapon_cam != null:
+	#
+	# Asked of the ride, not of the round. A round that has gone off is a freed
+	# object, and a freed object reads as null -- so "is there a round" said no
+	# the instant it burst, the branch below that holds on the impact never
+	# ran, and the view snapped straight back to the aeroplane on the frame
+	# the explosion it was there to watch began.
+	if _wcam_live or weapon_cam != null:
 		if not is_instance_valid(weapon_cam):
 			# hold on the impact for a moment rather than snapping back the
 			# instant the round frees itself: the explosion is the bit worth

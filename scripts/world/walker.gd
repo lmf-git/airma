@@ -106,6 +106,20 @@ var reloading := 0.0
 var health := 100.0
 var dead := false
 var last_attacker: Node = null
+## True while the deploy screen is up. He is already standing at the start
+## line behind it, and the match only took him off the infantry's list: the
+## armour, the aircraft and every shell and stray round could still find him,
+## so a player could be killed while still choosing a class.
+var sheltered := false
+
+## Out of the fight until DEPLOY is pressed: nothing can pick him as a target
+## and nothing that lands near him does any harm.
+func shelter(on: bool) -> void:
+	sheltered = on
+	if on:
+		remove_from_group("hittable")
+	elif not dead and not is_in_group("hittable"):
+		add_to_group("hittable")
 
 ## Sights held up without the button, for the harness to photograph.
 var hold_ads := false
@@ -123,6 +137,7 @@ var _reload_span := 1.0
 var _reload_mark := 0
 var _reload_empty := false
 var _pump_in := 0.0
+var _cycle_snd := "pump"
 var _sprint := false
 var _steps_seen := 0
 var _since_hit := 99.0
@@ -271,11 +286,11 @@ func _unhandled_input(e: InputEvent) -> void:
 	if not cam.current or dead:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var mm := e as InputEventMouseMotion
+		var mm := Sim.mouse_rel(e as InputEventMouseMotion)
 		# slower through the sights, in proportion to how far they magnify
 		var k: float = 0.0032 * lerpf(1.0, cam.fov / BASE_FOV, _ads)
-		yaw -= mm.relative.x * k
-		pitch = clampf(pitch - mm.relative.y * k, -1.4, 1.35)
+		yaw -= mm.x * k
+		pitch = clampf(pitch - mm.y * k, -1.4, 1.35)
 
 ## Step into an aircraft hold: reparent, keep the world pose, zero the velocity.
 func enter_frame(hold: Node3D, jet: Node) -> void:
@@ -976,7 +991,7 @@ func _fight(delta: float) -> void:
 	if _pump_in > 0.0:
 		_pump_in -= delta
 		if _pump_in <= 0.0:
-			Sfx.play_at(world, "pump", global_position + Vector3(0, 1.4, 0), -8.0,
+			Sfx.play_at(world, _cycle_snd, global_position + Vector3(0, 1.4, 0), -8.0,
 				randf_range(0.95, 1.05), 60.0)
 
 	var full: int = int(g["mag"])
@@ -1029,20 +1044,45 @@ func _fight(delta: float) -> void:
 	var eye := cam.global_position
 	var skip: float = maxf((body.eye_pos() - eye).dot(look), 0.0) + 0.6
 	var start: Vector3 = eye + look * skip
-	var to_wall: float = Obstacles.segment(start, start + look * 600.0) * 600.0
+	# What is under the crosshair: the first wall, prop or piece of ground the
+	# line of sight meets.
+	#
+	# Ground under the crosshair used to be pushed out to sixty metres, to
+	# keep a fold in the road from catching the rounds -- which put the mark
+	# underground, and from a muzzle lower than the eye every round aimed at
+	# the road came down metres short of it. Lying down that is every shot.
+	# The fold is dealt with below, for what it is.
 	var seen: float = Firearm.sight_range(start, look, 600.0)
-	# Only something built counts as "what is under the crosshair" up close.
-	# The ground does not: lying down, the eye is a hand's breadth above it,
-	# and the first fold in the road a few metres out is "under the crosshair"
-	# as far as a ray is concerned -- so every round was sent at the road just
-	# in front of him instead of at what he was looking at over it. Past a
-	# rise in the ground the rounds converge on the line of sight well out.
-	if seen < to_wall - 0.5:
-		seen = maxf(seen, 60.0)
 	var mark: Vector3 = start + look * seen
-	var aim: Vector3 = (mark - from).normalized()
-	if mark.distance_to(from) < 1.6 or aim.dot(look) < 0.5:
+	# And held up for the drop over that distance, so it lands where it is
+	# pointed. Laid flat on the crosshair, a rifle round at three hundred
+	# metres is half a metre low, and along a line skimming the road that is
+	# a hundred metres short.
+	# Only for something actually there: with nothing under the crosshair the
+	# "mark" is just how far the look was taken, and holding up for six
+	# hundred metres lobs the round over the line of sight on the way.
+	# What it falls under: a rifle round all of it, a rocket a little (its
+	# motor holds it up), a guided missile none. The launcher table calls the
+	# AT4 a "rocket" -- this asked for "law" and so held an AT4 up for a
+	# rifle round's drop.
+	var launcher := String(g.get("launcher", ""))
+	var fall: float = 3.0 if launcher == "rocket" else (0.0 if launcher == "sam" else 9.81)
+	var speed: float = float(g["muzzle"])
+	# rounds and the 40 mm fly the whole model; the AT4's motor holds it up
+	var air_k: float = Firearm.drag_of(g) if launcher != "rocket" else -1.0
+	var aim: Vector3 = _lay(from, mark, speed, fall, seen >= 599.0, air_k)
+	# a grenade launcher is laid well above the line of sight at range
+	var off_line: float = 0.0 if launcher == "gl" else 0.5
+	if mark.distance_to(from) < 1.6 or aim.dot(look) < off_line:
 		aim = look
+	elif _fouled(from, mark) and not _fouled(start, mark):
+		# The muzzle cannot see what the eye can: a hump in the road a few
+		# metres in front of a man lying down, the sill a rifle is rested on,
+		# or anything below an over-the-shoulder view. The round goes from the
+		# line of sight, which on the screen is clear all the way, instead of
+		# into the ground in front of him.
+		from = start
+		aim = _lay(start, mark, speed, fall, seen >= 599.0, air_k)
 	var quiet: bool = suppressed and Firearm.can_suppress(g)
 	if g.has("launcher"):
 		if String(g["launcher"]) == "sam":
@@ -1056,6 +1096,8 @@ func _fight(delta: float) -> void:
 				return
 			Firearm.sam(world, self, side, from, look, lock_target)
 			lock_t = 0.0
+		elif String(g["launcher"]) == "gl":
+			Firearm.grenade40(world, self, side, g, from, aim)
 		else:
 			Firearm.rocket(world, self, side, g, from, aim)
 	else:
@@ -1072,11 +1114,58 @@ func _fight(delta: float) -> void:
 	yaw += randf_range(-1.0, 1.0) * float(g["side"]) * (1.0 - 0.3 * _ads)
 	_bloom = minf(_bloom + float(g["hip"]) * 0.22, float(g["hip"]) * 1.6)
 	body.kick(clampf(float(g["kick"]) * 34.0, 0.3, 1.5))
-	if g.get("shells", false):
-		_pump_in = 0.24
+	# Working the action between shots: a pump, a bolt, or nothing -- a drum
+	# launcher is loaded one round at a time but fires straight off the next.
+	var cyc := String(g.get("cycle", "pump" if g.get("shells", false) else ""))
+	if cyc != "":
+		_cycle_snd = cyc
+		_pump_in = 0.24 if cyc == "pump" else 0.40
 
 ## The seeker. With the missile up and the sights on something that flies,
 ## it takes a moment to settle; look away and it lets go.
+## Which way to send a round so it comes down on the mark: the arc for its
+## speed and what it falls under, or as far as it will go toward the mark if
+## the mark is out of reach. With nothing under the crosshair there is no
+## distance to allow for, and it goes the way it is pointed.
+func _lay(from: Vector3, mark: Vector3, speed: float, fall: float, open_sky: bool,
+		k := -1.0) -> Vector3:
+	if open_sky or fall <= 0.0:
+		return (mark - from).normalized()
+	var d: Vector3 = Firearm.lob(from, mark, speed, fall)
+	if d != Vector3.ZERO:
+		if k >= 0.0:
+			# The vacuum arc is the first guess; the round flies through air on
+			# a turning planet, so the guess is corrected against that until it
+			# comes down on the mark. Inside the first thirty metres the two are
+			# the same and this costs a step or two.
+			var sol: Dictionary = Ballistics.solve(from, mark, speed, k, d)
+			if not sol.is_empty():
+				return sol["dir"]
+		return d
+	var h := Vector3(mark.x - from.x, 0.0, mark.z - from.z)
+	return (h.normalized() + Vector3.UP).normalized() if h.length() > 0.01 \
+		else (mark - from).normalized()
+
+## Whether something stands between two points: a wall or a prop anywhere
+## along it, or the ground in the first stretch of it, where a line from a man
+## lying down is closest to the road. The far end is the mark itself, which is
+## on whatever it hit, so the last few per cent do not count.
+func _fouled(a: Vector3, b: Vector3) -> bool:
+	var span: float = a.distance_to(b)
+	if span < 0.5:
+		return false
+	if Obstacles.segment(a, b) < 0.97:
+		return true
+	var dir: Vector3 = (b - a) / span
+	var near: float = minf(span * 0.97, 25.0)
+	var s := 0.4
+	while s < near:
+		var p: Vector3 = a + dir * s
+		if p.y < Sim.height_at(p.x, p.z):
+			return true
+		s += 0.5
+	return false
+
 func _seek(delta: float, g: Dictionary) -> void:
 	if String(g.get("launcher", "")) != "sam" or _ads < 0.6 or ammo <= 0:
 		lock_target = null
@@ -1136,8 +1225,8 @@ func _work_reload(delta: float, g: Dictionary, trigger_edge: bool) -> void:
 				_reload_mark = 0
 			else:
 				reloading = 0.0
-				if _reload_empty:
-					Sfx.play_at(world, "pump", at, -8.0, 1.0, 60.0)
+				if _reload_empty and String(g.get("cycle", "pump")) != "":
+					Sfx.play_at(world, String(g.get("cycle", "pump")), at, -8.0, 1.0, 60.0)
 					_shot_cd = 0.3
 		return
 	if _reload_mark == 0 and p > 0.22:
@@ -1311,7 +1400,7 @@ var _last_head := false
 var _last_low := false
 
 func take_hit(amount: float, from: Node = null) -> void:
-	if dead:
+	if dead or sheltered:
 		return
 	health -= amount
 	_last_amount = amount

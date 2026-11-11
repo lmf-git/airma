@@ -917,7 +917,7 @@ func _unhandled_input(e: InputEvent) -> void:
 	if not occupied or not alive:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		aim_mouse((e as InputEventMouseMotion).relative)
+		aim_mouse(Sim.mouse_rel(e as InputEventMouseMotion))
 
 ## Lay the piece with the mouse. Split out of the input handler so the guard
 ## below can be exercised without a captured pointer.
@@ -967,6 +967,9 @@ func _drive_input(delta: float) -> void:
 		if map_target != Vector3.INF:
 			turret_yaw = atan2(map_target.x - global_position.x,
 				-(map_target.z - global_position.z))
+			# off the straight bearing by what the planet's turn does to it
+			if not sol.is_empty() and sol.has("yaw"):
+				turret_yaw = float(sol["yaw"])
 			# and the readout follows the piece. aim_yaw is what the HUD prints
 			# as BEARING and what the wheel steers; leaving it on the mouse
 			# heading while the tubes swung to the map target is why the
@@ -1787,27 +1790,69 @@ func _ground_aim_now() -> Vector3:
 ## full charge when the target is beyond that.
 const ARTY_QE := 40.0
 
+## What the air takes off this piece's round per metre: see `Ballistics`. A
+## rocket is boosted for much of its flight, so it loses less than a shell.
+##
+## Lighter than a real 155 mm round's, on purpose: at a real one's the guns
+## would lose a third of the reach the game gives them. This still costs a
+## shell a few kilometres at full range, and still has to be aimed for.
+func shell_drag() -> float:
+	return 0.000005 if is_ripple() else 0.00001
+
+## The last solution, and what it was for. The HUD, the laying, the lay check
+## and the trigger all ask for it every frame, and against the full flight
+## model a solution is a few dozen flights of the round.
+var _sol: Dictionary = {}
+var _sol_for := Vector4.INF
+var _sol_from := Vector3.INF
+var _sol_t := 0
+
 func fire_solution(target: Vector3, v_max: float) -> Dictionary:
 	var origin: Vector3 = _muzzle.global_position
+	var key := Vector4(roundf(target.x), roundf(target.y), roundf(target.z), v_max)
+	if key == _sol_for and origin.distance_to(_sol_from) < 1.5 \
+			and Time.get_ticks_msec() - _sol_t < 500:
+		return _sol
+	_sol = _solve(origin, target, v_max)
+	_sol_for = key
+	_sol_from = origin
+	_sol_t = Time.get_ticks_msec()
+	return _sol
+
+## The vacuum answer first -- the quadrant elevation on a reduced charge if it
+## reaches, full charge on the low angle if not -- and then the same corrected
+## against the round's real flight: the air, the planet's curve and its turn.
+## The correction comes back as a bearing as well as an elevation, because over
+## twenty kilometres the turn alone puts a round a long way to one side.
+func _solve(origin: Vector3, target: Vector3, v_max: float) -> Dictionary:
 	var d := Vector2(target.x - origin.x, target.z - origin.z).length()
 	var dy := target.y - origin.y
 	var g := 9.81
 	if d < 60.0:
 		return {}
+	var k := shell_drag()
 	var el := deg_to_rad(ARTY_QE)
 	var denom := 2.0 * (d * tan(el) - dy)
 	if denom > 0.0:
 		var need := d / cos(el) * sqrt(g / denom)
 		if need <= v_max:
-			return {"elev": el, "speed": need,
-				"tof": d / (need * cos(el)), "range": d, "charge": need / v_max}
+			var r: Dictionary = Ballistics.solve_charge(origin, target, el, need, v_max, k)
+			if not r.is_empty():
+				return {"elev": el, "speed": float(r["speed"]), "yaw": float(r["yaw"]),
+					"tof": float(r["tof"]), "range": d, "charge": float(r["speed"]) / v_max}
 	# beyond the 40 degree arc: full charge on the low angle solution
 	var root := v_max * v_max * v_max * v_max - g * (g * d * d + 2.0 * dy * v_max * v_max)
 	if root < 0.0:
 		return {}
 	var low := atan((v_max * v_max - sqrt(root)) / (g * d))
-	return {"elev": low, "speed": v_max, "tof": d / (v_max * cos(low)),
-		"range": d, "charge": 1.0}
+	var flat := Vector2(target.x - origin.x, target.z - origin.z) / d
+	var guess := Vector3(flat.x * cos(low), sin(low), flat.y * cos(low))
+	var s: Dictionary = Ballistics.solve(origin, target, v_max, k, guess)
+	if s.is_empty():
+		return {}
+	var dirv: Vector3 = s["dir"]
+	return {"elev": asin(clampf(dirv.y, -1.0, 1.0)), "speed": v_max,
+		"yaw": atan2(dirv.x, -dirv.z), "tof": float(s["tof"]), "range": d, "charge": 1.0}
 
 func aim_at(point: Vector3) -> void:
 	var to := point - _turret.global_position
@@ -2234,7 +2279,8 @@ func lay_error() -> float:
 	var sol := fire_solution(aim, float(KINDS[kind]["muzzle"]))
 	if sol.is_empty():
 		return PI
-	var want_yaw := atan2(aim.x - global_position.x, -(aim.z - global_position.z))
+	var want_yaw: float = float(sol["yaw"]) if sol.has("yaw") \
+		else atan2(aim.x - global_position.x, -(aim.z - global_position.z))
 	var yaw_off := absf(wrapf(-want_yaw - (rotation.y + _turret.rotation.y), -PI, PI))
 	var max_el: float = deg_to_rad(70.0) if vclass() != "mbt" else deg_to_rad(20.0)
 	var want_el: float = clampf(float(sol["elev"]), deg_to_rad(-9.0), max_el)
@@ -2258,6 +2304,8 @@ func _fire_indirect(world: Node, kd: Dictionary) -> bool:
 	var tube := (-_muzzle.global_transform.basis.z).normalized()
 	var flat := Vector2(aim.x - origin.x, aim.z - origin.z)
 	var dir := Vector3(flat.x, 0, flat.y).normalized()
+	if sol.has("yaw"):
+		dir = Vector3(sin(float(sol["yaw"])), 0.0, -cos(float(sol["yaw"])))
 	if Sim.debug_weapons:
 		# the tubes and the ballistics must agree, or the round leaves in a
 		# direction the player can see is wrong however good the impact is
@@ -2285,6 +2333,7 @@ func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 	var shell := Aircraft.Shell.new()
 	shell.arm_dist = arm
 	shell.rocket = as_rocket
+	shell.drag = shell_drag()
 	if aim != Vector3.INF:
 		shell.set_meta("aim", aim)
 		shell.set_meta("origin", global_position)

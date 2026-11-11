@@ -467,6 +467,7 @@ static func play_ui(world: Node, id: String, db := 0.0, pitch := 1.0) -> void:
 	p.stream = get_clip(id)
 	p.volume_db = db
 	p.pitch_scale = pitch
+	p.bus = &"Interface"
 	p.finished.connect(p.queue_free)
 	world.add_child(p)
 	p.play()
@@ -482,6 +483,7 @@ static func play_at(world: Node, id: String, pos: Vector3, db := 0.0, pitch := 1
 	p.max_distance = dist
 	p.unit_size = 26.0
 	p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	p.bus = &"Effects"
 	p.finished.connect(p.queue_free)
 	world.add_child(p)
 	p.global_position = pos

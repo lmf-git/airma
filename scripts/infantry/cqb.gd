@@ -64,22 +64,52 @@ var _contacts := {0: [], 1: []}
 var _spots: Array = []
 var _queue: Array = []            # [seconds left, team, slot]
 var _rng := RandomNumberGenerator.new()
-## What a run of kills without dying earns, and the key that spends it.
-const STREAKS := [
-	{"id": "uav", "name": "UAV", "at": 3, "key": 4},
-	{"id": "strike", "name": "AIRSTRIKE", "at": 5, "key": 5},
-	{"id": "gunship", "name": "AC-130 GUNNER", "at": 7, "key": 6},
-	{"id": "missile", "name": "FIRE MISSION", "at": 9, "key": 7},
+## Everything a run of kills without dying can earn. Up to four are carried,
+## chosen on the deploy screen; they are spent with 4 to 7, cheapest first.
+const STREAK_POOL := [
+	{"id": "uav", "name": "UAV", "at": 3,
+		"note": "Every hostile on your map for thirty seconds."},
+	{"id": "mortar", "name": "MORTAR BARRAGE", "at": 4,
+		"note": "Ten rounds walked over a spot you pick on the map."},
+	{"id": "strike", "name": "AIRSTRIKE", "at": 5,
+		"note": "A stick of seven along the line to your mark."},
+	{"id": "jdam", "name": "PRECISION BOMB", "at": 6,
+		"note": "One heavy bomb, exactly where you put it."},
+	{"id": "gunship", "name": "AC-130 GUNNER", "at": 7,
+		"note": "You on the guns of a gunship over the town."},
+	{"id": "carpet", "name": "B-2 CARPET BOMB", "at": 8,
+		"note": "Two points on the map set the line; a B-2 comes over and lays a carpet along it."},
+	{"id": "missile", "name": "FIRE MISSION", "at": 9,
+		"note": "A launcher out of town lays rounds on your mark."},
 ]
+const MAX_STREAKS := 4
+## What he carries into the next life, by id. The four the game always had,
+## until he changes them.
+static var streak_pick: Array = ["uav", "strike", "gunship", "missile"]
+
+## The carried ones, cheapest first, each with the key that spends it.
+static func chosen_streaks() -> Array:
+	var out: Array = []
+	for k in STREAK_POOL:
+		if streak_pick.has(String(k["id"])):
+			out.append((k as Dictionary).duplicate())
+	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["at"]) < int(b["at"]))
+	for i in out.size():
+		out[i]["key"] = 4 + i
+	return out
+
 const UAV_TIME := 30.0
 var streak := 0
-var bank := {"uav": 0, "strike": 0, "gunship": 0, "missile": 0}
+var bank := {"uav": 0, "mortar": 0, "strike": 0, "jdam": 0, "gunship": 0, "carpet": 0,
+	"missile": 0}
+## The first end of a carpet's line, while the map waits for the second.
+var _carpet_from := Vector3.INF
 var uav_t := 0.0
 var map_tex: ImageTexture = null
 ## The player is somewhere else for a while -- at a gun station overhead --
 ## and the man standing in the street is not there to be shot.
 var away := false
-var _bombs: Array = []            # [seconds until it lands, where]
+var _bombs: Array = []            # [seconds until it lands, where, how big]
 var stats := {"props": 0, "ruins": 0, "free_cells": 0}
 ## What was put down and where: [kind, position, yaw].
 var props: Array = []
@@ -192,6 +222,8 @@ func _survey() -> void:
 					# passable, but the open road is preferred to somebody's wall
 					_vnav.set_point_weight_scale(Vector2i(i, j), 2.5)
 	stats["vehicle_cells"] = open_v
+	_comp = _components(_nav, _n)
+	_vcomp = _components(_vnav, _vn)
 	# The same survey, as a picture: what is solid and what is street. This
 	# is the map in the corner of the screen.
 	var img := Image.create(_n, _n, false, Image.FORMAT_RGBA8)
@@ -232,12 +264,86 @@ func _free_near(p: Vector3) -> Vector3:
 	var id := _free_cell(_cell(p))
 	return Vector3.INF if id.x < 0 else _cell_pos(id)
 
+## Which connected piece of open ground each cell is in, -1 for solid. A route
+## is asked for with a partial path allowed, so that a man sent somewhere he
+## cannot get to walks as near as he can -- and A* finds that out by visiting
+## every cell he *can* reach first. A courtyard with no way in, the gap behind
+## a row of houses: a goal in one cost a search of the whole town, ten
+## milliseconds and more in a single frame. Labelled once here, the goal is
+## moved to the nearest place he can reach before anything is searched.
+##
+## Four neighbours are enough: the grids only cut a corner when both cells
+## beside it are open, so a diagonal never joins two pieces that a pair of
+## straight steps would not.
+var _comp := PackedInt32Array()
+var _vcomp := PackedInt32Array()
+
+static func _components(grid: AStarGrid2D, n: int) -> PackedInt32Array:
+	var comp := PackedInt32Array()
+	comp.resize(n * n)
+	comp.fill(-1)
+	# solid or not, read once: the fill below looks at every cell four times
+	var open := PackedByteArray()
+	open.resize(n * n)
+	for j in n:
+		for i in n:
+			open[j * n + i] = 0 if grid.is_point_solid(Vector2i(i, j)) else 1
+	var label := 0
+	var stack := PackedInt32Array()
+	for start in n * n:
+		if comp[start] >= 0 or open[start] == 0:
+			continue
+		comp[start] = label
+		stack.append(start)
+		while not stack.is_empty():
+			var c: int = stack[stack.size() - 1]
+			stack.resize(stack.size() - 1)
+			var ci: int = c % n
+			# the four neighbours, those that are in the grid
+			if ci + 1 < n and comp[c + 1] < 0 and open[c + 1] == 1:
+				comp[c + 1] = label
+				stack.append(c + 1)
+			if ci > 0 and comp[c - 1] < 0 and open[c - 1] == 1:
+				comp[c - 1] = label
+				stack.append(c - 1)
+			if c + n < n * n and comp[c + n] < 0 and open[c + n] == 1:
+				comp[c + n] = label
+				stack.append(c + n)
+			if c - n >= 0 and comp[c - n] < 0 and open[c - n] == 1:
+				comp[c - n] = label
+				stack.append(c - n)
+		label += 1
+	return comp
+
+## The nearest cell to `id` in piece `want`, a ring at a time, or (-1, -1).
+static func _in_piece(comp: PackedInt32Array, n: int, id: Vector2i, want: int,
+		rings: int) -> Vector2i:
+	for r in range(0, rings + 1):
+		for dj in range(-r, r + 1):
+			for di in range(-r, r + 1):
+				if maxi(absi(di), absi(dj)) != r:
+					continue
+				var qi: int = id.x + di
+				var qj: int = id.y + dj
+				if qi >= 0 and qj >= 0 and qi < n and qj < n and comp[qj * n + qi] == want:
+					return Vector2i(qi, qj)
+	return Vector2i(-1, -1)
+
 ## A way from one place to another round everything solid, as points to walk.
 func path(from: Vector3, to: Vector3) -> PackedVector2Array:
 	var a := _free_cell(_cell(from))
 	var b := _free_cell(_cell(to))
 	if a.x < 0 or b.x < 0:
 		return PackedVector2Array()
+	if _comp.size() == _n * _n:
+		var mine: int = _comp[a.y * _n + a.x]
+		if _comp[b.y * _n + b.x] != mine:
+			# Somewhere he cannot get to from here: the nearest place he can,
+			# forty metres round it. Further than that and the old partial
+			# search is the answer, as it always was.
+			var near := _in_piece(_comp, _n, b, mine, 20)
+			if near.x >= 0:
+				b = near
 	var pts: PackedVector2Array = _nav.get_point_path(a, b, true)
 	# the first point is the cell he is already standing in
 	if pts.size() > 1:
@@ -330,6 +436,9 @@ func _spawn(team: int, slot: int) -> void:
 	var s := Soldier.new()
 	s.team = team
 	s.kit = KITS[(slot + team * 2) % KITS.size()]
+	# the other side carries the other side's rifle
+	if team == 1 and s.kit == "carbine":
+		s.kit = "ak"
 	s.callsign = ("Viper %d" if team == 0 else "Hostile %d") % (slot + 1)
 	s.name = s.callsign
 	s.set_meta("slot", slot)
@@ -361,9 +470,13 @@ func _on_died(who: Soldier, killer: Node, head: bool) -> void:
 	if by_player:
 		kills += 1
 		streak += 1
-		for k in STREAKS:
-			# the ladder comes round again after the top rung
-			if (streak - 1) % 9 + 1 == int(k["at"]):
+		var carried: Array = chosen_streaks()
+		var top := 1
+		for k0 in carried:
+			top = maxi(top, int(k0["at"]))
+		for k in carried:
+			# the ladder comes round again after the top rung of what he carries
+			if (streak - 1) % top + 1 == int(k["at"]):
 				bank[k["id"]] = int(bank[k["id"]]) + 1
 				Sim.report("%d in a row — %s ready, press %d" % [streak, String(k["name"]),
 					int(k["key"])], Sim.Ev.GOOD)
@@ -491,7 +604,16 @@ func _drive_armour(delta: float) -> void:
 				t.set_meta("cqb_goal", Vector3.INF)
 			continue
 		t.set_meta("cqb_wait", 0.0)
-		var route: PackedVector2Array = _vnav.get_point_path(_vcell(here), _vcell(goal), true)
+		var va := _vcell(here)
+		var vb := _vcell(goal)
+		if _vcomp.size() == _vn * _vn and _vcomp[vb.y * _vn + vb.x] != _vcomp[va.y * _vn + va.x]:
+			# a street it cannot reach from this one: the nearest it can, and
+			# that is where it is going now
+			var vnear := _in_piece(_vcomp, _vn, vb, _vcomp[va.y * _vn + va.x], 12)
+			if vnear.x >= 0:
+				vb = vnear
+				t.set_meta("cqb_goal", _vcell_pos(vb))
+		var route: PackedVector2Array = _vnav.get_point_path(va, vb, true)
 		if route.size() < 2:
 			t.set_meta("cqb_goal", Vector3.INF)
 			continue
@@ -528,9 +650,11 @@ func _process(delta: float) -> void:
 				(s as Soldier).set_process(false)
 	if over:
 		return
+	var _pc := Sim.prof_at()
 	_support(delta)
 	_under_wheels()
 	_drive_armour(delta)
+	Sim.prof_end(&"cqb.match", _pc)
 	for q in _queue:
 		q[0] = float(q[0]) - delta
 	while not _queue.is_empty() and float(_queue[0][0]) <= 0.0:
@@ -624,7 +748,7 @@ func _support(delta: float) -> void:
 			and not world.map.pick_cb.is_valid():
 		_picking = false
 	if is_instance_valid(player) and player.is_alive() and not away:
-		for k in STREAKS:
+		for k in chosen_streaks():
 			if int(bank[k["id"]]) > 0 and Sim.tapped(StringName("weapon_%d" % int(k["key"]))):
 				if _call(String(k["id"])):
 					bank[k["id"]] = int(bank[k["id"]]) - 1
@@ -634,7 +758,7 @@ func _support(delta: float) -> void:
 		if float(b[0]) > 0.0:
 			keep.append(b)
 			continue
-		_bomb(b[1])
+		_bomb(b[1], float(b[2]) if b.size() > 2 else 1.0)
 	_bombs = keep
 
 func _call(id: String) -> bool:
@@ -663,6 +787,49 @@ func _call(id: String) -> bool:
 			Sim.report("airstrike inbound on your mark — three seconds, get down", Sim.Ev.GOOD)
 			Sfx.play_at(world, "roar", at + Vector3(0, 160, 0) - run * 300.0, 8.0, 1.35, 4000.0)
 			return true
+		"mortar", "jdam":
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				world.map.pick("MORTAR BARRAGE" if id == "mortar" else "PRECISION BOMB",
+					func(p: Vector3): _picked(id, p))
+			return false
+		"mortar_at":
+			# ten rounds walked over the spot, a few seconds' flight apart
+			for i in 10:
+				var off := Vector3(_rng.randf_range(-20, 20), 0, _rng.randf_range(-20, 20))
+				var p: Vector3 = _pick_at + off
+				_bombs.append([4.0 + i * 0.7 + _rng.randf_range(0.0, 0.3),
+					Vector3(p.x, _ground(p.x, p.z), p.z), 0.65])
+			Sim.report("mortars on the way — ten rounds, first in four seconds", Sim.Ev.GOOD)
+			return true
+		"jdam_at":
+			var at2: Vector3 = _pick_at
+			_bombs.append([5.0, Vector3(at2.x, _ground(at2.x, at2.z), at2.z), 2.2])
+			Sim.report("precision bomb released — five seconds, get clear", Sim.Ev.GOOD)
+			Sfx.play_at(world, "roar", at2 + Vector3(0, 400, 0), 6.0, 1.2, 5000.0)
+			return true
+		"carpet":
+			# two picks: where the carpet starts, then where it ends
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				_carpet_from = Vector3.INF
+				world.map.pick("B-2 — click where the carpet STARTS", func(p: Vector3):
+					_carpet_from = p
+					world.map.pick("B-2 — click where the carpet ENDS",
+						func(q: Vector3): _picked("carpet", q)))
+			return false
+		"carpet_at":
+			if _carpet_from == Vector3.INF:
+				return false
+			var run := CarpetRun.new()
+			run.arena = self
+			run.from = _carpet_from
+			run.to = _pick_at
+			world.add_child(run)
+			_carpet_from = Vector3.INF
+			Sim.report("B-2 inbound — a carpet of %d along your line in about %d seconds" % [
+				run.bombs, int(run.eta)], Sim.Ev.GOOD)
+			return true
 		"gunship":
 			if world.has_method("cqb_gunship") and world.cqb_gunship(Vector3(centre.x,
 					_ground(centre.x, centre.y), centre.y)):
@@ -690,39 +857,195 @@ func _picked(id: String, at: Vector3) -> void:
 	if _call(id + "_at"):
 		bank[id] = int(bank[id]) - 1
 
-## One bomb of the stick. It does not care about walls and it does not care
-## whose side anyone is on, the man who called it included.
-func _bomb(at: Vector3) -> void:
+## A B-2 down a line the player drew on the map, laying a carpet of bombs
+## along it. It comes in from well short of the line at height, lets each bomb
+## go early enough that it falls onto its own stretch of the line -- worked out
+## by dropping one in the same flight model the bombs fly -- and goes on out the
+## far side. The bombs are real: they fall, and where they land they go off as
+## the match's own bombs do, credited to the man who called it.
+class CarpetRun extends Node3D:
+	const SPEED := 230.0
+	const HEIGHT := 1100.0
+	const SPACING := 12.0
+	const LONGEST := 600.0
+	const RUN_IN := 7000.0
+	var arena: CqbMatch = null
+	var from := Vector3.ZERO
+	var to := Vector3.ZERO
+	var bombs := 0
+	var eta := 0.0
+	var _dir := Vector3.FORWARD
+	var _start := Vector3.ZERO
+	var _along := 0.0
+	var _drops: Array = []            # along-track distances to let go at
+	var _end := 0.0
+
+	func _init() -> void:
+		top_level = true
+
+	func _enter_tree() -> void:
+		if not _drops.is_empty():
+			return
+		var flat := Vector3(to.x - from.x, 0.0, to.z - from.z)
+		var length: float = minf(flat.length(), LONGEST)
+		_dir = flat.normalized() if flat.length() > 1.0 else Vector3.FORWARD
+		bombs = clampi(int(length / SPACING) + 1, 8, 51)
+		var base: float = from.y
+		# How far forward of its release a bomb lands from this height and speed,
+		# flown in the model the bombs fly.
+		var p := Vector3(0.0, base + HEIGHT, 0.0)
+		var v := Vector3(0.0, 0.0, -SPEED)
+		var flown := 0.0
+		var t := 0.0
+		while p.y > base and t < 60.0:
+			v = Ballistics.step(p, v, CarpetBomb.DRAG, 1.0 / 30.0, flown)
+			p += v / 30.0
+			flown += v.length() / 30.0
+			t += 1.0 / 30.0
+		var lead: float = -p.z
+		_start = from - _dir * (lead + RUN_IN)
+		_start.y = base + HEIGHT
+		for i in bombs:
+			var s: float = length * float(i) / float(maxi(bombs - 1, 1))
+			_drops.append(RUN_IN + s)
+		_end = RUN_IN + lead + length + RUN_IN
+		eta = (RUN_IN + lead) / SPEED
+		# A carpet is iron and cluster bombs. The B-2 as it is set out carries
+		# a B83 and a B61 in its bays; this one is loaded for the job, and
+		# flies it with the doors open and the load showing.
+		var spec: Dictionary = JetSpec.get_spec("b2").duplicate(true)
+		for bay in spec["bays"]:
+			var st: Array = bay["stations"]
+			for i in st.size():
+				st[i]["weapon"] = "cbu97" if i % 2 == 0 else "gbu32"
+		var m: Dictionary = JetFactory.build(spec)
+		var root: Node3D = m["root"]
+		for g in m["gear"]:
+			(g as Node3D).visible = false
+		for bay2 in spec["bays"]:
+			for d in (m["doors"] as Dictionary).get(bay2["id"], []):
+				(d as Node3D).rotation.z = deg_to_rad(float(bay2["door_angle"])) \
+					* float((d as Node).get_meta("side", 1.0))
+		for k in m["stores"]:
+			(m["stores"][k] as Node3D).visible = true
+		add_child(root)
+		global_position = _start
+		look_at(_start + _dir, Vector3.UP)
+		Sfx.play_at(get_parent(), "roar", _start, 10.0, 0.8, 9000.0)
+
+	func _physics_process(delta: float) -> void:
+		_along += SPEED * delta
+		global_position = _start + _dir * _along
+		while not _drops.is_empty() and _along >= float(_drops[0]):
+			_drops.pop_front()
+			var b := CarpetBomb.new()
+			b.arena = arena
+			b.vel = _dir * SPEED
+			# every other one a cluster canister
+			b.cluster = _drops.size() % 2 == 1
+			get_parent().add_child(b)
+			b.global_position = global_position + Vector3(0.0, -3.0, 0.0)
+		if _along >= _end:
+			queue_free()
+
+## One of the carpet. It falls in the same flight model a round flies, and goes
+## off on whatever it meets first -- a roof or the road.
+class CarpetBomb extends Node3D:
+	const DRAG := 0.00002
+	## Where a cluster canister opens, above the ground, and what is in it.
+	const OPEN_AT := 250.0
+	const BOMBLETS := 10
+	var arena: CqbMatch = null
+	var vel := Vector3.ZERO
+	var cluster := false
+	## A bomblet out of a canister rather than a bomb.
+	var bomblet := false
+	var _flown := 0.0
+
+	func _ready() -> void:
+		top_level = true
+		var st := MeshKit.begin()
+		if bomblet:
+			MeshKit.cone(st, 0.05, 0.05, -0.1, 0.1, Vector3.ZERO, 6)
+		else:
+			MeshKit.cone(st, 0.18, 0.18, -0.9, 0.9, Vector3.ZERO, 8)
+		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
+			Color(0.42, 0.40, 0.22) if cluster or bomblet else Color(0.22, 0.23, 0.22), 0.6, 0.3)), "Bomb"))
+
+	func _physics_process(delta: float) -> void:
+		vel = Ballistics.step(global_position, vel, DRAG, delta, _flown)
+		var nxt: Vector3 = global_position + vel * delta
+		_flown += vel.length() * delta
+		var floor_y: float = maxf(Sim.height_at(nxt.x, nxt.z), Obstacles.top_at(nxt.x, nxt.z))
+		if cluster and nxt.y - floor_y < OPEN_AT:
+			# the canister opens and the bomblets go their own ways over the
+			# street, a few dozen metres across by the time they are down
+			for i in BOMBLETS:
+				var c := CarpetBomb.new()
+				c.arena = arena
+				c.bomblet = true
+				c.vel = vel + Vector3(randf_range(-11, 11), randf_range(-3, 3), randf_range(-11, 11))
+				get_parent().add_child(c)
+				c.global_position = nxt
+			Effects.dust(get_tree().current_scene, nxt, 1.5)
+			queue_free()
+			return
+		if nxt.y <= floor_y:
+			if is_instance_valid(arena):
+				arena._bomb(Vector3(nxt.x, floor_y, nxt.z), 0.5 if bomblet else 1.25)
+			else:
+				Effects.explosion(get_tree().current_scene, Vector3(nxt.x, floor_y, nxt.z), 6.0)
+			queue_free()
+			return
+		global_position = nxt
+		if vel.length_squared() > 1.0:
+			look_at(nxt + vel, Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD)
+
+## One bomb of the stick, one mortar round, or the one big bomb: `big` is
+## how much bigger or smaller than a stick bomb it is. It does not care about
+## walls and it does not care whose side anyone is on, the man who called it
+## included.
+func _bomb(at: Vector3, big := 1.0) -> void:
 	Effects.mute_blast = true
-	Effects.explosion(world, at + Vector3(0, 1.0, 0), 5.0)
-	Effects.he_impact(world, at + Vector3(0, 0.6, 0), 4.5)
+	Effects.explosion(world, at + Vector3(0, 1.0, 0), 5.0 * big)
+	Effects.he_impact(world, at + Vector3(0, 0.6, 0), 4.5 * big)
 	Effects.mute_blast = false
+	var kill_r: float = 14.0 * big
 	for n in soldiers.duplicate():
 		if not is_instance_valid(n) or (n as Soldier).team == 0:
 			continue
 		var d: float = (n as Soldier).global_position.distance_to(at)
-		if d < 14.0:
-			(n as Soldier).take_hit(320.0 * pow(1.0 - d / 14.0, 1.1), player)
+		if d < kill_r:
+			(n as Soldier).take_hit(320.0 * pow(1.0 - d / kill_r, 1.1), player)
 	if is_instance_valid(player) and not away:
 		var dp: float = player.global_position.distance_to(at)
-		if dp < 9.0:
-			player.take_hit(160.0 * (1.0 - dp / 9.0), player)
+		if dp < 9.0 * big:
+			player.take_hit(160.0 * (1.0 - dp / (9.0 * big)), player)
 
 func hud_state() -> Dictionary:
 	# who shows on the map: your own side always, theirs when a UAV is up or
 	# when they have just given themselves away by firing
 	var dots: Array = []
+	# and the same in metres, for a map that follows him rather than one fixed
+	# to the arena
+	var dots_w: Array = []
 	for s in soldiers:
 		if not is_instance_valid(s):
 			continue
 		var sd := s as Soldier
+		var at := Vector2(sd.global_position.x, sd.global_position.z)
 		if sd.team == 0:
 			dots.append([map_uv(sd.global_position), 0])
+			dots_w.append([at, 0])
 		elif uav_t > 0.0 or sd.loud > 0.0:
 			dots.append([map_uv(sd.global_position), 1])
+			dots_w.append([at, 1])
 	return {"kills": kills, "deaths": deaths, "headshots": headshots,
 		"blue": (_teams[0] as Array).size(), "red": (_teams[1] as Array).size(),
-		"streak": streak, "bank": bank, "streaks": STREAKS, "uav": uav_t,
-		"map": map_tex, "dots": dots,
+		"streak": streak, "bank": bank, "streaks": chosen_streaks(), "uav": uav_t,
+		"map": map_tex, "dots": dots, "dots_w": dots_w,
+		"area": Rect2(_corner, Vector2(HALF * 2.0, HALF * 2.0)),
+		"me_w": Vector2(player.global_position.x, player.global_position.z)
+			if is_instance_valid(player) else centre,
 		"me": map_uv(player.global_position) if is_instance_valid(player) else Vector2(0.5, 0.5),
 		"yaw": player.yaw if is_instance_valid(player) else 0.0}

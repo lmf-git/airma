@@ -24,9 +24,11 @@ var _rides: ItemList
 var _ride_ids: Array = []
 var _ride_box: VBoxContainer
 var _filling := false
+var _streak_ticks := {}
+var _streak_note: Label
 
-const LONG := ["carbine", "smg", "shotgun", "dmr"]
-const SECOND := ["smg", "carbine", "shotgun", "law", "stinger"]
+const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "lmg", "dmr", "sniper"]
+const SECOND := ["smg", "vector", "glock", "carbine", "shotgun", "gl", "law", "stinger"]
 
 func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -85,9 +87,8 @@ func _ready() -> void:
 	_primary = _choice(mid, "PRIMARY", LONG)
 	_second = _choice(mid, "SECOND", SECOND)
 	_sight = _choice(mid, "SIGHT", [])
-	for sgt in [["irons", "Iron sights — widest view"], ["dot", "Red dot"],
-			["scope", "Magnified scope — slow to bring up"]]:
-		_sight.add_item(String(sgt[1]))
+	for sgt in Firearm.SIGHTS:
+		_sight.add_item(String(Firearm.SIGHT_NAMES[sgt]))
 	_quiet = _tick(mid, "Suppressor — quiet, no flash, a little slower")
 	_grip = _tick(mid, "Foregrip — less climb, less wander")
 	_mag = _tick(mid, "Extended magazine — half as many again, slower to change")
@@ -95,6 +96,21 @@ func _ready() -> void:
 	_stats.add_theme_font_size_override("font_size", 13)
 	_stats.add_theme_color_override("font_color", Color(0.85, 0.92, 1.0))
 	mid.add_child(_stats)
+
+	# ---- what a run of kills buys: up to four, carried into every life
+	mid.add_child(_head("KILLSTREAKS — up to %d, spent with 4 to 7" % CqbMatch.MAX_STREAKS, 14))
+	for k in CqbMatch.STREAK_POOL:
+		var t := CheckButton.new()
+		t.text = "%-16s %d kills" % [String(k["name"]), int(k["at"])]
+		t.tooltip_text = String(k["note"])
+		t.add_theme_font_size_override("font_size", 13)
+		t.toggled.connect(_streak_toggled.bind(String(k["id"])))
+		mid.add_child(t)
+		_streak_ticks[String(k["id"])] = t
+	_streak_note = Label.new()
+	_streak_note.add_theme_font_size_override("font_size", 12)
+	_streak_note.add_theme_color_override("font_color", Color(0.7, 0.8, 0.88))
+	mid.add_child(_streak_note)
 
 	# ---- what to go in
 	_ride_box = VBoxContainer.new()
@@ -169,6 +185,7 @@ func open(takes: String, first: bool, faction: String) -> void:
 	_ride_box.visible = _ride_ids.size() > 1
 	_rides.select(0)
 	_pick(CqbMatch.class_pick)
+	_show_streaks()
 	visible = true
 
 func _add_ride(id: String, text: String) -> void:
@@ -226,7 +243,44 @@ func _show_stats(c: Dictionary) -> void:
 		String(s2["name"]),
 		"three rockets: armour, walls, anything" if String(s2.get("launcher", "")) == "rocket"
 		else ("two missiles: aircraft only, needs a lock" if String(s2.get("launcher", "")) == "sam"
-		else "magazine %d, %d rpm" % [int(s2["mag"]), int(60.0 / float(s2["cd"]))])]
+		else ("six 40 mm rounds in the drum, twelve more: they arc, and burst past ten metres"
+			if String(s2.get("launcher", "")) == "gl"
+		else "magazine %d, %d rpm" % [int(s2["mag"]), int(60.0 / float(s2["cd"]))]))]
+
+## One ticked or unticked. A fifth is refused rather than quietly dropping
+## one of the others, and the last one cannot be taken off -- a man with
+## nothing to earn plays a different game.
+func _streak_toggled(on: bool, id: String) -> void:
+	if _filling:
+		return
+	var pick: Array = CqbMatch.streak_pick
+	if on and not pick.has(id):
+		if pick.size() >= CqbMatch.MAX_STREAKS:
+			_filling = true
+			(_streak_ticks[id] as CheckButton).button_pressed = false
+			_filling = false
+			_streak_note.text = "four at most: take one off first"
+			return
+		pick.append(id)
+	elif not on and pick.has(id):
+		if pick.size() <= 1:
+			_filling = true
+			(_streak_ticks[id] as CheckButton).button_pressed = true
+			_filling = false
+			_streak_note.text = "carry at least one"
+			return
+		pick.erase(id)
+	_show_streaks()
+
+func _show_streaks() -> void:
+	_filling = true
+	for id in _streak_ticks:
+		(_streak_ticks[id] as CheckButton).button_pressed = CqbMatch.streak_pick.has(id)
+	_filling = false
+	var keys := PackedStringArray()
+	for k in CqbMatch.chosen_streaks():
+		keys.append("%d %s" % [int(k["key"]), String(k["name"])])
+	_streak_note.text = "   ".join(keys)
 
 func _go() -> void:
 	var picked: PackedInt32Array = _rides.get_selected_items()

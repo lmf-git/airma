@@ -25,15 +25,15 @@ func _ready() -> void:
 	_roar = _loop("roar", -60.0)
 	_wind = _loop("wind", -60.0)
 	_tyres = _loop("tyres", -60.0)
-	_gun = _loop("gun", -60.0, false)
-	_warn = _loop("beep", -60.0, false)
+	_gun = _loop("gun", -60.0, false, &"Effects")
+	_warn = _loop("beep", -60.0, false, &"Interface")
 	_buffet = _loop("buffet", -60.0)
 
-func _loop(id: String, db: float, autoplay := true) -> AudioStreamPlayer:
+func _loop(id: String, db: float, autoplay := true, bus := &"Engines") -> AudioStreamPlayer:
 	var p := AudioStreamPlayer.new()
 	p.stream = Sfx.get_clip(id)
 	p.volume_db = db
-	p.bus = "Master"
+	p.bus = bus
 	add_child(p)
 	if autoplay:
 		p.play()

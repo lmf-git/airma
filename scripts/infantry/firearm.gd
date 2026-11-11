@@ -27,7 +27,7 @@ const KIT := [
 	{"id": "shotgun", "name": "M870 SHOTGUN", "mag": 6, "spare": 18, "cd": 0.82,
 		"auto": false, "dmg": 13.0, "muzzle": 400.0, "pellets": 9,
 		"hip": 0.044, "ads": 0.034, "fov": 58.0, "reload": 0.52, "kick": 0.050,
-		"side": 0.012, "sound": "shotgun", "db": 0.0, "work": "pump",
+		"side": 0.012, "sound": "shotgun", "db": 0.0, "work": "pump", "cycle": "pump",
 		"len": 0.52, "stock": 0.26, "mag_len": 0.0, "sight": 0.045, "dot": false,
 		"shells": true,
 		"grip_l": Vector3(0.0, -0.05, -0.33), "move": 0.97, "reach": 12.0},
@@ -60,6 +60,58 @@ const KIT := [
 		"len": 0.75, "stock": 0.0, "mag_len": 0.0, "sight": 0.095, "dot": false,
 		"launcher": "sam",
 		"grip_l": Vector3(0.0, -0.075, -0.24), "move": 0.84, "reach": 4000.0},
+	# Added to the end, never between: a man's slots and every round count he
+	# carries are kept by where a weapon sits in this table.
+	{"id": "ak", "name": "AK-74M RIFLE", "mag": 30, "spare": 5, "cd": 0.092,
+		"auto": true, "dmg": 28.0, "muzzle": 900.0, "pellets": 1,
+		"hip": 0.022, "ads": 0.0019, "fov": 46.0, "reload": 2.4, "kick": 0.014,
+		"side": 0.008, "sound": "carbine", "db": -2.0, "work": "bolt",
+		"len": 0.48, "stock": 0.25, "mag_len": 0.19, "sight": 0.085, "dot": true,
+		"grip_l": Vector3(0.0, -0.045, -0.28), "move": 0.98, "reach": 40.0},
+	{"id": "scar", "name": "SCAR-H BATTLE RIFLE", "mag": 20, "spare": 5, "cd": 0.10,
+		"auto": true, "dmg": 38.0, "muzzle": 800.0, "pellets": 1,
+		"hip": 0.024, "ads": 0.0015, "fov": 44.0, "reload": 2.5, "kick": 0.022,
+		"side": 0.009, "sound": "dmr", "db": -2.0, "work": "bolt",
+		"len": 0.50, "stock": 0.26, "mag_len": 0.13, "sight": 0.088, "dot": true,
+		"grip_l": Vector3(0.0, -0.045, -0.29), "move": 0.96, "reach": 55.0},
+	{"id": "vector", "name": "VECTOR SMG", "mag": 25, "spare": 5, "cd": 0.05,
+		"auto": true, "dmg": 19.0, "muzzle": 400.0, "pellets": 1,
+		"hip": 0.017, "ads": 0.0036, "fov": 54.0, "reload": 1.9, "kick": 0.006,
+		"side": 0.006, "sound": "smg", "db": -5.0, "work": "bolt",
+		"len": 0.24, "stock": 0.18, "mag_len": 0.18, "sight": 0.075, "dot": true,
+		"grip_l": Vector3(0.0, -0.085, -0.14), "move": 1.08, "reach": 15.0},
+	# a hundred rounds in the box under it, and slow on its feet
+	{"id": "lmg", "name": "M249 SAW", "mag": 100, "spare": 2, "cd": 0.072,
+		"auto": true, "dmg": 24.0, "muzzle": 915.0, "pellets": 1,
+		"hip": 0.034, "ads": 0.0028, "fov": 48.0, "reload": 5.2, "kick": 0.012,
+		"side": 0.010, "sound": "carbine", "db": -1.0, "work": "bolt",
+		"len": 0.52, "stock": 0.24, "mag_len": 0.10, "sight": 0.088, "dot": true,
+		"box": true,
+		"grip_l": Vector3(0.0, -0.05, -0.30), "move": 0.86, "reach": 45.0},
+	# a bolt between every shot, and one shot is usually all it takes
+	{"id": "sniper", "name": "M2010 SNIPER", "mag": 5, "spare": 5, "cd": 1.25,
+		"auto": false, "dmg": 140.0, "muzzle": 870.0, "pellets": 1,
+		"hip": 0.05, "ads": 0.0002, "fov": 12.0, "reload": 3.4, "kick": 0.060,
+		"side": 0.006, "sound": "dmr", "db": 2.0, "work": "bolt", "cycle": "bolt",
+		"len": 0.70, "stock": 0.28, "mag_len": 0.08, "sight": 0.10, "scope": true,
+		"grip_l": Vector3(0.0, -0.045, -0.33), "move": 0.88, "reach": 120.0},
+	{"id": "glock", "name": "G18 MACHINE PISTOL", "mag": 33, "spare": 3, "cd": 0.05,
+		"auto": true, "dmg": 17.0, "muzzle": 375.0, "pellets": 1,
+		"hip": 0.024, "ads": 0.0080, "fov": 60.0, "reload": 1.5, "kick": 0.016,
+		"side": 0.011, "sound": "pistol", "db": -5.0, "work": "bolt",
+		"len": 0.14, "stock": 0.0, "mag_len": 0.0, "sight": 0.045, "dot": false,
+		"hand": true,
+		"grip_l": Vector3(-0.035, -0.075, 0.035), "move": 1.1, "reach": 14.0},
+	# Six 40 mm rounds in a drum, loaded one at a time. They arc, they arm
+	# after ten metres, and they burst; a round that hits something closer
+	# than that is a lump of metal and nothing more.
+	{"id": "gl", "name": "MGL GRENADE LAUNCHER", "mag": 6, "spare": 12, "cd": 0.55,
+		"auto": false, "dmg": 60.0, "muzzle": 76.0, "pellets": 1,
+		"hip": 0.030, "ads": 0.005, "fov": 44.0, "reload": 0.75, "kick": 0.050,
+		"side": 0.010, "sound": "shotgun", "db": -6.0, "work": "pump", "cycle": "",
+		"len": 0.40, "stock": 0.0, "mag_len": 0.0, "sight": 0.085, "dot": false,
+		"launcher": "gl", "shells": true,
+		"grip_l": Vector3(0.0, -0.075, -0.20), "move": 0.92, "reach": 300.0},
 ]
 
 ## The loadouts a man can deploy with. Each is a starting point: the gunsmith
@@ -81,8 +133,22 @@ const CLASSES := [
 	{"id": "breacher", "name": "BREACHER", "primary": "shotgun", "second": "smg",
 		"sight": "irons", "quiet": false, "grip": true, "mag": true,
 		"note": "For going through doors. Useless across a square."},
+	{"id": "grenadier", "name": "GRENADIER", "primary": "carbine", "second": "gl",
+		"sight": "2x", "quiet": false, "grip": false, "mag": false,
+		"note": "Six rounds of 40 mm in a drum: over the wall, through the window, into the yard."},
+	{"id": "support", "name": "SUPPORT", "primary": "lmg", "second": "glock",
+		"sight": "acog", "quiet": false, "grip": true, "mag": false,
+		"note": "A hundred rounds before you change the box. Keeps their heads down."},
+	{"id": "sniper", "name": "SNIPER", "primary": "sniper", "second": "vector",
+		"sight": "scope", "quiet": true, "grip": false, "mag": false,
+		"note": "One round, one man, a bolt in between. Something quick for when they get close."},
 ]
-const SIGHTS := ["irons", "dot", "scope"]
+## Iron sights, a red dot, a 2x, a 4x prism and the long glass. The three
+## magnified ones are looked through: the view closes down to the glass.
+const SIGHTS := ["irons", "dot", "2x", "acog", "scope"]
+const SIGHT_NAMES := {"irons": "Iron sights — widest view", "dot": "Red dot",
+	"2x": "2x scope — a little closer, still quick", "acog": "ACOG 4x — prism, chevron",
+	"scope": "Long scope — slow to bring up"}
 
 ## One weapon as a particular man has it set up: the table entry with his
 ## sight, grip and magazine worked into the numbers.
@@ -99,9 +165,22 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 		"scope":
 			g["dot"] = false
 			g["scope"] = true
-			g["sight"] = 0.095
+			g["reticle"] = "cross"
+			g["sight"] = 0.095 if id != "sniper" else 0.10
 			# a marksman's glass on the marksman's rifle, a 4x on anything else
-			g["fov"] = 15.0 if id == "dmr" else 21.0
+			g["fov"] = 15.0 if id == "dmr" else (12.0 if id == "sniper" else 21.0)
+		"2x":
+			g["dot"] = false
+			g["scope"] = true
+			g["reticle"] = "ring"
+			g["sight"] = 0.088
+			g["fov"] = 36.0
+		"acog":
+			g["dot"] = false
+			g["scope"] = true
+			g["reticle"] = "chevron"
+			g["sight"] = 0.092
+			g["fov"] = 19.0
 		_:
 			g["dot"] = true
 			g["scope"] = false
@@ -118,6 +197,17 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 		g["move"] = float(g["move"]) * 0.98
 	return g
 
+
+## What the air takes off each round, per metre at sea level: see
+## `Ballistics`. Light, fast pistol and submachine-gun rounds shed speed
+## quickly; a heavy rifle bullet and a long sniper's round keep theirs; a
+## shotgun pellet is a ball and stops in a couple of hundred metres.
+const DRAG := {"carbine": 0.0011, "ak": 0.0012, "scar": 0.0008, "smg": 0.0018,
+	"vector": 0.0022, "shotgun": 0.006, "dmr": 0.0008, "sniper": 0.0005,
+	"pistol": 0.0022, "glock": 0.0022, "lmg": 0.0011, "gl": 0.0006}
+
+static func drag_of(g: Dictionary) -> float:
+	return float(DRAG.get(String(g.get("id", "")), 0.0011))
 
 ## Where the trigger hand closes, in weapon space. The same for all of them:
 ## that is what the origin means.
@@ -160,7 +250,21 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 	var ln: float = g["len"]
 	var st := MeshKit.begin()
 	var fu := MeshKit.begin()       # furniture: stock, grip, handguard
-	if g.has("launcher"):
+	if String(g.get("launcher", "")) == "gl":
+		# a short fat barrel, the drum behind it, a pistol grip, a folding
+		# stock and a reflex sight on the top rail
+		MeshKit.cone(st, 0.030, 0.030, -ln, -0.12, Vector3(0, 0.004, 0.0), 10)
+		MeshKit.cone(st, 0.034, 0.034, -ln - 0.01, -ln + 0.04, Vector3(0, 0.004, 0.0), 10)
+		MeshKit.cone(fu, 0.062, 0.062, -0.13, 0.02, Vector3(0, -0.012, 0.0), 12)
+		MeshKit.box(st, Vector3(0.020, 0.020, 0.30), Vector3(0, 0.062, -0.12))
+		MeshKit.box(fu, Vector3(0.034, 0.095, 0.042), Vector3(0, -0.068, 0.05))
+		MeshKit.box(fu, Vector3(0.034, 0.080, 0.04), Vector3(0, -0.07, -0.26))
+		MeshKit.box(st, Vector3(0.020, 0.024, 0.22), Vector3(0, 0.0, 0.14))
+		MeshKit.box(fu, Vector3(0.034, 0.09, 0.05), Vector3(0, -0.02, 0.25))
+		for sx in [-1.0, 1.0]:
+			MeshKit.box(st, Vector3(0.005, 0.036, 0.04), Vector3(sx * 0.018, float(g["sight"]) - 0.006, -0.05))
+		MeshKit.box(st, Vector3(0.041, 0.005, 0.04), Vector3(0, float(g["sight"]) + 0.014, -0.05))
+	elif g.has("launcher"):
 		# a tube, a grip under it and a sight on top
 		MeshKit.cone(fu, 0.052, 0.052, -ln, 0.42, Vector3(0, 0.0, 0.0), 10)
 		MeshKit.cone(st, 0.060, 0.060, -ln - 0.03, -ln + 0.05, Vector3(0, 0.0, 0.0), 10)
@@ -193,7 +297,18 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 			MeshKit.box(st, Vector3(0.022, 0.022, ln * 0.62), Vector3(0, -0.028, -ln * 0.55))
 			MeshKit.box(fu, Vector3(0.046, 0.042, 0.15), Vector3(0, -0.032, -0.33))
 		var sy: float = g["sight"]
-		if g.get("scope", false):
+		if g.get("scope", false) and String(g.get("reticle", "cross")) == "chevron":
+			# the prism: short, squat, and square-shouldered on its mount
+			MeshKit.cone(st, 0.024, 0.024, -0.15, 0.03, Vector3(0, sy, 0.0), 8)
+			MeshKit.cone(st, 0.029, 0.029, -0.18, -0.15, Vector3(0, sy, 0.0), 8)
+			MeshKit.box(st, Vector3(0.040, 0.030, 0.11), Vector3(0, sy - 0.012, -0.06))
+			MeshKit.box(st, Vector3(0.022, sy - 0.035, 0.10), Vector3(0, sy * 0.5 - 0.005, -0.06))
+		elif g.get("scope", false) and String(g.get("reticle", "cross")) == "ring":
+			# a stubby 2x: barely longer than it is wide
+			MeshKit.cone(st, 0.022, 0.022, -0.11, 0.01, Vector3(0, sy, 0.0), 8)
+			MeshKit.cone(st, 0.026, 0.026, -0.13, -0.11, Vector3(0, sy, 0.0), 8)
+			MeshKit.box(st, Vector3(0.020, sy - 0.03, 0.08), Vector3(0, sy * 0.5 + 0.010, -0.05))
+		elif g.get("scope", false):
 			MeshKit.cone(st, 0.021, 0.021, -0.19, 0.07, Vector3(0, sy, 0.0), 8)
 			MeshKit.cone(st, 0.027, 0.027, -0.26, -0.19, Vector3(0, sy, 0.0), 8)
 			MeshKit.box(st, Vector3(0.016, sy - 0.03, 0.03), Vector3(0, sy * 0.5 + 0.012, -0.10))
@@ -224,7 +339,12 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 	var mag := Node3D.new()
 	mag.name = "Mag"
 	root.add_child(mag)
-	if mag_len > 0.0:
+	if mag_len > 0.0 and g.get("box", false):
+		# a belt box hung under the receiver, a little to the left
+		var bs := MeshKit.begin()
+		MeshKit.box(bs, Vector3(0.075, mag_len, 0.10), Vector3(-0.02, -0.035 - mag_len * 0.5, -0.06))
+		mag.add_child(MeshKit.mi(MeshKit.finish(bs, poly), "M"))
+	elif mag_len > 0.0:
 		var ms := MeshKit.begin()
 		MeshKit.box(ms, Vector3(0.026, mag_len, 0.055), Vector3(0, -0.03 - mag_len * 0.5, -0.075))
 		var mm := MeshKit.mi(MeshKit.finish(ms, dark), "M")
@@ -258,7 +378,7 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		Effects.bullet(world, muzzle, d * float(g["muzzle"]) * randf_range(0.97, 1.03)
 			* (0.93 if quiet else 1.0),
 			shooter, float(g["dmg"]) * dmg_scale, team,
-			0.55 if n > 1 else 1.0, 0.45 if n > 1 else 1.4)
+			0.55 if n > 1 else 1.0, 0.45 if n > 1 else 1.4, drag_of(g))
 	if quiet:
 		# no flash to speak of, no crack, and nothing that carries
 		Effects.muzzle_flash(world, muzzle + dir * 0.05, dir, 0.045)
@@ -400,14 +520,29 @@ static func body_hit(feet: Vector3, crouched: bool, from: Vector3, to: Vector3) 
 	return Vector2.ZERO
 
 ## How far a line of sight runs before it meets a wall or the ground.
+##
+## Fine near and coarser further out, and then pinned down. It took 2.5 m
+## strides growing to 12 m and answered with the middle of whichever stride
+## went under -- six metres out either way at range, and blind to a hump in
+## the first few metres, which lying in the road is exactly where the ground is.
 static func sight_range(from: Vector3, dir: Vector3, limit: float) -> float:
 	var d: float = Obstacles.segment(from, from + dir * limit) * limit
-	var step := 2.5
+	var step := 0.5
+	var lo := 0.0
 	var s := step
 	while s < d:
 		var p: Vector3 = from + dir * s
 		if p.y < Sim.height_at(p.x, p.z):
-			return s - step * 0.5
+			var hi: float = s
+			for k in 8:
+				var m: float = (lo + hi) * 0.5
+				var q: Vector3 = from + dir * m
+				if q.y < Sim.height_at(q.x, q.z):
+					hi = m
+				else:
+					lo = m
+			return hi
+		lo = s
 		s += step
 		step = minf(step * 1.15, 12.0)
 	return d
@@ -493,9 +628,25 @@ class Rocket extends Node3D:
 	var shooter: Node = null
 	var dmg := 110.0
 	var life := 3.5
+	## How hard it falls: a rocket's motor holds most of it up, a 40 mm
+	## round has nothing to.
+	var fall := 3.0
+	## The burst, and how far it must fly before it will burst at all.
+	var blast := 4.6
+	var arm := 0.0
+	## A 40 mm grenade rather than a rocket: smaller, and nothing burning.
+	var small := false
+	var _flown := 0.0
+	## Where it went off or struck, for the harness.
+	var ended_at := Vector3.INF
 
 	func _ready() -> void:
 		var st := MeshKit.begin()
+		if small:
+			MeshKit.cone(st, 0.022, 0.022, -0.05, 0.05, Vector3.ZERO, 6)
+			add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.32, 0.30, 0.18), 0.6, 0.3)), "M"))
+			physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+			return
 		MeshKit.cone(st, 0.04, 0.04, -0.25, 0.25, Vector3.ZERO, 6)
 		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.25, 0.27, 0.22), 0.6, 0.2)), "M"))
 		var glow := MeshInstance3D.new()
@@ -517,8 +668,13 @@ class Rocket extends Node3D:
 	func _physics_process(delta: float) -> void:
 		life -= delta
 		var from := global_position
-		vel.y -= 3.0 * delta
+		if small:
+			# a 40 mm round has nothing holding it up: the whole model
+			vel = Ballistics.step(from, vel, Firearm.DRAG["gl"], delta, _flown)
+		else:
+			vel.y -= fall * delta
 		var to := from + vel * delta
+		_flown += from.distance_to(to)
 		var wall: float = Obstacles.segment(from, to)
 		if wall < 1.0:
 			to = from.lerp(to, wall)
@@ -549,16 +705,24 @@ class Rocket extends Node3D:
 		look_at(to + vel, Vector3.UP)
 
 	func _burst(at: Vector3, struck: Node) -> void:
+		ended_at = at
 		var world := get_tree().current_scene
 		if struck != null and struck.has_method("take_hit"):
 			struck.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
+		if _flown < arm:
+			# not armed yet: a lump of metal and nothing more
+			Effects.bullet_impact(world, at, true)
+			if is_instance_valid(shooter) and shooter.has_method("hit_confirm") and struck != null:
+				shooter.hit_confirm(false, struck.has_method("is_alive") and not struck.is_alive())
+			queue_free()
+			return
 		# the blast belongs to whoever fired it, for as long as it takes
 		var was_credit: Node = Effects.credit
 		var was_spare: int = Effects.spare_team
 		Effects.credit = shooter if is_instance_valid(shooter) else null
 		Effects.spare_team = team
-		Effects.explosion(world, at, 4.6, false)
-		Effects.he_impact(world, at, 2.6)
+		Effects.explosion(world, at, blast, false)
+		Effects.he_impact(world, at, blast * 0.56)
 		Effects.credit = was_credit
 		Effects.spare_team = was_spare
 		if is_instance_valid(shooter) and shooter.has_method("hit_confirm") and struck != null:
@@ -575,8 +739,47 @@ static func rocket(world: Node, shooter: Node, team: int, g: Dictionary, from: V
 	r.vel = dir * float(g["muzzle"])
 	world.add_child(r)
 	r.global_position = from + dir * 0.4
+	Effects.watch(r, shooter)
 	Sfx.play_at(world, "launch", from, 2.0, 1.5, 900.0)
 	Effects.dust(world, from - dir * 1.4, 1.6)        # the backblast
+
+## A 40 mm grenade out of the drum: a round that arcs, arms after ten metres
+## and bursts where it lands.
+static func grenade40(world: Node, shooter: Node, team: int, g: Dictionary, from: Vector3,
+		dir: Vector3) -> void:
+	var r := Rocket.new()
+	r.team = team
+	r.shooter = shooter
+	r.dmg = float(g["dmg"])
+	r.vel = dir * float(g["muzzle"])
+	r.fall = 9.81
+	r.blast = 3.4
+	r.arm = 10.0
+	r.small = true
+	r.life = 9.0
+	world.add_child(r)
+	r.global_position = from + dir * 0.3
+	Effects.watch(r, shooter)
+	Sfx.play_at(world, "launch", from, -4.0, 2.3, 300.0)
+
+## Which way to send something at `speed` so it falls onto `to` under `fall`:
+## the low arc, or zero if it cannot get there at all. A rifle round at a
+## hundred metres is a hair above the line; a 40 mm round at three hundred is
+## up at twenty degrees, and the straight-line guess that does for the one is
+## metres short for the other.
+static func lob(from: Vector3, to: Vector3, speed: float, fall: float) -> Vector3:
+	var d: Vector3 = to - from
+	var flat := Vector2(d.x, d.z)
+	var x: float = flat.length()
+	if x < 0.5 or fall <= 0.0:
+		return d.normalized()
+	var v2: float = speed * speed
+	var disc: float = v2 * v2 - fall * (fall * x * x + 2.0 * d.y * v2)
+	if disc < 0.0:
+		return Vector3.ZERO
+	var ang: float = atan((v2 - sqrt(disc)) / (fall * x))
+	var h: Vector2 = flat / x
+	return Vector3(h.x * cos(ang), sin(ang), h.y * cos(ang))
 
 ## A shoulder-launched missile onto an aircraft: the same round the manpads
 ## teams on the ground fire.
@@ -587,5 +790,6 @@ static func sam(world: Node, shooter: Node, team: int, from: Vector3, dir: Vecto
 		dir * 30.0, shooter, target)
 	m.team = team
 	world.add_child(m)
+	Effects.watch(m, shooter)
 	Sfx.play_at(world, "launch", from, 2.0, 1.1, 1400.0)
 	Effects.dust(world, from - dir * 1.4, 1.8)

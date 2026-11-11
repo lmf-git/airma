@@ -704,11 +704,15 @@ func _town_detail() -> void:
 				kiosk.append(xf)
 		var tone: Color = Sim.faction_colour(faction)
 		made += _detail_batch(_lamp_mesh(tone), lamp, "Lamps_%s" % String(t["name"]))
-		made += _detail_batch(_seat_mesh(tone, biome), seat, "Seats_%s" % String(t["name"]))
+		# Benches, kiosks and planters stop a round -- something to get behind
+		# in a street fight -- but not a tank, which knocks them over. Lamp
+		# posts do not: their box is the reach of the arm, and a round would
+		# stop on the air under it.
+		made += _detail_batch(_seat_mesh(tone, biome), seat, "Seats_%s" % String(t["name"]), true)
 		made += _detail_batch(_kiosk_mesh(tone, faction), kiosk,
-			"Kiosks_%s" % String(t["name"]))
+			"Kiosks_%s" % String(t["name"]), true)
 		made += _detail_batch(_planter_mesh(tone, biome), planter,
-			"Planters_%s" % String(t["name"]))
+			"Planters_%s" % String(t["name"]), true)
 		_stats["town_faction_" + faction] = int(_stats.get("town_faction_" + faction, 0)) + 1
 	_stats["street_props"] = made
 
@@ -720,6 +724,9 @@ func _town_detail() -> void:
 var _furniture: Array = []
 var _furn_hash: Dictionary = {}
 var _furn_down: Dictionary = {}
+## Furniture code -> its soft obstacle entry, for the pieces that stop rounds,
+## so that one knocked flat stops stopping them.
+var _furn_obs: Dictionary = {}
 const FURN_CELL := 12.0
 
 func _furn_key(x: float, z: float) -> int:
@@ -758,6 +765,8 @@ func knock(at: Vector3, r: float, push: Vector3) -> int:
 						or absf(xf.origin.y - at.y) > 4.0:
 					continue
 				_furn_down[code] = true
+				if _furn_obs.has(code):
+					Obstacles.remove(int(_furn_obs[code]))
 				# over, along the way it was pushed
 				var dir := Vector3(push.x, 0.0, push.z)
 				dir = dir.normalized() if dir.length() > 0.1 else Vector3.FORWARD
@@ -768,9 +777,15 @@ func knock(at: Vector3, r: float, push: Vector3) -> int:
 				n += 1
 	return n
 
-func _detail_batch(mesh: Mesh, xforms: Array, nm: String) -> int:
+func _detail_batch(mesh: Mesh, xforms: Array, nm: String, stops_rounds := false) -> int:
 	if xforms.is_empty() or mesh == null:
 		return 0
+	if stops_rounds:
+		var ids: PackedInt32Array = Obstacles.add_batch(mesh, xforms, Obstacles.MIN_HEIGHT,
+			0.3, true)
+		for ii in ids.size():
+			if ids[ii] >= 0:
+				_furn_obs[_furniture.size() * 65536 + ii] = ids[ii]
 	var mmi := MultiMeshInstance3D.new()
 	mmi.name = nm
 	var mm := MultiMesh.new()

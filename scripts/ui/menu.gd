@@ -9,6 +9,7 @@ signal weather_changed(id: String)
 signal host_requested(id: String, address: String)
 signal join_requested(id: String, address: String)
 signal resume_requested()
+signal settings_requested()
 
 const MISSIONS := [
 	["takeoff", "RUNWAY START", "No threats. Cold on runway 36 — firewall it, rotate around 150 kt, gear up with G."],
@@ -218,8 +219,9 @@ func _ready() -> void:
 	_launch.text = "LAUNCH"
 	_launch.custom_minimum_size = Vector2(190, 52)
 	_launch.add_theme_font_size_override("font_size", 20)
-	_launch.pressed.connect(func(): start_requested.emit(
-		"foot" if mode_takes(mission_id) == "none" else jet_id, mission_id))
+	_launch.pressed.connect(func():
+		var a := launch_args()
+		start_requested.emit(String(a[0]), String(a[1])))
 	btns.add_child(_launch)
 	_resume = Button.new()
 	_resume.text = "RESUME"
@@ -260,6 +262,11 @@ func _ready() -> void:
 	_net_status.custom_minimum_size = Vector2(520, 0)
 	net_row.add_child(_net_status)
 
+	var settings := Button.new()
+	settings.text = "SETTINGS"
+	settings.custom_minimum_size = Vector2(130, 52)
+	settings.pressed.connect(func(): settings_requested.emit())
+	btns.add_child(settings)
 	var quit := Button.new()
 	quit.text = "QUIT"
 	quit.custom_minimum_size = Vector2(110, 52)
@@ -515,10 +522,18 @@ func set_net_status(t: String) -> void:
 	if _net_status:
 		_net_status.text = t
 
+## Shown from the pause menu's CHANGE MODE, over a match that is still going:
+## RESUME goes back to it, LAUNCH ends it and starts whatever is picked here.
 func set_paused(p: bool) -> void:
 	paused = p
 	_resume.visible = p
-	_launch.text = "RESTART" if p else "LAUNCH"
+	if net_role != "client":
+		_launch.text = "LAUNCH NEW" if p else "LAUNCH"
+
+## What LAUNCH starts: the vehicle picked, or on foot in the modes where the
+## kit is chosen inside the match, and the mode.
+func launch_args() -> Array:
+	return ["foot" if mode_takes(mission_id) == "none" else jet_id, mission_id]
 
 func _select(id: String) -> void:
 	jet_id = id

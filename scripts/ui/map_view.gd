@@ -52,10 +52,72 @@ var zoom := 29.0
 ## street fight in a patch the size of a thumbnail.
 const MAX_ZOOM := 9000.0
 const GLOBE_MAX := 30000.0
+## The globe and the chart are one zoom.
+##
+## They were two maps. The globe is the planet and has nothing on it to fight
+## by; the chart has the streets and could not be zoomed out past twelve
+## hundred kilometres -- and the only way onto it was choosing a target for a
+## strike, after which there was no way back to the planet at all. Over the
+## theatre, which is the ground the chart has, zooming the globe in past this
+## hands over to the chart at the same place and the same scale, and zooming
+## the chart out past it hands back. Elsewhere on the planet the globe simply
+## carries on zooming, as it always did. The chart zoom it happens at is about
+## three hundred kilometres across the screen; the globe hands over a little
+## further in, so a single notch of the wheel never flips it back and forth.
+const HANDOVER := 4.0
+const HANDOVER_IN := 4.6
 ## Somebody waiting for a place to be chosen: the next plain click on the
 ## chart is handed to this as a point on the ground, and the map closes.
 var pick_cb: Callable = Callable()
 var pick_label := ""
+
+## Chart zoom for a globe zoom at the same scale in the middle of the screen,
+## and back. The chart is `0.86 * zoom` screens to its `2 * HALF` metres; the
+## globe is `0.42 * globe_zoom` screens to the planet's radius.
+func _chart_zoom_for(gz: float) -> float:
+	return gz * 0.42 * HALF * 2.0 / (0.86 * Sim.PLANET_R)
+
+func _globe_zoom_for(z: float) -> float:
+	return z * 0.86 * Sim.PLANET_R / (0.42 * HALF * 2.0)
+
+## After any zoom: across to the other map if it has gone past the handover.
+func _handover() -> void:
+	if not Sim.globe:
+		return
+	if globe:
+		var cz: float = _chart_zoom_for(globe_zoom)
+		if cz < HANDOVER_IN:
+			return
+		var vp := get_viewport_rect().size
+		var w: Vector2 = _globe_point(vp * 0.5)
+		if not w.is_finite():
+			return
+		# Only where the chart has ground for the whole of the screen.
+		var half_view: float = maxf(vp.x, vp.y) * 0.5 \
+			/ (minf(vp.x, vp.y) * 0.86 * cz / (HALF * 2.0))
+		if maxf(absf(w.x), absf(w.y)) + half_view > HALF:
+			return
+		globe = false
+		centre = w
+		zoom = cz
+		follow = false
+	else:
+		if zoom >= HANDOVER:
+			return
+		_aim_globe(centre)
+		globe_zoom = _globe_zoom_for(zoom)
+		globe = true
+	queue_redraw()
+
+## Turn the globe so a point on the chart is in the middle of the screen: the
+## inverse of `_globe_basis` for that one direction. Spin about the vertical
+## brings it round to the front, tilt brings it up to the middle.
+func _aim_globe(w: Vector2) -> void:
+	var frame := Basis(Sim.chart_east, -Sim.chart_south,
+		Sim.chart_origin).transposed()
+	var v: Vector3 = frame * _globe_dir(w)
+	globe_spin = atan2(-v.x, v.z)
+	globe_tilt = clampf(atan2(v.y, sqrt(v.x * v.x + v.z * v.z)), -PI * 0.49, PI * 0.49)
 
 ## Open on the player, close enough in to see a street, and wait for a click.
 func pick(label: String, cb: Callable) -> void:
@@ -342,17 +404,20 @@ func _gui_input(e: InputEvent) -> void:
 		if e is InputEventPanGesture:
 			globe_zoom = clampf(globe_zoom * pow(1.08,
 				-(e as InputEventPanGesture).delta.y), 0.6, GLOBE_MAX)
+			_handover()
 			queue_redraw()
 			return
 		if e is InputEventMagnifyGesture:
 			globe_zoom = clampf(
 				globe_zoom * (e as InputEventMagnifyGesture).factor, 0.6, GLOBE_MAX)
+			_handover()
 			queue_redraw()
 			return
 		if e is InputEventMouseButton:
 			var gb := e as InputEventMouseButton
 			if gb.button_index == MOUSE_BUTTON_WHEEL_UP and gb.pressed:
 				globe_zoom = clampf(globe_zoom * 1.2, 0.6, GLOBE_MAX)
+				_handover()
 			elif gb.button_index == MOUSE_BUTTON_WHEEL_DOWN and gb.pressed:
 				globe_zoom = clampf(globe_zoom / 1.2, 0.6, GLOBE_MAX)
 			elif gb.button_index == MOUSE_BUTTON_RIGHT and gb.pressed:
@@ -387,10 +452,12 @@ func _gui_input(e: InputEvent) -> void:
 		zoom = clampf(zoom * pow(1.10,
 			-(e as InputEventPanGesture).delta.y), 1.0, MAX_ZOOM)
 		follow = false
+		_handover()
 		queue_redraw()
 		return
 	if e is InputEventMagnifyGesture:
 		zoom = clampf(zoom * (e as InputEventMagnifyGesture).factor, 1.0, MAX_ZOOM)
+		_handover()
 		queue_redraw()
 		return
 	if e is InputEventMouseButton:
@@ -399,6 +466,7 @@ func _gui_input(e: InputEvent) -> void:
 			zoom = clampf(zoom * 1.25, 1.0, MAX_ZOOM)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			zoom = clampf(zoom / 1.25, 1.0, MAX_ZOOM)
+			_handover()
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
 			# On a satellite, either button assigns it. Nothing else on the map
 			# lives a hundred kilometres up, so there is nothing for a right
@@ -725,6 +793,12 @@ func _draw() -> void:
 		for f in Obstacles.footprints(centre - half_w, centre + half_w):
 			var fc: Vector2 = f[0]
 			var fh: Vector2 = f[1]
+			# Less than a pixel across is not a shape: a fence post at this
+			# scale is four corners on top of one another, and handing that to
+			# the polygon fill made it fail to triangulate and say so, every
+			# frame the map was open.
+			if minf(fh.x, fh.y) * 2.0 * ppm < 1.0:
+				continue
 			var fy: float = f[2]
 			var ax := Vector2(cos(fy), -sin(fy)) * fh.x
 			var az := Vector2(sin(fy), cos(fy)) * fh.y
@@ -953,7 +1027,7 @@ func _draw() -> void:
 	_label(Vector2(bx, vp.y - 60), "%d km" % int(bar_m * 0.001), Color(0.9, 0.95, 1.0))
 	_label(Vector2(24, 40), "TACTICAL MAP", Color(0.6, 0.95, 1.0), 22)
 	_label(Vector2(24, 64),
-		"wheel zoom   drag to pan   shift+click sets an objective (again to clear)   click a satellite to target it   M to close",
+		"wheel zoom (out far enough for the planet)   drag to pan   shift+click sets an objective (again to clear)   click a satellite to target it   M to close",
 		Color(0.6, 0.7, 0.8), 14)
 	# north arrow
 	var na := Vector2(vp.x - 60.0, 70.0)
@@ -1141,8 +1215,8 @@ func _draw_globe() -> void:
 		var ap: Vector3 = me2.global_position
 		alt = Sim.altitude(ap)
 		lat = Sim.latitude_at(ap.x, ap.z)
-	_label(Vector2(18, 26), "PLANET  —  drag to turn, wheel to zoom, right click "
-		+ "to lay a fire mission, shift+click for an objective", Color(0.75, 0.85, 1.0), 15)
+	_label(Vector2(18, 26), "PLANET  —  drag to turn, wheel to zoom (in over the theatre for the street map), "
+		+ "right click to lay a fire mission, shift+click for an objective", Color(0.75, 0.85, 1.0), 15)
 	_label(Vector2(18, 48), "globe %.0f km across; you are %.1f km up at %.2f%s" % [
 		Sim.PLANET_R * 2.0 * 0.001, alt * 0.001,
 		absf(rad_to_deg(lat)), "N" if lat >= 0.0 else "S"],

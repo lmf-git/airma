@@ -11,24 +11,51 @@ extends Node3D
 ##
 ## Buildings are drawn as MultiMesh batches, so there are no nodes to give
 ## colliders to in the first place. This keeps the footprints instead -- an
-## oriented box per instance, in a coarse spatial hash -- and answers the same
-## question the ground does: is there something here. A query is the nine cells
-## around a point, which is a handful of boxes however big the map gets.
+## oriented box per instance, in a spatial hash -- and answers the same
+## question the ground does: is there something here. A query looks only in the
+## cells its own footprint overlaps, which is a handful of boxes however big the
+## map gets.
 ##
 ## Real static bodies are kept too, but only for the few dozen structures
 ## nearest the viewer, so that the things which *do* use physics (ragdolls) have
 ## something to land against. Those are the LOD part: they follow you and
 ## nothing else in the world pays for them.
 
-const CELL := 160.0                 # spatial hash cell
+## The spatial hash cell. It was 160 m, and every query walked the nine cells
+## round it: a 480 m square, which in a town is the whole town -- 394 boxes
+## tested for every step a soldier took, for each foot he planted and for every
+## tick of every bullet in the air. At 24 m a man's query is one cell and a
+## few boxes.
+const CELL := 24.0
 const MIN_HEIGHT := 2.5             # below this it is a fence post, not an obstacle
-const STRIDE := 8                   # x, ybase, z, hx, height, hz, cos, sin
+const STRIDE := 8                   # x, ybase, z, hx, height, hz, cos, -sin
+
+## A box's turn is kept as cos and *minus* sin of its yaw. Every query takes
+## a point into the box's frame as (dx c + dz s, -dx s + dz c), and with the
+## plain sine that frame is the mesh's turned the other way: Godot turns a
+## mesh's x axis to (cos, -sin), not (cos, sin). Anything set at an angle --
+## a wall across a corner, a parked car, a block on a skewed street -- had its
+## box mirrored about the street: rounds went through the corner you could
+## see and stopped on air where it was not, and the same for men and tanks.
+## Measured on the town's own props, 18 of 76 points well inside the drawn
+## meshes were inside their boxes. Stored this way, every query is the mesh's.
+static func _turn(yaw: float) -> PackedFloat32Array:
+	return PackedFloat32Array([cos(yaw), -sin(yaw)])
 const MAX_SEGMENT := 6000.0         # the longest line `segment` will walk
 
 ## Flat on purpose: the inner loop of a query reads this a few thousand times a
 ## second and an array of dictionaries spends all of it unboxing Variants.
 static var _ent := PackedFloat32Array()
+## What each entry is now: LIVE, GONE, or SOFT. A soft entry stops rounds and
+## lines of sight and nothing else -- a parked lorry, a low wall, a kiosk, a
+## planter. Anything that moves through the world asks `hit`, `blocks`,
+## `top_at` or `floor_under`, which take only LIVE; `segment` takes both.
+## They were left out of the field altogether, so a rifleman crouched behind a
+## car was behind nothing, and every round went through it.
 static var _dead := PackedByteArray()
+const LIVE := 0
+const GONE := 1
+const SOFT := 2
 static var _cells: Dictionary = {}
 static var stats := {"count": 0, "cells": 0}
 
@@ -38,8 +65,11 @@ static func clear() -> void:
 	_cells = {}
 	stats = {"count": 0, "cells": 0}
 
+## Room for a cell index either way of 2^23, which at 24 m is two hundred
+## thousand kilometres: the fields are seventeen thousand out, and at the old
+## 2^20 their rows would have run into one another.
 static func _key(ci: int, cj: int) -> int:
-	return ci * 1048576 + cj
+	return ci * 16777216 + cj
 
 ## Take a MultiMesh batch: one box per instance, sized from the source mesh.
 ## `min_h` lets a caller register something shorter than the general rule
@@ -47,9 +77,16 @@ static func _key(ci: int, cj: int) -> int:
 ## the obstacle field with things nothing could hit; a fence is different,
 ## because it is a continuous line rather than a scattering, and an aeroplane
 ## that runs into one has run into all of it.
-static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT) -> void:
+##
+## Below `min_h` and above `soft_from` an instance is SOFT: a round stops on
+## it, nothing else does. `all_soft` makes every instance soft whatever its
+## height, for street furniture that a tank knocks over rather than stops at.
+## Returns the entry for each instance, -1 where nothing was registered.
+static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT, soft_from := 0.45,
+		all_soft := false) -> PackedInt32Array:
+	var ids := PackedInt32Array()
 	if mesh == null or xforms.is_empty():
-		return
+		return ids
 	# The mesh's own size means nothing here: a town block is modelled as a unit
 	# cube and given its real dimensions by the instance transform, so testing
 	# the source mesh against a height in metres threw out every building in
@@ -64,14 +101,19 @@ static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT) -> void:
 		var hx: float = ab.size.x * 0.5 * sc.x
 		var hz: float = ab.size.z * 0.5 * sc.z
 		var hy: float = (ab.position.y + ab.size.y) * sc.y
-		if hy < min_h:
-			continue
+		var state := LIVE
+		if all_soft or hy < min_h:
+			if hy < soft_from:
+				ids.append(-1)
+				continue
+			state = SOFT
 		var yaw: float = xf.basis.get_euler().y
 		var o := xf.origin
 		var id: int = _dead.size()      # the entry index, not the float offset
-		_ent.append_array(PackedFloat32Array([o.x, o.y, o.z, hx, hy, hz,
-			cos(yaw), sin(yaw)]))
-		_dead.append(0)
+		ids.append(id)
+		_ent.append_array(PackedFloat32Array([o.x, o.y, o.z, hx, hy, hz]))
+		_ent.append_array(_turn(yaw))
+		_dead.append(state)
 		# every cell the footprint's bounding circle touches
 		var reach: float = sqrt(hx * hx + hz * hz)
 		var lo_i: int = int(floor((o.x - reach) / CELL))
@@ -88,21 +130,24 @@ static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT) -> void:
 				_cells[k] = arr
 	stats["count"] = _dead.size()
 	stats["cells"] = _cells.size()
+	return ids
 
 ## The structure a point is inside, allowing `r` of clearance around it, or -1.
 ## `r` is the radius of whatever is doing the asking -- a wing, a hull, a
 ## warhead -- so a wingtip clipping a roof counts.
+##
+## Only the cells the query's own square overlaps. Every box is filed under
+## each cell its bounding circle touches, so a box that could contain a point
+## padded by `r` is filed in at least one cell within `r` of it.
 static func hit(p: Vector3, r := 0.0) -> int:
 	if _dead.is_empty():
 		return -1
-	var ci := int(floor(p.x / CELL))
-	var cj := int(floor(p.z / CELL))
-	for dj in range(-1, 2):
-		for di in range(-1, 2):
-			var k := _key(ci + di, cj + dj)
-			if not _cells.has(k):
+	for cj in range(int(floor((p.z - r) / CELL)), int(floor((p.z + r) / CELL)) + 1):
+		for ci in range(int(floor((p.x - r) / CELL)), int(floor((p.x + r) / CELL)) + 1):
+			var cell: Variant = _cells.get(_key(ci, cj))
+			if cell == null:
 				continue
-			for id in (_cells[k] as PackedInt32Array):
+			for id in (cell as PackedInt32Array):
 				if _dead[id] != 0:
 					continue
 				var b: int = id * STRIDE
@@ -127,7 +172,8 @@ static func add_box(origin: Vector3, half_x: float, height: float, half_z: float
 		yaw := 0.0) -> int:
 	var id: int = _dead.size()
 	_ent.append_array(PackedFloat32Array([origin.x, origin.y, origin.z, half_x,
-		height, half_z, cos(yaw), sin(yaw)]))
+		height, half_z]))
+	_ent.append_array(_turn(yaw))
 	_dead.append(0)
 	var reach: float = sqrt(half_x * half_x + half_z * half_z)
 	for cj in range(int(floor((origin.z - reach) / CELL)), int(floor((origin.z + reach) / CELL)) + 1):
@@ -142,7 +188,7 @@ static func add_box(origin: Vector3, half_x: float, height: float, half_z: float
 
 static func remove(id: int) -> void:
 	if id >= 0 and id < _dead.size():
-		_dead[id] = 1
+		_dead[id] = GONE
 
 ## The same question as `hit`, asked by something standing on the ground rather
 ## than flying through the air. `hit` pads the box by `r` in every direction,
@@ -152,14 +198,12 @@ static func remove(id: int) -> void:
 static func blocks(p: Vector3, r: float) -> int:
 	if _dead.is_empty():
 		return -1
-	var ci := int(floor(p.x / CELL))
-	var cj := int(floor(p.z / CELL))
-	for dj in range(-1, 2):
-		for di in range(-1, 2):
-			var k := _key(ci + di, cj + dj)
-			if not _cells.has(k):
+	for cj in range(int(floor((p.z - r) / CELL)), int(floor((p.z + r) / CELL)) + 1):
+		for ci in range(int(floor((p.x - r) / CELL)), int(floor((p.x + r) / CELL)) + 1):
+			var cell: Variant = _cells.get(_key(ci, cj))
+			if cell == null:
 				continue
-			for id in (_cells[k] as PackedInt32Array):
+			for id in (cell as PackedInt32Array):
 				if _dead[id] != 0:
 					continue
 				var b: int = id * STRIDE
@@ -204,30 +248,46 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 		to = from.lerp(to_in, part)
 	var best := 1.0
 	var d := to - from
-	# The cells the line passes through, not the box it spans: a diagonal
-	# across a town is forty cells, where its bounding box is eight hundred.
-	var flat: float = Vector2(d.x, d.z).length()
-	var steps: int = clampi(int(ceil(flat / (CELL * 0.5))) + 1, 1, 160)
-	var seen: Dictionary = {}
-	var keys: Array = []
-	for i in steps + 1:
-		var q: Vector3 = from + d * (float(i) / float(steps))
-		var ci0 := int(floor(q.x / CELL))
-		var cj0 := int(floor(q.z / CELL))
-		for dj in range(-1, 2):
-			for di in range(-1, 2):
-				var kk := _key(ci0 + di, cj0 + dj)
-				if not seen.has(kk):
-					seen[kk] = true
-					if _cells.has(kk):
-						keys.append(kk)
-	var done: Dictionary = {}
-	for k in keys:
-		if true:
-			for id in (_cells[k] as PackedInt32Array):
-				if _dead[id] != 0 or done.has(id):
+	# The cells the line actually passes through, in order along it, and
+	# nothing either side. Every box is filed under each cell its bounding
+	# circle touches, so wherever a box meets the line, the cell holding that
+	# point is one of these and the box is filed there. In order, so once the
+	# nearest wall found is nearer than the next cell begins, nothing further
+	# along can beat it and the walk stops -- a bullet step, a few metres long,
+	# is one or two cells and is over.
+	#
+	# It was a walk of samples with the nine cells round each, collected into
+	# two dictionaries allocated per call and then every box in them tested:
+	# with 160 m cells, the whole of a town for every tick of every round.
+	var ci := int(floor(from.x / CELL))
+	var cj := int(floor(from.z / CELL))
+	var ce := int(floor(to.x / CELL))
+	var cje := int(floor(to.z / CELL))
+	var si: int = 1 if d.x > 0.0 else -1
+	var sj: int = 1 if d.z > 0.0 else -1
+	# where along the line (as a fraction of it) the next x and z boundaries are
+	var tmx := INF
+	var tdx := INF
+	if absf(d.x) > 1e-9:
+		tmx = ((float(ci) + (1.0 if si > 0 else 0.0)) * CELL - from.x) / d.x
+		tdx = CELL / absf(d.x)
+	var tmz := INF
+	var tdz := INF
+	if absf(d.z) > 1e-9:
+		tmz = ((float(cj) + (1.0 if sj > 0 else 0.0)) * CELL - from.z) / d.z
+		tdz = CELL / absf(d.z)
+	var t_in := 0.0
+	# More than the line can cross, as a guard against a walk that never
+	# reaches its last cell through rounding: MAX_SEGMENT is 250 cells each way.
+	for _guard in 1100:
+		if t_in > best:
+			break
+		var cell: Variant = _cells.get(_key(ci, cj))
+		if cell != null:
+			for id in (cell as PackedInt32Array):
+				# soft as well as live: a round stops on a car
+				if _dead[id] == GONE:
 					continue
-				done[id] = true
 				var b: int = id * STRIDE
 				var c: float = _ent[b + 6]
 				var s: float = _ent[b + 7]
@@ -278,6 +338,19 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 					if t0 > t1:
 						continue
 				best = t0
+		if ci == ce and cj == cje:
+			break
+		# into whichever neighbour the line crosses into first
+		if tmx < tmz:
+			t_in = tmx
+			tmx += tdx
+			ci += si
+		else:
+			t_in = tmz
+			tmz += tdz
+			cj += sj
+		if t_in > 1.0:
+			break
 	# as a fraction of the line that was asked about, not the part looked at
 	return 1.0 if best >= 1.0 else best * part
 
@@ -285,25 +358,22 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 ## What a helicopter has to clear to hover over a town.
 static func top_at(x: float, z: float) -> float:
 	var best := -1e9
-	var ci := int(floor(x / CELL))
-	var cj := int(floor(z / CELL))
-	for dj in range(-1, 2):
-		for di in range(-1, 2):
-			var k := _key(ci + di, cj + dj)
-			if not _cells.has(k):
-				continue
-			for id in (_cells[k] as PackedInt32Array):
-				if _dead[id] != 0:
-					continue
-				var b: int = id * STRIDE
-				var dx: float = x - _ent[b]
-				var dz: float = z - _ent[b + 2]
-				var c: float = _ent[b + 6]
-				var s: float = _ent[b + 7]
-				var lx: float = dx * c + dz * s
-				var lz: float = -dx * s + dz * c
-				if absf(lx) <= _ent[b + 3] and absf(lz) <= _ent[b + 5]:
-					best = maxf(best, _ent[b + 1] + _ent[b + 4])
+	# a point is inside a box only in the one cell it is in
+	var cell: Variant = _cells.get(_key(int(floor(x / CELL)), int(floor(z / CELL))))
+	if cell == null:
+		return best
+	for id in (cell as PackedInt32Array):
+		if _dead[id] != 0:
+			continue
+		var b: int = id * STRIDE
+		var dx: float = x - _ent[b]
+		var dz: float = z - _ent[b + 2]
+		var c: float = _ent[b + 6]
+		var s: float = _ent[b + 7]
+		var lx: float = dx * c + dz * s
+		var lz: float = -dx * s + dz * c
+		if absf(lx) <= _ent[b + 3] and absf(lz) <= _ent[b + 5]:
+			best = maxf(best, _ent[b + 1] + _ent[b + 4])
 	return best
 
 ## The floor a man at height `y` would be standing on here: the highest roof
@@ -312,26 +382,22 @@ static func top_at(x: float, z: float) -> float:
 ## underneath a scaffold -- it puts him on top of it.
 static func floor_under(x: float, z: float, y: float) -> float:
 	var best := -1e9
-	var ci := int(floor(x / CELL))
-	var cj := int(floor(z / CELL))
-	for dj in range(-1, 2):
-		for di in range(-1, 2):
-			var k := _key(ci + di, cj + dj)
-			if not _cells.has(k):
-				continue
-			for id in (_cells[k] as PackedInt32Array):
-				if _dead[id] != 0:
-					continue
-				var b: int = id * STRIDE
-				var top: float = _ent[b + 1] + _ent[b + 4]
-				if top > y + 0.55 or top <= best:
-					continue
-				var dx: float = x - _ent[b]
-				var dz: float = z - _ent[b + 2]
-				var c: float = _ent[b + 6]
-				var s: float = _ent[b + 7]
-				if absf(dx * c + dz * s) <= _ent[b + 3] and absf(-dx * s + dz * c) <= _ent[b + 5]:
-					best = top
+	var cell: Variant = _cells.get(_key(int(floor(x / CELL)), int(floor(z / CELL))))
+	if cell == null:
+		return best
+	for id in (cell as PackedInt32Array):
+		if _dead[id] != 0:
+			continue
+		var b: int = id * STRIDE
+		var top: float = _ent[b + 1] + _ent[b + 4]
+		if top > y + 0.55 or top <= best:
+			continue
+		var dx: float = x - _ent[b]
+		var dz: float = z - _ent[b + 2]
+		var c: float = _ent[b + 6]
+		var s: float = _ent[b + 7]
+		if absf(dx * c + dz * s) <= _ent[b + 3] and absf(-dx * s + dz * c) <= _ent[b + 5]:
+			best = top
 	return best
 
 ## Which face of a structure a point is against, and where on it: the outward
@@ -372,21 +438,46 @@ static func face_of(id: int, p: Vector3) -> Dictionary:
 ## far enough to show a street has to show what the street runs between.
 static func footprints(lo: Vector2, hi: Vector2, limit := 1500) -> Array:
 	var out: Array = []
-	var seen: Dictionary = {}
-	for cj in range(int(floor(lo.y / CELL)), int(floor(hi.y / CELL)) + 1):
-		for ci in range(int(floor(lo.x / CELL)), int(floor(hi.x / CELL)) + 1):
-			var k := _key(ci, cj)
-			if not _cells.has(k):
+	for id in _ids_in(lo, hi):
+		var b: int = id * STRIDE
+		out.append([Vector2(_ent[b], _ent[b + 2]), Vector2(_ent[b + 3], _ent[b + 5]),
+			atan2(-_ent[b + 7], _ent[b + 6]), _ent[b + 4]])
+		if out.size() >= limit:
+			return out
+	return out
+
+## Every standing structure filed in a rectangle of ground, once each. A
+## rectangle with more cells in it than there are cells filled -- a map zoomed
+## out over kilometres, a big blast -- is cheaper as one pass over every box
+## than as a lookup per cell, most of which are empty.
+static func _ids_in(lo: Vector2, hi: Vector2, soft := false) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var i0 := int(floor(lo.x / CELL))
+	var i1 := int(floor(hi.x / CELL))
+	var j0 := int(floor(lo.y / CELL))
+	var j1 := int(floor(hi.y / CELL))
+	if (i1 - i0 + 1) * (j1 - j0 + 1) > _cells.size():
+		for id in _dead.size():
+			if _dead[id] == GONE or (_dead[id] == SOFT and not soft):
 				continue
-			for id in (_cells[k] as PackedInt32Array):
-				if _dead[id] != 0 or seen.has(id):
+			var b: int = id * STRIDE
+			var reach: float = sqrt(_ent[b + 3] * _ent[b + 3] + _ent[b + 5] * _ent[b + 5])
+			if _ent[b] + reach < lo.x or _ent[b] - reach > hi.x \
+					or _ent[b + 2] + reach < lo.y or _ent[b + 2] - reach > hi.y:
+				continue
+			out.append(id)
+		return out
+	var seen: Dictionary = {}
+	for cj in range(j0, j1 + 1):
+		for ci in range(i0, i1 + 1):
+			var cell: Variant = _cells.get(_key(ci, cj))
+			if cell == null:
+				continue
+			for id in (cell as PackedInt32Array):
+				if _dead[id] == GONE or (_dead[id] == SOFT and not soft) or seen.has(id):
 					continue
 				seen[id] = true
-				var b: int = id * STRIDE
-				out.append([Vector2(_ent[b], _ent[b + 2]), Vector2(_ent[b + 3], _ent[b + 5]),
-					atan2(_ent[b + 7], _ent[b + 6]), _ent[b + 4]])
-				if out.size() >= limit:
-					return out
+				out.append(id)
 	return out
 
 ## The height of one structure's roof, in the world.
@@ -404,21 +495,14 @@ static func centre_of(id: int) -> Vector3:
 static func kill_near(pos: Vector3, radius: float) -> void:
 	if _dead.is_empty():
 		return
-	var reach: int = int(ceil(radius / CELL)) + 1
-	var ci := int(floor(pos.x / CELL))
-	var cj := int(floor(pos.z / CELL))
 	var r2 := radius * radius
-	for dj in range(-reach, reach + 1):
-		for di in range(-reach, reach + 1):
-			var k := _key(ci + di, cj + dj)
-			if not _cells.has(k):
-				continue
-			for id in (_cells[k] as PackedInt32Array):
-				var b: int = id * STRIDE
-				var dx: float = _ent[b] - pos.x
-				var dz: float = _ent[b + 2] - pos.z
-				if dx * dx + dz * dz <= r2:
-					_dead[id] = 1
+	for id in _ids_in(Vector2(pos.x - radius, pos.z - radius),
+			Vector2(pos.x + radius, pos.z + radius), true):
+		var b: int = id * STRIDE
+		var dx: float = _ent[b] - pos.x
+		var dz: float = _ent[b + 2] - pos.z
+		if dx * dx + dz * dz <= r2:
+			_dead[id] = GONE
 
 # ------------------------------------------------------------ near colliders
 ## Real bodies for the structures nearest the viewer. Everything else in the
@@ -449,23 +533,11 @@ func follow(eye: Vector3) -> void:
 		return
 	_near_at = eye
 	var found: Array = []
-	var reach: int = int(ceil(NEAR / CELL))
-	var ci := int(floor(eye.x / CELL))
-	var cj := int(floor(eye.z / CELL))
-	var seen: Dictionary = {}
-	for dj in range(-reach, reach + 1):
-		for di in range(-reach, reach + 1):
-			var k := _key(ci + di, cj + dj)
-			if not _cells.has(k):
-				continue
-			for id in (_cells[k] as PackedInt32Array):
-				if _dead[id] != 0 or seen.has(id):
-					continue
-				seen[id] = true
-				var b: int = id * STRIDE
-				var d := Vector2(_ent[b] - eye.x, _ent[b + 2] - eye.z).length()
-				if d < NEAR:
-					found.append([d, id])
+	for id in _ids_in(Vector2(eye.x - NEAR, eye.z - NEAR), Vector2(eye.x + NEAR, eye.z + NEAR)):
+		var b: int = id * STRIDE
+		var d := Vector2(_ent[b] - eye.x, _ent[b + 2] - eye.z).length()
+		if d < NEAR:
+			found.append([d, id])
 	found.sort_custom(func(a: Array, c: Array) -> bool: return a[0] < c[0])
 	for i in NEAR_MAX:
 		var sb: StaticBody3D = _near[i]
@@ -480,5 +552,5 @@ func follow(eye: Vector3) -> void:
 		box.size = Vector3(_ent[b2 + 3] * 2.0, _ent[b2 + 4], _ent[b2 + 5] * 2.0)
 		cs.position = Vector3(0.0, _ent[b2 + 4] * 0.5, 0.0)
 		sb.position = Vector3(_ent[b2], _ent[b2 + 1], _ent[b2 + 2])
-		sb.rotation = Vector3(0.0, atan2(_ent[b2 + 7], _ent[b2 + 6]), 0.0)
+		sb.rotation = Vector3(0.0, atan2(-_ent[b2 + 7], _ent[b2 + 6]), 0.0)
 		sb.process_mode = Node.PROCESS_MODE_INHERIT

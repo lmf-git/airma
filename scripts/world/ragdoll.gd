@@ -22,6 +22,21 @@ const JOINTS := [
 	["pelvis", "leg_r", Vector3(0.12, -0.13, 0), 1.1, 0.5],
 ]
 
+## One physics material for every limb of every body: they were a new one per
+## limb per death, all with the same two numbers in them.
+static var _grip: PhysicsMaterial = null
+
+## Each body lies on a floor of its own, on a collision layer nobody else's
+## limbs look at. The floors were all on the shared layer, a hundred and sixty
+## metres across, so every limb in the street was tested against every body's
+## floor -- forty men down was six thousand pairs -- and on a slope a man killed
+## beside another started with his boots inside the other's floor, which the
+## solver answered by throwing him thirty metres. Bits 9 to 32, handed out in
+## turn; the first twenty-four bodies alive at once never share one.
+const FLOOR_BITS := 24
+static var _floor_next := 0
+var _floor_bit := 0
+
 var bodies := {}
 var life := 26.0
 ## A man who has been shot falls down. The tumble below is for crew thrown
@@ -42,6 +57,12 @@ static func fall(world: Node, feet: Transform3D, velocity: Vector3, suit: Color,
 		amount: float, head: bool, low: bool, from_dir: Vector3, lasts := 16.0) -> void:
 	if world == null or not world.is_inside_tree():
 		return
+	var _pr := Sim.prof_at()
+	_fall(world, feet, velocity, suit, helmet, amount, head, low, from_dir, lasts)
+	Sim.prof_end(&"fx.death", _pr)
+
+static func _fall(world: Node, feet: Transform3D, velocity: Vector3, suit: Color, helmet: Color,
+		amount: float, head: bool, low: bool, from_dir: Vector3, lasts: float) -> void:
 	var at: Vector3 = feet.origin
 	var right: Vector3 = feet.basis.orthonormalized().x
 	if amount >= 120.0 and not head:
@@ -90,6 +111,8 @@ func _ready() -> void:
 	var xf: Transform3D = get_meta("spawn_xf", Transform3D.IDENTITY)
 	var vel: Vector3 = get_meta("spawn_vel", Vector3.ZERO)
 	global_transform = Transform3D(Basis(), xf.origin)
+	_floor_bit = 1 << (8 + _floor_next % FLOOR_BITS)
+	_floor_next += 1
 	_ground_patch(xf.origin)
 	for l in LIMBS:
 		if lost.has(l[0]):
@@ -98,12 +121,18 @@ func _ready() -> void:
 		b.name = str(l[0])
 		b.mass = float(l[3])
 		b.can_sleep = true
+		# Continuous collision only costs anything while a limb is moving
+		# fast, which is exactly when it is needed: crew thrown clear of a
+		# wreck, or a limb kicked loose when two bodies fall together.
 		b.continuous_cd = true
+		# buildings and other bodies on 4, and this body's own floor
 		b.collision_layer = 4
-		b.collision_mask = 4
-		b.physics_material_override = PhysicsMaterial.new()
-		b.physics_material_override.friction = 0.9
-		b.physics_material_override.bounce = 0.05
+		b.collision_mask = 4 | _floor_bit
+		if _grip == null:
+			_grip = PhysicsMaterial.new()
+			_grip.friction = 0.9
+			_grip.bounce = 0.05
+		b.physics_material_override = _grip
 		var cs := CollisionShape3D.new()
 		var box := BoxShape3D.new()
 		box.size = l[1]
@@ -114,7 +143,7 @@ func _ready() -> void:
 		var col: Color = get_meta("suit", Pilot.SUIT)
 		if l[0] == "head":
 			col = get_meta("helmet", Pilot.HELMET)
-		b.add_child(MeshKit.mi(_box_mesh(l[1], col), "M"))
+		b.add_child(_limb(l[1], col, "M"))
 		add_child(b)
 		# Facing the way the figure faced. Placed by position alone, every
 		# limb was square to the world whatever way he had been standing.
@@ -134,8 +163,8 @@ func _ready() -> void:
 		if bodies.has(j[0]) and not bodies.has(j[1]):
 			# the raw end of it, on whatever it used to be joined to
 			var owner_body: RigidBody3D = bodies[j[0]]
-			var cap := MeshKit.mi(_box_mesh(Vector3(0.15, 0.07, 0.15) if j[1] != "head"
-				else Vector3(0.16, 0.06, 0.16), Color(0.40, 0.03, 0.03)), "Stump")
+			var cap := _limb(Vector3(0.15, 0.07, 0.15) if j[1] != "head"
+				else Vector3(0.16, 0.06, 0.16), Color(0.40, 0.03, 0.03), "Stump")
 			owner_body.add_child(cap)
 			cap.global_position = xf.origin + xf.basis * (j[2] as Vector3)
 		if not bodies.has(j[0]) or not bodies.has(j[1]):
@@ -154,33 +183,42 @@ func _ready() -> void:
 		joint.node_a = bodies[j[0]].get_path()
 		joint.node_b = bodies[j[1]].get_path()
 
-func _box_mesh(size: Vector3, col: Color) -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.box(st, size, Vector3.ZERO)
-	return MeshKit.finish(st, MeshKit.mat(col, 0.85, 0.0))
+## A limb: the shared unit cube at the limb's size, in the shared material for
+## its colour. Each was a mesh and a material built for the one body.
+func _limb(size: Vector3, col: Color, nm: String) -> MeshInstance3D:
+	var mi := MeshKit.mi(Effects.unit_box(), nm)
+	mi.material_override = Effects.bit_mat(col)
+	mi.scale = size
+	return mi
 
 ## The world has no collision mesh, so drop a patch of ground under the ragdoll.
+## Only this body's limbs can touch it: see `FLOOR_BITS`.
 func _ground_patch(at: Vector3) -> void:
 	var sb := StaticBody3D.new()
-	sb.collision_layer = 4
-	sb.collision_mask = 4
+	sb.collision_layer = _floor_bit
+	sb.collision_mask = 0
 	var cs := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(160, 4, 160)
+	# Deep, not a sheet. A limb knocked more than half way into a slab four
+	# metres thick is nearer the bottom face than the top, and the solver
+	# pushes it out the way that is shortest -- down, through the floor, for
+	# ever. Forty metres deep, the shortest way out is always up.
+	box.size = Vector3(160, 40, 160)
 	cs.shape = box
 	sb.add_child(cs)
 	add_child(sb)
-	sb.global_position = Vector3(at.x, maxf(Sim.height_at(at.x, at.z), Sim.sea_at(at.x, at.z)) - 2.0, at.z)
+	sb.global_position = Vector3(at.x, maxf(Sim.height_at(at.x, at.z), Sim.sea_at(at.x, at.z)) - 20.0, at.z)
 
-var _bled := false
-var _age := 0.0
+## The pool where he has come to rest, not where he was hit, and then gone
+## when his time is up. Two timers: this was a frame callback for every body
+## for the whole of its life, to do two things once each.
+func _enter_tree() -> void:
+	if is_inside_tree() and not has_meta("timed"):
+		set_meta("timed", true)
+		get_tree().create_timer(2.2, false).timeout.connect(_bleed)
+		get_tree().create_timer(maxf(life, 0.05), false).timeout.connect(queue_free)
 
-func _process(delta: float) -> void:
-	_age += delta
-	if not _bled and _age > 2.2 and (calm or not lost.is_empty()) and bodies.has("torso"):
-		# where he has come to rest, not where he was hit
-		_bled = true
+func _bleed() -> void:
+	if (calm or not lost.is_empty()) and bodies.has("torso") \
+			and is_instance_valid(bodies["torso"]):
 		Effects.blood_pool(get_parent(), (bodies["torso"] as Node3D).global_position, 1.2)
-	life -= delta
-	if life <= 0.0:
-		queue_free()

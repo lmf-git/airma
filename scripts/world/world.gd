@@ -27,6 +27,8 @@ var _sun: DirectionalLight3D
 var _fill: DirectionalLight3D
 var _psm: ShaderMaterial
 var menu: Menu
+## ESC in a match. The hangar used to be the pause menu as well.
+var pause_menu: PauseMenu
 var hud: HUD
 var cam: ChaseCamera
 var menu_cam: Camera3D
@@ -1173,6 +1175,11 @@ var _fps_phys: Array = []
 var _fps_rcpu: Array = []
 var _fps_rgpu: Array = []
 var _fps_nodes: Array = []
+## Each stall, with the tagged blocks that grew most across it. "worst 48 ms"
+## with nobody's name on it is a number to stare at; this names the suspects,
+## or says it was none of them -- which points at the engine.
+var _fps_stalls: Array = []
+var _fps_prof_prev: Dictionary = {}
 var _fps_times: PackedFloat32Array = PackedFloat32Array()
 var _locktime_test := false
 var _lt_t := 0.0
@@ -1214,6 +1221,36 @@ var _river_test := false
 var _warlords_test := false
 var _churn_test := false
 var _gun_test := false
+## --jet= as given, for the tests that should fly what was asked for.
+var _jet_arg := ""
+## ESC through the pause page, the settings page and the hangar and back.
+var _pause_test := false
+## The obstacle grid against every box, one by one, round a real town.
+var _obs_test := false
+## Forty men down at once, every way there is to go down.
+var _gib_test := false
+## Rounds against a wall and a parked car, and the weapon camera on his own.
+var _round_test := false
+## Lying down and shooting: where the rounds start and where they go.
+var _prone_test := false
+## Whether a turned building's obstacle box is turned the way its mesh is.
+var _yaw_test := false
+## The map from the street out to the planet and back, and the corner map.
+var _zoom_test := false
+## Every class, every weapon in it fired at a mark, and every sight.
+var _arms_test := false
+## Killstreaks as chosen: the keys, the ladder, two of them called in.
+var _streak_test := false
+## Whether the AI helicopters fly with their wheels up.
+var _hgear_test := false
+## The flight model itself: what the air takes, what the turn does, and
+## whether the solver puts a round on its mark.
+var _ball_test := false
+## Hellfire and Hydra off a hovering helicopter at a lased spot, all round.
+var _hf_test := false
+## The edges of a street fight, and the country hidden beyond them.
+var _bounds_test := false
+var _hgear_t := 0.0
 var _tfr_test := false
 var _tfr_range := 0.0
 var _tfr_veh := false
@@ -1336,6 +1373,9 @@ var fleet_count := 0
 var weapon_cam_on := false
 var _cam_was_ship := false
 var _cam_was_tank := false
+## On foot, the screen is his own eyes; riding a round it is the chase camera's
+## until the round has gone off and been watched going off.
+var _cam_was_walker := false
 var chat: ChatBox = null
 var ship: Ship = null
 var _ship_kind := ""
@@ -1682,7 +1722,17 @@ func _ready() -> void:
 	menu.mission_changed.connect(_on_lobby_mission)
 	menu.join_requested.connect(_join_game)
 	menu.resume_requested.connect(_resume)
+	menu.settings_requested.connect(func() -> void: pause_menu.open_settings())
 	ui.add_child(menu)
+	# After the hangar, so it draws over it: the hangar opens the settings page
+	# too, and the deploy screen is put in below the hangar.
+	pause_menu = PauseMenu.new()
+	pause_menu.name = "Pause"
+	pause_menu.world = self
+	pause_menu.resume_requested.connect(_resume)
+	pause_menu.restart_requested.connect(_restart_match)
+	pause_menu.change_mode_requested.connect(_pause_to_hangar)
+	ui.add_child(pause_menu)
 	# Not yet: this puts a vehicle on the hangar turntable, forty metres in
 	# front of the menu camera, and the menu camera is the one running while the
 	# world is still being built. Built here it stood there through the rest of
@@ -2028,6 +2078,12 @@ func _tick_world(delta: float) -> void:
 		_cam_was_tank = false
 		if is_instance_valid(tank) and is_instance_valid(tank.cam):
 			tank.cam.current = true
+	# back to his own eyes once it has gone off and been watched going off
+	if _cam_was_walker and (not is_instance_valid(cam) or not cam.riding()):
+		_cam_was_walker = false
+		if on_foot and is_instance_valid(walker) and is_instance_valid(walker.cam) \
+				and not walker.dead:
+			walker.cam.current = true
 	# The ground follows the eye. Rebuilds are metered so crossing a ring
 	# boundary at five hundred knots does not stall the frame: a chunk is 289
 	# height samples and a mesh, and a boundary crossing can want dozens.
@@ -3568,6 +3624,19 @@ func _tick_world(delta: float) -> void:
 		# are still arriving, and the worst frame in a game's life is its first.
 		if _fps_clock > 1.0:
 			_fps_times.append(delta)
+			if delta > 0.020 and _fps_stalls.size() < 12:
+				var grew: Array = []
+				for tag in Sim._prof:
+					var g: float = float(Sim._prof[tag]) - float(_fps_prof_prev.get(tag, 0.0))
+					if g > 500.0 and not String(tag).ends_with(".total"):
+						grew.append([g, String(tag)])
+				grew.sort_custom(func(a: Array, b: Array) -> bool: return float(a[0]) > float(b[0]))
+				var who := PackedStringArray()
+				for gw in grew.slice(0, 4):
+					who.append("%s %.1f ms" % [String(gw[1]), float(gw[0]) * 0.001])
+				_fps_stalls.append("%.1f ms at %.1f s: %s" % [delta * 1000.0, _fps_clock,
+					", ".join(who) if not who.is_empty() else "nothing tagged -- the engine's own"])
+			_fps_prof_prev = Sim._prof.duplicate()
 			# Sampled with the frame time, not read once when the report is
 			# printed. Read at the end they are whatever the engine happened to
 			# be doing at that instant -- and it showed: a run whose frames
@@ -6181,7 +6250,7 @@ func _tick_world(delta: float) -> void:
 	# directly and takes the input out of it.
 	if _gun_test:
 		_gun_test = false
-		_start("f16", "free")
+		_start(_jet_arg if _jet_arg != "" else "f16", "free")
 		await get_tree().process_frame
 		await get_tree().physics_frame
 		if not is_instance_valid(player):
@@ -6195,11 +6264,16 @@ func _tick_world(delta: float) -> void:
 		var refused := 0
 		var frames := 0
 		var first_refusal := -1
+		var rounds0: int = player.ammo
+		var stutters := 0
 		while frames < 720:                       # six seconds at 120 Hz
 			await get_tree().physics_frame
 			frames += 1
 			if player.fire_gun(self):
 				fired += 1
+				# the report has to run on to the next shot, or it stutters
+				if player._gun_snd <= player.gun_cd:
+					stutters += 1
 			else:
 				refused += 1
 				if first_refusal < 0:
@@ -6208,9 +6282,21 @@ func _tick_world(delta: float) -> void:
 			fired, refused, player.ammo])
 		print("[gun] first refusal at frame %d (%.2f s), cooldown now %.4f" % [
 			first_refusal, float(first_refusal) / 120.0, player.gun_cd])
-		var ok: bool = fired > 100
+		# Every shot the rate allows, near enough. A slow gun fires every round
+		# and a fast one four to a tracer, so the count is the rate's own.
+		var rpm: float = float((player.spec["gun"] as Dictionary)["rpm"])
+		var each: float = 60.0 / rpm * (4.0 if rpm >= 1500.0 else 1.0)
+		var per: float = 4.0 if rpm >= 1500.0 else 1.0
+		var want: int = mini(int(6.0 / each), int(float(rounds0) / per))
+		var ok: bool = fired >= int(float(want) * 0.9) and fired > 20 and stutters == 0
+		print("[gun] expected about %d, %d shot(s) where the report would cut out" % [
+			want, stutters])
 		print("[gun] RESULT: %s" % ("ok" if ok else "FAILED"))
 		get_tree().quit()
+		return
+	if _pause_test:
+		_pause_test = false
+		await _run_pause_test()
 		return
 	# Does a cruise round actually follow the ground, or does it fly into the
 	# first hill it meets? Asked on its own, with nothing else shooting: in a
@@ -8882,8 +8968,63 @@ func _tick_world(delta: float) -> void:
 	_tick_town_sets(delta)
 	if is_instance_valid(cqb):
 		_tick_cqb_support(delta)
+	_tick_bounds(delta)
 	if _cqb_test and is_instance_valid(cqb):
 		_tick_cqb_test(delta)
+	if _obs_test and is_instance_valid(cqb):
+		_obs_test = false
+		_run_obs_test()
+	if _gib_test and is_instance_valid(cqb) and is_instance_valid(walker):
+		_gib_test = false
+		_run_gib_test()
+	if _round_test and is_instance_valid(cqb) and is_instance_valid(walker) and is_instance_valid(cam):
+		_round_test = false
+		_run_round_test()
+	if _prone_test and is_instance_valid(cqb) and is_instance_valid(walker):
+		_prone_test = false
+		_run_prone_test()
+	if _yaw_test and is_instance_valid(cqb) and is_instance_valid(cqb.dressing):
+		_yaw_test = false
+		_run_yaw_test()
+	if _zoom_test and is_instance_valid(cqb) and is_instance_valid(walker) and is_instance_valid(map):
+		_zoom_test = false
+		_run_zoom_test()
+	if _arms_test and is_instance_valid(cqb) and is_instance_valid(walker):
+		_arms_test = false
+		_run_arms_test()
+	if _streak_test and is_instance_valid(cqb) and is_instance_valid(walker):
+		_streak_test = false
+		_run_streak_test()
+	if _ball_test and running:
+		_ball_test = false
+		_run_ball_test()
+	if _hf_test and running and is_instance_valid(player):
+		_hf_test = false
+		_run_hf_test()
+	if _bounds_test and running and is_instance_valid(cqb) and is_instance_valid(walker):
+		_bounds_test = false
+		_run_bounds_test()
+	if _hgear_test and running:
+		_hgear_t += delta
+		if _hgear_t > 25.0:
+			_hgear_test = false
+			var up := 0
+			var hanging := 0
+			for n in get_tree().get_nodes_in_group("bandits") + get_tree().get_nodes_in_group("allies"):
+				if not (n is AIHeli) or not (n as AIHeli).alive:
+					continue
+				var h := n as AIHeli
+				var clear: float = h.global_position.y - Sim.height_at(h.global_position.x, h.global_position.z)
+				print("[hgear] %s: %.0f m over the ground, gear %s (%.2f)" % [h.name, clear,
+					"down" if h.gear_down else "up", h.gear_anim])
+				if clear > 60.0:
+					if h.gear_anim < 0.05:
+						up += 1
+					else:
+						hanging += 1
+			print("[hgear] RESULT: %s — %d flying with it up, %d with it hanging" % [
+				"ok" if up > 0 and hanging == 0 else "FAILED", up, hanging])
+			get_tree().quit()
 	if _cqb_view != "" and is_instance_valid(cqb) and is_instance_valid(walker):
 		# pose the player for a photograph
 		var cv := _cqb_view
@@ -9352,7 +9493,22 @@ func _start(id: String, mission: String) -> void:
 	Sim.score = 0
 	get_tree().paused = false
 	_clear_mission()
+	# no fight, no edges, and the whole country back
+	_bounds_c = Vector3.INF
+	_show_far_scenery()
+	# Every mission opens the map as it always has, on the planet and framing
+	# the ground you are on; a street fight puts it on the chart below.
+	if is_instance_valid(map):
+		map.globe = Sim.globe
+		map.zoom = 29.0
+		map.follow = true
 	menu.visible = false
+	# a hangar shown from the pause page said RESUME and LAUNCH NEW; the next
+	# time it comes up it is between matches
+	menu.set_paused(false)
+	if is_instance_valid(pause_menu):
+		pause_menu.close()
+	_show_roster(false)
 	preview.visible = false
 	hud.visible = true
 	running = true
@@ -9380,6 +9536,7 @@ func _start(id: String, mission: String) -> void:
 	if cam == null:
 		cam = ChaseCamera.new()
 		add_child(cam)
+		Effects.round_watch = _offer_round
 	player.auto = _auto
 	if "_dash_alt" in player:
 		player._dash_alt = _dash_alt
@@ -9810,6 +9967,7 @@ func _tick_cqb_support(delta: float) -> void:
 			var sol: Dictionary = _cqb_tel.fire_solution(mk, float(Tank.KINDS[_cqb_tel.kind]["muzzle"]))
 			if not sol.is_empty():
 				_cqb_tel.turret_pitch = float(sol["elev"])
+				_cqb_tel.turret_yaw = float(sol.get("yaw", _cqb_tel.turret_yaw))
 		if _cqb_tel.lay_error() < 0.04 and _cqb_tel.fire_main(self):
 			if not _cqb_tel_fired:
 				_cqb_tel_fired = true
@@ -9838,6 +9996,83 @@ var _cqb_said := 0
 ## Two squads on foot in the middle of the nearest town. The aeroplane that
 ## was picked stays on the apron with the canopy shut: every page in the game
 ## expects there to be one, and this is a mission that never goes near it.
+## The edges of a fight: see `_setup_cqb`. INF while there is none.
+const BOUNDS_CQB := 400.0
+const BOUNDS_GROUND := 900.0
+const BOUNDS_AIR := 15000.0
+## Seconds out of bounds before it is the end of you.
+const OOB_GRACE := 10.0
+var _bounds_c := Vector3.INF
+var _bounds_ground := 0.0
+var _bounds_air := 0.0
+var _oob_t := 0.0
+## Scenery hidden for the match, to be shown again after it.
+var _hidden_far: Array = []
+
+## Hide every piece of scenery that lies wholly beyond `reach` of the fight:
+## towns, road cells, the trees and rocks of the open country. They are drawn
+## in batches by area, and a batch with nothing anywhere near the fight is a
+## batch nobody in it can see. Hidden rather than freed, so the next mission
+## has its country back without building it again.
+func _hide_far_scenery(c: Vector3, reach: float) -> void:
+	_show_far_scenery()
+	if not is_instance_valid(scenery):
+		return
+	for n in scenery.find_children("*", "GeometryInstance3D", true, false):
+		var gi := n as GeometryInstance3D
+		if gi == null or not gi.visible:
+			continue
+		var wab: AABB = gi.global_transform * gi.get_aabb()
+		var near := Vector2(clampf(c.x, wab.position.x, wab.end.x),
+			clampf(c.z, wab.position.z, wab.end.z))
+		if near.distance_to(Vector2(c.x, c.z)) > reach:
+			gi.visible = false
+			_hidden_far.append(gi)
+
+func _show_far_scenery() -> void:
+	for gi in _hidden_far:
+		if is_instance_valid(gi):
+			(gi as GeometryInstance3D).visible = true
+	_hidden_far.clear()
+
+## Who is out of bounds, and for how long. Ten seconds to get back, and then
+## the fight ends you. Not while choosing a class, and not from the back of a
+## gunship called in over the town, which orbits outside it by design.
+func _tick_bounds(delta: float) -> void:
+	if _bounds_c == Vector3.INF or not running or not is_instance_valid(cqb):
+		if is_instance_valid(hud):
+			hud.oob_left = -1.0
+		return
+	var who: Node3D = null
+	var r: float = _bounds_ground
+	if is_instance_valid(_station_walker) or gunning:
+		who = null
+	elif on_foot and is_instance_valid(walker) and not walker.dead and not walker.sheltered:
+		who = walker
+	elif is_instance_valid(tank):
+		who = tank
+	elif is_instance_valid(player) and player.alive and not on_foot and _bounds_air > 0.0:
+		who = player
+		r = _bounds_air
+	if who == null:
+		_oob_t = 0.0
+		hud.oob_left = -1.0
+		return
+	var d: float = Vector2(who.global_position.x - _bounds_c.x,
+		who.global_position.z - _bounds_c.z).length()
+	if d <= r:
+		_oob_t = 0.0
+		hud.oob_left = -1.0
+		return
+	_oob_t += delta
+	hud.oob_left = maxf(OOB_GRACE - _oob_t, 0.0)
+	if _oob_t >= OOB_GRACE:
+		_oob_t = 0.0
+		hud.oob_left = -1.0
+		Sim.report("out of bounds too long", Sim.Ev.BAD)
+		if who.has_method("take_hit"):
+			who.call("take_hit", 100000.0, null)
+
 func _setup_cqb(kind := "cqb") -> void:
 	var flying: bool = kind == "arms" and not _cqb_on_foot and _drive_kind == ""
 	player.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(-90.0)),
@@ -9870,9 +10105,24 @@ func _setup_cqb(kind := "cqb") -> void:
 	add_child(cqb)
 	cqb.setup(town, mode, self, town_set(clampi(CqbMatch.town, 0, maxi(scenery.sites.size() - 1, 0))))
 	if is_instance_valid(map):
-		# close enough in to see a street fight when the map is opened
+		# Close enough in to see a street fight when the map is opened, on
+		# the chart and on him. Setting the chart's zoom alone did nothing:
+		# the map opens as the planet, and the chart was only reached by
+		# picking a strike. Zooming out from here goes on to the planet.
+		map.globe = false
 		map.zoom = 2400.0
+		map.follow = true
 	var c3 := Vector3(cqb.centre.x, Sim.height_at(cqb.centre.x, cqb.centre.y), cqb.centre.y)
+	# The fight has edges. A street fight is the town, a battle with armour the
+	# ground round it, and the aircraft over a combined fight get the sky for
+	# fifteen kilometres; past that is out of bounds. The country beyond the
+	# edge and a margin is hidden for the match -- nobody is going to stand in
+	# it -- and comes back with the next mission.
+	_bounds_c = c3
+	_bounds_ground = BOUNDS_CQB if kind == "cqb" else BOUNDS_GROUND
+	_bounds_air = BOUNDS_AIR if kind == "arms" else 0.0
+	_oob_t = 0.0
+	_hide_far_scenery(c3, (_bounds_air + 10000.0) if kind == "arms" else (_bounds_ground + 1500.0))
 	if kind != "cqb":
 		_cqb_armour(c3)
 	if kind == "arms":
@@ -9975,6 +10225,7 @@ func _cqb_deploy(first: bool) -> void:
 		menu.get_parent().move_child(deploy_ui, menu.get_index())
 		deploy_ui.deploy.connect(_on_cqb_deploy)
 	walker.set_physics_process(false)
+	walker.shelter(true)
 	cqb.set_away(true)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	# Somewhere to look from while choosing. The man is not being ticked, so
@@ -10007,6 +10258,7 @@ func _on_cqb_deploy(what: String) -> void:
 		if is_instance_valid(walker):
 			var all: Array = CqbMatch.kit_classes()
 			walker.apply_class(all[clampi(CqbMatch.class_pick, 0, all.size() - 1)])
+			walker.shelter(false)
 			walker.set_physics_process(true)
 			walker.activate()
 		cqb.set_away(false)
@@ -10425,6 +10677,12 @@ func _run_apkws_test() -> void:
 	pod.pitch = -atan2(h, 4000.0)
 	await get_tree().process_frame
 	pod.designate()
+	# where "straight ahead" on the sensor put the spot, against the nose
+	var nose: Vector3 = -player.global_transform.basis.z
+	var to_spot: Vector3 = pod.area_point - player.global_position
+	print("[laser] head at yaw 0: the spot is %.0f deg off the nose, %.0f m away (%.0f m up)" % [
+		rad_to_deg(Vector2(nose.x, nose.z).angle_to(Vector2(to_spot.x, to_spot.z))),
+		Vector2(to_spot.x, to_spot.z).length(), h])
 	pod.toggle_laser()
 	for i in 6:
 		await get_tree().process_frame
@@ -11329,6 +11587,10 @@ func _gunner_input(_delta: float) -> void:
 				and i < player.weapon_types.size() and not Sim.menu_keys:
 			player.set_weapon(i)
 			Sim.report(player.weapon_label(player.current_weapon()), Sim.Ev.INFO)
+	# The page says "L laser" at the gun station as well, and L was only ever
+	# read on the pilot's sensor page: once it was on here it stayed on.
+	if Input.is_action_just_pressed(&"laser") and not Sim.ui_modal:
+		pod.toggle_laser()
 	if (Input.is_action_pressed(&"gun") or Input.is_action_pressed(&"fire")) \
 			and not Sim.ui_modal:
 		var aim: Vector3 = pod.aim_point()
@@ -11352,7 +11614,14 @@ func _sensor_input() -> void:
 			Sim.report(player.weapon_label(player.current_weapon()), Sim.Ev.INFO)
 	if Input.is_action_just_pressed(&"laser"):
 		pod.toggle_laser()
-	if Input.is_action_just_pressed(&"fire") or Input.is_action_pressed(&"gun"):
+	# The gun is held, the stores are not. The whole block was entered on the
+	# press of the fire button, so with the chin gun selected and the trigger
+	# squeezed on the sensor page an Apache put out one shot and stopped until
+	# the button was let go and pulled again.
+	var gun_sel: bool = player.current_weapon() == "gun" \
+		or player.is_gunship_weapon(player.current_weapon())
+	if Input.is_action_just_pressed(&"fire") or Input.is_action_pressed(&"gun") \
+			or (gun_sel and Input.is_action_pressed(&"fire")):
 		var w: String = player.current_weapon()
 		var aim: Vector3 = pod.aim_point()
 		if player.is_gunship_weapon(w):
@@ -11364,6 +11633,9 @@ func _sensor_input() -> void:
 			elif aim != Vector3.INF:
 				player.fire_gunship(self, aim)
 		elif w == "gun":
+			# On the fire button as well as the gun key, and for as long as it
+			# is down: see below. Reaching this branch on the press alone gave
+			# a chin gun one shot per click.
 			player.fire_gun(self)
 		elif Input.is_action_just_pressed(&"fire"):
 			var res: String = player.fire()
@@ -13474,32 +13746,63 @@ func _on_store_released(m: Node) -> void:
 	# Ride it out if the weapon cam is armed. It lets go on its own when the
 	# round goes off, because the node stops being valid.
 	if weapon_cam_on and is_instance_valid(cam) and m is Node3D:
-		cam.weapon_cam = m as Node3D
-		# A crewed hull runs its own camera and drives it every physics frame,
-		# so setting the ride here did nothing at all: the boat simply put the
-		# view back on her own masthead. Hand the screen to the chase camera
-		# for the flight, and take it back when the round is gone.
-		# A crewed hull or vehicle runs its own camera and re-points it every
-		# physics frame, so setting the ride did nothing: the view simply went
-		# back to the vehicle. Hand the screen over for the flight.
-		if is_instance_valid(ship) and is_instance_valid(ship.cam):
-			_cam_was_ship = true
-			# From where the view is, not from wherever the chase camera was
-			# last left: it eases across from its own pose, and one that has
-			# not had the screen since the hull was boarded is nowhere near.
-			if not cam.current:
-				cam.global_transform = ship.cam.global_transform
-			cam.current = true
-		elif is_instance_valid(tank) and is_instance_valid(tank.cam):
-			_cam_was_tank = true
-			if not cam.current:
-				cam.global_transform = tank.cam.global_transform
-			cam.current = true
+		_ride(m as Node3D)
 	# a ship's round is not reported over the wire here: the hull's own fire
 	# path already tells the other end
 	if net and net.active and is_instance_valid(m) and is_instance_valid(player) \
 			and m.shooter == player:
 		net.report_fire(m.wid, m.global_transform, m.vel)
+
+## Every round fired anywhere, offered to the weapon camera by `Effects.watch`.
+## It takes the player's own -- from his gun on foot, his rocket or his
+## missile, the aeroplane's cannon, the vehicle's guns -- one at a time. A gun
+## puts rounds out far faster than a camera can follow them, so the one being
+## ridden is ridden to the end and its impact watched, and the next one fired
+## after that is the next one ridden.
+func _offer_round(shot: Node3D, shooter: Node) -> void:
+	if not weapon_cam_on or not running or not is_instance_valid(cam) \
+			or not is_instance_valid(shot) or shooter == null:
+		return
+	var mine: bool = (on_foot and shooter == walker) \
+		or (not on_foot and shooter == player) \
+		or (is_instance_valid(tank) and shooter == tank) \
+		or (is_instance_valid(ship) and shooter == ship)
+	if not mine or cam.riding():
+		return
+	_ride(shot)
+
+## Put the chase camera on a round, taking the screen from whatever camera has
+## it -- the vehicle's, the hull's, or his own eyes -- for as long as the ride
+## lasts.
+func _ride(m: Node3D) -> void:
+	if not is_instance_valid(cam) or not is_instance_valid(m):
+		return
+	cam.weapon_cam = m
+	# A crewed hull runs its own camera and drives it every physics frame,
+	# so setting the ride here did nothing at all: the boat simply put the
+	# view back on her own masthead. Hand the screen to the chase camera
+	# for the flight, and take it back when the round is gone.
+	# A crewed hull or vehicle runs its own camera and re-points it every
+	# physics frame, so setting the ride did nothing: the view simply went
+	# back to the vehicle. Hand the screen over for the flight.
+	if is_instance_valid(ship) and is_instance_valid(ship.cam):
+		_cam_was_ship = true
+		# From where the view is, not from wherever the chase camera was
+		# last left: it eases across from its own pose, and one that has
+		# not had the screen since the hull was boarded is nowhere near.
+		if not cam.current:
+			cam.global_transform = ship.cam.global_transform
+		cam.current = true
+	elif is_instance_valid(tank) and is_instance_valid(tank.cam):
+		_cam_was_tank = true
+		if not cam.current:
+			cam.global_transform = tank.cam.global_transform
+		cam.current = true
+	elif on_foot and is_instance_valid(walker) and is_instance_valid(walker.cam):
+		_cam_was_walker = true
+		if not cam.current:
+			cam.global_transform = walker.cam.global_transform
+		cam.current = true
 
 func _on_bandit_down(who: Node) -> void:
 	if mode and mode.running:
@@ -13554,17 +13857,1254 @@ func _watch_landing(delta: float) -> void:
 		Sim.report("FULL STOP — %d m of runway to spare. Score %d." % [int(rem), Sim.score], Sim.Ev.GOOD)
 
 # ---------------------------------------------------------------- shell
+## What a street fight hides of the country, what it does to a man who walks
+## out of it, and that the country comes back for the next mission.
+func _run_bounds_test() -> void:
+	for sd in cqb.soldiers:
+		if is_instance_valid(sd):
+			(sd as Node).set_process(false)
+	for i in 30:
+		await get_tree().physics_frame
+	var bad: Array = []
+	var hidden: int = _hidden_far.size()
+	var insts := 0
+	for gi in _hidden_far:
+		if gi is MultiMeshInstance3D and (gi as MultiMeshInstance3D).multimesh != null:
+			insts += (gi as MultiMeshInstance3D).multimesh.instance_count
+	var shown := 0
+	for n in scenery.find_children("*", "GeometryInstance3D", true, false):
+		if (n as GeometryInstance3D).visible:
+			shown += 1
+	print("[bounds] street fight: %d scenery batches hidden (%d instances), %d still drawn" % [
+		hidden, insts, shown])
+	if hidden == 0:
+		bad.append("nothing beyond the fight was hidden")
+	# out, and back in before the time is up
+	var home: Vector3 = walker.global_position
+	var out := Vector3(_bounds_c.x + BOUNDS_CQB + 60.0, 0.0, _bounds_c.z)
+	out.y = Sim.height_at(out.x, out.z)
+	walker.global_position = out
+	for i in 120 * 3:
+		await get_tree().physics_frame
+	var warned: float = hud.oob_left
+	walker.global_position = home
+	for i in 30:
+		await get_tree().physics_frame
+	var cleared: bool = hud.oob_left < 0.0
+	print("[bounds] three seconds out: %.1f s left on the warning; back in, warning gone %s" % [
+		warned, str(cleared)])
+	if warned < 0.0 or warned > 8.0 or not cleared:
+		bad.append("the warning did not count down and clear")
+	# out, and staying out
+	walker.global_position = out
+	var dead := false
+	for i in 120 * 12:
+		await get_tree().physics_frame
+		if not is_instance_valid(walker) or walker.dead:
+			dead = true
+			break
+		walker.global_position = out
+	print("[bounds] staying out: %s" % ("killed" if dead else "still standing after twelve seconds"))
+	if not dead:
+		bad.append("staying out of bounds did not end him")
+	# the next mission has its country back: everything the fight hid
+	var was_hidden: Array = _hidden_far.duplicate()
+	_start("f16", "free")
+	await get_tree().physics_frame
+	var back := 0
+	for n in was_hidden:
+		if is_instance_valid(n) and not (n as GeometryInstance3D).visible:
+			back += 1
+	print("[bounds] next mission: %d scenery batches still hidden" % back)
+	if back > 0 or _bounds_c != Vector3.INF:
+		bad.append("the country did not come back")
+	for b in bad:
+		print("[bounds] %s" % b)
+	print("[bounds] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## An Apache in a low hover, a spot lased fifteen hundred metres out at a few
+## bearings off the nose, and a Hellfire and a Hydra at each: which way each
+## goes off the rail and how close it comes.
+func _run_hf_test() -> void:
+	var bad: Array = []
+	var heli: Aircraft = player
+	var g0: float = Sim.height_at(heli.global_position.x, heli.global_position.z)
+	# two of each aboard: dead ahead, and well off the nose
+	for brg_deg in [0.0, 40.0]:
+		for wid in ["agm114", "hydra"]:
+			# a hover a hundred and fifty metres up, nose north, still
+			var at := Vector3(heli.global_position.x, g0 + 150.0, heli.global_position.z)
+			heli.global_transform = Transform3D(Basis(), at)
+			heli.linear_velocity = Vector3.ZERO
+			heli.angular_velocity = Vector3.ZERO
+			if heli.has_method("set_hover_hold"):
+				heli.call("set_hover_hold", true)
+			await get_tree().physics_frame
+			var b: float = deg_to_rad(brg_deg)
+			var spot := Vector3(at.x + sin(b) * 1500.0, 0.0, at.z - cos(b) * 1500.0)
+			spot.y = Sim.height_at(spot.x, spot.z)
+			pod.platform = heli
+			if not pod.active:
+				pod.toggle()
+			pod.mode = SensorPod.AREA
+			pod.area_point = spot
+			pod.tracked = null
+			pod.designate()
+			if not pod.lasing:
+				pod.toggle_laser()
+			for i in 6:
+				await get_tree().process_frame
+			var wi: int = heli.weapon_types.find(wid)
+			if wi < 0:
+				bad.append("no %s aboard" % wid)
+				continue
+			heli.set_weapon(wi)
+			heli.target = pod._marker
+			heli.fire_cd = 0.0
+			var before := {}
+			for n in get_tree().get_nodes_in_group("missiles"):
+				before[n.get_instance_id()] = true
+			var why: String = heli.fire()
+			var m: Node3D = null
+			for i in 30:
+				for n in get_tree().get_nodes_in_group("missiles"):
+					if not before.has(n.get_instance_id()):
+						m = n
+				if m != null:
+					break
+				await get_tree().physics_frame
+			if m == null:
+				print("[hf] %-6s at %+4.0f deg: did not go (%s)" % [wid, brg_deg, why])
+				continue
+			var p0: Vector3 = m.global_position
+			var best := INF
+			var first_dir := Vector3.ZERO
+			var last: Vector3 = p0
+			for f in 120 * 25:
+				if not is_instance_valid(m):
+					break
+				var p: Vector3 = m.global_position
+				if first_dir == Vector3.ZERO and p.distance_to(p0) > 30.0:
+					first_dir = (p - p0).normalized()
+				best = minf(best, p.distance_to(spot))
+				last = p
+				await get_tree().physics_frame
+			var want := (spot - p0)
+			var off: float = rad_to_deg(Vector2(first_dir.x, first_dir.z).angle_to(Vector2(want.x, want.z))) \
+				if first_dir != Vector3.ZERO else 999.0
+			print("[hf] %-6s at %+4.0f deg: left %+.0f deg off the line to the spot, came within %.0f m, last seen %.0f m from it" % [
+				wid, brg_deg, off, best, last.distance_to(spot)])
+			if best > 25.0:
+				bad.append("%s at %.0f deg missed by %.0f m" % [wid, brg_deg, best])
+	for x in bad:
+		print("[hf] %s" % x)
+	print("[hf] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## The flight model on its own, away from any weapon: speed kept against
+## range, the solver against marks out to six hundred metres, the turn of the
+## planet over an artillery shot, gravity with height, and the plain-gravity
+## stretch at the muzzle.
+func _run_ball_test() -> void:
+	var bad: Array = []
+	var o: Vector3 = Vector3(0.0, Sim.height_at(0.0, 0.0) + 2.0, 0.0)
+	# speed kept: a carbine round and a sniper's, flown flat at 120 Hz
+	for pair in [["carbine", 880.0, 0.0011], ["sniper", 870.0, 0.0005]]:
+		var p: Vector3 = o
+		var v := Vector3(0, 0, -float(pair[1]))
+		var flown := 0.0
+		var at300 := 0.0
+		var at600 := 0.0
+		while flown < 600.0:
+			v = Ballistics.step(p, v, float(pair[2]), 1.0 / 120.0, flown)
+			p += v / 120.0
+			flown += v.length() / 120.0
+			if at300 == 0.0 and flown >= 300.0:
+				at300 = v.length()
+		at600 = v.length()
+		print("[ball] %-8s %.0f m/s at the muzzle, %.0f at 300 m (%.0f%%), %.0f at 600 m" % [
+			pair[0], float(pair[1]), at300, at300 / float(pair[1]) * 100.0, at600])
+	# the solver: lay on marks and fly the answer at 120 Hz, as a round flies
+	for case in [[100.0, 880.0, 0.0011], [300.0, 880.0, 0.0011], [600.0, 870.0, 0.0005],
+			[150.0, 76.0, 0.0006], [300.0, 76.0, 0.0006]]:
+		var rng: float = case[0]
+		var spd: float = case[1]
+		var kk: float = case[2]
+		var mark := Vector3(rng * 0.6, o.y - 3.0, -rng * 0.8)
+		var guess: Vector3 = Firearm.lob(o, mark, spd, 9.81)
+		var sol: Dictionary = Ballistics.solve(o, mark, spd, kk, guess)
+		if sol.is_empty():
+			bad.append("no solution at %.0f m for %.0f m/s" % [rng, spd])
+			continue
+		var p2: Vector3 = o
+		var v2: Vector3 = (sol["dir"] as Vector3) * spd
+		var flown2 := 0.0
+		var best := INF
+		for t in 120 * 30:
+			v2 = Ballistics.step(p2, v2, kk, 1.0 / 120.0, flown2)
+			var p3: Vector3 = p2 + v2 / 120.0
+			flown2 += v2.length() / 120.0
+			best = minf(best, Geometry3D.get_closest_point_to_segment(mark, p2, p3).distance_to(mark))
+			p2 = p3
+			if p2.y < mark.y - 50.0:
+				break
+		var vac: float = asin(clampf(guess.y, -1.0, 1.0))
+		var real: float = asin(clampf((sol["dir"] as Vector3).y, -1.0, 1.0))
+		print("[ball] %4.0f m at %3.0f m/s: laid %.3f deg (vacuum %.3f), passes %.2f m from the mark" % [
+			rng, spd, rad_to_deg(real), rad_to_deg(vac), best])
+		# a 40 mm round bursts over three metres; a rifle round has to be on it
+		if best > (0.6 if spd < 200.0 else 0.2):
+			bad.append("the solution at %.0f m for %.0f m/s misses by %.2f m" % [rng, spd, best])
+	# the planet's turn over a long artillery arc
+	var mk2 := Vector3(0.0, o.y, -18000.0)
+	var v0 := Vector3(0.0, sin(deg_to_rad(40.0)), -cos(deg_to_rad(40.0))) * 560.0
+	var spun: Array = Ballistics.fly(o, v0, 0.00001, mk2, 200.0)
+	print("[ball] the planet's turn: %s rad/s, %.1f%% of it about the local vertical" % [
+		str(Ballistics.spin().length()), Ballistics.spin().normalized().y * 100.0])
+	if not spun.is_empty():
+		var at: Vector3 = spun[0]
+		print("[ball] a 40 degree shell at 560 m/s, crossing 18 km down range after %.1f s, is %.0f m to one side and %.0f m off the height" % [
+			float(spun[1]), at.x - o.x, at.y - o.y])
+	# gravity with height
+	var g0: float = Ballistics.accel(Vector3(0, 0, 0), Vector3.ZERO, 0.0, Vector3.ZERO).length()
+	var g10k: float = Ballistics.accel(Vector3(0, 10000, 0), Vector3.ZERO, 0.0, Vector3.ZERO).length()
+	print("[ball] gravity at the surface %.3f, ten kilometres up %.3f" % [g0, g10k])
+	if absf(g0 - 9.81) > 0.01 or g10k >= g0:
+		bad.append("gravity is not 9.81 at the surface and less above it")
+	# the muzzle stretch is plain gravity
+	var vn: Vector3 = Ballistics.step(o, Vector3(0, 0, -880), 0.0011, 1.0 / 120.0, 10.0)
+	if absf(vn.z + 880.0) > 1e-3 or absf(vn.y + 9.81 / 120.0) > 1e-4:
+		bad.append("the first thirty metres are not plain gravity")
+	for b in bad:
+		print("[ball] %s" % b)
+	print("[ball] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Four streaks picked out of six; the keys they come on; what a run of kills
+## earns, ladder and all; a mortar barrage and a precision bomb laid on a
+## street; and the deploy screen refusing a fifth and refusing none at all.
+func _run_streak_test() -> void:
+	for i in 20:
+		await get_tree().physics_frame
+	var bad: Array = []
+	var was_pick: Array = CqbMatch.streak_pick.duplicate()
+	CqbMatch.streak_pick = ["gunship", "jdam", "uav", "mortar"]
+	var chosen: Array = CqbMatch.chosen_streaks()
+	var order := PackedStringArray()
+	for k in chosen:
+		order.append("%d=%s" % [int(k["key"]), String(k["id"])])
+	print("[streak] carried: %s" % " ".join(order))
+	if " ".join(order) != "4=uav 5=mortar 6=jdam 7=gunship":
+		bad.append("the keys are not cheapest first")
+	# kills by him, one at a time, on the enemy side
+	var earned: Array = []
+	for n in 8:
+		var foe: Soldier = null
+		# six a side: past the sixth, wait for the next one back in
+		for wait in 1200:
+			for sd in cqb.soldiers:
+				if is_instance_valid(sd) and (sd as Soldier).team == 1 and (sd as Soldier).alive:
+					foe = sd
+					break
+			if foe != null:
+				break
+			await get_tree().physics_frame
+		if foe == null:
+			break
+		var before: Dictionary = cqb.bank.duplicate()
+		foe.take_hit(1000.0, walker)
+		for id in cqb.bank:
+			if int(cqb.bank[id]) > int(before.get(id, 0)):
+				earned.append("%d:%s" % [cqb.streak, id])
+		await get_tree().process_frame
+	print("[streak] earned on the way to %d kills: %s" % [cqb.streak, ", ".join(PackedStringArray(earned))])
+	if not earned.has("3:uav") or not earned.has("4:mortar") or not earned.has("6:jdam") \
+			or not earned.has("7:gunship"):
+		bad.append("not everything carried was earned at its count")
+	# round the ladder from the top: kill eight is the first rung again? no --
+	# the ladder is seven long here, so the eighth kill is rung one, and the
+	# tenth (rung three) is the next UAV
+	for e in earned:
+		if String(e).ends_with("strike") or String(e).ends_with("missile"):
+			bad.append("earned something not carried: %s" % e)
+	# a mortar barrage and the precision bomb, on a street
+	var spot := Vector3(cqb.centre.x + 30.0, 0.0, cqb.centre.y)
+	spot.y = Sim.height_at(spot.x, spot.z)
+	var queued_before: int = cqb._bombs.size()
+	cqb.bank["mortar"] = 1
+	cqb.bank["jdam"] = 1
+	cqb._picked("mortar", spot)
+	cqb._picked("jdam", spot + Vector3(-40, 0, 0))
+	var queued: int = cqb._bombs.size() - queued_before
+	print("[streak] mortar and bomb called: %d rounds on the way, banks now %s/%s" % [
+		queued, str(cqb.bank["mortar"]), str(cqb.bank["jdam"])])
+	if queued != 11 or int(cqb.bank["mortar"]) != 0 or int(cqb.bank["jdam"]) != 0:
+		bad.append("calling them did not queue ten rounds and one bomb and spend both")
+	var t := 0.0
+	while cqb._bombs.size() > queued_before and t < 14.0:
+		await get_tree().physics_frame
+		t += 1.0 / 120.0
+	print("[streak] all landed after %.1f s" % t)
+	if cqb._bombs.size() > queued_before:
+		bad.append("not everything landed")
+	# the carpet: a line drawn across the town, a B-2 down it, every bomb
+	# landing on the line and spread along it
+	var ca := Vector3(cqb.centre.x - 120.0, 0.0, cqb.centre.y + 40.0)
+	ca.y = Sim.height_at(ca.x, ca.z)
+	var cb := Vector3(cqb.centre.x + 120.0, 0.0, cqb.centre.y - 40.0)
+	cb.y = Sim.height_at(cb.x, cb.z)
+	cqb.bank["carpet"] = 1
+	cqb._carpet_from = ca
+	var landed: Array = []
+	var bomblets: Array = [0]
+	var watch_new := func(n: Node) -> void:
+		if n is CqbMatch.CarpetBomb:
+			var cbomb := n as CqbMatch.CarpetBomb
+			cbomb.tree_exiting.connect(func() -> void:
+				if cbomb.bomblet:
+					bomblets[0] = int(bomblets[0]) + 1
+				else:
+					landed.append(cbomb.global_position))
+	get_tree().node_added.connect(watch_new)
+	cqb._picked("carpet", cb)
+	var run: Node = null
+	for n in get_children():
+		if n is CqbMatch.CarpetRun:
+			run = n
+	if run == null:
+		bad.append("calling the carpet put no B-2 in the sky")
+	else:
+		var want: int = run.bombs
+		var waited := 0.0
+		while landed.size() < want and waited < 75.0:
+			await get_tree().physics_frame
+			waited += 1.0 / 120.0
+		var worst := 0.0
+		var lo := INF
+		var hi := -INF
+		var line := Vector2(cb.x - ca.x, cb.z - ca.z)
+		var ln: float = line.length()
+		for p in landed:
+			var rel := Vector2((p as Vector3).x - ca.x, (p as Vector3).z - ca.z)
+			var along: float = rel.dot(line / ln)
+			worst = maxf(worst, absf(rel.cross(line / ln)))
+			lo = minf(lo, along)
+			hi = maxf(hi, along)
+		for i in 600:
+			await get_tree().physics_frame
+		print("[streak] carpet: %d of %d bombs and canisters down after %.1f s, the worst %.1f m off the line, spread from %.0f to %.0f m along a %.0f m line; %d bomblets out of the canisters" % [
+			landed.size(), want, waited, worst, lo, hi, ln, int(bomblets[0])])
+		if int(bomblets[0]) < 20:
+			bad.append("the cluster canisters let out %d bomblets" % int(bomblets[0]))
+		if landed.size() < want or worst > 12.0 or hi - lo < ln * 0.8:
+			bad.append("the carpet did not land along the line")
+	get_tree().node_added.disconnect(watch_new)
+	# the deploy screen
+	var dm := DeployMenu.new()
+	add_child(dm)
+	dm.open("none", true, "usa")
+	(dm._streak_ticks["strike"] as CheckButton).button_pressed = true
+	var five_refused: bool = not CqbMatch.streak_pick.has("strike") \
+		and CqbMatch.streak_pick.size() == 4
+	for id in ["gunship", "jdam", "mortar"]:
+		(dm._streak_ticks[id] as CheckButton).button_pressed = false
+	(dm._streak_ticks["uav"] as CheckButton).button_pressed = false
+	var none_refused: bool = CqbMatch.streak_pick == ["uav"]
+	print("[streak] deploy screen: a fifth refused %s, taking off the last refused %s" % [
+		str(five_refused), str(none_refused)])
+	if not five_refused or not none_refused:
+		bad.append("the deploy screen let the count go outside one to four")
+	dm.queue_free()
+	CqbMatch.streak_pick = was_pick
+	for b in bad:
+		print("[streak] %s" % b)
+	print("[streak] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Every class deployed, and both its weapons taken up and fired at a mark on
+## the road down the longest open line: where each round comes down against
+## where it was laid. Then each sight's magnification, and the deploy screen
+## with every class on it.
+func _run_arms_test() -> void:
+	cqb.set_process(false)
+	for sd in cqb.soldiers:
+		if is_instance_valid(sd):
+			(sd as Node).set_process(false)
+			(sd as Node3D).global_position += Vector3(0, -500, 0)
+	var w: Walker = walker
+	w.stance = 0
+	w.hold_ads = true
+	for i in 30:
+		await get_tree().physics_frame
+	# A heading down which the road itself is the mark, 45 and 90 m out: the
+	# line from the eye to each meets nothing on the way, so what is under the
+	# crosshair is the road and not the top edge of something in front of it.
+	var best_yaw := 0.0
+	var found := false
+	var e0: Vector3 = w.global_position + Vector3(0, 1.6, 0)
+	for k in 72:
+		var yv: float = TAU * float(k) / 72.0
+		var fl := Vector3(-sin(yv), 0.0, -cos(yv))
+		var ok := true
+		for dd in [45.0, 90.0]:
+			var sp: Vector3 = e0 + fl * dd
+			sp.y = Sim.height_at(sp.x, sp.z)
+			var dl: Vector3 = (sp - e0).normalized()
+			if absf(Firearm.sight_range(e0, dl, 200.0) - e0.distance_to(sp)) > 0.6:
+				ok = false
+		if ok:
+			best_yaw = yv
+			found = true
+			break
+	w.yaw = best_yaw
+	print("[arms] facing %.0f deg, %s" % [rad_to_deg(best_yaw),
+		"road clear to 90 m" if found else "NO clear heading found"])
+	var spawned: Array = []
+	var was_watch: Callable = Effects.round_watch
+	Effects.round_watch = func(shot: Node3D, shooter: Node) -> void:
+		if shooter == w:
+			spawned.append(shot)
+	var bad: Array = []
+	var tried := {}
+	for ci in Firearm.CLASSES.size():
+		var c: Dictionary = (Firearm.CLASSES[ci] as Dictionary).duplicate()
+		w.apply_class(c)
+		for si in 2:
+			var idx: int = int(w.slots[si])
+			var id := String(Firearm.KIT[idx]["id"])
+			if tried.has(id):
+				continue
+			tried[id] = true
+			w._take_up(idx, false)
+			w.ammo = int(w.gun_spec()["mag"])
+			var g: Dictionary = w.gun_spec()
+			var launcher := String(g.get("launcher", ""))
+			if launcher == "sam":
+				continue                # needs an aircraft to lock; flown elsewhere
+			# a mark on the road: 45 m out, or 90 for the launcher
+			var want: float = 90.0 if launcher == "gl" else 45.0
+			var eye: Vector3 = w.cam.global_position
+			var flat := Vector3(-sin(w.yaw), 0.0, -cos(w.yaw))
+			var spot: Vector3 = eye + flat * want
+			spot.y = Sim.height_at(spot.x, spot.z)
+			w.pitch = atan2(spot.y - eye.y, want)
+			w._recoil = 0.0
+			w._bloom = 0.0
+			w._shot_cd = 0.0
+			for i in 90:
+				await get_tree().physics_frame
+			eye = w.cam.global_position
+			var look: Vector3 = -w.cam.global_transform.basis.z
+			var mark: Vector3 = eye + look * Firearm.sight_range(eye, look, 600.0)
+			spawned.clear()
+			Input.action_press(&"foot_fire")
+			await get_tree().physics_frame
+			await get_tree().physics_frame
+			Input.action_release(&"foot_fire")
+			for i in 4:
+				if not spawned.is_empty():
+					break
+				await get_tree().physics_frame
+			if spawned.is_empty():
+				bad.append("%s (%s): nothing came out" % [id, String(c["name"])])
+				continue
+			# every pellet of a shotgun's load, and where the load centred
+			var ends: Array = []
+			for sh in spawned:
+				var shot: Node = sh
+				shot.tree_exiting.connect(func() -> void: ends.append(shot.get("ended_at")))
+			for f in 900:
+				if ends.size() >= spawned.size():
+					break
+				await get_tree().physics_frame
+			var end: Variant = null
+			var n_end := 0
+			var sum := Vector3.ZERO
+			for e in ends:
+				if e != null and e != Vector3.INF:
+					sum += e as Vector3
+					n_end += 1
+			if n_end > 0:
+				end = sum / float(n_end)
+			if end == null:
+				bad.append("%s: never said where it came down" % id)
+				continue
+			var miss: float = (end as Vector3).distance_to(mark)
+			var rel: Vector3 = (end as Vector3) - eye
+			var along: float = rel.dot(look)
+			print("[arms] %-22s %s: laid on %.1f m, came down %.2f m from the mark (%.1f m along the line, %.2f m off it; ads %.2f, spread %.4f)" % [
+				String(g["name"]), String(c["name"]), eye.distance_to(mark), miss, along,
+				(rel - look * along).length(), w._ads, w.spread_now])
+			# a 40 mm round is a lob; a rifle round from the shoulder is not
+			# Judged off the line of sight, not along it: onto a flat road
+			# forty-five metres out the line meets the ground at two degrees,
+			# and there the ordinary spread of a burst is metres along it. A
+			# lob is judged on the mark itself.
+			var off: float = (rel - look * along).length()
+			var allow: float = 0.15 + along * w.spread_now * 2.5
+			if launcher == "gl":
+				if miss > 2.5:
+					bad.append("%s: %.1f m off the mark" % [id, miss])
+			elif off > allow:
+				bad.append("%s: %.2f m off the line of sight at %.0f m (allowed %.2f)" % [id, off, along, allow])
+	Effects.round_watch = was_watch
+	# the sights, on the carbine
+	for sg in Firearm.SIGHTS:
+		var fg: Dictionary = Firearm.fitted("carbine", {"sight": sg})
+		print("[arms] carbine with %-6s %.1fx  (%s)" % [sg, 74.0 / float(fg["fov"]),
+			String(fg.get("reticle", "dot" if fg.get("dot", false) else "irons"))])
+	var f2x: Dictionary = Firearm.fitted("carbine", {"sight": "2x"})
+	var facog: Dictionary = Firearm.fitted("carbine", {"sight": "acog"})
+	if not (f2x.get("scope", false) and facog.get("scope", false) \
+			and absf(74.0 / float(f2x["fov"]) - 2.0) < 0.3 and absf(74.0 / float(facog["fov"]) - 4.0) < 0.4):
+		bad.append("the 2x and the ACOG are not 2x and 4x")
+	# the deploy screen, with every class
+	var dm := DeployMenu.new()
+	add_child(dm)
+	dm.open("any", true, "usa")
+	for ci2 in CqbMatch.kit_classes().size():
+		dm._pick(ci2)
+	if dm._sight.item_count != Firearm.SIGHTS.size():
+		bad.append("the deploy screen offers %d sights of %d" % [dm._sight.item_count, Firearm.SIGHTS.size()])
+	dm.queue_free()
+	for b in bad:
+		print("[arms] %s" % b)
+	print("[arms] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## In a street fight the map opens on the street; the wheel takes it out to the
+## whole planet and back in again, keeping the same place in the middle of the
+## screen across each handover; and the corner map has the buildings round him.
+func _run_zoom_test() -> void:
+	for i in 30:
+		await get_tree().process_frame
+	var bad: Array = []
+	map.toggle()
+	await get_tree().process_frame
+	var vp: Vector2 = map.get_viewport_rect().size
+	var me := Vector2(walker.global_position.x, walker.global_position.z)
+	print("[map] opened: globe %s, zoom %.0f, %.0f m from him" % [str(map.globe), map.zoom,
+		map.centre.distance_to(me)])
+	if map.globe or map.zoom < 1000.0 or map.centre.distance_to(me) > 30.0:
+		bad.append("a street fight's map did not open on the street on him")
+	var wheel := func(up: bool) -> void:
+		var e := InputEventMouseButton.new()
+		e.button_index = MOUSE_BUTTON_WHEEL_UP if up else MOUSE_BUTTON_WHEEL_DOWN
+		e.pressed = true
+		e.position = vp * 0.5
+		map._gui_input(e)
+	# out to the planet
+	var before: Vector2 = map.centre
+	var n := 0
+	while not map.globe and n < 200:
+		wheel.call(false)
+		n += 1
+	if not map.globe:
+		bad.append("zooming out never reached the planet (zoom %.2f)" % map.zoom)
+	else:
+		var mid: Vector2 = map._globe_point(vp * 0.5)
+		print("[map] out to the planet after %d notches; the middle of the globe is %.1f km from where the chart was" % [
+			n, mid.distance_to(before) * 0.001])
+		if mid.distance_to(before) > 2000.0:
+			bad.append("the globe opened %.0f km away from where the chart was" % (mid.distance_to(before) * 0.001))
+	var m2 := 0
+	while map.globe_zoom > 0.7 and m2 < 200:
+		wheel.call(false)
+		m2 += 1
+	print("[map] all the way out: globe zoom %.2f, the planet %s on screen" % [map.globe_zoom,
+		"wholly" if map.globe_zoom <= 1.0 else "partly"])
+	if map.globe_zoom > 1.0:
+		bad.append("could not zoom out to see the whole planet")
+	# and back in to the street
+	var g_mid: Vector2 = map._globe_point(vp * 0.5)
+	var k := 0
+	while map.globe and k < 400:
+		wheel.call(true)
+		k += 1
+	if map.globe:
+		bad.append("zooming back in never reached the street map")
+	else:
+		print("[map] back to the chart after %d notches, %.1f km from the globe's middle" % [
+			k, map.centre.distance_to(g_mid) * 0.001])
+		if map.centre.distance_to(g_mid) > 2000.0:
+			bad.append("the chart came back %.0f km from where the globe was looking" % (
+				map.centre.distance_to(g_mid) * 0.001))
+		var j := 0
+		while map.zoom < 2400.0 and j < 200:
+			wheel.call(true)
+			j += 1
+		print("[map] street level again (zoom %.0f) after %d more" % [map.zoom, j])
+	map.toggle()
+	# the corner map
+	for i in 10:
+		hud.queue_redraw()
+		await get_tree().process_frame
+	var cm: Variant = hud.get("_cqb_map")
+	if cm == null or not is_instance_valid(cm):
+		bad.append("no corner map")
+	else:
+		var tris: int = 0
+		var mesh: Variant = cm.get("_mesh")
+		if mesh != null:
+			tris = int((mesh as ArrayMesh).surface_get_array_len(0) / 3.0)
+		print("[map] corner map: %d footprint triangles round him, %.0f m across" % [tris,
+			float(cm.get("SPAN"))])
+		if tris == 0:
+			bad.append("the corner map has no buildings on it")
+	for b in bad:
+		print("[map] %s" % b)
+	print("[map] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Every prop the town put down at an angle, against the box it filed for
+## itself: points well inside the drawn mesh, near its corners, should be
+## inside the obstacle box. A box turned the other way from its mesh puts the
+## corners outside, and the wall is somewhere it is not drawn.
+func _run_yaw_test() -> void:
+	var ts: Node = cqb.dressing
+	var tried := 0
+	var inside := 0
+	var props := 0
+	for mi in ts.find_children("*", "MeshInstance3D", true, false):
+		var m := mi as MeshInstance3D
+		if m.mesh == null:
+			continue
+		var yaw: float = m.global_rotation.y
+		var turn: float = absf(fmod(absf(yaw), PI * 0.5))
+		if turn < 0.15 or turn > PI * 0.5 - 0.15:
+			continue
+		var ab: AABB = m.mesh.get_aabb()
+		if ab.size.x < 1.2 or ab.size.z < 1.2 or ab.size.y < 0.6:
+			continue
+		props += 1
+		# the corners of the footprint, pulled in a fifth, half way up
+		for cx in [-1.0, 1.0]:
+			for cz in [-1.0, 1.0]:
+				var lp := ab.get_center() + Vector3(cx * ab.size.x * 0.4, 0.0, cz * ab.size.z * 0.4)
+				var wp: Vector3 = m.global_transform * lp
+				tried += 1
+				if Obstacles.hit(wp, 0.0) >= 0:
+					inside += 1
+		if props >= 60:
+			break
+	print("[yaw] %d props set at an angle; %d of %d points well inside their meshes are inside an obstacle box" % [
+		props, inside, tried])
+	print("[yaw] RESULT: %s" % ("ok" if tried > 0 and inside >= int(tried * 0.9) else "FAILED"))
+	get_tree().quit()
+
+## Lying in the road and shooting. For each of a few lines of sight, from the
+## hip and down the sights, the round is followed from the muzzle to wherever
+## it stops, and compared with where the line of sight meets the world: how
+## far along, how far off it, and how close to the road it ran on the way.
+func _run_prone_test() -> void:
+	cqb.set_process(false)
+	for sd in cqb.soldiers:
+		if is_instance_valid(sd):
+			(sd as Node).set_process(false)
+			(sd as Node3D).global_position += Vector3(0, -500, 0)
+	var w: Walker = walker
+	w.stance = 2
+	for i in 120:
+		await get_tree().physics_frame
+	# down the longest open line from where he lies
+	var best_yaw := 0.0
+	var best_reach := 0.0
+	for k in 24:
+		var yv: float = TAU * float(k) / 24.0
+		var dirv := Vector3(-sin(yv), 0.0, -cos(yv))
+		var e0: Vector3 = w.global_position + Vector3(0, 0.46, 0)
+		var r0: float = Firearm.sight_range(e0, dirv, 300.0)
+		if r0 > best_reach:
+			best_reach = r0
+			best_yaw = yv
+	w.yaw = best_yaw
+	print("[prone] lying facing %.0f deg, %.0f m of open line" % [rad_to_deg(best_yaw), best_reach])
+	# every round as it leaves, where it leaves from
+	var spawned: Array = []
+	var was_watch: Callable = Effects.round_watch
+	Effects.round_watch = func(shot: Node3D, shooter: Node) -> void:
+		if shooter == w:
+			spawned.append([shot, shot.global_position])
+	var bad: Array = []
+	for view in ["first", "third"]:
+		w.third = view == "third"
+		for ads in [false, true]:
+			w.hold_ads = ads
+			for p in [-0.10, -0.04, 0.0, 0.04]:
+				w.pitch = p
+				w._recoil = 0.0
+				w._bloom = 0.0
+				for i in 90:
+					await get_tree().physics_frame
+				var eye: Vector3 = w.cam.global_position
+				var look: Vector3 = -w.cam.global_transform.basis.z
+				var muzzle: Vector3 = w.body.muzzle_pos()
+				var gm: float = Sim.height_at(muzzle.x, muzzle.z)
+				# where the crosshair is: the first thing the line of sight meets
+				var reach: float = Firearm.sight_range(eye, look, 600.0)
+				var mark: Vector3 = eye + look * reach
+				spawned.clear()
+				Input.action_press(&"foot_fire")
+				await get_tree().physics_frame
+				Input.action_release(&"foot_fire")
+				var tag := "%s %s pitch %+.2f" % [view, "ADS" if ads else "hip", p]
+				if spawned.is_empty():
+					for i in 4:
+						await get_tree().physics_frame
+				if spawned.is_empty():
+					bad.append("%s: no round came out" % tag)
+					continue
+				var shot: Variant = spawned[0][0]
+				var start: Vector3 = spawned[0][1]
+				# read as it leaves: it says where it stopped on the tick it frees itself
+				var ends: Array = []
+				if is_instance_valid(shot):
+					var rnd := shot as Effects.Tracer
+					rnd.tree_exiting.connect(func() -> void: ends.append(rnd.ended_at))
+				for f in 300:
+					if not is_instance_valid(shot) or not ends.is_empty():
+						break
+					await get_tree().physics_frame
+				var end: Vector3 = ends[0] if not ends.is_empty() else Vector3.INF
+				if end == Vector3.INF:
+					bad.append("%s: round never said where it stopped" % tag)
+					continue
+				var miss: float = end.distance_to(mark) if reach < 599.0 else -1.0
+				# how far off the line from the eye to the mark the round ended
+				var along: float = (end - eye).dot(look)
+				var off: float = ((end - eye) - look * along).length()
+				print("[prone] %s: muzzle %.2f m off the road, round from %.2f m off the muzzle; crosshair on the world at %.1f m, round ended %.1f m along, %.2f m off the line%s" % [
+					tag, muzzle.y - gm, start.distance_to(muzzle), reach, along, off,
+					(", %.2f m from the mark" % miss) if miss >= 0.0 else ""])
+				# from the muzzle, or -- when the muzzle could not see the mark --
+				# from the line of sight itself
+				var on_line: float = ((start - eye) - look * (start - eye).dot(look)).length()
+				if start.distance_to(muzzle) > 0.3 and on_line > 0.05:
+					bad.append("%s: the round started %.2f m from the muzzle and %.2f m off the line of sight" % [
+						tag, start.distance_to(muzzle), on_line])
+				# From the hip it scatters by design, and along a line skimming the
+				# road a fraction of a degree is a long way: only an aimed round
+				# is held to landing on the mark.
+				if not ads:
+					pass
+				elif reach < 599.0 and absf(along - reach) > maxf(1.5, reach * 0.06):
+					bad.append("%s: crosshair on the world at %.1f m, the round stopped at %.1f m" % [tag, reach, along])
+				elif reach >= 599.0 and along < 300.0:
+					bad.append("%s: nothing under the crosshair, the round stopped at %.1f m" % [tag, along])
+				if ads and reach < 599.0 and off > 0.25 + along * 0.004:
+					bad.append("%s: down the sights, the round ended %.2f m off the line" % [tag, off])
+	# A sill in front of him: 0.62 m of wall four metres out, over the muzzle
+	# lying down and under the view over his shoulder. Aimed over it, the
+	# round has to go over it too.
+	w.third = true
+	w.hold_ads = true
+	w.pitch = -0.02
+	var fwd := Vector3(-sin(w.yaw), 0.0, -cos(w.yaw))
+	var sill_at: Vector3 = w.global_position + fwd * 4.0
+	var sill: int = Obstacles.add_box(Vector3(sill_at.x, Sim.height_at(sill_at.x, sill_at.z), sill_at.z),
+		3.0, 0.62, 0.15, w.yaw)
+	for i in 90:
+		await get_tree().physics_frame
+	var eye2: Vector3 = w.cam.global_position
+	var look2: Vector3 = -w.cam.global_transform.basis.z
+	var reach2: float = Firearm.sight_range(eye2, look2, 600.0)
+	var muz2: Vector3 = w.body.muzzle_pos()
+	spawned.clear()
+	var ends2: Array = []
+	Input.action_press(&"foot_fire")
+	await get_tree().physics_frame
+	Input.action_release(&"foot_fire")
+	for i in 4:
+		if not spawned.is_empty():
+			break
+		await get_tree().physics_frame
+	if spawned.is_empty():
+		bad.append("over the sill: no round came out")
+	else:
+		var r2 := spawned[0][0] as Effects.Tracer
+		var from2: Vector3 = spawned[0][1]
+		if is_instance_valid(r2):
+			r2.tree_exiting.connect(func() -> void: ends2.append(r2.ended_at))
+		for f in 300:
+			if not ends2.is_empty() or not is_instance_valid(r2):
+				break
+			await get_tree().physics_frame
+		var end2: Vector3 = ends2[0] if not ends2.is_empty() else Vector3.INF
+		var along2: float = (end2 - eye2).dot(look2)
+		print("[prone] over a 0.62 m sill 4 m out, third person: muzzle %.2f m up, round left %.2f m from the muzzle; crosshair on the world at %.1f m, round ended %.1f m along" % [
+			muz2.y - Sim.height_at(muz2.x, muz2.z), from2.distance_to(muz2), reach2, along2])
+		if along2 < 6.0:
+			bad.append("over the sill: the round went into it at %.1f m" % along2)
+		elif reach2 < 599.0 and absf(along2 - reach2) > maxf(1.5, reach2 * 0.06):
+			bad.append("over the sill: crosshair at %.1f m, round stopped at %.1f m" % [reach2, along2])
+	Obstacles.remove(sill)
+	Effects.round_watch = was_watch
+	w.third = false
+	for b in bad:
+		print("[prone] %s" % b)
+	print("[prone] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## Two things that were wrong together. A shell or a machine-gun round went
+## straight through a house, and every round went through a car; and the
+## weapon camera rode stores but never a round from a gun or from a man's
+## shoulder. A building and a soft prop near the town are each shot at, end
+## on, with a rifle round and a cannon round, and where each stops is checked
+## against the face; then the player fires his rifle and a rocket with the
+## camera armed, and each is checked for being ridden and for handing the
+## screen back.
+func _run_round_test() -> void:
+	cqb.set_process(false)
+	for sd in cqb.soldiers:
+		if is_instance_valid(sd):
+			(sd as Node).set_process(false)
+	for i in 20:
+		await get_tree().physics_frame
+	var bad: Array = []
+	var c := Vector3(cqb.centre.x, 0.0, cqb.centre.y)
+	var e: PackedFloat32Array = Obstacles._ent
+	var picks := {}
+	for id in Obstacles._dead.size():
+		var b: int = id * Obstacles.STRIDE
+		if Vector2(e[b] - c.x, e[b + 2] - c.z).length() > 400.0:
+			continue
+		var st: int = Obstacles._dead[id]
+		if st == Obstacles.LIVE and e[b + 4] > 4.0 and minf(e[b + 3], e[b + 5]) > 2.0 \
+				and not picks.has("building"):
+			picks["building"] = id
+		if st == Obstacles.SOFT and e[b + 4] > 0.8 and minf(e[b + 3], e[b + 5]) > 0.25 \
+				and not picks.has("prop"):
+			picks["prop"] = id
+	for what in ["building", "prop"]:
+		if not picks.has(what):
+			bad.append("no %s near the town to shoot at" % what)
+			continue
+		var id: int = picks[what]
+		var b: int = id * Obstacles.STRIDE
+		var mid := Vector3(e[b], e[b + 1] + minf(e[b + 4] * 0.5, 1.2), e[b + 2])
+		var dir := Vector3(e[b + 6], 0.0, e[b + 7])        # the box's own x axis
+		# from open ground: back out from the face until nothing is standing there
+		var back_off := 12.0
+		while back_off < 60.0 and Obstacles.hit(mid - dir * (e[b + 3] + back_off), 0.3) >= 0:
+			back_off += 1.0
+		var from: Vector3 = mid - dir * (e[b + 3] + back_off)
+		var far: Vector3 = mid + dir * (e[b + 3] + 30.0)
+		var t_wall: float = Obstacles.segment(from, far)
+		var face: Vector3 = from.lerp(far, t_wall)
+		for kind in ["rifle", "cannon"]:
+			var r: Node3D = Effects.bullet(self, from, dir * 880.0, null, 10.0, 7) \
+				if kind == "rifle" else Effects.tracer(self, from, dir * 1000.0, null, 10.0, 7)
+			var last: Vector3 = from
+			for f in 90:
+				if not is_instance_valid(r):
+					break
+				last = r.global_position
+				await get_tree().physics_frame
+			var went: float = from.distance_to(last)
+			var to_face: float = from.distance_to(face)
+			var stopped: bool = not is_instance_valid(r)
+			print("[round] %s round at a %s (%.1f m tall): wall %.1f m out, the round got %.1f m%s" % [
+				kind, what, e[b + 4], to_face, went, "" if stopped else " and was still going"])
+			if t_wall >= 1.0:
+				bad.append("the line at the %s does not meet it" % what)
+			elif not stopped or went > to_face + 0.5:
+				bad.append("a %s round went through the %s" % [kind, what])
+	# The weapon camera, on foot.
+	weapon_cam_on = true
+	var eye: Vector3 = walker.cam.global_position
+	var look: Vector3 = -walker.cam.global_transform.basis.z
+	# somebody else's round is not his to ride
+	if not cqb.soldiers.is_empty() and is_instance_valid(cqb.soldiers[0]):
+		Effects.bullet(self, eye + Vector3(0, 0, 3), look * 880.0, cqb.soldiers[0], 1.0, 1)
+		if cam.riding():
+			bad.append("the camera rode a round somebody else fired")
+	for kind in ["rifle", "rocket"]:
+		if kind == "rifle":
+			Firearm.fire(self, walker, walker.side, Firearm.spec("carbine"), eye, look, 0.0)
+		else:
+			Firearm.rocket(self, walker, walker.side, Firearm.spec("law"), eye, look)
+		var on: Variant = cam.weapon_cam
+		var took: bool = on != null and is_instance_valid(on) and cam.current \
+			and not walker.cam.current
+		# a second round straight after is not taken off the first
+		Firearm.fire(self, walker, walker.side, Firearm.spec("carbine"), eye, look, 0.0)
+		var kept: bool = cam.weapon_cam == on
+		var waited := 0
+		while cam.riding() and waited < 900:
+			await get_tree().physics_frame
+			waited += 1
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var back: bool = walker.cam.current
+		print("[round] %s with the weapon camera armed: ridden %s, kept over the next round %s, screen back to his eyes %s after %.1f s" % [
+			kind, str(took), str(kept), str(back), float(waited) / 120.0])
+		if not took:
+			bad.append("his %s was not ridden" % kind)
+		if not kept:
+			bad.append("the ride on his %s was cut by the next round" % kind)
+		if not back:
+			bad.append("the screen did not come back to him after the %s" % kind)
+	weapon_cam_on = false
+	for b2 in bad:
+		print("[round] %s" % b2)
+	print("[round] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## What dying costs. Forty men killed in one frame in front of the player --
+## shells, heads, limbs and plain falls, ten of each -- and then what is lying
+## about: how long the frame took, how many separate meshes and materials the
+## pieces brought with them, and what the physics step cost while it settled.
+func _run_gib_test() -> void:
+	cqb.set_process(false)
+	for sd in cqb.soldiers:
+		if is_instance_valid(sd):
+			(sd as Node).set_process(false)
+	for i in 30:
+		await get_tree().physics_frame
+	var front: Vector3 = walker.global_position + Vector3(0, 0, -14)
+	var before: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	var t0 := Time.get_ticks_usec()
+	for i in 40:
+		var kind: int = i % 4
+		var amount: float = [300.0, 30.0, 55.0, 20.0][kind]
+		var at := front + Vector3(float(i % 8) * 1.6 - 5.6, 0.0, float(i / 8.0) * 1.6)
+		at.y = Sim.height_at(at.x, at.z)
+		Ragdoll.fall(self, Transform3D(Basis(), at), Vector3.ZERO,
+			Color(0.27, 0.31, 0.22), Color(0.24, 0.27, 0.20), amount, kind == 1, false,
+			Vector3(0, 0, -1))
+	var spent: float = float(Time.get_ticks_usec() - t0) * 0.001
+	var made: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)) - before
+	var meshes := {}
+	var mats := {}
+	var pieces := 0
+	for n in get_children():
+		if n is Ragdoll or n is Effects.Debris:
+			for mi in n.find_children("*", "MeshInstance3D", true, false):
+				var m := mi as MeshInstance3D
+				pieces += 1
+				if m.mesh != null:
+					meshes[m.mesh.get_rid()] = true
+					var sm: Material = m.material_override if m.material_override != null \
+						else m.mesh.surface_get_material(0)
+					if sm != null:
+						mats[sm.get_rid()] = true
+	var nf := 0
+	var wall := 0.0
+	var worst := 0.0
+	var pairs := 0
+	var last := Time.get_ticks_usec()
+	for i in 240:
+		await get_tree().process_frame
+		var now := Time.get_ticks_usec()
+		var ft: float = float(now - last) * 0.001
+		last = now
+		wall += ft
+		worst = maxf(worst, ft)
+		pairs = maxi(pairs, int(Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS)))
+		nf += 1
+	var still := 0
+	var moving := 0
+	var bodies := 0
+	var sunk := 0
+	for n in get_children():
+		if n is Ragdoll:
+			for limb in (n as Ragdoll).bodies.values():
+				if not is_instance_valid(limb):
+					continue
+				bodies += 1
+				var lp: Vector3 = (limb as Node3D).global_position
+				# through the floor, not pressed into it: a pile of forty
+				# leaves a limb or two half buried for a moment, which the
+				# floor pushes back out
+				if lp.y < Sim.height_at(lp.x, lp.z) - 2.0:
+					sunk += 1
+					if sunk <= 6:
+						var o: Vector3 = (n as Ragdoll).global_position
+						print("[gib]   sunk %s: y %.2f, ground there %.2f, ground under the body %.2f, %.1f m from it" % [
+							String((limb as Node).name), lp.y, Sim.height_at(lp.x, lp.z),
+							Sim.height_at(o.x, o.z), Vector2(lp.x - o.x, lp.z - o.z).length()])
+		if n is Effects.Debris:
+			if (n as Node).is_physics_processing():
+				moving += 1
+			else:
+				still += 1
+	print("[gib] 40 deaths in one frame: %.1f ms, %d nodes made" % [spent, made])
+	print("[gib] %d drawn pieces using %d distinct meshes and %d distinct materials" % [
+		pieces, meshes.size(), mats.size()])
+	print("[gib] the next %d frames: %.2f ms a frame on average, worst %.1f ms; up to %d collision pairs" % [
+		nf, wall / float(nf), worst, pairs])
+	print("[gib] debris after 2 s: %d still being ticked, %d asleep" % [moving, still])
+	print("[gib] %d limbs lying about, %d of them under the ground" % [bodies, sunk])
+	print("[gib] RESULT: %s" % ("ok" if sunk == 0 and bodies > 0 else "FAILED"))
+	get_tree().quit()
+
+## The obstacle grid answers from the cells a query touches; this asks the same
+## questions of every box in the field, one at a time, and compares. Points,
+## padded points, feet, floors, roofs, rifle-round steps and sight lines across
+## the town, plus a few long lines out of it.
+func _run_obs_test() -> void:
+	var c := Vector3(cqb.centre.x, 0.0, cqb.centre.y)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	var bad: Array = []
+	var n_ent: int = Obstacles._dead.size()
+	var inside := func(id: int, p: Vector3, r: float, feet: bool) -> bool:
+		var b: int = id * Obstacles.STRIDE
+		var e: PackedFloat32Array = Obstacles._ent
+		var dy: float = p.y - e[b + 1]
+		if feet:
+			if dy < -1.85 or dy >= e[b + 4] - 0.02:
+				return false
+		elif dy < -r or dy > e[b + 4] + r:
+			return false
+		var dx: float = p.x - e[b]
+		var dz: float = p.z - e[b + 2]
+		var lx: float = dx * e[b + 6] + dz * e[b + 7]
+		var lz: float = -dx * e[b + 7] + dz * e[b + 6]
+		return absf(lx) <= e[b + 3] + r and absf(lz) <= e[b + 5] + r
+	var seg_ref := func(a: Vector3, z: Vector3) -> float:
+		var best := 1.0
+		var d: Vector3 = z - a
+		var e: PackedFloat32Array = Obstacles._ent
+		for id in n_ent:
+			# rounds and sight stop on soft entries too
+			if Obstacles._dead[id] == Obstacles.GONE:
+				continue
+			var b: int = id * Obstacles.STRIDE
+			var cs: float = e[b + 6]
+			var sn: float = e[b + 7]
+			var ox: float = a.x - e[b]
+			var oz: float = a.z - e[b + 2]
+			var p3 := Vector3(ox * cs + oz * sn, a.y - e[b + 1], -ox * sn + oz * cs)
+			var v3 := Vector3(d.x * cs + d.z * sn, d.y, -d.x * sn + d.z * cs)
+			var lo := Vector3(-e[b + 3], 0.0, -e[b + 5])
+			var hi := Vector3(e[b + 3], e[b + 4], e[b + 5])
+			var t0 := 0.0
+			var t1 := best
+			var miss := false
+			for ax in 3:
+				if absf(v3[ax]) < 1e-7:
+					if p3[ax] < lo[ax] or p3[ax] > hi[ax]:
+						miss = true
+						break
+				else:
+					var ta: float = (lo[ax] - p3[ax]) / v3[ax]
+					var tb: float = (hi[ax] - p3[ax]) / v3[ax]
+					t0 = maxf(t0, minf(ta, tb))
+					t1 = minf(t1, maxf(ta, tb))
+					if t0 > t1:
+						miss = true
+						break
+			if not miss:
+				best = t0
+		return best
+	var counts := {"hit": 0, "blocks": 0, "floor": 0, "top": 0, "step": 0, "sight": 0, "long": 0}
+	var t_new := 0
+	for i in 3000:
+		var p := Vector3(c.x + rng.randf_range(-150, 150), 0.0, c.z + rng.randf_range(-150, 150))
+		p.y = Sim.height_at(p.x, p.z) + rng.randf_range(-0.5, 14.0)
+		var r: float = [0.0, 0.36, 1.0, 4.2, 9.0][i % 5]
+		var want_hit := false
+		var want_feet := false
+		var want_top := -1e9
+		var want_floor := -1e9
+		for id in n_ent:
+			if Obstacles._dead[id] != 0:
+				continue
+			if not want_hit and inside.call(id, p, r, false):
+				want_hit = true
+			if not want_feet and inside.call(id, p, r, true):
+				want_feet = true
+			var b: int = id * Obstacles.STRIDE
+			var e: PackedFloat32Array = Obstacles._ent
+			if inside.call(id, Vector3(p.x, e[b + 1] + 0.01, p.z), 0.0, false):
+				var top: float = e[b + 1] + e[b + 4]
+				want_top = maxf(want_top, top)
+				if top <= p.y + 0.55:
+					want_floor = maxf(want_floor, top)
+		var t0 := Time.get_ticks_usec()
+		var got_hit: bool = Obstacles.hit(p, r) >= 0
+		var got_feet: bool = Obstacles.blocks(p, r) >= 0
+		var got_top: float = Obstacles.top_at(p.x, p.z)
+		var got_floor: float = Obstacles.floor_under(p.x, p.z, p.y)
+		t_new += Time.get_ticks_usec() - t0
+		counts["hit"] += int(got_hit)
+		counts["blocks"] += int(got_feet)
+		counts["top"] += int(got_top > -1e8)
+		counts["floor"] += int(got_floor > -1e8)
+		if got_hit != want_hit:
+			bad.append("hit(%s, %.2f): grid %s, every box %s" % [str(p), r, got_hit, want_hit])
+		if got_feet != want_feet:
+			bad.append("blocks(%s, %.2f): grid %s, every box %s" % [str(p), r, got_feet, want_feet])
+		if absf(got_top - want_top) > 1e-3:
+			bad.append("top_at(%s): grid %.3f, every box %.3f" % [str(p), got_top, want_top])
+		if absf(got_floor - want_floor) > 1e-3:
+			bad.append("floor_under(%s): grid %.3f, every box %.3f" % [str(p), got_floor, want_floor])
+		# a rifle round's step, a sight line across town, and a long line out
+		var dir := Vector3(rng.randf_range(-1, 1), rng.randf_range(-0.3, 0.3), rng.randf_range(-1, 1)).normalized()
+		var q: Vector3 = Vector3(c.x + rng.randf_range(-150, 150), 0.0, c.z + rng.randf_range(-150, 150))
+		q.y = Sim.height_at(q.x, q.z) + rng.randf_range(0.5, 10.0)
+		var lines: Array = [["step", p, p + dir * 7.5], ["sight", p, q],
+			["long", p, p + dir * 2500.0]]
+		for ln in lines:
+			var a: Vector3 = ln[1]
+			var z: Vector3 = ln[2]
+			var t1 := Time.get_ticks_usec()
+			var got: float = Obstacles.segment(a, z)
+			t_new += Time.get_ticks_usec() - t1
+			var want: float = seg_ref.call(a, z)
+			if want < 1.0:
+				counts[ln[0]] += 1
+			if absf(got - want) > 1e-4:
+				bad.append("segment %s %s -> %s: grid %.5f, every box %.5f" % [ln[0], str(a), str(z), got, want])
+	var n_soft := 0
+	for id in n_ent:
+		if Obstacles._dead[id] == Obstacles.SOFT:
+			n_soft += 1
+	print("[obs] %d boxes in the field, %d of them soft; 3000 points and 9000 lines round %s" % [
+		n_ent, n_soft, str(c.round())])
+	print("[obs] found: %s" % str(counts))
+	print("[obs] the grid took %.1f ms for all of it" % (float(t_new) * 0.001))
+	for b in bad.slice(0, 12):
+		print("[obs] MISMATCH %s" % b)
+	print("[obs] %d mismatches" % bad.size())
+	print("[obs] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
+## ESC is the pause page and not the hangar; the settings page steps back to
+## it; CHANGE MODE is the hangar and ESC from there is the pause page again;
+## and a slider reaches its bus. Nothing is left changed in the settings file.
+func _run_pause_test() -> void:
+	_start(_jet_arg if _jet_arg != "" else "f16", "free")
+	for i in 30:
+		await get_tree().physics_frame
+	var bad: Array = []
+	_press(KEY_ESCAPE)
+	if not pause_menu.visible or menu.visible or not get_tree().paused:
+		bad.append("ESC did not bring up the pause page by itself (pause %s, hangar %s, paused %s)" % [
+			str(pause_menu.visible), str(menu.visible), str(get_tree().paused)])
+	pause_menu._show_settings()
+	var was: float = float(Sim.volumes[&"Effects"])
+	(pause_menu._vol_sliders[&"Effects"] as HSlider).value = 40.0
+	var bus := AudioServer.get_bus_index(&"Effects")
+	if bus < 0 or absf(AudioServer.get_bus_volume_db(bus) - linear_to_db(0.4)) > 0.05:
+		bad.append("the effects slider did not reach its bus")
+	(pause_menu._vol_sliders[&"Effects"] as HSlider).value = was * 100.0
+	_press(KEY_ESCAPE)
+	if not pause_menu.visible or pause_menu._settings.visible:
+		bad.append("ESC on the settings page did not step back to the pause page")
+	_pause_to_hangar()
+	if not menu.visible or pause_menu.visible:
+		bad.append("CHANGE MODE did not bring up the hangar")
+	_press(KEY_ESCAPE)
+	if menu.visible or not pause_menu.visible:
+		bad.append("ESC on the hangar did not go back to the pause page")
+	_press(KEY_ESCAPE)
+	if pause_menu.visible or menu.visible or get_tree().paused:
+		bad.append("ESC on the pause page did not resume")
+	for b in bad:
+		print("[pause] %s" % b)
+	print("[pause] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED"))
+	get_tree().quit()
+
 func _resume() -> void:
 	menu.visible = false
+	if is_instance_valid(pause_menu):
+		pause_menu.close()
+	_show_roster(false)
 	get_tree().paused = false
+	# RESUME on the hangar left the cockpit sound paused: only ESC undid it.
+	if audio:
+		audio.set_paused(false)
+	# the click on RESUME is still down, and SPACE on a focused button is fire
+	Sim.block_until_released([&"foot_fire", &"fire", &"gun"])
+	var crewed: bool = is_instance_valid(tank) or is_instance_valid(ship) or _at_conn()
 	if on_foot and is_instance_valid(walker):
 		# his own eyes, not the camera on the aeroplane parked back at the field
 		walker.activate()
-	elif is_instance_valid(player):
+	elif is_instance_valid(player) and not crewed:
 		cam.current = true
-		if player.mouse_fly:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Whatever had the mouse before the pause gets it back. Only the walker and
+	# the mouse stick did: a tank, a ship or the sensor page came back with the
+	# pointer free, and the gun would not lay until something captured it again.
+	var grab: bool = (on_foot and is_instance_valid(walker) and not walker.dead) \
+		or crewed or gunning or (is_instance_valid(pod) and pod.active) \
+		or (is_instance_valid(player) and not on_foot and "mouse_fly" in player and player.mouse_fly)
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if grab else Input.MOUSE_MODE_VISIBLE
 	_deploy_yield(false)
+
+func _pause() -> void:
+	var can_restart: bool = menu.net_role != "client"
+	pause_menu.open(_pause_context(), can_restart)
+	# The session list comes up with the pause menu rather than instead of it.
+	# Put on its own key it simply took escape over, and there was then no way
+	# to reach the menu at all.
+	_show_roster(true)
+	get_tree().paused = true
+	if audio:
+		audio.set_paused(true)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_deploy_yield(true)
+
+## ESC, one step at a time: out of the settings page, out of the hangar back to
+## the pause page, and out of the pause page back into the match.
+func _on_escape() -> void:
+	if pause_menu.visible:
+		if not pause_menu.back() and running:
+			_resume()
+		return
+	if not running:
+		return
+	if menu.visible:
+		# the hangar was opened from the pause page: back to it
+		menu.visible = false
+		pause_menu.open(_pause_context(), menu.net_role != "client")
+		_show_roster(true)
+		return
+	_pause()
+
+## CHANGE MODE: the hangar, over the paused match. Its RESUME goes back to the
+## match and its LAUNCH ends it for whatever is picked there.
+func _pause_to_hangar() -> void:
+	pause_menu.close()
+	_show_roster(false)
+	menu.set_paused(true)
+	menu.visible = true
+
+## The same mode and the same vehicle, from the top.
+func _restart_match() -> void:
+	pause_menu.close()
+	_show_roster(false)
+	if audio:
+		audio.set_paused(false)
+	var a: Array = menu.launch_args()
+	_start(String(a[0]), String(a[1]))
+
+func _show_roster(on: bool) -> void:
+	if is_instance_valid(roster_view):
+		roster_view.visible = on and net != null and net.active
+		roster_view.set_process(roster_view.visible)
+
+## The line under PAUSED: what is being played, and with whom.
+func _pause_context() -> String:
+	var mode_name := String(Sim.mission)
+	for m in Menu.MISSIONS:
+		if String(m[0]) == String(menu.mission_id):
+			mode_name = String(m[1])
+	var what := ""
+	if on_foot:
+		what = "on foot"
+	elif is_instance_valid(tank):
+		what = tank.display_name()
+	elif is_instance_valid(ship):
+		what = ship.display_name()
+	elif is_instance_valid(player):
+		what = String(player.spec.get("name", ""))
+	var line := mode_name if what == "" else "%s  ·  %s" % [mode_name, what]
+	if net != null and net.active:
+		line += "\n" + net.status_line()
+	return line
 
 ## The deploy screen and the pause menu cannot both be up: the deploy screen
 ## sat over the top of the menu and took every click meant for it, so with it
@@ -13672,8 +15212,12 @@ func _shell_input(e: InputEvent) -> void:
 		if pod.active and mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			pod.zoom(-1)
 			return
-	if pod.active and e is InputEventMouseMotion and Input.is_action_pressed(&"freelook"):
-		pod.slew((e as InputEventMouseMotion).relative)
+	# At a gun station the mouse has nothing else to do -- the aircraft is flying
+	# itself -- and the station says "mouse slews". It needed ALT held as well,
+	# so the sight sat wherever the station had laid it and felt locked there.
+	if pod.active and e is InputEventMouseMotion \
+			and (Input.is_action_pressed(&"freelook") or gunning):
+		pod.slew(Sim.mouse_rel(e as InputEventMouseMotion))
 		return
 	if boarding and ((e is InputEventKey and e.pressed and not e.echo) \
 			or (e is InputEventMouseButton and e.pressed)):
@@ -13759,7 +15303,8 @@ func _shell_input(e: InputEvent) -> void:
 			pod.cycle_channel()
 			Sim.report("sensor: %s" % SensorPod.CHANNEL_NAMES[pod.channel], Sim.Ev.INFO)
 		elif k == KEY_T and pod.active and (Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)):
-			pod.designate()
+			# again on what is held lets it go; see `SensorPod.toggle_track`
+			pod.toggle_track()
 		elif k == KEY_F3 and running:
 			if admin.visible:
 				admin.close()
@@ -13767,25 +15312,8 @@ func _shell_input(e: InputEvent) -> void:
 				admin.open()
 		elif k == KEY_F2:
 			hud.show_help = not hud.show_help
-		elif k == KEY_ESCAPE and running:
-			menu.visible = not menu.visible
-			# The session list comes up with the pause menu rather than instead
-			# of it. Put on its own key it simply took escape over, and there
-			# was then no way to reach the menu at all.
-			if is_instance_valid(roster_view):
-				roster_view.visible = menu.visible and net != null and net.active
-				roster_view.set_process(roster_view.visible)
-			menu.set_paused(true)
-			get_tree().paused = menu.visible
-			if audio:
-				audio.set_paused(menu.visible)
-			if menu.visible:
-				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-			elif on_foot and is_instance_valid(walker):
-				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			elif is_instance_valid(player) and player.mouse_fly:
-				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			_deploy_yield(menu.visible)
+		elif k == KEY_ESCAPE and (running or pause_menu.visible):
+			_on_escape()
 		elif k == KEY_P and running and not on_foot and not _at_conn():
 			cam.cycle()
 		elif k == KEY_J and running and is_instance_valid(_station_walker):
@@ -13817,6 +15345,33 @@ func _parse_cmdline() -> void:
 			set_weather(a.substr(10))
 		elif a.begins_with("--jet="):
 			menu._select(a.substr(6))
+			_jet_arg = a.substr(6)
+		elif a == "--pausetest":
+			_pause_test = true
+		elif a == "--obstest":
+			_obs_test = true
+		elif a == "--gibtest":
+			_gib_test = true
+		elif a == "--roundtest":
+			_round_test = true
+		elif a == "--pronetest":
+			_prone_test = true
+		elif a == "--yawtest":
+			_yaw_test = true
+		elif a == "--zoomtest":
+			_zoom_test = true
+		elif a == "--armstest":
+			_arms_test = true
+		elif a == "--streaktest":
+			_streak_test = true
+		elif a == "--hgeartest":
+			_hgear_test = true
+		elif a == "--balltest":
+			_ball_test = true
+		elif a == "--hftest":
+			_hf_test = true
+		elif a == "--boundstest":
+			_bounds_test = true
 		elif a.begins_with("--auto="):
 			_auto = a.substr(7)
 		elif a.begins_with("--dump="):
@@ -16645,6 +18200,8 @@ func _run_fps_test() -> void:
 	print("[fps] %d frames (%.1f%%) over 1.5x the median, %d (%.1f%%) over 3x — stutter and stalls, which are not slowness" % [
 		dropped, 100.0 * float(dropped) / float(n),
 		hitch, 100.0 * float(hitch) / float(n)])
+	for st in _fps_stalls:
+		print("[fps]   stall %s" % String(st))
 	# ...and what the worst of them was doing.
 	if _fps_nodes.size() == n and n > 2:
 		var at := 0

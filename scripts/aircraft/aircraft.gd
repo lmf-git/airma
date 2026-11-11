@@ -1802,6 +1802,9 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	dir = (dir + Vector3(randf_range(-sp, sp), randf_range(-sp, sp), randf_range(-sp, sp))).normalized()
 	var shell := Shell.new()
 	shell.vel = dir * float(g["muzzle"]) + linear_velocity
+	# laid by `battery_lead`, which allows for gravity and not for the air:
+	# kept to that, so what it lays on is where it lands
+	shell.drag = 0.0
 	shell.damage = float(g["damage"])
 	shell.blast = float(g["blast"])
 	shell.shooter = self
@@ -1858,8 +1861,13 @@ func fire_gun(world: Node) -> bool:
 	if not spec.has("gun"):
 		return false
 	var g: Dictionary = spec["gun"]
-	gun_cd = 60.0 / float(g["rpm"]) * 4.0     # tracer every 4th round
-	ammo = maxi(ammo - 4, 0)
+	# One tracer stands for four rounds on a fast gun, so a 6000 rpm cannon is
+	# not drawing a hundred of them a second. A slow one fires every round:
+	# four to a tracer at 625 rpm put one out every 0.38 s, which on an Apache's
+	# chin gun read as single pops and short bursts rather than a gun firing.
+	var per: int = 4 if float(g["rpm"]) >= 1500.0 else 1
+	gun_cd = 60.0 / float(g["rpm"]) * float(per)
+	ammo = maxi(ammo - per, 0)
 	var muzzle := global_transform * gun_muzzle()
 	var dir := -global_transform.basis.z
 	var v: float = g["muzzle"]
@@ -1880,7 +1888,7 @@ func fire_gun(world: Node) -> bool:
 				var b := global_transform.basis.orthonormalized()
 				if want.dot(-b.z) > -0.35 and want.dot(b.y) < 0.2:
 					dir = want
-	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * 4.0,
+	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * float(per),
 		team, float(g.get("he", 0.0)))
 	Effects.muzzle_flash(world, muzzle, dir, 1.1)
 	# The one gun in the game you could not hear. The tank's coaxial, the
@@ -1892,7 +1900,9 @@ func fire_gun(world: Node) -> bool:
 	# firing it as a one-shot twelve times a second left twelve immortal loops a
 	# second behind, because a looping stream never reports finishing. The gun
 	# went on firing for the rest of the sortie after you let go.
-	_gun_snd = 0.12
+	# Long enough to carry over to the next shot, or a slow gun's report cut
+	# out between rounds and stuttered.
+	_gun_snd = maxf(0.12, gun_cd + 0.06)
 	if _gun_audio == null or not is_instance_valid(_gun_audio):
 		_gun_audio = AudioStreamPlayer3D.new()
 		_gun_audio.stream = Sfx.get_clip("gun")
@@ -1900,6 +1910,7 @@ func fire_gun(world: Node) -> bool:
 		_gun_audio.max_distance = 2400.0
 		_gun_audio.unit_size = 26.0
 		_gun_audio.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		_gun_audio.bus = &"Effects"
 		add_child(_gun_audio)
 		_gun_audio.position = gun_muzzle()
 	if not _gun_audio.playing:
@@ -2485,6 +2496,10 @@ class Shell extends Node3D:
 	var arm_dist := 12.0       # fuse arming distance: see _physics_process
 	var rocket := false        # launcher round: drawn as one, and pointed
 	var _flown := 0.0
+	## What the air takes off it per metre: see `Ballistics`. A shell keeps its
+	## speed far better than a bullet does, but over twenty kilometres of
+	## artillery arc even this is the difference between hitting and not.
+	var drag := 0.00002
 
 	func _ready() -> void:
 		top_level = true
@@ -2543,7 +2558,7 @@ class Shell extends Node3D:
 	func _physics_process(delta: float) -> void:
 		life -= delta
 		var from := global_position
-		vel += Vector3.DOWN * 9.81 * delta
+		vel = Ballistics.step(from, vel, drag, delta, _flown)
 		var to := from + vel * delta
 		global_position = to
 		if rocket and vel.length_squared() > 4.0:

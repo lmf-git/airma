@@ -297,6 +297,35 @@ func wave_at(x: float, z: float) -> float:
 		+ SWELL_B * sin(SWELL_KB.x * x + SWELL_KB.y * z + sea_time * SWELL_WB) \
 		+ SWELL_C * sin(SWELL_KC.x * x + SWELL_KC.y * z + sea_time * SWELL_WC)
 
+## The swell as it is drawn, from wherever the camera is.
+##
+## The sea is a disc of vertices about the eye that grows coarser with
+## distance, and each wave is let go where the mesh is too coarse to carry it:
+## the seventy metre chop is gone a few hundred metres out, the long swells by
+## two or three kilometres. A hull riding `wave_at` rides all of it regardless,
+## so seen from any distance a ship rolled and pitched and bobbed on water drawn
+## calm -- not floating on the sea, but moving about on top of it. Hulls take
+## the same fade the drawn sea does at their distance from the eye, with the
+## mesh's own numbers (see the sea in `Terrain`).
+const SEA_SPOKE_ANG := TAU / 192.0
+const SEA_INNER_STEP := 3.0
+
+func wave_seen(x: float, z: float) -> float:
+	var cam: Camera3D = get_viewport().get_camera_3d() if is_inside_tree() else null
+	var d := 0.0
+	if cam != null:
+		d = Vector2(x - cam.global_position.x, z - cam.global_position.z).length()
+	var sp: float = maxf(SEA_INNER_STEP, d * SEA_SPOKE_ANG)
+	return _kept(sp, SWELL_KA) * SWELL_A * sin(SWELL_KA.x * x + SWELL_KA.y * z + sea_time * SWELL_WA) \
+		+ _kept(sp, SWELL_KB) * SWELL_B * sin(SWELL_KB.x * x + SWELL_KB.y * z + sea_time * SWELL_WB) \
+		+ _kept(sp, SWELL_KC) * SWELL_C * sin(SWELL_KC.x * x + SWELL_KC.y * z + sea_time * SWELL_WC)
+
+## How much of a wave the drawn sea keeps where its vertices are `sp` apart:
+## the shader's `keep`, all of it at eight points a wave, none at four.
+static func _kept(sp: float, k: Vector2) -> float:
+	var lam: float = TAU / k.length()
+	return 1.0 - smoothstep(0.125 * lam, 0.25 * lam, sp)
+
 ## The surface a hull actually floats on: the shell plus the swell riding on it.
 func sea_surface(x: float, z: float) -> float:
 	return sea_at(x, z) + wave_at(x, z)
@@ -388,6 +417,10 @@ func save_settings() -> void:
 	cf.set_value("sim", "radar_range_idx", radar_range_idx)
 	cf.set_value("sim", "mouse_gain", mouse_gain)
 	cf.set_value("sim", "invert_pitch", invert_pitch)
+	for b in volumes:
+		cf.set_value("audio", String(b), float(volumes[b]))
+	cf.set_value("display", "fullscreen", fullscreen)
+	cf.set_value("display", "vsync", vsync)
 	var err := cf.save(SETTINGS_PATH)
 	if err != OK:
 		push_warning("could not save settings: %d" % err)
@@ -401,11 +434,69 @@ func load_settings() -> void:
 	radar_range_idx = int(cf.get_value("sim", "radar_range_idx", radar_range_idx))
 	mouse_gain = float(cf.get_value("sim", "mouse_gain", mouse_gain))
 	invert_pitch = bool(cf.get_value("sim", "invert_pitch", invert_pitch))
+	for b in volumes:
+		volumes[b] = clampf(float(cf.get_value("audio", String(b), volumes[b])), 0.0, 1.0)
+	fullscreen = bool(cf.get_value("display", "fullscreen", fullscreen))
+	vsync = bool(cf.get_value("display", "vsync", vsync))
 
 ## Pointer scaling and pitch sense, which every simulator has and this had
-## hard-coded.
+## hard-coded. Both were saved and loaded and then read by nothing at all:
+## every mouse handler goes through `mouse_rel` now.
 var mouse_gain := 1.0
 var invert_pitch := false
+
+## A mouse movement as the player has asked for it: scaled, and with the
+## vertical turned over if they fly or look that way.
+func mouse_rel(e: InputEventMouseMotion) -> Vector2:
+	var r: Vector2 = e.relative * mouse_gain
+	if invert_pitch:
+		r.y = -r.y
+	return r
+
+# ------------------------------------------------------------------- audio
+## Every sound went straight to Master, so the only volume there was the
+## operating system's. Three groups under it, each with its own slider: what
+## the weapons and the world sound like, the noise of whatever you are in, and
+## the tones and ticks that are there to tell you something.
+const BUSES := [&"Master", &"Effects", &"Engines", &"Interface"]
+var volumes := {&"Master": 1.0, &"Effects": 1.0, &"Engines": 1.0, &"Interface": 1.0}
+
+func _make_buses() -> void:
+	for b in BUSES:
+		if AudioServer.get_bus_index(b) < 0:
+			AudioServer.add_bus()
+			var i := AudioServer.bus_count - 1
+			AudioServer.set_bus_name(i, b)
+			AudioServer.set_bus_send(i, &"Master")
+	apply_audio()
+
+func apply_audio() -> void:
+	for b in volumes:
+		var i := AudioServer.get_bus_index(b)
+		if i < 0:
+			continue
+		var v: float = float(volumes[b])
+		AudioServer.set_bus_mute(i, v <= 0.001)
+		AudioServer.set_bus_volume_db(i, linear_to_db(maxf(v, 0.001)))
+
+# ----------------------------------------------------------------- display
+var fullscreen := false
+var vsync := true
+
+## Not at start-up for a harness run: a test that asks for a window of a given
+## size, or none at all, gets that rather than whatever was last chosen on the
+## page. `now` is the page itself, where someone has just asked for it.
+func apply_display(now := false) -> void:
+	if DisplayServer.get_name() == "headless" \
+			or (not now and not OS.get_cmdline_user_args().is_empty()):
+		return
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if vsync
+		else DisplayServer.VSYNC_DISABLED)
+	var fs: bool = DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN \
+		or DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN
+	if fs != fullscreen:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN if fullscreen
+			else DisplayServer.WINDOW_MODE_WINDOWED)
 
 # --------------------------------------------------------------------- IFF
 ## Who a contact is, as far as the observer can actually tell.
@@ -607,6 +698,8 @@ var score := 0
 func _ready() -> void:
 	# Whatever the player chose last time, before anything reads a default.
 	load_settings()
+	_make_buses()
+	apply_display()
 	# Before the noise fields, so nothing can sample the GDScript ones first and
 	# then be answered by the native field later in the same run.
 	if ClassDB.class_exists("Terra"):
@@ -2097,9 +2190,21 @@ var menu_keys := false
 const MENU_ACTIONS := [&"pitch_up", &"pitch_down", &"weapon_1", &"weapon_2",
 	&"weapon_3", &"weapon_4", &"weapon_5", &"weapon_6", &"weapon_7", &"weapon_8"]
 
+## True while the sensor page is up. CTRL there is the modifier for CTRL+T,
+## the designate key -- and CTRL is also the throttle. Holding it to designate
+## pulled the power back, and any throttle input is the disconnect for the
+## altitude hold and the auto hover, so every designation knocked the
+## aircraft out of the hold it had been put in precisely so the pilot could
+## work the sensor. With the page up CTRL is the modifier only; Z and the
+## shoulder button still bring the power back.
+var sensor_keys := false
+
 func strength(action: StringName) -> float:
 	if typing or (menu_keys and MENU_ACTIONS.has(action)):
 		return 0.0
+	if action == &"throttle_down" and sensor_keys and Input.is_physical_key_pressed(KEY_CTRL):
+		return 1.0 if Input.is_physical_key_pressed(KEY_Z) \
+			or Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER) else 0.0
 	return Input.get_action_strength(action)
 
 func held(action: StringName) -> bool:

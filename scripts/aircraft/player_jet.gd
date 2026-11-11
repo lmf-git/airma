@@ -31,9 +31,13 @@ func hit_radius() -> float:
 func _unhandled_input(e: InputEvent) -> void:
 	if not alive:
 		return
-	if e is InputEventMouseMotion and mouse_fly:
+	# Not while ALT is held: the mouse is looking around then, or slewing the
+	# sensor head. It flew the aeroplane as well, so aiming the pod with the
+	# mouse stick on rolled the jet and broke the altitude hold.
+	if e is InputEventMouseMotion and mouse_fly \
+			and not Input.is_action_pressed(&"freelook"):
 		var vp := get_viewport().get_visible_rect().size
-		_mouse += (e as InputEventMouseMotion).relative / (vp.y * 0.42)
+		_mouse += Sim.mouse_rel(e as InputEventMouseMotion) / (vp.y * 0.42)
 		_mouse.x = clampf(_mouse.x, -1.0, 1.0)
 		_mouse.y = clampf(_mouse.y, -1.0, 1.0)
 

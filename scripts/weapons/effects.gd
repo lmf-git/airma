@@ -120,8 +120,18 @@ static func vortex_particles(colour: Color, length := 3.0, amount := 48) -> GPUP
 	return p
 
 ## `he` is the burst scale of an explosive shell, 0 for solid shot.
+## The weapon camera's hook. Every round it might ride -- a gun's, a rocket, a
+## shoulder-launched missile -- is offered here with whoever fired it, and the
+## world decides. Stores off a pylon, a hull or a launcher already went to it;
+## nothing fired from a gun or from a man's shoulder ever did.
+static var round_watch := Callable()
+
+static func watch(shot: Node3D, shooter: Node) -> void:
+	if round_watch.is_valid() and is_instance_valid(shot):
+		round_watch.call(shot, shooter)
+
 static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
-		team: int, he := 0.0) -> void:
+		team: int, he := 0.0) -> Tracer:
 	var t := Tracer.new()
 	t.vel = vel
 	t.shooter = owner
@@ -130,23 +140,28 @@ static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: fl
 	t.he = he
 	world.add_child(t)
 	t.global_position = pos
+	watch(t, owner)
+	return t
 
 ## A rifle round rather than a cannon shell. The same projectile -- travel time,
 ## drop, a streak you can see -- but drawn at the size of the thing, stopped by
 ## walls, and able to tell a head from a chest. `glow` is how much of it burns:
 ## not every round in a magazine is tracer.
 static func bullet(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
-		team: int, glow := 1.0, life := 1.4) -> void:
+		team: int, glow := 1.0, life := 1.4, drag := 0.0011) -> Tracer:
 	var t := Tracer.new()
 	t.vel = vel
 	t.shooter = owner
 	t.dmg = dmg
 	t.team = team
+	t.drag = drag
 	t.small = true
 	t.glow = glow
 	t.life = life
 	world.add_child(t)
 	t.global_position = pos
+	watch(t, owner)
+	return t
 
 ## Where a round went in: a chip of dust, a spark, and the sound of it.
 static func bullet_impact(world: Node, pos: Vector3, hard: bool) -> void:
@@ -165,15 +180,47 @@ static func bullet_impact(world: Node, pos: Vector3, hard: bool) -> void:
 			("impact_hard" if hard else "impact_soft"), pos, -9.0,
 			randf_range(0.85, 1.25), 90.0)
 
+## One cube a metre a side, scaled to whatever piece is wanted, and one
+## material per colour. Every piece of a man used to be a mesh and a material
+## of its own, built while he fell: twenty of each for a man caught by a shell,
+## none of which the renderer could draw together.
+static var _unit_box: ArrayMesh = null
+static var _bit_mats := {}
+
+static func unit_box() -> ArrayMesh:
+	if _unit_box == null:
+		var st := MeshKit.begin()
+		MeshKit.box(st, Vector3.ONE, Vector3.ZERO)
+		_unit_box = MeshKit.finish(st)
+	return _unit_box
+
+static func bit_mat(col: Color) -> StandardMaterial3D:
+	var k: int = col.to_rgba32()
+	var m: Variant = _bit_mats.get(k)
+	if m == null:
+		m = MeshKit.mat(col, 0.7, 0.0)
+		_bit_mats[k] = m
+	return m
+
+## The gore bits a burst may still throw. Bodies, heads and limbs always come
+## off; the spray is the part that piles up, fourteen seconds a piece, and in a
+## street fight it piled up faster than it went away.
+const GORE_BUDGET := 120
+static var _gore_live := 0
+
 ## One piece of something, thrown: a box that flies, bounces and stays.
 static func chunk(world: Node, at: Vector3, vel: Vector3, size: Vector3, col: Color,
-		life := 30.0) -> void:
+		life := 30.0) -> Debris:
 	if world == null or not world.is_inside_tree():
-		return
-	var st := MeshKit.begin()
-	MeshKit.box(st, size, Vector3.ZERO)
+		return null
 	var d := Debris.new()
-	d.add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(col, 0.7, 0.0)), "Bit"))
+	var bit := MeshKit.mi(unit_box(), "Bit")
+	bit.material_override = bit_mat(col)
+	bit.scale = size
+	# a few centimetres of red is not going to throw a shadow anyone sees
+	if size.x < 0.1:
+		bit.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	d.add_child(bit)
 	d.vel = vel
 	d.spin = Vector3(randf_range(-9, 9), randf_range(-9, 9), randf_range(-9, 9))
 	d.rest_offset = maxf(size.y * 0.5, 0.04)
@@ -181,6 +228,7 @@ static func chunk(world: Node, at: Vector3, vel: Vector3, size: Vector3, col: Co
 	d.life = life
 	world.add_child(d)
 	d.global_position = at
+	return d
 
 static var _pools := 0
 const POOL_BUDGET := 48
@@ -194,50 +242,64 @@ static func blood_pool(world: Node, at: Vector3, size := 1.0) -> void:
 	world.add_child(p)
 	p.global_position = Vector3(at.x, Sim.height_at(at.x, at.z) + 0.03, at.z)
 
+static var pool_mesh: CylinderMesh = null
+
 class Pool extends MeshInstance3D:
 	var size := 1.0
 	var age := 0.0
 	const LIFE := 50.0
+	const SPREAD := 2.5
 
 	func _ready() -> void:
 		Effects._pools += 1
-		var cm := CylinderMesh.new()
-		cm.top_radius = 0.5
-		cm.bottom_radius = 0.5
-		cm.height = 0.01
-		cm.radial_segments = 9
-		cm.rings = 1
-		var m := StandardMaterial3D.new()
-		m.albedo_color = Color(0.30, 0.02, 0.02, 0.92)
-		m.roughness = 0.25
-		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		cm.material = m
-		mesh = cm
+		# One disc for all of them: they were a mesh and a material each,
+		# identical down to the colour.
+		if Effects.pool_mesh == null:
+			var cm := CylinderMesh.new()
+			cm.top_radius = 0.5
+			cm.bottom_radius = 0.5
+			cm.height = 0.01
+			cm.radial_segments = 9
+			cm.rings = 1
+			var m := StandardMaterial3D.new()
+			m.albedo_color = Color(0.30, 0.02, 0.02, 0.92)
+			m.roughness = 0.25
+			m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			cm.material = m
+			Effects.pool_mesh = cm
+		mesh = Effects.pool_mesh
 		cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		rotation.y = randf() * TAU
 		scale = Vector3(0.05, 1.0, 0.05)
 		physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		# Spreads for a couple of seconds and then only waits: the wait is a
+		# timer, not fifty seconds of frames doing nothing.
+		get_tree().create_timer(LIFE, false).timeout.connect(queue_free)
 
 	func _exit_tree() -> void:
 		Effects._pools -= 1
 
 	func _process(delta: float) -> void:
 		age += delta
-		var k: float = clampf(age / 2.5, 0.0, 1.0)
+		var k: float = clampf(age / SPREAD, 0.0, 1.0)
 		k = 1.0 - (1.0 - k) * (1.0 - k)
 		scale = Vector3(size * (0.2 + 1.3 * k), 1.0, size * (0.2 + 1.0 * k))
-		if age > LIFE:
-			queue_free()
+		if age >= SPREAD:
+			set_process(false)
 
 ## A spray of it: where a round came out, or where a limb was.
 static func gore_burst(world: Node, at: Vector3, dir: Vector3, bits := 5, speed := 4.0) -> void:
 	if world == null or not world.is_inside_tree():
 		return
-	for i in bits:
+	for i in mini(bits, GORE_BUDGET - _gore_live):
 		var v: Vector3 = dir * randf_range(0.4, 1.0) * speed + Vector3(randf_range(-1.5, 1.5),
 			randf_range(0.5, 3.0), randf_range(-1.5, 1.5))
 		var s: float = randf_range(0.03, 0.09)
-		chunk(world, at, v, Vector3(s, s, s), Color(0.42, 0.03, 0.03), 14.0)
+		var bit := chunk(world, at, v, Vector3(s, s, s), Color(0.42, 0.03, 0.03), 14.0)
+		if bit != null:
+			_gore_live += 1
+			# counted down when it goes, whichever way it goes
+			bit.tree_exited.connect(func() -> void: Effects._gore_live -= 1)
 	var e := Boom.new()
 	e.radius = 0.32
 	e.tint = Color(0.60, 0.04, 0.03)
@@ -959,6 +1021,34 @@ class Flash extends Node3D:
 			queue_free()
 
 # ---------------------------------------------------------------------------
+## Streaks, one per shape, and their materials, one per colour. Every round
+## built a mesh and a material of its own as it left the barrel: a dozen new
+## GPU resources a second for each man firing, none of which could be drawn
+## alongside another.
+static var streaks := {}
+static var streak_mats := {}
+
+## What a round can hit, read once a physics tick rather than twice per round
+## per tick. A list going stale inside one tick costs nothing: whatever died in
+## it says so through `is_alive`, and whatever was made in it is a tick late.
+static var _grp_tick := -1
+static var _grp_inf: Array = []
+static var _grp_hit: Array = []
+
+static func _targets(tree: SceneTree) -> void:
+	var tick := Engine.get_physics_frames()
+	if tick == _grp_tick:
+		return
+	_grp_tick = tick
+	_grp_inf = tree.get_nodes_in_group("infantry")
+	_grp_hit = tree.get_nodes_in_group("hittable")
+
+## Further than this from a round's step and nothing can be touched by it: the
+## widest thing that can be hit is a carrier, about 27 m either side.
+const REACH_HIT := 40.0
+## and a man, from the feet the distance is measured from to the top of his head
+const REACH_MAN := 2.5
+
 class Tracer extends Node3D:
 	var vel := Vector3.ZERO
 	var shooter: Node = null
@@ -971,23 +1061,56 @@ class Tracer extends Node3D:
 	var small := false
 	var glow := 1.0
 	var _whizzed := false
+	## How much of its speed it loses to the air per metre: see `Ballistics`.
+	## A cannon shell keeps it better than a rifle round.
+	var drag := 0.0005
+	var _flown := 0.0
+	## Where it stopped, whatever stopped it. For the harness, and for anything
+	## that wants to know where a round went in.
+	var ended_at := Vector3.INF
+
+	## How far along a step the round meets the ground, as a fraction of it, or
+	## 2.0 if it does not.
+	##
+	## The ground was asked about once a step, at its end -- seven metres on
+	## for a rifle round. A round that skimmed a hump in the middle went
+	## through it, and one that went into the road was put into it at the end
+	## of the step, metres past where it struck: lying down, where every line
+	## of sight grazes the road, the strike landed well beyond the mark. Looked
+	## for along the step, then pinned down by halving.
+	func _ground_t(from: Vector3, to: Vector3) -> float:
+		var c0: float = from.y - Sim.height_at(from.x, from.z)
+		var c1: float = to.y - Sim.height_at(to.x, to.z)
+		# well clear at both ends: no hump in a few metres reaches it
+		if c0 > 3.0 and c1 > 3.0:
+			return 2.0
+		var n: int = clampi(int(ceil(from.distance_to(to) / 1.25)), 1, 16)
+		var lo := 0.0
+		for i in range(1, n + 1):
+			var t: float = float(i) / float(n)
+			var p: Vector3 = from.lerp(to, t)
+			if p.y < Sim.height_at(p.x, p.z):
+				var hi: float = t
+				for k in 6:
+					var m: float = (lo + hi) * 0.5
+					var q: Vector3 = from.lerp(to, m)
+					if q.y < Sim.height_at(q.x, q.z):
+						hi = m
+					else:
+						lo = m
+				return hi
+			lo = t
+		return 2.0
 
 	func _ready() -> void:
 		var mi := MeshInstance3D.new()
 		# A cross of two quads along the flight axis. Billboarding fought the
 		# look_at that keeps the round pointed along its travel, which is what
 		# made the bolts sit at the wrong angle.
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		# Hotter than the old orange, and over-bright so it blooms: a tracer is
 		# a burning pellet, and what the eye picks out at two kilometres is the
 		# glare rather than the colour.
-		mat.albedo_color = Color(2.4, 1.35, 0.55, 0.95)
-		mat.albedo_texture = Effects.glow_texture()
-		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		mat.render_priority = 6
+		var colour := Color(2.4, 1.35, 0.55, 0.95)
 		# Stretched along the way it is going, by how fast it is going.
 		#
 		# The round was a fixed nine metres of quad. A cannon shell leaves the
@@ -1005,7 +1128,32 @@ class Tracer extends Node3D:
 			# a searchlight. A rifle round is a line you half see.
 			half = clampf(speed * 0.0032, 0.7, 2.8)
 			wide = 0.035
-			mat.albedo_color = Color(2.2, 1.5, 0.7, 0.9 * glow)
+			colour = Color(2.2, 1.5, 0.7, 0.9 * glow)
+		# A handful of shapes rather than one per round: the length to a
+		# quarter metre on a rifle round and a metre on a shell, which is
+		# less than the streak moves in a frame.
+		half = snappedf(half, 0.25 if small else 1.0)
+		wide = snappedf(wide, 0.005 if small else 0.05)
+		var ckey: int = colour.to_rgba64()
+		var mat: Variant = Effects.streak_mats.get(ckey)
+		if mat == null:
+			var sm := StandardMaterial3D.new()
+			sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			sm.albedo_color = colour
+			sm.albedo_texture = Effects.glow_texture()
+			sm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+			sm.render_priority = 6
+			Effects.streak_mats[ckey] = sm
+			mat = sm
+		var mkey := Vector2(half, wide)
+		var cached: Variant = Effects.streaks.get(mkey)
+		if cached != null:
+			mi.mesh = cached
+			mi.material_override = mat
+			_finish_ready(mi, half)
+			return
 		# Built by hand, with texture coordinates. It was two MeshKit quads,
 		# and MeshKit writes none: every vertex sampled the glow at (0, 0),
 		# which is the transparent corner of a radial gradient, so the streak
@@ -1036,8 +1184,12 @@ class Tracer extends Node3D:
 		arr[Mesh.ARRAY_INDEX] = idx
 		var m := ArrayMesh.new()
 		m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-		m.surface_set_material(0, mat)
+		Effects.streaks[mkey] = m
 		mi.mesh = m
+		mi.material_override = mat
+		_finish_ready(mi, half)
+
+	func _finish_ready(mi: MeshInstance3D, half: float) -> void:
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(mi)
 		_mi = mi
@@ -1073,12 +1225,18 @@ class Tracer extends Node3D:
 		_mi.scale = Vector3(s, s, clampf(gone / _len, 0.001, 1.0))
 
 	func _physics_process(delta: float) -> void:
+		var _pb := Sim.prof_at()
+		_fly(delta)
+		Sim.prof_end(&"fx.bullet", _pb)
+
+	func _fly(delta: float) -> void:
 		life -= delta
 		var from := global_position
 		if _born == Vector3.INF:
 			_born = from
-		vel += Vector3.DOWN * 9.81 * delta
+		vel = Ballistics.step(from, vel, drag, delta, _flown)
 		var to := from + vel * delta
+		_flown += vel.length() * delta
 		if small:
 			if _small_step(from, to):
 				return
@@ -1086,18 +1244,34 @@ class Tracer extends Node3D:
 			if vel.length_squared() > 1.0:
 				look_at(to + vel, Vector3.UP)
 			if to.y < Sim.height_at(to.x, to.z):
+				ended_at = to
 				Effects.bullet_impact(get_tree().current_scene, to, false)
 				queue_free()
 			elif life <= 0.0:
+				ended_at = to
 				queue_free()
 			return
-		global_position = to
+		# Buildings and what stands in the street, the same as a rifle round.
+		# Shells and machine-gun rounds were tested against the ground and
+		# against targets and nothing else: a coaxial, an aeroplane's cannon,
+		# the chin gun and the anti-aircraft guns all fired straight through
+		# houses, and the man behind the wall was hit through it.
+		var wall_t: float = Obstacles.segment(from, to)
+		var dirt_t: float = _ground_t(from, to)
+		var end: Vector3 = to if minf(wall_t, dirt_t) >= 1.0 else from.lerp(to, minf(wall_t, dirt_t))
+		global_position = end
 		if vel.length_squared() > 1.0:
-			look_at(to + vel, Vector3.UP)
+			look_at(end + vel, Vector3.UP)
 		# men on foot as well as everything on the radar picture: a coaxial
 		# machine gun that could not hit a rifleman was no use in a street
-		for n in get_tree().get_nodes_in_group("hittable") + get_tree().get_nodes_in_group("infantry"):
+		Effects._targets(get_tree())
+		var mid: Vector3 = (from + end) * 0.5
+		var reach: float = from.distance_to(end) * 0.5 + Effects.REACH_HIT
+		reach *= reach
+		for n in Effects._grp_hit + Effects._grp_inf:
 			if n == shooter or not is_instance_valid(n):
+				continue
+			if (n as Node3D).global_position.distance_squared_to(mid) > reach:
 				continue
 			if n.has_method("is_alive") and not n.is_alive():
 				continue
@@ -1108,20 +1282,32 @@ class Tracer extends Node3D:
 			if "side" in n and n.side == team:
 				continue
 			var r: float = n.hit_radius() if n.has_method("hit_radius") else 6.0
-			if Geometry3D.get_closest_point_to_segment(n.global_position, from, to).distance_to(n.global_position) < r:
+			if Geometry3D.get_closest_point_to_segment(n.global_position, from, end).distance_to(n.global_position) < r:
 				if n.has_method("take_hit"):
 					n.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
+				ended_at = end
 				if he > 0.0:
-					Effects.he_impact(get_tree().current_scene, to, he)
+					Effects.he_impact(get_tree().current_scene, end, he)
 				else:
-					Effects.dust(get_tree().current_scene, to, 1.2)
+					Effects.dust(get_tree().current_scene, end, 1.2)
 				queue_free()
 				return
-		if to.y < Sim.height_at(to.x, to.z):
+		if wall_t < 1.0 and wall_t <= dirt_t:
+			ended_at = end
+			# just short of the face, so the burst is on this side of it
+			var face: Vector3 = end - vel.normalized() * 0.08
 			if he > 0.0:
-				Effects.he_impact(get_tree().current_scene, to, he * 0.85)
+				Effects.he_impact(get_tree().current_scene, face, he * 0.85)
 			else:
-				Effects.dust(get_tree().current_scene, to, 1.6)
+				Effects.bullet_impact(get_tree().current_scene, face, true)
+			queue_free()
+			return
+		if dirt_t < 1.0 or end.y < Sim.height_at(end.x, end.z):
+			ended_at = end
+			if he > 0.0:
+				Effects.he_impact(get_tree().current_scene, end, he * 0.85)
+			else:
+				Effects.dust(get_tree().current_scene, end, 1.6)
 			queue_free()
 		elif life <= 0.0:
 			queue_free()
@@ -1133,14 +1319,26 @@ class Tracer extends Node3D:
 		var world := get_tree().current_scene
 		var stop := to_in
 		var wall: float = Obstacles.segment(from, stop)
-		if wall < 1.0:
-			stop = from.lerp(to_in, wall)
+		# and the ground, on the same footing: whatever is behind a fold in
+		# the road is as safe from the round as whatever is behind a wall
+		var dirt: float = _ground_t(from, to_in)
+		var cut: float = minf(wall, dirt)
+		if cut < 1.0:
+			stop = from.lerp(to_in, cut)
 		var best: Node = null
 		var best_t := 2.0
 		var best_k := 0.0
+		Effects._targets(get_tree())
+		var step_mid: Vector3 = (from + stop) * 0.5
+		var half_len: float = from.distance_to(stop) * 0.5
 		for grp in ["infantry", "hittable"]:
-			for n in get_tree().get_nodes_in_group(grp):
+			var near: float = half_len + (Effects.REACH_MAN if grp == "infantry" else Effects.REACH_HIT)
+			near *= near
+			for n in (Effects._grp_inf if grp == "infantry" else Effects._grp_hit):
 				if n == shooter or not is_instance_valid(n):
+					continue
+				# everything the step cannot reach, before anything is asked of it
+				if (n as Node3D).global_position.distance_squared_to(step_mid) > near:
 					continue
 				if n.has_method("is_alive") and not n.is_alive():
 					continue
@@ -1167,6 +1365,7 @@ class Tracer extends Node3D:
 					best_k = k
 		if best != null:
 			var where := from.lerp(stop, clampf(best_t, 0.0, 1.0))
+			ended_at = where
 			var was_alive: bool = not best.has_method("is_alive") or best.is_alive()
 			# a rifle round does nothing to armour plate but mark the paint
 			var plate: bool = best is Tank or best is Ship
@@ -1182,8 +1381,9 @@ class Tracer extends Node3D:
 				shooter.hit_confirm(best_k > 1.5, dead_now)
 			queue_free()
 			return true
-		if wall < 1.0:
-			Effects.bullet_impact(world, stop - vel.normalized() * 0.05, true)
+		if cut < 1.0:
+			ended_at = stop
+			Effects.bullet_impact(world, stop - vel.normalized() * 0.05, wall <= dirt)
 			queue_free()
 			return true
 		if not _whizzed:
@@ -1198,6 +1398,8 @@ class Tracer extends Node3D:
 					Sfx.play_at(world, "whiz" if miss > 1.2 else "snap", c2,
 						-3.0, randf_range(0.85, 1.3), 40.0)
 		return false
+
+static var boom_sphere: SphereMesh = null
 
 class Boom extends Node3D:
 	var radius := 12.0
@@ -1217,12 +1419,17 @@ class Boom extends Node3D:
 		top_level = true
 		physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 		_mi = MeshInstance3D.new()
-		var sm := SphereMesh.new()
-		sm.radius = 1.0
-		sm.height = 2.0
-		sm.radial_segments = 10
-		sm.rings = 6
-		_mi.mesh = sm
+		# One sphere for every burst: each made its own, and a new mesh is
+		# built the first time it is drawn -- a blood puff for every round
+		# that hit anybody. The material stays its own, because it fades.
+		if Effects.boom_sphere == null:
+			var sm := SphereMesh.new()
+			sm.radius = 1.0
+			sm.height = 2.0
+			sm.radial_segments = 10
+			sm.rings = 6
+			Effects.boom_sphere = sm
+		_mi.mesh = Effects.boom_sphere
 		_mat = StandardMaterial3D.new()
 		_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -1236,7 +1443,7 @@ class Boom extends Node3D:
 		# 86% opaque sea over the top of it. A bomb into the water looked like a
 		# dud. Explosions are drawn last, over everything transparent.
 		_mat.render_priority = 8
-		sm.material = _mat
+		_mi.material_override = _mat
 		_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(_mi)
 		# Every burst lights the ground, not just the ones that also make smoke.
@@ -1291,6 +1498,11 @@ class Debris extends Node3D:
 		return _still > 0.4
 
 	func _physics_process(delta: float) -> void:
+		var _pd := Sim.prof_at()
+		_settle(delta)
+		Sim.prof_end(&"fx.debris", _pd)
+
+	func _settle(delta: float) -> void:
 		life -= delta
 		if life <= 0.0:
 			queue_free()
@@ -1316,3 +1528,8 @@ class Debris extends Node3D:
 				vel = Vector3.ZERO
 				spin = Vector3.ZERO
 				_still = 1.0
+				# Nothing moves it again once it is down, so stop asking. It
+				# was a call a tick for every piece on the ground for as long
+				# as it lay there -- forty seconds for what a shell leaves.
+				set_physics_process(false)
+				get_tree().create_timer(maxf(life, 0.05), false).timeout.connect(queue_free)

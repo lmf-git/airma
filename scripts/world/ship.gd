@@ -659,11 +659,11 @@ func _unhandled_input(e: InputEvent) -> void:
 	if not occupied or not alive:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var mm := e as InputEventMouseMotion
+		var mm := Sim.mouse_rel(e as InputEventMouseMotion)
 		# Same bearing convention as the tank's turret, and it was inverted in
 		# the same way.
-		aim_yaw += mm.relative.x * 0.0026
-		aim_pitch = clampf(aim_pitch - mm.relative.y * 0.0020,
+		aim_yaw += mm.x * 0.0026
+		aim_pitch = clampf(aim_pitch - mm.y * 0.0020,
 			deg_to_rad(-8.0), deg_to_rad(70.0))
 
 ## Helm and telegraph. A ship answers slowly: the wheel sets a rate of turn and
@@ -1032,6 +1032,12 @@ func _round_reaches(tgt: Node3D, round_id := "sm2") -> bool:
 ## to reach ten kilometres, so a ship making fifteen knots has moved the better
 ## part of two hundred metres by the time it arrives: without the lead every
 ## round lands in her wake.
+## What the air takes off a naval shell per metre: see `Ballistics`.
+const SHELL_DRAG := 0.00001
+var _gun_sol := Vector3.FORWARD
+var _gun_sol_for := Vector3.INF
+var _gun_sol_t := 0
+
 func _lay_on(tgt: Node3D) -> bool:
 	var muzzle := 820.0
 	var aim: Vector3 = tgt.global_position
@@ -1055,6 +1061,18 @@ func _lay_on(tgt: Node3D) -> bool:
 		return false
 	var el := 0.5 * asin(clampf(arg, -1.0, 1.0)) + atan2(rel.y, maxf(flat, 1.0)) * 0.5
 	aim_yaw = atan2(rel.x, -rel.z)
+	# And then against the shell's real flight -- the air, the curve of the
+	# sea, the planet turning -- which at twenty kilometres is the difference
+	# between straddling her and missing. Held while the mark barely moves:
+	# it is asked every tick she has a target.
+	if aim.distance_to(_gun_sol_for) > 6.0 or Time.get_ticks_msec() - _gun_sol_t > 400:
+		var guess := Vector3(sin(aim_yaw) * cos(el), sin(el), -cos(aim_yaw) * cos(el))
+		var sol: Dictionary = Ballistics.solve(here, aim, muzzle, SHELL_DRAG, guess)
+		_gun_sol = sol["dir"] if not sol.is_empty() else guess
+		_gun_sol_for = aim
+		_gun_sol_t = Time.get_ticks_msec()
+	el = asin(clampf(_gun_sol.y, -1.0, 1.0))
+	aim_yaw = atan2(_gun_sol.x, -_gun_sol.z)
 	aim_pitch = clampf(el, deg_to_rad(-8.0), deg_to_rad(70.0))
 	# the mount has to actually be there before the round goes
 	var laid := absf(wrapf(_mount_yaw - aim_yaw, -PI, PI))
@@ -1110,6 +1128,7 @@ func fire_gun() -> bool:
 	var v := Vector3(sin(aim_yaw) * cos(aim_pitch), sin(aim_pitch),
 		-cos(aim_yaw) * cos(aim_pitch)) * 820.0
 	var shell := Aircraft.Shell.new()
+	shell.drag = SHELL_DRAG
 	shell.vel = v
 	shell.damage = 240.0
 	shell.blast = 14.0
@@ -1145,6 +1164,7 @@ func show_shot(yaw: float, pitch: float) -> void:
 	Effects.muzzle_flash(get_tree().current_scene, muzzle,
 		Vector3(sin(yaw), 0, -cos(yaw)), 3.2)
 	var shell := Aircraft.Shell.new()
+	shell.drag = SHELL_DRAG
 	shell.vel = Vector3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch)) * 820.0
 	shell.damage = 0.0             # the host decides what it hits
 	shell.blast = 14.0
@@ -1304,11 +1324,13 @@ func _tick_ship_p(delta: float) -> void:
 	var fwd2 := Vector2(sin(heading), -cos(heading))
 	var rgt2 := Vector2(cos(heading), sin(heading))
 	# amidships, and then fore/aft and port/starboard to read the slope
-	var h_mid: float = Sim.wave_at(px, pz)
-	var h_bow: float = Sim.wave_at(px + fwd2.x * half_l, pz + fwd2.y * half_l)
-	var h_stern: float = Sim.wave_at(px - fwd2.x * half_l, pz - fwd2.y * half_l)
-	var h_stbd: float = Sim.wave_at(px + rgt2.x * half_b, pz + rgt2.y * half_b)
-	var h_port: float = Sim.wave_at(px - rgt2.x * half_b, pz - rgt2.y * half_b)
+	# the swell as the sea under her is drawn from where it is being watched
+	# from: see `Sim.wave_seen`
+	var h_mid: float = Sim.wave_seen(px, pz)
+	var h_bow: float = Sim.wave_seen(px + fwd2.x * half_l, pz + fwd2.y * half_l)
+	var h_stern: float = Sim.wave_seen(px - fwd2.x * half_l, pz - fwd2.y * half_l)
+	var h_stbd: float = Sim.wave_seen(px + rgt2.x * half_b, pz + rgt2.y * half_b)
+	var h_port: float = Sim.wave_seen(px - rgt2.x * half_b, pz - rgt2.y * half_b)
 	# A long hull bridges the swell instead of following it: she pitches to the
 	# average slope over her length, which is why a corvette bucks where a
 	# carrier barely nods.

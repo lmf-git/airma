@@ -274,6 +274,9 @@ func _strafe(tgt: Node3D, slant: float, delta: float) -> void:
 
 ## Nearest hostile that is not an aeroplane: armour, a battery, a ship.
 func _find_ground() -> Node3D:
+	return _held("ground", _scan_ground)
+
+func _scan_ground() -> Node3D:
 	var best: Node3D = null
 	var bd := 26000.0
 	for n in get_tree().get_nodes_in_group("hittable"):
@@ -435,7 +438,30 @@ func _mask_altitude(threat: Node3D) -> float:
 	var ground: float = Sim.height_at(global_position.x, global_position.z)
 	return ground + maxf(90.0, depth * 0.35)
 
+
+## Who to fight, looked for a few times a second rather than on every tick.
+## Every AI pilot walked every contact on the map at 120 Hz -- twice a tick for
+## a wingman, which asks once to decide whether to formate and again to fight
+## -- to find a nearest that cannot change in a hundredth of a second. What is
+## held is let go at once if it dies or goes away.
+var _foe_at := {}
+
+func _held(kind: String, scan: Callable) -> Node3D:
+	var c: Variant = _foe_at.get(kind)
+	if c != null and _life_t < float(c[0]):
+		var n: Variant = c[1]
+		if n == null:
+			return null
+		if is_instance_valid(n) and (not n.has_method("is_alive") or n.is_alive()):
+			return n
+	var got: Node3D = scan.call()
+	_foe_at[kind] = [_life_t + 0.25 + randf() * 0.1, got]
+	return got
+
 func _find_enemy() -> Node3D:
+	return _held("air", _scan_enemy)
+
+func _scan_enemy() -> Node3D:
 	var best: Node3D = null
 	var bd := 1e9
 	for n in get_tree().get_nodes_in_group("hittable"):

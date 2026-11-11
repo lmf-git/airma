@@ -62,6 +62,19 @@ var motor := 0.0
 var dead := false
 var _start_xf := Transform3D.IDENTITY
 var _eject := 0.0
+## The way the rail pointed when it let go. Until the round is going fast
+## enough for its fins to fly it, the nose stays on this, and so does the
+## motor. They were both put on the velocity from the first frame -- and from
+## a hover the velocity at the moment the motor lights is the drop off the rail,
+## straight down: every Hellfire and every rocket off a hovering helicopter
+## lit its motor pointing at the ground under it and drove itself in.
+var _axis := Vector3.FORWARD
+## Below this the airframe holds the rail's line; by twice it is flying along
+## its velocity, as everything already did at a fast jet's launch speed.
+const AXIS_HOLD := 45.0
+## How long a laser-guided round flies toward the spot it was given before its
+## own seeker has to have it.
+const LOAL_FOR := 2.0
 var _trail: GPUParticles3D
 var _flame: MeshInstance3D
 var _glow: OmniLight3D
@@ -86,6 +99,20 @@ func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: 
 		ws["max_g"] = float(ws["laser_g"])
 		ws["seeker_fov"] = float(ws.get("laser_fov", ws["seeker_fov"]))
 	_start_xf = xf
+	_axis = (-xf.basis.z).normalized()
+	# Off a slow launcher -- a helicopter in the hover, a man on foot -- a round
+	# with somewhere to go leaves pointed at it, a little lofted, as long as it
+	# is not behind. Leaving along the airframe's nose it had to turn onto the
+	# mark at walking pace, with no lift to turn on: a Hellfire forty degrees
+	# off the nose of a hovering Apache flew out along the rail and missed by
+	# most of a kilometre.
+	if is_instance_valid(tgt) and carrier_vel.length() < 60.0 \
+			and (laser_guided or bool(WeaponSpec.get_spec(id).get("air_to_ground", false))):
+		var to_t: Vector3 = (tgt.global_position - xf.origin)
+		if to_t.length() > 50.0 and to_t.normalized().dot(_axis) > 0.0:
+			var flat_d: float = Vector2(to_t.x, to_t.z).length()
+			var lofted := Vector3(to_t.x, maxf(to_t.y, 0.0) + flat_d * 0.06, to_t.z)
+			_axis = lofted.normalized()
 	vel = carrier_vel
 	shooter = from
 	target = tgt
@@ -545,8 +572,14 @@ func _physics_process(delta: float) -> void:
 	var from := global_position
 	var to := from + vel * delta
 	global_position = to
-	if vel.length_squared() > 4.0:
-		var fwd := vel.normalized()
+	if vel.length_squared() > 4.0 or not _vls:
+		var spd: float = vel.length()
+		var fwd: Vector3 = vel.normalized() if spd > 0.01 else _axis
+		if not _vls:
+			# held on the rail's line while it is slow, and eased onto its own
+			# flight as it gets going
+			var w: float = clampf((spd - AXIS_HOLD) / AXIS_HOLD, 0.0, 1.0)
+			fwd = _axis.slerp(fwd, w).normalized() if spd > 0.01 else _axis
 		var up := Vector3.UP if absf(fwd.y) < 0.98 else Vector3.FORWARD
 		global_transform.basis = Basis.looking_at(fwd, up)
 	if _fins != null:
@@ -1030,7 +1063,13 @@ func _guide(delta: float) -> void:
 	# every hypersonic 1.2 seconds after launch and left it flying on ballistic.
 	# Measured: mark 27.4 km away, closest approach 26.9 km, into the ground at
 	# six seconds.
-	if homes_on_a_thing and seeker_ang > ws["seeker_fov"]:
+	# Lock on after launch. A laser round is told where the spot is when it
+	# leaves, and flies toward it until its own seeker can see it: the spot
+	# was outside the seeker's cone whenever the rail was not pointed at it --
+	# a helicopter firing at anything off its nose -- and the round never
+	# steered at all, flew on along the rail and was dropped.
+	var loal: bool = laser_guided and age < LOAL_FOR
+	if homes_on_a_thing and seeker_ang > ws["seeker_fov"] and not loal:
 		_seek_lost += delta
 		if _seek_lost > 1.2:
 			if Sim.debug_weapons:

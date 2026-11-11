@@ -402,7 +402,11 @@ static func _db() -> Dictionary:
 	"hydra": {
 		"name": "Hydra 70 rocket", "short": "RKT", "kind": "radar",
 		"mass": 11.0, "length": 1.06, "dia": 0.070, "fin": 0.14,
-		"boost": 130.0, "burn": 1.1, "max_g": 3.0, "drag": 0.000075, "ref_speed": 300.0,
+		# At 130 this burned out at a hundred and forty metres a second, and
+		# from a hover it fell short of anything a kilometre away. The real
+		# motor is faster still than this; at the real figure, fired from a jet
+		# it is going too fast for twelve g to steer it onto the spot.
+		"boost": 300.0, "burn": 1.1, "max_g": 3.0, "drag": 0.000075, "ref_speed": 300.0,
 		"life": 18.0, "range": 6000.0, "seeker_fov": 25.0, "lock_time": 0.0,
 		"arm_time": 0.3, "fuse": 4.0, "damage": 90.0, "lethal": 9.0,
 		"air_to_ground": true,

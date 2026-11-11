@@ -122,9 +122,9 @@ func _unhandled_input(e: InputEvent) -> void:
 	if not occupied:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var mm := e as InputEventMouseMotion
-		aim_yaw -= mm.relative.x * 0.0026
-		aim_pitch = clampf(aim_pitch - mm.relative.y * 0.0020,
+		var mm := Sim.mouse_rel(e as InputEventMouseMotion)
+		aim_yaw -= mm.x * 0.0026
+		aim_pitch = clampf(aim_pitch - mm.y * 0.0020,
 			deg_to_rad(-20.0), deg_to_rad(50.0))
 
 func _conn(delta: float) -> void:

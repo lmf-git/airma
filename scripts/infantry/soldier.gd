@@ -78,6 +78,13 @@ var rounds_heavy := 3
 var _heavy_cd := 4.0
 var _heavy_aim := 0.0
 var _heavy_at: Node3D = null
+## The rig is posed every frame near the eye and less often further off: four
+## limbs of two-bone IK and a weapon placed in the eye's frame is the most a
+## man costs, and at a hundred and fifty metres nobody can see it run at a
+## quarter of the frame rate. Staggered, so the squad does not all pose on the
+## same frame.
+var _anim_acc := 0.0
+var _anim_n := 0
 
 func _ready() -> void:
 	var u: Array = UNIFORM.get(team, UNIFORM[1])
@@ -91,6 +98,7 @@ func _ready() -> void:
 	# moved at the frame rate, so there is nothing for the physics to smooth
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_think = randf() * 0.25
+	_anim_n = randi() % 4
 	_was = global_position
 	rotation.y = yaw
 
@@ -169,18 +177,29 @@ func _process(delta: float) -> void:
 	_think -= delta
 	if _think <= 0.0:
 		_think = 0.16 + randf() * 0.08
+		var _ps := Sim.prof_at()
 		_sense()
 		_decide()
+		Sim.prof_end(&"ai.sense", _ps)
 	_acquired = _acquired + delta if is_instance_valid(target) else 0.0
 	var before := global_position
-	if _heavy(delta):
+	var _ph := Sim.prof_at()
+	var shouldered: bool = _heavy(delta)
+	Sim.prof_end(&"ai.heavy", _ph)
+	if shouldered:
 		# the tube is on his shoulder: he stands, turns to it and lets go
 		vel = Vector3.ZERO
 		_pose(delta, Vector3.ZERO)
 		return
+	var _pm := Sim.prof_at()
 	_move(delta)
+	Sim.prof_end(&"ai.move", _pm)
+	var _pf := Sim.prof_at()
 	_shoot(delta)
+	Sim.prof_end(&"ai.shoot", _pf)
+	var _pp := Sim.prof_at()
 	_pose(delta, (global_position - before) / maxf(delta, 0.001))
+	Sim.prof_end(&"ai.pose", _pp)
 
 # ---------------------------------------------------------------- heavy weapons
 ## Armour and aircraft. A rifleman can do nothing about either and does not
@@ -334,7 +353,9 @@ func _at_goal(within: float) -> bool:
 
 func _set_goal(at: Vector3) -> void:
 	_goal = at
+	var _pp := Sim.prof_at()
 	_path = arena.path(global_position, at)
+	Sim.prof_end(&"ai.path", _pp)
 	_path_i = 0
 	_repath = randf_range(2.0, 3.2)
 
@@ -538,6 +559,11 @@ func _near_sound(id: String, db: float) -> void:
 func _pose(delta: float, moved: Vector3) -> void:
 	var ear := get_viewport().get_camera_3d()
 	var far: float = 0.0 if ear == null else ear.global_position.distance_to(global_position)
+	# as far as he looks, not as far as he is: through a scope a man at three
+	# hundred metres fills as much of the screen as one at forty
+	var looks: float = far
+	if ear != null and ear.fov < 60.0:
+		looks *= ear.fov / 60.0
 	var right := Vector3(cos(yaw), 0.0, -sin(yaw))
 	var fwd := Vector3(-sin(yaw), 0.0, -cos(yaw))
 	body.in_move = Vector2(moved.dot(right), moved.dot(fwd))
@@ -549,7 +575,13 @@ func _pose(delta: float, moved: Vector3) -> void:
 	body.in_ads = 1.0 if state == FIGHT else 0.0
 	body.in_reload = (1.0 - clampf(_reload / _reload_span, 0.0, 1.0)) if _reload > 0.0 else -1.0
 	body.in_foot_ik = far < 45.0
-	body.animate(delta)
+	_anim_acc += delta
+	_anim_n += 1
+	var every: int = 1 if looks < 60.0 else (2 if looks < 130.0 else 4)
+	if _anim_n >= every:
+		_anim_n = 0
+		body.animate(_anim_acc)
+		_anim_acc = 0.0
 	if body.steps != _steps_seen:
 		_steps_seen = body.steps
 		if far < 32.0 and moved.length() > 1.0:

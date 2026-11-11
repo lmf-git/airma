@@ -56,7 +56,8 @@ func _ready() -> void:
 	_vp = SubViewport.new()
 	_vp.size = Vector2i(SIZE)
 	_vp.transparent_bg = false
-	_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	# Drawn only while the page is up: see `_render_when_up`.
+	_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	_vp.own_world_3d = false
 	_vp.handle_input_locally = false
 	_vp.msaa_3d = Viewport.MSAA_2X
@@ -200,13 +201,40 @@ func set_fullscreen(on: bool) -> void:
 	size = want
 	if on:
 		position = Vector2.ZERO
-	_vp.size = Vector2i(want)
+	# The picture a sensor makes, not the screen's: full screen it is drawn at
+	# no more than 1280 across and stretched. It was rendered at the window's
+	# own size with 2x multisampling -- a second full-resolution frame of the
+	# whole world, every frame -- and a thermal picture with grain laid over
+	# it does not show the difference.
+	var px: Vector2 = want
+	if px.x > 1280.0:
+		px *= 1280.0 / px.x
+	_vp.size = Vector2i(px)
 	_tex.size = want
 	queue_redraw()
+
+## The second camera renders the whole world, sky and cloud and all. It was
+## left rendering every frame whether the page was up or not -- a second view
+## of the world drawn into nothing for the whole of every sortie.
+func _render_when_up() -> void:
+	if _vp != null:
+		_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if active \
+			else SubViewport.UPDATE_DISABLED
+
+## CTRL is the designate modifier while the page is up, not the throttle: see
+## `Sim.sensor_keys`. Kept by visibility so every way of opening or closing it
+## counts.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_VISIBILITY_CHANGED:
+		Sim.sensor_keys = is_visible_in_tree()
+
+func _exit_tree() -> void:
+	Sim.sensor_keys = false
 
 func toggle() -> void:
 	active = not active
 	visible = active
+	_render_when_up()
 	# Coming back to the page keeps whatever the pod was holding. Resetting to
 	# SLEW on every activation threw away a point track the moment you looked
 	# away from the sensor page, which is the one thing a track is for.
@@ -309,6 +337,66 @@ func _hand_over(t: Node3D) -> void:
 		tk.map_target = Vector3(w.x, Sim.height_at(w.x, w.z), w.z)
 	elif plane() != null:
 		plane().target = t
+
+## CTRL+T from the keyboard. Takes what is under the crosshair; pressed again
+## with a track held and nothing new under it, lets the track go.
+##
+## There was no letting go. CTRL+T only ever took something, and slewing an
+## area track walks the held point rather than freeing the head -- so a sight
+## that started on an area track, which the AC-130 support does, was locked
+## on for the whole time it was on station.
+func toggle_track() -> void:
+	if not active or platform == null:
+		return
+	if mode != SLEW:
+		var under: Node3D = _under_crosshair()
+		if under == null or under == tracked:
+			release()
+			return
+	designate()
+
+## Back to a free slew, looking where the track was.
+func release() -> void:
+	if mode == SLEW:
+		return
+	_sync_head()
+	mode = SLEW
+	tracked = null
+	if _marker != null and is_instance_valid(_marker):
+		_marker.on = false
+		_marker.lasing = false
+		_marker.visible = false
+	var pl := plane()
+	if pl != null and pl.target == _marker:
+		pl.target = null
+	elif platform is Ship and (platform as Ship).ai_target == _marker:
+		(platform as Ship).ai_target = null
+	Sim.report("track released — slewing", Sim.Ev.INFO)
+
+## The hostile thing nearest the middle of the picture that `designate` would
+## take, without taking it.
+func _under_crosshair() -> Node3D:
+	var origin := _head_origin()
+	var dir := _aim_dir()
+	var fov_now: float = deg_to_rad(_cam.fov if is_instance_valid(_cam) else ZOOMS[zoom_step])
+	var best_ang: float = minf(deg_to_rad(1.5), fov_now / 12.0)
+	var my_team: int = int(platform.team) if ("team" in platform) else -1
+	var best: Node3D = null
+	for n in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(n) or n == platform or n.is_in_group("no_lock"):
+			continue
+		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if ("team" in n) and int(n.team) == my_team:
+			continue
+		var to: Vector3 = (n as Node3D).global_position - origin
+		if to.length() > 26000.0:
+			continue
+		var a := dir.angle_to(to)
+		if a < best_ang:
+			best_ang = a
+			best = n as Node3D
+	return best
 
 func designate() -> void:
 	if not active or platform == null:
@@ -710,13 +798,13 @@ func _draw() -> void:
 				Color(1.0, 0.85, 0.4))
 		if plane() != null:
 			draw_string(_font, Vector2(frame.x * 0.5 - 200, frame.y - 30),
-				"1-4 weapon   SPACE fire   CTRL+T track   L laser   N channel   wheel zoom   ALT+RMB close",
+				"1-4 weapon   SPACE fire   CTRL+T track/free   L laser   N channel   wheel zoom   ALT+RMB close",
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
 		elif not _armed(holder):
 			# Nothing aboard to shoot with -- the carrier, a merchant hull --
 			# so the page is a sensor and says only what a sensor does.
 			draw_string(_font, Vector2(frame.x * 0.5 - 150, frame.y - 30),
-				"CTRL+T track   L laser   N channel   wheel zoom   O close",
+				"CTRL+T track/free   L laser   N channel   wheel zoom   O close",
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
 		elif holder.has_method("weapons"):
 			# The hull's own selector, spelled out with what is chosen marked.
@@ -729,7 +817,7 @@ func _draw() -> void:
 				row.append("%d %s%s" % [wi + 1, String(list[wi]).to_upper(),
 					" <" if wi == sel else ""])
 			draw_string(_font, Vector2(frame.x * 0.5 - 200, frame.y - 30),
-				"%s    SPACE fire   CTRL+T track   L laser   O close" % "   ".join(row),
+				"%s    SPACE fire   CTRL+T track/free   L laser   O close" % "   ".join(row),
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.6, 0.85, 0.7))
 	draw_string(_font, Vector2(10, frame.y - 26), "FOV %.1f" % _cam.fov,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 14, g)

@@ -157,7 +157,22 @@ func _draw() -> void:
 	_draw_all()
 	Sim.prof_end(&"hud.total", _ph)
 
+## Seconds left to get back inside the fight, or below zero when inside it.
+var oob_left := -1.0
+
+func _draw_oob() -> void:
+	if oob_left < 0.0:
+		return
+	var vp := get_viewport_rect().size
+	var flash: float = 0.6 + 0.4 * absf(sin(Time.get_ticks_msec() * 0.006))
+	draw_rect(Rect2(0, vp.y * 0.30, vp.x, 70.0), Color(0.25, 0.0, 0.0, 0.45))
+	_txt(Vector2(0, vp.y * 0.30 + 30.0), "OUT OF BOUNDS — RETURN TO THE FIGHT", 26,
+		Color(1.0, 0.35, 0.3, flash), HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+	_txt(Vector2(0, vp.y * 0.30 + 58.0), "%d" % int(ceil(oob_left)), 22,
+		Color(1.0, 0.85, 0.8, flash), HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+
 func _draw_all() -> void:
+	_draw_oob()
 	# The objective marker belongs on every page too, and before anything
 	# returns: the whole point of planting one on the map is that you can see it
 	# from the cockpit, the chase camera, a driver's seat and a bridge.
@@ -683,6 +698,10 @@ func _draw_on_foot() -> void:
 				continue
 			var far: float = eye.global_position.distance_to(at)
 			var sp: Vector2 = eye.unproject_position(at)
+			# A man right at the camera plane projects to infinity, or to
+			# nothing a triangle can be made of, and the fill says so.
+			if not sp.is_finite() or absf(sp.x) > 1.0e5 or absf(sp.y) > 1.0e5 or far < 0.3:
+				continue
 			var a: float = clampf(1.15 - far / 160.0, 0.25, 0.9)
 			var blue := Color(0.35, 0.72, 1.0, a)
 			draw_colored_polygon(PackedVector2Array([sp + Vector2(-5, -8), sp + Vector2(5, -8),
@@ -691,42 +710,78 @@ func _draw_on_foot() -> void:
 				_txt(Vector2(sp.x - 60.0, sp.y - 12.0), sd.callsign, 11, blue,
 					HORIZONTAL_ALIGNMENT_CENTER, 120.0)
 
-	if w.scoped():
-		# through the glass: everything outside the tube is the inside of it
-		var r: float = vp.y * 0.46
+	if not (is_instance_valid(eye) and eye.current):
+		# Riding a round on the weapon camera: his sight is not what is on
+		# the screen, and a scope tube or a crosshair over the ride marks
+		# nothing.
+		pass
+	elif w.scoped():
+		# through the glass: everything outside the tube is the inside of it.
+		# A 2x shows most of the screen, a prism a little less, a long scope
+		# least of all.
+		var reticle := String(g.get("reticle", "cross"))
+		var r: float = vp.y * (0.49 if reticle == "ring" else (0.43 if reticle == "chevron" else 0.46))
 		var dark := Color(0, 0, 0, 1)
 		draw_rect(Rect2(0, 0, c.x - r, vp.y), dark)
 		draw_rect(Rect2(c.x + r, 0, vp.x - c.x - r, vp.y), dark)
-		var ring := PackedVector2Array()
-		for i in 65:
-			var t: float = TAU * float(i) / 64.0
-			ring.append(c + Vector2(cos(t), sin(t)) * r)
-		for i in 64:
-			# the corners between the circle and the square it sits in
-			var p0: Vector2 = ring[i]
-			var p1: Vector2 = ring[i + 1]
-			var edge_y: float = 0.0 if p0.y < c.y else vp.y
-			draw_colored_polygon(PackedVector2Array([p0, p1, Vector2(p1.x, edge_y),
-				Vector2(p0.x, edge_y)]), dark)
+		# The corners between the circle and the square it sits in, as two
+		# shapes: above the glass and below it. It was a strip per segment of
+		# the rim down to the nearer edge, and the two strips that crossed the
+		# middle went up on one side and down on the other -- a bow tie, which
+		# the polygon fill cannot triangulate, and said so every frame.
+		var above := PackedVector2Array([Vector2(c.x - r, 0.0)])
+		var below := PackedVector2Array([Vector2(c.x + r, vp.y)])
+		for i in 33:
+			var ta: float = PI + PI * float(i) / 32.0
+			above.append(c + Vector2(cos(ta), sin(ta)) * r)
+			var tb: float = PI * float(i) / 32.0
+			below.append(c + Vector2(cos(tb), sin(tb)) * r)
+		above.append(Vector2(c.x + r, 0.0))
+		below.append(Vector2(c.x - r, vp.y))
+		draw_colored_polygon(above, dark)
+		draw_colored_polygon(below, dark)
 		draw_arc(c, r, 0, TAU, 64, Color(0, 0, 0, 1), 6.0)
 		var ink := Color(0.03, 0.03, 0.03, 0.95)
-		draw_line(c + Vector2(-r, 0), c + Vector2(-14, 0), ink, 2.0)
-		draw_line(c + Vector2(14, 0), c + Vector2(r, 0), ink, 2.0)
-		draw_line(c + Vector2(0, 14), c + Vector2(0, r), ink, 2.0)
-		draw_line(c + Vector2(0, -r), c + Vector2(0, -14), ink, 1.0)
-		for k in range(1, 5):
-			draw_line(c + Vector2(-5, k * 22.0), c + Vector2(5, k * 22.0), ink, 1.0)
-		draw_circle(c, 1.4, Color(0.9, 0.1, 0.05, 0.9))
-	elif not (w._ads > 0.85 and not w.third and g.get("dot", false)):
-		# Four ticks that open as the weapon wanders. Through a red dot the dot
-		# is the mark, and a second one painted over it only hides it.
-		var px: float = vp.y * 0.5 / tan(deg_to_rad(eye.fov * 0.5)) if is_instance_valid(eye) else 600.0
-		var gap: float = clampf(w.spread_now * px, 3.0, 90.0) + 3.0
-		var col := Color(1, 1, 1, 0.82 if w.reloading <= 0.0 else 0.3)
-		for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
-			draw_line(c + d * gap, c + d * (gap + 7.0), Color(0, 0, 0, 0.5), 3.0)
-			draw_line(c + d * gap, c + d * (gap + 7.0), col, 1.4)
-		draw_circle(c, 1.2, col)
+		if reticle == "ring":
+			# a lit ring and a dot, and nothing else in the way
+			var lit := Color(1.0, 0.18, 0.10, 0.9)
+			draw_arc(c, 34.0, 0, TAU, 48, lit, 1.6)
+			draw_circle(c, 2.0, lit)
+		elif reticle == "chevron":
+			# the prism's chevron, lit amber, on a post, with the drop below it
+			var amb := Color(1.0, 0.62, 0.12, 0.95)
+			draw_line(c + Vector2(-9, 9), c, amb, 2.2)
+			draw_line(c, c + Vector2(9, 9), amb, 2.2)
+			draw_line(c + Vector2(0, 14), c + Vector2(0, r * 0.55), ink, 1.6)
+			for k in range(1, 5):
+				var y: float = 14.0 + k * 18.0
+				var hw: float = 10.0 - k * 1.5
+				draw_line(c + Vector2(-hw, y), c + Vector2(hw, y), ink, 1.2)
+			draw_line(c + Vector2(-r, 0), c + Vector2(-r * 0.55, 0), ink, 1.4)
+			draw_line(c + Vector2(r * 0.55, 0), c + Vector2(r, 0), ink, 1.4)
+		else:
+			draw_line(c + Vector2(-r, 0), c + Vector2(-14, 0), ink, 2.0)
+			draw_line(c + Vector2(14, 0), c + Vector2(r, 0), ink, 2.0)
+			draw_line(c + Vector2(0, 14), c + Vector2(0, r), ink, 2.0)
+			draw_line(c + Vector2(0, -r), c + Vector2(0, -14), ink, 1.0)
+			for k in range(1, 5):
+				draw_line(c + Vector2(-5, k * 22.0), c + Vector2(5, k * 22.0), ink, 1.0)
+			draw_circle(c, 1.4, Color(0.9, 0.1, 0.05, 0.9))
+	else:
+		# Four ticks that open as the weapon wanders. Through the sights in
+		# first person the sights are the mark -- irons, a dot, a holo -- and
+		# ticks painted over them only hid what they were laid on. It went only
+		# for a red dot; now it fades as any weapon comes up to the eye. Over
+		# the shoulder there is nothing to look through, so it stays.
+		var fade: float = 1.0 if w.third else clampf(1.0 - w._ads * 1.6, 0.0, 1.0)
+		if fade > 0.01:
+			var px: float = vp.y * 0.5 / tan(deg_to_rad(eye.fov * 0.5)) if is_instance_valid(eye) else 600.0
+			var gap: float = clampf(w.spread_now * px, 3.0, 90.0) + 3.0
+			var col := Color(1, 1, 1, (0.82 if w.reloading <= 0.0 else 0.3) * fade)
+			for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
+				draw_line(c + d * gap, c + d * (gap + 7.0), Color(0, 0, 0, 0.5 * fade), 3.0)
+				draw_line(c + d * gap, c + d * (gap + 7.0), col, 1.4)
+			draw_circle(c, 1.2, col)
 
 	# the seeker: a box on what it is looking at, closed when it has it
 	if is_instance_valid(w.lock_target) and is_instance_valid(eye) \
@@ -833,30 +888,130 @@ func _draw_on_foot() -> void:
 	if mode != null and is_instance_valid(mode):
 		_draw_mode(vp)
 
-## The few blocks the fight is in, north up, with everyone you are entitled
-## to know about on it.
+## The street map in the corner of a street fight.
+var _cqb_map: CqbMap = null
+
 func _draw_cqb_map(cs: Dictionary, box: Rect2) -> void:
-	var tex: Texture2D = cs["map"]
-	if tex != null:
-		draw_texture_rect(tex, box, false)
-	_box(box, Color(0.6, 0.75, 0.9, 0.7), 1.2)
-	if float(cs["uav"]) > 0.0:
-		# the sweep, so it is obvious why there is red on the map
-		var sw: float = fmod(Time.get_ticks_msec() * 0.001, 2.0) / 2.0
-		draw_line(Vector2(box.position.x + box.size.x * sw, box.position.y),
-			Vector2(box.position.x + box.size.x * sw, box.end.y), Color(1, 0.3, 0.2, 0.35), 2.0)
-	for d in cs["dots"]:
-		var uv: Vector2 = d[0]
-		if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
-			continue
-		draw_circle(box.position + uv * box.size, 3.2,
-			Color(0.35, 0.72, 1.0) if int(d[1]) == 0 else Color(1.0, 0.2, 0.15))
-	var me: Vector2 = box.position + (cs["me"] as Vector2).clamp(Vector2.ZERO, Vector2.ONE) * box.size
-	var yaw: float = cs["yaw"]
-	var f := Vector2(-sin(yaw), -cos(yaw))
-	var r := Vector2(-f.y, f.x)
-	draw_colored_polygon(PackedVector2Array([me + f * 8.0, me - f * 5.0 + r * 5.0,
-		me - f * 2.0, me - f * 5.0 - r * 5.0]), Color(1, 1, 1))
+	if _cqb_map == null or not is_instance_valid(_cqb_map):
+		_cqb_map = CqbMap.new()
+		add_child(_cqb_map)
+	_cqb_map.feed(cs, box)
+
+## Him in the middle, north up, the buildings round him drawn from the
+## buildings themselves, and everyone he is entitled to know about.
+##
+## It was the arena's own survey picture: a fixed square two hundred and sixty
+## metres across, drawn the same whatever he did. Walk out of the arena and he
+## walked off the map; stand at one end of it and half the map was what was
+## behind him. Now it goes where he goes. The arena's edge is drawn on it, so
+## where the fight is still reads.
+##
+## Its own control, so that it is clipped to its own box, and the buildings
+## are one mesh rebuilt only when he has moved or the town has changed: a few
+## hundred footprints filled one by one every frame was a few hundred polygon
+## triangulations a frame.
+class CqbMap extends Control:
+	const SPAN := 300.0               # metres across the box
+	const BLUE := Color(0.35, 0.72, 1.0)
+	const RED := Color(1.0, 0.2, 0.15)
+	var state: Dictionary = {}
+	var fed_at := -10
+	var _mesh: ArrayMesh = null
+	var _mesh_at := Vector2(INF, INF)
+	var _mesh_t := 0.0
+
+	func _ready() -> void:
+		clip_contents = true
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func feed(cs: Dictionary, box: Rect2) -> void:
+		state = cs
+		fed_at = Engine.get_process_frames()
+		position = box.position
+		size = box.size
+		queue_redraw()
+
+	func _process(delta: float) -> void:
+		_mesh_t -= delta
+		# not fed this frame: he is not on foot in a street fight any more
+		if Engine.get_process_frames() - fed_at > 2 and not state.is_empty():
+			state = {}
+			queue_redraw()
+
+	## Every footprint within reach, as triangles in metres from where he was.
+	## Rebuilt every couple of seconds as well, because buildings come down.
+	func _rebuild(me: Vector2) -> void:
+		_mesh_at = me
+		_mesh_t = 2.0
+		_mesh = null
+		var reach: float = SPAN * 0.75 + 30.0
+		var verts := PackedVector2Array()
+		var cols := PackedColorArray()
+		for f in Obstacles.footprints(me - Vector2(reach, reach), me + Vector2(reach, reach), 3000):
+			var fh: Vector2 = f[1]
+			if minf(fh.x, fh.y) < 0.15:
+				continue
+			var fc: Vector2 = (f[0] as Vector2) - me
+			var fy: float = f[2]
+			var ax := Vector2(cos(fy), -sin(fy)) * fh.x
+			var az := Vector2(sin(fy), cos(fy)) * fh.y
+			var col := Color(0.62, 0.68, 0.74, 0.88) if float(f[3]) > 4.0 \
+				else Color(0.52, 0.47, 0.38, 0.88)
+			var p0: Vector2 = fc - ax - az
+			var p1: Vector2 = fc + ax - az
+			var p2: Vector2 = fc + ax + az
+			var p3: Vector2 = fc - ax + az
+			verts.append_array(PackedVector2Array([p0, p1, p2, p0, p2, p3]))
+			for k in 6:
+				cols.append(col)
+		if verts.is_empty():
+			return
+		var arr := []
+		arr.resize(Mesh.ARRAY_MAX)
+		arr[Mesh.ARRAY_VERTEX] = verts
+		arr[Mesh.ARRAY_COLOR] = cols
+		_mesh = ArrayMesh.new()
+		_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+
+	func _draw() -> void:
+		if state.is_empty():
+			return
+		var me: Vector2 = state.get("me_w", Vector2.ZERO)
+		var ppm: float = size.x / SPAN
+		var mid: Vector2 = size * 0.5
+		var frame := Rect2(Vector2.ZERO, size)
+		draw_rect(frame, Color(0.03, 0.06, 0.09, 0.62))
+		if _mesh == null or _mesh_at.distance_to(me) > 12.0 or _mesh_t <= 0.0:
+			_rebuild(me)
+		if _mesh != null:
+			draw_set_transform(mid + (_mesh_at - me) * ppm, 0.0, Vector2(ppm, ppm))
+			draw_mesh(_mesh, null)
+			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		# where the fight is
+		var area: Rect2 = state.get("area", Rect2())
+		if area.size.x > 0.0:
+			draw_rect(Rect2(mid + (area.position - me) * ppm, area.size * ppm),
+				Color(1.0, 0.8, 0.3, 0.5), false, 1.2)
+		if float(state.get("uav", 0.0)) > 0.0:
+			# the sweep, so it is obvious why there is red on the map
+			var sw: float = fmod(Time.get_ticks_msec() * 0.001, 2.0) / 2.0
+			draw_line(Vector2(size.x * sw, 0.0), Vector2(size.x * sw, size.y),
+				Color(1, 0.3, 0.2, 0.35), 2.0)
+		for d in state.get("dots_w", []):
+			var p: Vector2 = mid + ((d[0] as Vector2) - me) * ppm
+			if frame.has_point(p):
+				draw_circle(p, 3.2, BLUE if int(d[1]) == 0 else RED)
+		var yaw: float = state.get("yaw", 0.0)
+		var fw := Vector2(-sin(yaw), -cos(yaw))
+		var rt := Vector2(-fw.y, fw.x)
+		draw_colored_polygon(PackedVector2Array([mid + fw * 8.0, mid - fw * 5.0 + rt * 5.0,
+			mid - fw * 2.0, mid - fw * 5.0 - rt * 5.0]), Color(1, 1, 1))
+		draw_rect(frame, Color(0.6, 0.75, 0.9, 0.7), false, 1.2)
+		# a scale, because nothing else on it says how far anything is
+		var bar: float = 50.0 * ppm
+		draw_line(Vector2(6, size.y - 8), Vector2(6 + bar, size.y - 8), Color(1, 1, 1, 0.8), 1.5)
+		draw_string(ThemeDB.fallback_font, Vector2(8 + bar, size.y - 4), "50 m",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1, 0.8))
 
 ## Work out where the combiner glass sits on screen this frame.
 func _setup_hud_box() -> void:
@@ -1940,7 +2095,7 @@ func _foot_keys() -> Array:
 			["SPACE", "jump  /  vault  /  climb  —  at a tall wall: take hold of it"],
 			["on a wall", "W S A D climb, SHIFT faster, SPACE kick off, C let go"],
 			["F", "pick up a dropped weapon"],
-			["4 - 7", "kill streaks: UAV, airstrike, AC-130, fire mission"],
+			["4 - 7", "kill streaks, cheapest first — chosen on the deploy screen"],
 			["", "airstrike and fire mission open the map: click the spot"],
 			["M", "map — wheel zooms right in to the streets"],
 			["Q / E", "lean left / right"],

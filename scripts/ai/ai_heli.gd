@@ -74,9 +74,43 @@ func _pilot(delta: float) -> void:
 	var ahead := Sim.height_at(look.x, look.z) + 120.0
 	want_alt = maxf(want_alt, ahead)
 
+	# Up in the air, down to land. It was down for good, because with it
+	# stowed a helicopter has nothing to stand on -- so every one on station
+	# flew its whole sortie with its wheels hanging. Raised once it is well
+	# clear of the ground and lowered again on the way down, with a gap
+	# between the two so it does not cycle on the way through.
+	var clear: float = global_position.y - Sim.height_at(global_position.x, global_position.z)
+	if gear_down and clear > 40.0 and not on_ground:
+		gear_down = false
+	elif not gear_down and clear < 20.0:
+		gear_down = true
+
 	_fly(goal, want_alt, want_speed, delta)
 
+
+## Who to fight, looked for a few times a second rather than on every tick.
+## Every AI pilot walked every contact on the map at 120 Hz -- twice a tick for
+## a wingman, which asks once to decide whether to formate and again to fight
+## -- to find a nearest that cannot change in a hundredth of a second. What is
+## held is let go at once if it dies or goes away.
+var _foe_at := {}
+
+func _held(kind: String, scan: Callable) -> Node3D:
+	var c: Variant = _foe_at.get(kind)
+	if c != null and _life_t < float(c[0]):
+		var n: Variant = c[1]
+		if n == null:
+			return null
+		if is_instance_valid(n) and (not n.has_method("is_alive") or n.is_alive()):
+			return n
+	var got: Node3D = scan.call()
+	_foe_at[kind] = [_life_t + 0.25 + randf() * 0.1, got]
+	return got
+
 func _find_enemy() -> Node3D:
+	return _held("any", _scan_enemy)
+
+func _scan_enemy() -> Node3D:
 	var best: Node3D = null
 	var bd := 1e9
 	for n in get_tree().get_nodes_in_group("hittable"):
