@@ -597,7 +597,12 @@ func _draw_driver() -> void:
 	# The sight is the vehicle's. Riding a round on the weapon camera the
 	# screen is not looking down the barrel, and a crosshair in the middle of
 	# it marks nothing.
-	var sight := not riding_round()
+	#
+	# And only through the sight. From the camera behind the vehicle the middle
+	# of the screen is not where the gun is laid -- the barrel is somewhere
+	# below it and off to one side of the view -- so a cross drawn there was an
+	# aiming mark for nothing in particular. G puts you on the sight.
+	var sight: bool = not riding_round() and tank.gunner
 	if sight:
 		draw_line(c - Vector2(30, 0), c - Vector2(8, 0), g, 1.5)
 		draw_line(c + Vector2(8, 0), c + Vector2(30, 0), g, 1.5)

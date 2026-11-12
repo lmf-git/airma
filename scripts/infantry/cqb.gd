@@ -874,12 +874,14 @@ func _call(id: String) -> bool:
 			var at3: Vector3 = _pick_at
 			_nukes.append([12.0, Vector3(at3.x, _ground(at3.x, at3.z), at3.z), TAC_LETHAL, false])
 			Sim.report("TACTICAL NUKE inbound — twelve seconds, get eighty metres clear of the mark", Sim.Ev.BAD)
+			Effects.nuke_warm(world)
 			Sfx.play_at(world, "roar", at3 + Vector3(0, 900, 0), 9.0, 0.7, 9000.0)
 			return true
 		"stratnuke_at":
 			var at4: Vector3 = _pick_at
 			_nukes.append([20.0, Vector3(at4.x, _ground(at4.x, at4.z), at4.z), STRAT_LETHAL, true])
 			Sim.report("STRATEGIC NUKE inbound — twenty seconds. It has been an honour.", Sim.Ev.BAD)
+			Effects.nuke_warm(world)
 			Sfx.play_at(world, "roar", at4 + Vector3(0, 2000, 0), 10.0, 0.55, 12000.0)
 			return true
 		"strike":

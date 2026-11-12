@@ -324,6 +324,7 @@ var _mu_lat := 0.85
 var _mu_roll := 1.5
 var _yaw_damp := 2.4              # resistance to the hull spinning up on its own
 var _max_steer := 0.0             # steered road wheels, radians
+var _wheelbase := 4.0             # front axle to rear, for how much lock the speed allows
 var _steer := 0.0                 # where they are now
 var _drive_max := DRIVE_MAX
 var _brake_max := BRAKE
@@ -483,6 +484,7 @@ func setup(t := 0, k := "m1a2") -> void:
 			_mu_roll = 1.25
 			_yaw_damp = 0.25
 			_max_steer = deg_to_rad(34.0)
+			_wheelbase = float(ch.get("wb", 3.3))
 			_drive_max = mass * 6.4
 			_brake_max = mass * 9.0
 			_wheel_r = float(ch.get("r", 0.47))
@@ -1346,7 +1348,17 @@ func _tick_tank_p(delta: float) -> void:
 	# The steered axle follows the wheel, not the stick: a road wheel takes about
 	# a third of a second to come off lock.
 	if _max_steer > 0.0:
-		_steer = move_toward(_steer, -clampf(in_steer, -1.0, 1.0) * _max_steer,
+		# Only as much lock as the tyres can hold at this speed. The key is all
+		# or nothing, and all of it was thirty-four degrees at any speed: at
+		# seventy kilometres an hour that asks the front tyres for ten times
+		# what they have, they let go, the back follows, and a scout car held
+		# into a bend went round a hundred and forty degrees in a second and a
+		# half and finished it backwards. A driver feeds the wheel in; this is
+		# that. Cornering at six tenths of the grip there is, v^2/R against it,
+		# with R from the wheelbase -- full lock still, below a fast walk.
+		var lock: float = minf(_max_steer,
+			atan(_wheelbase * 0.6 * _mu_lat * 9.81 / maxf(speed * speed, 1.0)))
+		_steer = move_toward(_steer, -clampf(in_steer, -1.0, 1.0) * lock,
 			_max_steer * 3.0 * delta)
 	_wheel_spin += speed / maxf(_wheel_r, 0.05) * delta
 	if _w_node.size() != _road_wheels.size():
@@ -1528,7 +1540,11 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 		var lat_dir := n.cross(roll_dir).normalized()
 		var grip: float = gnd[i * 5 + 4]
 		var mu_lat: float = _mu_lat * grip
-		f += lat_dir * clampf(-pv.dot(lat_dir) * mass * 1.6, -mu_lat * fn, mu_lat * fn)
+		# A tyre gives up far less sideways than a track does before it bites:
+		# stiff for anything on wheels, so what slip there is settles at once
+		# instead of building into a slide.
+		f += lat_dir * clampf(-pv.dot(lat_dir) * mass * (1.6 if _skid else 3.5),
+			-mu_lat * fn, mu_lat * fn)
 		var side_cmd: float = in_throttle
 		if _skid:
 			# Right is the LEFT track running on. This added the command to

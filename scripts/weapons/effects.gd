@@ -388,7 +388,29 @@ static func nuke(world: Node, pos: Vector3, lethal: float) -> void:
 	# they are just a swarm of dark quads crawling up through it, each one
 	# turning to face the camera. The volume is the smoke now.
 
+## Have the cloud's shaders built before they are needed.
+##
+## They are written here and compiled the first time something wearing them is
+## drawn, which was the frame the warhead went off: the game stood still while
+## a thirty-four step raymarch was turned into a pipeline, with half the town
+## dying in the same frame. A copy the size of a pea, a few metres in front of
+## the camera for half a second, makes that happen when the strike is called
+## instead -- twelve seconds earlier, with the map just closing.
+static func nuke_warm(world: Node) -> void:
+	if world == null or not is_instance_valid(world) or not world.is_inside_tree():
+		return
+	var eye := world.get_viewport().get_camera_3d()
+	if eye == null:
+		return
+	var fb := _NukeBall.new()
+	fb.lethal = 0.02
+	fb.warm = 0.5
+	world.add_child(fb)
+	fb.global_position = eye.global_position - eye.global_transform.basis.z * 4.0
+
 class _NukeBall extends Node3D:
+	## Seconds to live as a warm-up copy; nothing, for a real one.
+	var warm := 0.0
 	## How long the column stands. A mushroom cloud is a landmark for minutes,
 	## not the twenty-six seconds this used to get.
 	const LIFE := 165.0
@@ -695,6 +717,9 @@ void fragment() {
 
 	func _process(delta: float) -> void:
 		_t += delta
+		if warm > 0.0 and _t >= warm:
+			queue_free()
+			return
 		# Two clocks. The column takes about half a minute to climb and spread;
 		# it then *stands there*. Running the shape and the fade off one
 		# twenty-six second timer meant the whole thing was gone before the
