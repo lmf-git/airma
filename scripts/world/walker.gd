@@ -38,6 +38,13 @@ var slots: Array = [0, 1, 4]
 ## nobody three streets away turns round; a little off the muzzle velocity.
 var suppressed := false
 
+## Whether the weapon in his hands has one on it. Each weapon of a class is
+## fitted on its own; anything picked up off the road, and the sidearm, goes
+## by `suppressed`.
+func is_quiet() -> bool:
+	var g: Dictionary = gun_spec()
+	return bool(g.get("quiet", suppressed)) and Firearm.can_suppress(g)
+
 ## What to carry: two long guns by name, and whether they are suppressed.
 func set_loadout(primary: String, second: String, quiet: bool) -> void:
 	var a: int = Firearm.index_of(primary)
@@ -54,6 +61,39 @@ var slot := 0
 var _rounds: Array = []
 var _spare: Array = []
 var grenades := 2
+## Stun grenades, thrown with their own key: see `Firearm.Frag.flash`.
+var flashes := 2
+## When he can see again, by the clock, and how long he was blinded for, for
+## the picture to fade back by.
+var _flash_until := 0.0
+var flash_span := 1.0
+var _throw_flash := false
+
+## How suppressed he is, 0 to 1: rounds going close past, or into what he is
+## behind. The weapon wanders, the sights come up slower, the edges of the
+## world close in and his wounds do not start to mend until it stops. Lying
+## down or kneeling he takes less of it.
+var suppression := 0.0
+var _supp_quiet := 9.0
+
+func suppress(amount: float, _from: Vector3) -> void:
+	if not is_alive():
+		return
+	var low: float = 0.55 if prone else (0.8 if crouching else 1.0)
+	suppression = minf(suppression + amount * low, 1.0)
+	_supp_quiet = 0.0
+	# a flinch, the way a hit is one
+	_recoil += randf_range(0.004, 0.010) * amount * 3.0
+
+## A stun grenade went off where he could see it.
+func blind(secs: float) -> void:
+	if secs > flash_left():
+		_flash_until = Time.get_ticks_msec() * 0.001 + secs
+		flash_span = secs
+
+## Seconds of not being able to see that he has left.
+func flash_left() -> float:
+	return maxf(_flash_until - Time.get_ticks_msec() * 0.001, 0.0)
 ## Which side he is on. Not called `team`: everything that hunts by `team`
 ## expects a vehicle on the other end of it.
 var side := 0
@@ -78,9 +118,12 @@ func apply_class(c: Dictionary) -> void:
 	var b: int = Firearm.index_of(String(c["second"]))
 	if b == a:
 		b = (a + 1) % 4
-	_mods = {a: Firearm.fitted(String(c["primary"]), c), b: Firearm.fitted(String(c["second"]), c)}
+	# each as its owner left that weapon, not both as he left the class
+	var fit_a: Dictionary = Firearm.setup_for(c, String(c["primary"]))
+	_mods = {a: Firearm.fitted(String(c["primary"]), fit_a),
+		b: Firearm.fitted(String(c["second"]), Firearm.setup_for(c, String(c["second"])))}
 	slots = [a, b, Firearm.index_of("pistol")]
-	suppressed = bool(c.get("quiet", false))
+	suppressed = bool(fit_a.get("quiet", false))
 	slot = 0
 	rearm()
 	_take_up(a, false)
@@ -274,13 +317,16 @@ func rearm() -> void:
 			_spare[i] = int(g["mag"]) * int(g["spare"]) if not g.get("shells", false) \
 				else int(g["spare"])
 	grenades = 2
+	flashes = 2
+	suppression = 0.0
+	_flash_until = 0.0
 	ammo = int(_rounds[kit_idx])
 	spare = int(_spare[kit_idx])
 	reloading = 0.0
 
 func _take_up(i: int, noisy := true) -> void:
 	kit_idx = i
-	body.equip(gun_spec(), suppressed)
+	body.equip(gun_spec(), is_quiet())
 	weapon = body.gun_node
 	ammo = int(_rounds[kit_idx])
 	spare = int(_spare[kit_idx])
@@ -467,6 +513,10 @@ func _tick_walk_p(delta: float) -> void:
 	speed *= float(g["move"]) * lerpf(1.0, 0.62, _ads)
 	if prone:
 		speed = 0.95
+	# getting down or getting up, he is not also going anywhere
+	var down_s: float = body.prone_amount() if is_instance_valid(body) else 0.0
+	if down_s > 0.02 and down_s < 0.98:
+		speed = minf(speed, 0.6)
 	if _grab_t >= 0.0:
 		speed *= 0.15
 	if chute:
@@ -1015,7 +1065,10 @@ func _fight(delta: float) -> void:
 	kill_t = maxf(kill_t - delta, 0.0)
 	hurt_t = maxf(hurt_t - delta, 0.0)
 	_since_hit += delta
-	if regen and _since_hit > 5.0 and health < 100.0:
+	_supp_quiet += delta
+	if _supp_quiet > 0.8:
+		suppression = maxf(suppression - delta * 0.35, 0.0)
+	if regen and _since_hit > 5.0 and suppression < 0.25 and health < 100.0:
 		health = minf(health + delta * 22.0, 100.0)
 	var world := get_tree().current_scene
 	var g: Dictionary = gun_spec()
@@ -1027,8 +1080,11 @@ func _fight(delta: float) -> void:
 			slot = wi
 			_take_up(int(slots[wi]))
 			return
-	if Sim.tapped(&"grenade") and grenades > 0 and _shot_cd < 0.2 and _throw_t < 0.0 \
+	var want_frag: bool = Sim.tapped(&"grenade") and grenades > 0
+	var want_flash: bool = Sim.tapped(&"flashbang") and flashes > 0
+	if (want_frag or want_flash) and _shot_cd < 0.2 and _throw_t < 0.0 \
 			and reloading <= 0.0:
+		_throw_flash = want_flash and not want_frag
 		_throw_t = 0.0
 		_shot_cd = 0.75
 		Sfx.play_ui(world, "pin", -6.0)
@@ -1074,6 +1130,8 @@ func _fight(delta: float) -> void:
 	if not on_floor:
 		s += float(g["hip"]) * 2.0
 	s += _bloom * loose
+	# under fire: nobody holds a sight picture with rounds cracking past
+	s = s * (1.0 + 1.2 * suppression) + float(g["hip"]) * 0.5 * suppression
 	spread_now = s
 
 	if edge:
@@ -1142,7 +1200,7 @@ func _fight(delta: float) -> void:
 		# into the ground in front of him.
 		from = start
 		aim = _lay(start, mark, speed, fall, seen >= 599.0, air_k)
-	var quiet: bool = suppressed and Firearm.can_suppress(g)
+	var quiet: bool = is_quiet()
 	if g.has("launcher"):
 		if String(g["launcher"]) == "sam":
 			if not is_instance_valid(lock_target) or lock_t < LOCK_TIME:
@@ -1320,10 +1378,17 @@ func _work_reload(delta: float, g: Dictionary, trigger_edge: bool) -> void:
 		_spare[kit_idx] = spare
 
 func _throw() -> void:
-	grenades -= 1
+	if _throw_flash:
+		flashes -= 1
+	else:
+		grenades -= 1
 	var world := get_tree().current_scene
 	var look := -cam.global_transform.basis.z
 	var f := Firearm.Frag.new()
+	if _throw_flash:
+		# a short fuse: it is meant to go off as it arrives, not after
+		f.flash = true
+		f.fuse = 1.7
 	f.team = side
 	f.thrower = self
 	f.vel = look * 17.0 + Vector3(0, 3.2, 0) + Vector3(vel.x, 0, vel.z) * 0.6
@@ -1427,8 +1492,9 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	_pitch_was = pitch
 	body.position = Vector3.ZERO
 	body.animate(delta)
-	_eye = lerpf(_eye, 0.55 if prone else (EYE_CROUCH + 0.25 if crouching else EYE),
-		clampf(delta * 9.0, 0, 1))
+	# the view goes down with the body: see `Pilot._prone_s`
+	_eye = lerpf(_eye, lerpf(EYE_CROUCH + 0.25 if crouching else EYE, 0.55,
+		body.prone_amount()), clampf(delta * 9.0, 0, 1))
 	# your own boots on the road
 	if body.steps != _steps_seen:
 		_steps_seen = body.steps

@@ -14,6 +14,10 @@ signal deploy(what: String)
 var _class_btns: Array = []
 var _primary: OptionButton
 var _second: OptionButton
+## Which of the two the sight, can, grip and magazine below are being fitted
+## to: 0 the primary, 1 the second. Each weapon has its own.
+var _bench := 0
+var _bench_btns: Array = []
 var _sight: OptionButton
 var _quiet: CheckButton
 var _grip: CheckButton
@@ -27,7 +31,7 @@ var _filling := false
 var _streak_ticks := {}
 var _streak_note: Label
 
-const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "lmg", "dmr", "sniper"]
+const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "lmg", "dmr", "sniper", "fifty"]
 const SECOND := ["smg", "vector", "glock", "carbine", "shotgun", "gl", "law", "stinger"]
 
 func _ready() -> void:
@@ -100,7 +104,24 @@ func _ready() -> void:
 	mid.add_child(_head("GUNSMITH — this class, as you want it", 14))
 	_primary = _choice(mid, "PRIMARY", LONG)
 	_second = _choice(mid, "SECOND", SECOND)
-	_sight = _choice(mid, "SIGHT", [])
+	# one weapon on the bench at a time: what is below is fitted to it alone
+	var bench := HBoxContainer.new()
+	bench.add_theme_constant_override("separation", 6)
+	mid.add_child(bench)
+	var bl := Label.new()
+	bl.text = "FITTING"
+	bl.custom_minimum_size = Vector2(84, 0)
+	bl.add_theme_font_size_override("font_size", 13)
+	bench.add_child(bl)
+	for bi in 2:
+		var bb := Button.new()
+		bb.custom_minimum_size = Vector2(115, 30)
+		bb.add_theme_font_size_override("font_size", 12)
+		bb.clip_text = true
+		bb.pressed.connect(_to_bench.bind(bi))
+		bench.add_child(bb)
+		_bench_btns.append(bb)
+	_sight = _choice(mid, "SIGHT", [], false)
 	for sgt in Firearm.SIGHTS:
 		_sight.add_item(String(Firearm.SIGHT_NAMES[sgt]))
 	_quiet = _tick(mid, "Suppressor — quiet, no flash, a little slower")
@@ -153,7 +174,7 @@ func _head(t: String, points: int) -> Label:
 	l.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
 	return l
 
-func _choice(into: Control, label: String, ids: Array) -> OptionButton:
+func _choice(into: Control, label: String, ids: Array, weapon := true) -> OptionButton:
 	var row := HBoxContainer.new()
 	into.add_child(row)
 	var l := Label.new()
@@ -165,7 +186,12 @@ func _choice(into: Control, label: String, ids: Array) -> OptionButton:
 	ob.custom_minimum_size = Vector2(236, 32)
 	for id in ids:
 		ob.add_item(String(Firearm.spec(String(id))["name"]))
-	ob.item_selected.connect(func(_i: int): _changed())
+	# a different weapon is a different thing on the bench; a different sight
+	# is a change to the one that is there
+	if weapon:
+		ob.item_selected.connect(func(_i: int): _weapon_changed())
+	else:
+		ob.item_selected.connect(func(_i: int): _changed())
 	row.add_child(ob)
 	return ob
 
@@ -234,19 +260,46 @@ func _pick(i: int) -> void:
 	_filling = true
 	_primary.select(maxi(LONG.find(String(c["primary"])), 0))
 	_second.select(maxi(SECOND.find(String(c["second"])), 0))
-	_sight.select(maxi(Firearm.SIGHTS.find(String(c["sight"])), 0))
-	_quiet.button_pressed = bool(c["quiet"])
-	_grip.button_pressed = bool(c["grip"])
-	_mag.button_pressed = bool(c["mag"])
 	_filling = false
 	_note.text = String(c.get("note", ""))
+	_to_bench(_bench)
+
+## The weapon that is on the bench: the class's primary or its second.
+func _bench_id(c: Dictionary) -> String:
+	return String(c["second"] if _bench == 1 else c["primary"])
+
+## Put one of the two on the bench and show how it is fitted.
+func _to_bench(which: int) -> void:
+	_bench = which
+	var c: Dictionary = CqbMatch.kit_classes()[CqbMatch.class_pick]
+	for k in _bench_btns.size():
+		var b: Button = _bench_btns[k]
+		b.text = String(Firearm.spec(String(c["second"] if k == 1 else c["primary"]))["name"])
+		b.modulate = Color(0.55, 1.0, 0.75) if k == _bench else Color(1, 1, 1)
+	var id: String = _bench_id(c)
+	var g: Dictionary = Firearm.spec(id)
+	var s: Dictionary = Firearm.setup_for(c, id)
+	# a tube or a pistol takes nothing; a shotgun takes no can
+	var bare: bool = g.has("launcher") or bool(g.get("hand", false))
+	_filling = true
+	_sight.select(maxi(Firearm.SIGHTS.find(String(s["sight"])), 0))
+	_quiet.button_pressed = bool(s["quiet"]) and Firearm.can_suppress(g)
+	_grip.button_pressed = bool(s["grip"]) and not bare
+	_mag.button_pressed = bool(s["mag"]) and not bare
+	_filling = false
+	_sight.disabled = bare
+	_quiet.disabled = not Firearm.can_suppress(g)
+	_grip.disabled = bare
+	_mag.disabled = bare
 	_show_stats(c)
 
-## Something on the bench was changed: write it back into the class.
-func _changed() -> void:
+## A different weapon was chosen for one of the two slots. What is fitted to
+## it is whatever was last fitted to *it*, not what the one before it wore.
+func _weapon_changed() -> void:
 	if _filling:
 		return
 	var c: Dictionary = CqbMatch.kit_classes()[CqbMatch.class_pick]
+	var was_primary: String = String(c["primary"])
 	c["primary"] = LONG[_primary.selected]
 	c["second"] = SECOND[_second.selected]
 	if c["second"] == c["primary"]:
@@ -254,30 +307,48 @@ func _changed() -> void:
 		_filling = true
 		_second.select(SECOND.find(String(c["second"])))
 		_filling = false
-	c["sight"] = Firearm.SIGHTS[_sight.selected]
-	c["quiet"] = _quiet.button_pressed
-	c["grip"] = _grip.button_pressed
-	c["mag"] = _mag.button_pressed
+	_to_bench(0 if String(c["primary"]) != was_primary else 1)
+
+## Something on the bench was changed: write it into that weapon's own setup.
+func _changed() -> void:
+	if _filling:
+		return
+	var c: Dictionary = CqbMatch.kit_classes()[CqbMatch.class_pick]
+	var s: Dictionary = Firearm.setup_for(c, _bench_id(c), true)
+	s["sight"] = Firearm.SIGHTS[_sight.selected]
+	s["quiet"] = _quiet.button_pressed
+	s["grip"] = _grip.button_pressed
+	s["mag"] = _mag.button_pressed
 	_show_stats(c)
 
-func _show_stats(c: Dictionary) -> void:
-	var g: Dictionary = Firearm.fitted(String(c["primary"]), c)
-	var base: Dictionary = Firearm.spec(String(c["primary"]))
-	var s2: Dictionary = Firearm.spec(String(c["second"]))
-	var quiet: bool = bool(c["quiet"]) and Firearm.can_suppress(g)
-	_stats.text = "%s\n  damage %d%s   %d rpm   magazine %d\n  recoil %d%%   sight %s   %s\n\n%s\n  %s" % [
+## One weapon as it is fitted, in two lines.
+func _stat_lines(c: Dictionary, id: String) -> String:
+	var base: Dictionary = Firearm.spec(id)
+	var launcher: String = String(base.get("launcher", ""))
+	if launcher == "rocket":
+		return "%s\n  three rockets: armour, walls, anything" % String(base["name"])
+	if launcher == "sam":
+		return "%s\n  two missiles: aircraft only, needs a lock" % String(base["name"])
+	if launcher == "gl":
+		return "%s\n  six 40 mm rounds in the drum, twelve more: they arc, and burst past ten metres" \
+			% String(base["name"])
+	var g: Dictionary = Firearm.fitted(id, Firearm.setup_for(c, id))
+	var pen: float = Firearm.pen_of(g)
+	return "%s\n  damage %d%s   %d rpm   magazine %d\n  recoil %d%%   sight %s   %s\n  goes through %s" % [
 		String(g["name"]), int(float(g["dmg"])),
 		" x%d" % int(g["pellets"]) if int(g["pellets"]) > 1 else "",
 		int(60.0 / float(g["cd"])), int(g["mag"]),
 		int(float(g["kick"]) / float(base["kick"]) * 100.0),
 		"%.1fx" % (74.0 / float(g["fov"])),
-		"heard at 14 m" if quiet else "heard at 75 m",
-		String(s2["name"]),
-		"three rockets: armour, walls, anything" if String(s2.get("launcher", "")) == "rocket"
-		else ("two missiles: aircraft only, needs a lock" if String(s2.get("launcher", "")) == "sam"
-		else ("six 40 mm rounds in the drum, twelve more: they arc, and burst past ten metres"
-			if String(s2.get("launcher", "")) == "gl"
-		else "magazine %d, %d rpm" % [int(s2["mag"]), int(60.0 / float(s2["cd"]))]))]
+		"heard at 14 m" if bool(g.get("quiet", false)) else "heard at 75 m",
+		"walls, cars and several men" if pen >= 1.0
+		else ("a house wall, or two men" if pen >= 0.6
+		else ("a thin wall or a fence, or one man" if pen >= 0.3
+		else "planks and not much else"))]
+
+func _show_stats(c: Dictionary) -> void:
+	_stats.text = "%s\n\n%s" % [_stat_lines(c, String(c["primary"])),
+		_stat_lines(c, String(c["second"]))]
 
 ## One ticked or unticked. A fifth is refused rather than quietly dropping
 ## one of the others, and the last one cannot be taken off -- a man with

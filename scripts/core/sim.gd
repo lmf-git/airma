@@ -2515,6 +2515,8 @@ func _setup_input() -> void:
 	_add(&"reload",       [_key(KEY_R)])
 	# G is the undercarriage in a cockpit, and a man on foot has none.
 	_add(&"grenade",      [_key(KEY_G)])
+	# X is the wheel brakes in a cockpit
+	_add(&"flashbang",    [_key(KEY_X)])
 	# and F is the flaps
 	_add(&"pickup",       [_key(KEY_F)])
 	# Z is the look-behind in a cockpit

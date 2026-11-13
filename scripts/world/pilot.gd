@@ -403,6 +403,18 @@ var in_move := Vector2.ZERO
 var in_crouch := false
 ## Flat on his front.
 var in_prone := false
+## How far down he actually is, 0 up to 1 flat. `in_prone` is what he has
+## decided; this is where the body has got to. Every part of lying down --
+## the pose, where the hips are, the eye, the weapon -- was switched on
+## `in_prone` itself, so a man went from his feet to his belly, and back up
+## again, inside a frame or two. Getting down takes about half a second and
+## getting up a little longer, by way of a knee both times.
+var _prone_s := 0.0
+const PRONE_DOWN := 0.55
+const PRONE_UP := 0.70
+
+func prone_amount() -> float:
+	return _prone_s * _prone_s * (3.0 - 2.0 * _prone_s)
 ## 0 on the ground, +1 going up, -1 coming down.
 var in_air := 0
 var in_pitch := 0.0
@@ -492,12 +504,12 @@ func _eye_target() -> Vector3:
 	if in_action in ["vault", "climb", "wall", "ladder", "grab"]:
 		return global_transform.affine_inverse() * (head.global_transform * EYE_AT)
 	var e := Vector3(0.0, 1.74, -0.07)
-	if in_prone:
-		e = Vector3(0.0, 0.46, -0.10)
-	elif in_action == "slide":
+	if in_action == "slide":
 		e = Vector3(0.0, 0.80, 0.02)
 	elif in_crouch:
 		e = Vector3(0.0, 1.34, -0.13)
+	# the eye goes down with the body, not ahead of it
+	e = e.lerp(Vector3(0.0, 0.46, -0.10), prone_amount())
 	e.x += in_lean * 0.26
 	e.y -= absf(in_lean) * 0.04
 	return e
@@ -546,6 +558,11 @@ func animate(delta: float) -> void:
 
 	var armed: bool = has_gun()
 	var act: float = clampf(in_action_t, 0.0, 1.0)
+	var lying: bool = in_prone and in_action == "" and in_air == 0
+	_prone_s = move_toward(_prone_s, 1.0 if in_prone else 0.0,
+		delta / (PRONE_DOWN if in_prone else PRONE_UP))
+	var ps: float = prone_amount()
+	var shifting: bool = _prone_s > 0.0 and _prone_s < 1.0
 	if in_action == "chute":
 		# Hanging in the harness: legs together and a little forward, knees
 		# soft for the landing, head up to the canopy. It was the jump pose --
@@ -570,8 +587,10 @@ func animate(delta: float) -> void:
 		_rot(torso, 0.04, sin(_climb_ph * 3.4) * 0.10, 0)
 		_rot(head, -0.35, 0, 0)
 		_gait_ph = 0.0
-	elif in_prone and in_action == "" and in_air == 0:
+	elif lying and _prone_s > 0.3:
 		# flat, chest propped on the elbows, and a leopard crawl to move
+		# (the first part of going down is spent getting onto a knee, which is
+		# the crouch below: he does not pitch forward off his feet)
 		var crawl: float = sin(_phase * 7.0) * (1.0 if moving else 0.0)
 		_rot(hips, -1.44, 0, crawl * 0.10)
 		_rot(torso, 0.20, crawl * -0.12 * (1.0 - clampf(in_ads, 0.0, 1.0)), 0)
@@ -647,7 +666,9 @@ func animate(delta: float) -> void:
 
 	# Ease between poses. Each of those functions writes angles outright, so
 	# stopping, crouching or leaving the ground was a single-frame snap.
-	var kb: float = _k(delta, 18.0)
+	# ...and getting down or up is slower than any of those: it is the whole
+	# body going through a right angle, not a knee bending.
+	var kb: float = _k(delta, 7.0 if shifting else 18.0)
 	for n in [hips, torso, head, leg_l, leg_r, shin_l, shin_r, arm_l, arm_r, fore_l, fore_r]:
 		var q: Quaternion = (n as Node3D).quaternion
 		var was: Quaternion = _blend.get(n, q)
@@ -664,8 +685,10 @@ func animate(delta: float) -> void:
 	# With the weapon up the top half stops swinging. A walk throws the
 	# shoulders about, and a man carrying a rifle at the ready holds his chest
 	# still over legs that are doing all of it.
-	if armed and not in_prone and in_action == "":
-		var still: float = _ready_s * 0.8
+	# only a man on the ground is any part of the way to lying on it
+	var ps_l: float = ps if (in_action == "" and in_air == 0) else 0.0
+	if armed and ps_l < 1.0 and in_action == "":
+		var still: float = _ready_s * 0.8 * (1.0 - ps_l)
 		torso.quaternion = torso.quaternion.slerp(Quaternion(Vector3.RIGHT, -0.08), still)
 		var hq: Quaternion = hips.quaternion
 		hips.quaternion = hq.slerp(Quaternion(Vector3.RIGHT, hq.get_euler().x), still * 0.7)
@@ -674,13 +697,30 @@ func animate(delta: float) -> void:
 	var look: float = in_pitch * lerpf(0.35, 1.0, _ready_s)
 
 	# Layer the look and the lean over the gait.
-	if in_prone and in_action == "" and in_air == 0:
+	if ps_l >= 1.0:
 		# lying down: no turning at the hips, and he looks by lifting the chest
 		hips.position = Vector3(0.0, 0.20, 0.55)
 		torso.transform.basis = Basis(Vector3.RIGHT, clampf(look, -0.2, 0.5) * 0.5) \
 			* torso.transform.basis
 		for f in [foot_l, foot_r]:
 			(f as Node3D).transform.basis = Basis(Vector3.RIGHT, -1.2)
+	elif ps_l > 0.0:
+		# On the way down, or the way up: part of each of the two below. The
+		# hips travel from where a standing man has them to where a lying one
+		# does, and the turning at the waist goes out as he gets lower.
+		var up: float = 1.0 - ps_l
+		hips.transform.basis = Basis(Vector3.UP, _hips_yaw * up) \
+			* Basis(Vector3.BACK, -in_lean * 0.22 * up) * hips.transform.basis
+		_pelvis = lerpf(_pelvis, 0.0, _k(delta, 12.0))
+		hips.position = Vector3(in_lean * 0.13, HIP_Y + _pelvis, 0.0).lerp(
+			Vector3(0.0, 0.20, 0.55), ps_l)
+		torso.transform.basis = Basis(Vector3.UP, (-_hips_yaw + blade) * up) \
+			* Basis(Vector3.RIGHT, lerpf(look * 0.30, clampf(look, -0.2, 0.5) * 0.5, ps_l)) \
+			* torso.transform.basis
+		var head_up := Quaternion(Basis(Vector3.UP, -blade) * Basis(Vector3.RIGHT, look * 0.42))
+		head.quaternion = head_up.slerp(head.quaternion, ps_l)
+		for f in [foot_l, foot_r]:
+			(f as Node3D).transform.basis = Basis(Vector3.RIGHT, lerpf(-0.2, -1.2, ps_l))
 	else:
 		hips.transform.basis = Basis(Vector3.UP, _hips_yaw) \
 			* Basis(Vector3.BACK, -in_lean * 0.22) * hips.transform.basis
@@ -885,11 +925,11 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	var hip := Vector3(0.09, -0.15, -0.36) if hand else Vector3(0.125, -0.150, -0.25)
 	var ads := Vector3(0.0, -sight, -0.40) if hand else Vector3(0.0, -sight, -0.235)
 	var low := Vector3(0.10, -0.42, -0.22) if hand else Vector3(0.03, -0.37, -0.20)
-	if in_prone:
-		# propped on the elbows: the weapon is up at the eye, not down at a
-		# hip he is lying on, or the muzzle is in the dirt
-		hip.y = -0.09
-		low.y = -0.12
+	# propped on the elbows: the weapon is up at the eye, not down at a
+	# hip he is lying on, or the muzzle is in the dirt
+	var down: float = prone_amount()
+	hip.y = lerpf(hip.y, -0.09, down)
+	low.y = lerpf(low.y, -0.12, down)
 	var a: float = clampf(in_ads, 0.0, 1.0)
 	a = a * a * (3.0 - 2.0 * a)
 	var r: float = _ready_s

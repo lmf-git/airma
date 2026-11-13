@@ -31,6 +31,13 @@ func _exit_tree() -> void:
 	live.erase(self)
 	for id in _boxes:
 		Obstacles.remove(id)
+	# and the buildings that were opened up are stood back on the ground
+	for h in _hollowed:
+		if not Obstacles.gone(int(h[0])):
+			Obstacles.lift(int(h[0]), -float(h[1]))
+			if is_instance_valid(scenery):
+				scenery.lower_block(h[3])
+	_hollowed.clear()
 
 func _ground(x: float, z: float) -> float:
 	return Sim.height_at(x, z)
@@ -72,10 +79,15 @@ var _last_mesh: MeshInstance3D = null
 ## Structure id -> [mesh, kind]: what goes when something heavy drives into it.
 var _breaks: Dictionary = {}
 const UNBREAKABLE := ["container", "bus", "crane", "scaffold"]
+## What a round goes through for a third of what its size says: see
+## `Obstacles.set_light`.
+const LIGHT := ["hedge", "stall", "car", "bus", "small", "fence"]
 
 func _solid(at: Vector3, size: Vector3, yaw: float, kind := "") -> void:
 	var id: int = Obstacles.add_box(at, size.x * 0.5, size.y, size.z * 0.5, yaw)
 	_boxes.append(id)
+	if LIGHT.has(kind):
+		Obstacles.set_light(id)
 	if kind != "" and not UNBREAKABLE.has(kind) and is_instance_valid(_last_mesh):
 		_breaks[id] = [_last_mesh, kind]
 
@@ -308,6 +320,16 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 				MeshKit.box(st, Vector3(0.22, 2.55 + DEEP, 0.26), Vector3(-2.0 + post * 2.0, 1.27, 0) + d)
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.60, 0.60, 0.58), 0.95, 0.0))
 			_solid(at, Vector3(4.2, 2.4, 0.26), yaw, kind)
+		"fence":
+			# Boards on two rails. It hides a man completely and stops next
+			# to nothing: everything else in a yard was masonry, and there
+			# was nothing in town a rifle could be fired through.
+			MeshKit.box(st, Vector3(4.0, 1.85 + DEEP, 0.05), Vector3(0, 0.92, 0) + d)
+			for post in 3:
+				MeshKit.box(st, Vector3(0.10, 1.95 + DEEP, 0.10),
+					Vector3(-1.95 + post * 1.95, 0.97, 0.07) + d)
+			_mesh(at, yaw, st, MeshKit.mat(Color(0.42, 0.30, 0.19), 0.95, 0.0))
+			_solid(at, Vector3(4.0, 1.85, 0.08), yaw, kind)
 		"hedge":
 			MeshKit.box(st, Vector3(4.0, 1.35 + DEEP, 0.9), Vector3(0, 0.67, 0) + d)
 			_mesh(at, yaw, st, MeshKit.mat(Color(0.16, 0.30, 0.14), 1.0, 0.0))
@@ -442,6 +464,203 @@ func _ruin_wall(st: SurfaceTool, o: Vector3, base: Vector3, along_x: bool, from:
 	_solid(at, size, 0.0, "wall")
 	if st == null or o == Vector3.INF:
 		return
+
+## The ground floor of a town building, opened up.
+##
+## A town's blocks are solid: one box each, drawn as one box, with nothing to
+## go into. The only rooms in a town were the two or three ruins, so a fight
+## in the streets stayed in the streets -- most of what stood in it had no
+## door at all. Here the bottom storey of the block is taken away (the block
+## itself is lifted, roof staying where it was) and a ground floor is built
+## under it out of walls: a door on the street side, one at the back and one
+## in a side, windows to shoot out of, and a partition across the middle.
+##
+## The walls are one mesh and belong to the building: nothing drives through
+## them, and when the building comes down they go with it.
+const STOREY := 3.1
+const DOOR_H := 2.25
+const DOOR_W := 2.4
+const WALL_T := 0.4
+const PARTITION_T := 0.14
+## The scenery that owns the blocks, given by whoever puts this set down.
+var scenery: Node = null
+## [structure, how far it was lifted, its ground floor mesh, where it stands,
+## first of its wall boxes, one past the last]
+var _hollowed: Array = []
+var _wall_mats: Dictionary = {}
+var _gone_t := 0.0
+
+func _open_buildings() -> void:
+	if not is_instance_valid(scenery) or not scenery.has_method("raise_block"):
+		return
+	var mine := {}
+	for id in _boxes:
+		mine[id] = true
+	for id in Obstacles.ids_in(centre - Vector2(HALF, HALF), centre + Vector2(HALF, HALF)):
+		if mine.has(id):
+			continue
+		_hollow(id)
+		if not await _pause():
+			return
+
+func _hollow(id: int) -> void:
+	var half: Vector2 = Obstacles.half_of(id)
+	if minf(half.x, half.y) < 6.0:
+		return
+	stats["blocks"] = int(stats.get("blocks", 0)) + 1
+	var c: Vector3 = Obstacles.centre_of(id)
+	var yaw: float = Obstacles.yaw_of(id)
+	var bs := Basis(Vector3.UP, yaw)
+	# the ground it stands on: too much of a slope and one end of the floor
+	# would be a cellar
+	var g_lo := 1e9
+	var g_hi := -1e9
+	for sx in [-1.0, 0.0, 1.0]:
+		for sz in [-1.0, 0.0, 1.0]:
+			var q: Vector3 = c + bs * Vector3(sx * half.x, 0, sz * half.y)
+			var g: float = _ground(q.x, q.z)
+			g_lo = minf(g_lo, g)
+			g_hi = maxf(g_hi, g)
+	if g_hi - g_lo > 1.2 or Obstacles.top_of(id) - g_hi < STOREY + 2.5:
+		stats["too_steep"] = int(stats.get("too_steep", 0)) + 1
+		return
+	var dy: float = g_hi + STOREY - c.y
+	var kind: int = scenery.raise_block(c, dy)
+	if kind < 0:
+		return
+	Obstacles.lift(id, dy)
+	if not _wall_mats.has(kind):
+		_wall_mats[kind] = MeshKit.panelled(scenery.TOWN_WALLS[kind], 0.92, 0.0, 3.2)
+	var o := Vector3(c.x, g_lo, c.z)
+	var top: float = g_hi + STOREY + 0.15 - g_lo      # into the block above
+	var sill: float = g_hi + 1.0 - g_lo
+	var lintel: float = g_hi + DOOR_H - g_lo
+	var st := MeshKit.begin()
+	var first: int = _boxes.size()
+	# A partition across the long way, when there is the room for two rooms.
+	var long_x: bool = half.x >= half.y
+	var parted: bool = maxf(half.x, half.y) > 9.0
+	# Which face is the front: the one looking at the nearest street. The
+	# back and one side get a door as well; the other side has windows only.
+	var to_street := Vector3.ZERO
+	var best_d := 1e9
+	for line in [-128.0, 0.0, 128.0]:
+		var ddx: float = centre.x + line - c.x
+		var ddz: float = centre.y + line - c.z
+		if absf(ddx) < best_d:
+			best_d = absf(ddx)
+			to_street = Vector3(signf(ddx), 0, 0)
+		if absf(ddz) < best_d:
+			best_d = absf(ddz)
+			to_street = Vector3(0, 0, signf(ddz))
+	var faces: Array = []
+	for f in [[true, -1.0], [true, 1.0], [false, -1.0], [false, 1.0]]:
+		# a face that runs along x looks out along z, and the other way about
+		var n_l := Vector3(0, 0, f[1]) if f[0] else Vector3(f[1], 0, 0)
+		faces.append([f[0], f[1], (bs * n_l).dot(to_street)])
+	faces.sort_custom(func(a: Array, b: Array) -> bool: return a[2] > b[2])
+	# front, a side, a side, back -> front, back, then whichever side
+	var order: Array = [faces[0], faces[3], faces[1 + _rng.randi() % 2]]
+	var doors := 0
+	for f in faces:
+		var along_x: bool = f[0]
+		var sgn: float = f[1]
+		var run: float = half.x if along_x else half.y          # half its length
+		var off: float = (half.y if along_x else half.x) - WALL_T * 0.5
+		var n_l := Vector3(0, 0, sgn) if along_x else Vector3(sgn, 0, 0)
+		var a_l := Vector3(1, 0, 0) if along_x else Vector3(0, 0, 1)
+		var cuts: Array = []            # [where along it, half width, sill]
+		if order.has(f):
+			# a door, somewhere along it that nothing is standing in front of
+			var tries: Array = [0.0, run * 0.45, -run * 0.45, run * 0.25, -run * 0.25]
+			if parted and along_x == long_x:
+				tries = [run * 0.45, -run * 0.45, run * 0.25, -run * 0.25]
+			for u_try in tries:
+				# on the route grid, so the men who plan on it can use it
+				var w: Vector3 = o + bs * (a_l * float(u_try) + n_l * off)
+				var w2 := Vector3(_snap(w.x), 0, _snap(w.z)) - o
+				var u: float = clampf((bs.inverse() * w2).dot(a_l),
+					-run + DOOR_W * 0.5 + 1.0, run - DOOR_W * 0.5 - 1.0)
+				var clear := true
+				for step in [0.9, 1.9]:
+					var p: Vector3 = o + bs * (a_l * u + n_l * (off + float(step)))
+					p.y = _ground(p.x, p.z) + 0.3
+					if Obstacles.blocks(p, 0.55) >= 0:
+						clear = false
+				if clear:
+					cuts.append([u, DOOR_W * 0.5, 0.0])
+					doors += 1
+					break
+		# windows every so often along the rest of it
+		var pitch: float = 5.5
+		var k_n: int = int((run * 2.0 - 3.0) / pitch)
+		for k in k_n + 1:
+			var wu: float = (float(k) - float(k_n) * 0.5) * pitch
+			var room := true
+			for cut in cuts:
+				if absf(wu - float(cut[0])) < float(cut[1]) + 1.9:
+					room = false
+			if room and absf(wu) < run - 1.8:
+				cuts.append([wu, 0.8, sill])
+		cuts.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+		var from: float = -run
+		for cut in cuts:
+			var lo: float = float(cut[0]) - float(cut[1])
+			_storey_wall(st, o, bs, a_l, n_l * off, from, lo, 0.0, lintel)
+			if float(cut[2]) > 0.0:
+				_storey_wall(st, o, bs, a_l, n_l * off, lo, lo + float(cut[1]) * 2.0, 0.0,
+					float(cut[2]))
+			from = lo + float(cut[1]) * 2.0
+		_storey_wall(st, o, bs, a_l, n_l * off, from, run, 0.0, lintel)
+		# and the wall over all of them, door and window alike
+		_storey_wall(st, o, bs, a_l, n_l * off, -run, run, lintel, top)
+	if parted:
+		var p_a := Vector3(0, 0, 1) if long_x else Vector3(1, 0, 0)
+		var p_run: float = (half.y if long_x else half.x) - WALL_T
+		var gap: float = p_run * 0.35 * (1.0 if _rng.randf() < 0.5 else -1.0)
+		# a stud wall, not masonry: a rifle round goes through it
+		_storey_wall(st, o, bs, p_a, Vector3.ZERO, -p_run, gap - DOOR_W * 0.5, 0.0, lintel, PARTITION_T)
+		_storey_wall(st, o, bs, p_a, Vector3.ZERO, gap + DOOR_W * 0.5, p_run, 0.0, lintel, PARTITION_T)
+		_storey_wall(st, o, bs, p_a, Vector3.ZERO, -p_run, p_run, lintel, top, PARTITION_T)
+	var mi := MeshKit.mi(MeshKit.finish(st, _wall_mats[kind]), "GroundFloor")
+	add_child(mi)
+	mi.global_transform = Transform3D(bs, o)
+	_hollowed.append([id, dy, mi, c, first, _boxes.size()])
+	stats["interiors"] = int(stats.get("interiors", 0)) + 1
+	stats["doors"] = int(stats.get("doors", 0)) + doors
+
+## One length of a ground floor's wall, from `from` to `to` along `along` and
+## `y0` to `y1` up it, in the building's own frame.
+func _storey_wall(st: SurfaceTool, o: Vector3, bs: Basis, along: Vector3, off: Vector3,
+		from: float, to: float, y0: float, y1: float, thick := WALL_T) -> void:
+	if to - from < 0.15 or y1 - y0 < 0.1:
+		return
+	var is_x: bool = absf(along.x) > 0.5
+	var span: float = to - from
+	var size := Vector3(span, y1 - y0, thick) if is_x else Vector3(thick, y1 - y0, span)
+	var mid: Vector3 = off + along * ((from + to) * 0.5)
+	# the part that stands on the ground goes a little way into it
+	var deep: float = DEEP if y0 <= 0.0 else 0.0
+	MeshKit.box(st, size + Vector3(0, deep, 0), mid + Vector3(0, (y0 + y1 - deep) * 0.5, 0))
+	var id: int = Obstacles.add_box(o + bs * (mid + Vector3(0, y0, 0)), size.x * 0.5, size.y,
+		size.z * 0.5, bs.get_euler().y)
+	_boxes.append(id)
+
+## A building that has come down takes its ground floor with it.
+func _process(delta: float) -> void:
+	_gone_t -= delta
+	if _gone_t > 0.0:
+		return
+	_gone_t = 0.5
+	for i in range(_hollowed.size() - 1, -1, -1):
+		var h: Array = _hollowed[i]
+		if not Obstacles.gone(int(h[0])):
+			continue
+		for k in range(int(h[4]), int(h[5])):
+			Obstacles.remove(_boxes[k])
+		if is_instance_valid(h[2]):
+			(h[2] as Node).queue_free()
+		_hollowed.remove_at(i)
 
 ## A building site: a tower crane you can climb and walk out along, and the
 ## stacks it was lifting. The mast is a wall like any other -- take hold of it
@@ -804,8 +1023,11 @@ func _build(at: Vector2, of_site: Dictionary) -> void:
 			or absf(fmod(absf(az - centre.y) + 64.0, 128.0) - 64.0) < 15.0
 		if in_street:
 			continue
-		_prop(["wall", "stack", "crates", "wall", "hedge" if biome != "desert" else "wall",
+		_prop(["wall", "stack", "crates", "fence", "hedge" if biome != "desert" else "wall",
 			"small"][_rng.randi() % 6], ax, az, float(_rng.randi() % 2) * PI * 0.5)
 		if not await _pause():
 			return
+	# Last, so that a door is only cut where nothing has been stood in front
+	# of it: the ground floors of the buildings themselves.
+	await _open_buildings()
 

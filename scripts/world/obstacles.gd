@@ -60,6 +60,7 @@ static var _cells: Dictionary = {}
 static var stats := {"count": 0, "cells": 0}
 
 static func clear() -> void:
+	_light.clear()
 	_ent = PackedFloat32Array()
 	_dead = PackedByteArray()
 	_cells = {}
@@ -226,7 +227,25 @@ static func blocks(p: Vector3, r: float) -> int:
 ## if the way is clear. This is what stops a bullet, and what decides whether
 ## one man can see another: a slab test against each box near the line, so a
 ## thin wall stops a round that would have stepped clean over it between ticks.
+##
+## What it met is left in `seg_id`, with `seg_exit` -- how far along the same
+## line it comes out the other side, which may be past the end of it -- and
+## `seg_soft`. A round that can go through things asks how much there is to
+## go through.
+## Entries that are a great deal less to go through than their size: a hedge,
+## a car's bodywork, a board fence. They count as soft to a round passing
+## through and as solid to everything else.
+static var _light := {}
+
+static func set_light(id: int) -> void:
+	_light[id] = true
+
+static var seg_id := -1
+static var seg_exit := 1.0
+static var seg_soft := false
+
 static func segment(from: Vector3, to_in: Vector3) -> float:
+	seg_id = -1
 	if _dead.is_empty():
 		return 1.0
 	# Never further than this. The cells are walked along the line, and a
@@ -247,6 +266,8 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 		part = MAX_SEGMENT / full
 		to = from.lerp(to_in, part)
 	var best := 1.0
+	var hit_id := -1
+	var hit_exit := 1.0
 	var d := to - from
 	# The cells the line actually passes through, in order along it, and
 	# nothing either side. Every box is filed under each cell its bounding
@@ -301,6 +322,7 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 				var vz: float = -d.x * s + d.z * c
 				var t0 := 0.0
 				var t1: float = best
+				var x1 := INF
 				var hx: float = _ent[b + 3]
 				var hz: float = _ent[b + 5]
 				var hy: float = _ent[b + 4]
@@ -313,6 +335,7 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 					var e: float = (hx - px) / vx
 					t0 = maxf(t0, minf(a, e))
 					t1 = minf(t1, maxf(a, e))
+					x1 = minf(x1, maxf(a, e))
 					if t0 > t1:
 						continue
 				# z slab
@@ -324,6 +347,7 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 					var e2: float = (hz - pz) / vz
 					t0 = maxf(t0, minf(a2, e2))
 					t1 = minf(t1, maxf(a2, e2))
+					x1 = minf(x1, maxf(a2, e2))
 					if t0 > t1:
 						continue
 				# y slab, base to roof
@@ -335,9 +359,12 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 					var e3: float = (hy - py) / d.y
 					t0 = maxf(t0, minf(a3, e3))
 					t1 = minf(t1, maxf(a3, e3))
+					x1 = minf(x1, maxf(a3, e3))
 					if t0 > t1:
 						continue
 				best = t0
+				hit_id = id
+				hit_exit = x1
 		if ci == ce and cj == cje:
 			break
 		# into whichever neighbour the line crosses into first
@@ -352,6 +379,10 @@ static func segment(from: Vector3, to_in: Vector3) -> float:
 		if t_in > 1.0:
 			break
 	# as a fraction of the line that was asked about, not the part looked at
+	if best < 1.0:
+		seg_id = hit_id
+		seg_exit = hit_exit * part
+		seg_soft = hit_id >= 0 and (_dead[hit_id] == SOFT or _light.has(hit_id))
 	return 1.0 if best >= 1.0 else best * part
 
 ## How high the structures at a point stand, or the ground if there are none.
@@ -479,6 +510,32 @@ static func _ids_in(lo: Vector2, hi: Vector2, soft := false) -> PackedInt32Array
 				seen[id] = true
 				out.append(id)
 	return out
+
+## Every standing structure filed in a rectangle of ground.
+static func ids_in(lo: Vector2, hi: Vector2) -> PackedInt32Array:
+	return _ids_in(lo, hi)
+
+static func gone(id: int) -> bool:
+	return id < 0 or id >= _dead.size() or _dead[id] == GONE
+
+## Half the footprint of one structure, in its own frame, and which way that
+## frame is turned.
+static func half_of(id: int) -> Vector2:
+	var b := id * STRIDE
+	return Vector2(_ent[b + 3], _ent[b + 5])
+
+static func yaw_of(id: int) -> float:
+	var b := id * STRIDE
+	return atan2(-_ent[b + 7], _ent[b + 6])
+
+## Take the bottom `dy` of a structure away and leave the rest standing where
+## it was: its roof does not move. What is left is a box that begins above the
+## ground, which every query here already understands -- a man walks under it
+## the way he walks under a scaffold deck. Negative puts it back.
+static func lift(id: int, dy: float) -> void:
+	var b := id * STRIDE
+	_ent[b + 1] += dy
+	_ent[b + 4] -= dy
 
 ## The height of one structure's roof, in the world.
 static func top_of(id: int) -> float:

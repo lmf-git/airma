@@ -154,8 +154,10 @@ static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: fl
 ## walls, and able to tell a head from a chest. `glow` is how much of it burns:
 ## not every round in a magazine is tracer.
 static func bullet(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
-		team: int, glow := 1.0, life := 1.4, drag := 0.0011) -> Tracer:
+		team: int, glow := 1.0, life := 1.4, drag := 0.0011, pen := 0.0) -> Tracer:
 	var t := Tracer.new()
+	t.pen = pen
+	t.heavy = pen >= 1.0
 	t.vel = vel
 	t.shooter = owner
 	t.dmg = dmg
@@ -1153,6 +1155,26 @@ class Tracer extends Node3D:
 	var small := false
 	var glow := 1.0
 	var _whizzed := false
+	## How much it can still go through, as metres of wall. A round used to
+	## stop dead on the first thing it met -- a plank, a fence panel, a man --
+	## whatever had fired it. Now whatever it meets is measured along the line
+	## it is flying, and if there is less of it than the round has left it
+	## comes out the far side, slower and worth less, and carries on: through
+	## a partition and into the man behind it, or through one man and into
+	## the next. Soft things -- a car door, a kiosk -- cost a third as much as
+	## masonry, and a man costs `MAN_COST`.
+	var pen := 0.0
+	const MAN_COST := 0.3
+	## An anti-materiel round: marks more than the paint on a vehicle.
+	var heavy := false
+	var _struck: Array = []
+	var _resume := Vector3.ZERO
+	## Who this round has already gone close past. A round that misses a man
+	## by an arm's length used to be the same to him as one that missed by a
+	## street; now it tells him, once, how near it was and how big: see
+	## `Soldier.suppress` and `Walker.suppress`.
+	var _scared: Array = []
+	const NEAR_MISS := 2.4
 	## How much of its speed it loses to the air per metre: see `Ballistics`.
 	## A cannon shell keeps it better than a rifle round.
 	var drag := 0.0005
@@ -1420,9 +1442,30 @@ class Tracer extends Node3D:
 	## is safe from it; then anyone standing in what is left of the path; and
 	## last, whether it went close enough past the listener to be heard.
 	func _small_step(from: Vector3, to_in: Vector3) -> bool:
+		var a := from
+		for layer in 6:
+			if a.distance_squared_to(to_in) < 1e-4:
+				return false
+			var r: int = _small_leg(a, to_in)
+			if r == 0:
+				return false
+			if r != 2:
+				return true
+			a = _resume
+		# six things in one step is a round that has found a seam to run along
+		ended_at = a
+		queue_free()
+		return true
+
+	## One stretch of that tick, as far as the first thing in the way: 0 if
+	## nothing was, 1 if the round ended there, 2 if it went through and goes
+	## on from `_resume`, and 3 if it went through and is where it comes out.
+	func _small_leg(from: Vector3, to_in: Vector3) -> int:
 		var world := get_tree().current_scene
 		var stop := to_in
 		var wall: float = Obstacles.segment(from, stop)
+		var wall_exit: float = Obstacles.seg_exit
+		var wall_soft: bool = Obstacles.seg_soft
 		# and the ground, on the same footing: whatever is behind a fold in
 		# the road is as safe from the round as whatever is behind a wall
 		var dirt: float = _ground_t(from, to_in)
@@ -1448,7 +1491,7 @@ class Tracer extends Node3D:
 				if whose[i] == team or pos[i].distance_squared_to(step_mid) > near:
 					continue
 				var n: Variant = nodes[i]
-				if not is_instance_valid(n) or n == shooter:
+				if not is_instance_valid(n) or n == shooter or _struck.has(n):
 					continue
 				if n.has_method("is_alive") and not n.is_alive():
 					continue
@@ -1469,6 +1512,16 @@ class Tracer extends Node3D:
 					best = n
 					best_t = at
 					best_k = k
+				elif k <= 0.0 and n.has_method("suppress") and not _scared.has(n):
+					# past his chest, or into the wall he is behind
+					var chest: Vector3 = n.global_position + Vector3(0, 0.9, 0)
+					var miss: float = Geometry3D.get_closest_point_to_segment(
+						chest, from, stop).distance_to(chest)
+					if miss < NEAR_MISS:
+						_scared.append(n)
+						n.suppress(clampf(dmg / 110.0, 0.10, 0.6)
+							* (1.0 - 0.6 * miss / NEAR_MISS),
+							from if _born == Vector3.INF else _born)
 		if best != null:
 			var where := from.lerp(stop, clampf(best_t, 0.0, 1.0))
 			ended_at = where
@@ -1477,6 +1530,9 @@ class Tracer extends Node3D:
 			var plate: bool = best is Tank or best is Ship
 			if best.has_method("take_hit") and not plate:
 				best.take_hit(dmg * best_k, shooter if is_instance_valid(shooter) else null)
+			elif heavy and best is Tank:
+				# half an inch of steel core does not stop on a scout car
+				best.take_hit(dmg * 0.3, shooter if is_instance_valid(shooter) else null)
 			if best.has_method("bullet_hit"):
 				Effects.blood(world, where)
 			else:
@@ -1485,13 +1541,36 @@ class Tracer extends Node3D:
 				var dead_now: bool = was_alive and best.has_method("is_alive") \
 					and not best.is_alive()
 				shooter.hit_confirm(best_k > 1.5, dead_now)
+			# through him and on, if it has it left to give
+			if best.has_method("bullet_hit") and pen >= MAN_COST:
+				pen -= MAN_COST
+				dmg *= 0.7
+				_struck.append(best)
+				_resume = where
+				return 2
 			queue_free()
-			return true
+			return 1
 		if cut < 1.0:
+			var dir: Vector3 = vel.normalized()
+			Effects.bullet_impact(world, stop - dir * 0.05, wall <= dirt)
+			if wall <= dirt and pen > 0.0:
+				var span: float = from.distance_to(to_in)
+				var thick: float = (wall_exit - wall) * span * (0.3 if wall_soft else 1.0)
+				if is_finite(thick) and thick <= pen:
+					pen -= thick
+					dmg *= 0.8
+					vel *= 0.92
+					var out: Vector3 = from.lerp(to_in, wall_exit) + dir * 0.03
+					Effects.bullet_impact(world, out, true)
+					if wall_exit >= 1.0:
+						# it comes out past where this tick would have left it
+						global_position = out
+						return 3
+					_resume = out
+					return 2
 			ended_at = stop
-			Effects.bullet_impact(world, stop - vel.normalized() * 0.05, wall <= dirt)
 			queue_free()
-			return true
+			return 1
 		if not _whizzed:
 			var eye := get_viewport().get_camera_3d()
 			if eye != null and is_instance_valid(shooter) \
@@ -1503,7 +1582,7 @@ class Tracer extends Node3D:
 					_whizzed = true
 					Sfx.play_at(world, "whiz" if miss > 1.2 else "snap", c2,
 						-3.0, randf_range(0.85, 1.3), 40.0)
-		return false
+		return 0
 
 static var boom_sphere: SphereMesh = null
 

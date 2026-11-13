@@ -942,6 +942,23 @@ func _draw_on_foot() -> void:
 		draw_rect(Rect2(0, vp.y - band, vp.x, band), edge)
 		draw_rect(Rect2(0, band, band, vp.y - band * 2.0), edge)
 		draw_rect(Rect2(vp.x - band, band, band, vp.y - band * 2.0), edge)
+	# pinned down: the edges go dark and the middle is all there is
+	if w.suppression > 0.02:
+		var dark := Color(0.0, 0.0, 0.0, 0.5 * w.suppression)
+		var rim: float = vp.y * (0.10 + 0.14 * w.suppression)
+		draw_rect(Rect2(0, 0, vp.x, rim), dark)
+		draw_rect(Rect2(0, vp.y - rim, vp.x, rim), dark)
+		draw_rect(Rect2(0, rim, rim, vp.y - rim * 2.0), dark)
+		draw_rect(Rect2(vp.x - rim, rim, rim, vp.y - rim * 2.0), dark)
+		draw_rect(Rect2(0, 0, vp.x, rim * 0.5), dark)
+		draw_rect(Rect2(0, vp.y - rim * 0.5, vp.x, rim * 0.5), dark)
+		draw_rect(Rect2(0, rim * 0.5, rim * 0.5, vp.y - rim), dark)
+		draw_rect(Rect2(vp.x - rim * 0.5, rim * 0.5, rim * 0.5, vp.y - rim), dark)
+	# a stun grenade: nothing but white, and then the world coming back
+	var dazed: float = w.flash_left()
+	if dazed > 0.0:
+		var back: float = clampf(dazed / maxf(w.flash_span * 0.55, 0.4), 0.0, 1.0)
+		draw_rect(Rect2(Vector2.ZERO, vp), Color(1.0, 1.0, 1.0, back * back * (3.0 - 2.0 * back)))
 
 	var p: String = w.prompt()
 	if p != "":
@@ -954,7 +971,7 @@ func _draw_on_foot() -> void:
 	var rel: bool = w.reloading > 0.0
 	var low: bool = w.ammo <= maxi(int(float(g["mag"]) * 0.2), 1)
 	_txt(Vector2(vp.x - 330.0, vp.y - 118.0), String(g["name"])
-		+ ("  · SUPPRESSED" if (w.suppressed and Firearm.can_suppress(g)) else ""), 15,
+		+ ("  · SUPPRESSED" if w.is_quiet() else ""), 15,
 		Color(0.85, 0.92, 1.0), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
 	_txt(Vector2(vp.x - 330.0, vp.y - 78.0), "%d" % w.ammo, 40,
 		RED if (low or rel) else WHITE, HORIZONTAL_ALIGNMENT_RIGHT, 220.0)
@@ -966,7 +983,7 @@ func _draw_on_foot() -> void:
 	elif w.ammo == 0:
 		_txt(Vector2(vp.x - 330.0, vp.y - 54.0), "EMPTY — R" if w.spare > 0 else "OUT — SWITCH WEAPON",
 			14, RED, HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-	_txt(Vector2(vp.x - 330.0, vp.y - 32.0), "GRENADES %d" % w.grenades, 14,
+	_txt(Vector2(vp.x - 330.0, vp.y - 32.0), "GRENADES %d   FLASH %d" % [w.grenades, w.flashes], 14,
 		Color(0.75, 0.8, 0.85), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
 	# the rack: which number is which
 	for i in w.slots.size():
@@ -1008,7 +1025,7 @@ func _draw_on_foot() -> void:
 				HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
 			ly += 18.0
 	_txt(Vector2(26, vp.y - 40.0),
-		"F2 keys   SPACE vault/climb walls   C crouch   Z prone   F pick up   Q/E lean   G grenade   P view",
+		"F2 keys   SPACE vault/climb walls   C crouch   Z prone   F pick up   Q/E lean   G grenade   X flashbang   P view",
 		13, Color(0.85, 0.92, 1.0))
 	_draw_log(vp)
 	if mode != null and is_instance_valid(mode):
@@ -2260,6 +2277,7 @@ func _foot_keys() -> Array:
 			["1 - 3", "the two long guns and the sidearm"],
 			["R", "reload"],
 			["G", "grenade"],
+			["X", "flashbang"],
 			["P", "first person / over the shoulder"],
 			["B", "binoculars"],
 			["N", "night vision"],

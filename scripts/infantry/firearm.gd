@@ -112,6 +112,15 @@ const KIT := [
 		"len": 0.40, "stock": 0.0, "mag_len": 0.0, "sight": 0.085, "dot": false,
 		"launcher": "gl", "shells": true,
 		"grip_l": Vector3(0.0, -0.075, -0.20), "move": 0.92, "reach": 300.0},
+	# Half an inch across and a kilometre of reach. Ten rounds, one at a time,
+	# each of which goes through the wall, the car and the man behind them;
+	# and nobody runs anywhere carrying it.
+	{"id": "fifty", "name": "M107 .50 CAL", "mag": 10, "spare": 3, "cd": 0.55,
+		"auto": false, "dmg": 240.0, "muzzle": 853.0, "pellets": 1,
+		"hip": 0.075, "ads": 0.0002, "fov": 12.0, "reload": 4.2, "kick": 0.095,
+		"side": 0.010, "sound": "dmr", "db": 5.0, "work": "bolt",
+		"len": 0.86, "stock": 0.30, "mag_len": 0.13, "sight": 0.10, "scope": true,
+		"grip_l": Vector3(0.0, -0.05, -0.33), "move": 0.76, "reach": 160.0},
 ]
 
 ## The loadouts a man can deploy with. Each is a starting point: the gunsmith
@@ -142,6 +151,9 @@ const CLASSES := [
 	{"id": "sniper", "name": "SNIPER", "primary": "sniper", "second": "vector",
 		"sight": "scope", "quiet": true, "grip": false, "mag": false,
 		"note": "One round, one man, a bolt in between. Something quick for when they get close."},
+	{"id": "amr", "name": "ANTI-MATERIEL", "primary": "fifty", "second": "smg",
+		"sight": "scope", "quiet": false, "grip": false, "mag": false,
+		"note": "A .50 rifle. It goes through walls, cars and whoever is standing behind them."},
 ]
 ## Iron sights, a red dot, a 2x, a 4x prism and the long glass. The three
 ## magnified ones are looked through: the view closes down to the glass.
@@ -150,10 +162,41 @@ const SIGHT_NAMES := {"irons": "Iron sights — widest view", "dot": "Red dot",
 	"2x": "2x scope — a little closer, still quick", "acog": "ACOG 4x — prism, chevron",
 	"scope": "Long scope — slow to bring up"}
 
+## How one weapon of a class is set up: its own sight, can, grip and magazine.
+##
+## A class had one of each, and both its weapons wore them: a scope on the
+## rifle was a scope on the submachine gun, and a suppressor on one was a
+## suppressor on everything. Each weapon keeps its own now, under the class's
+## `fit` by the weapon's name -- so the bench remembers how a rifle was left
+## when it is swapped out and back. A weapon nobody has touched starts from
+## what the class came with. `make` writes that start down so it can be edited.
+static func setup_for(c: Dictionary, id: String, make := false) -> Dictionary:
+	var fit: Dictionary = c.get("fit", {})
+	if fit.has(id):
+		return fit[id]
+	var s := {"sight": String(c.get("sight", "dot")), "quiet": bool(c.get("quiet", false)),
+		"grip": bool(c.get("grip", false)), "mag": bool(c.get("mag", false))}
+	if make:
+		fit[id] = s
+		c["fit"] = fit
+	return s
+
+## What a salvo of small arms fire can go through, as metres of wall: see
+## `Effects.Tracer.pen`. A pistol round stops in a plank; a rifle round goes
+## through a partition or one man; the long rifles through a house wall; and
+## the .50 through most of what a street is made of.
+const PEN := {"pistol": 0.10, "glock": 0.10, "smg": 0.14, "vector": 0.12, "shotgun": 0.05,
+	"carbine": 0.34, "ak": 0.36, "lmg": 0.34, "scar": 0.50, "dmr": 0.55, "sniper": 0.85,
+	"fifty": 1.7}
+
+static func pen_of(g: Dictionary) -> float:
+	return float(PEN.get(String(g.get("id", "")), 0.0))
+
 ## One weapon as a particular man has it set up: the table entry with his
 ## sight, grip and magazine worked into the numbers.
 static func fitted(id: String, c: Dictionary) -> Dictionary:
 	var g: Dictionary = spec(id).duplicate()
+	g["quiet"] = bool(c.get("quiet", false)) and can_suppress(g)
 	if g.has("launcher") or g.get("hand", false):
 		return g
 	match String(c.get("sight", "dot")):
@@ -166,9 +209,9 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 			g["dot"] = false
 			g["scope"] = true
 			g["reticle"] = "cross"
-			g["sight"] = 0.095 if id != "sniper" else 0.10
+			g["sight"] = 0.095 if not id in ["sniper", "fifty"] else 0.10
 			# a marksman's glass on the marksman's rifle, a 4x on anything else
-			g["fov"] = 15.0 if id == "dmr" else (12.0 if id == "sniper" else 21.0)
+			g["fov"] = 15.0 if id == "dmr" else (12.0 if id in ["sniper", "fifty"] else 21.0)
 		"2x":
 			g["dot"] = false
 			g["scope"] = true
@@ -204,7 +247,7 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 ## shotgun pellet is a ball and stops in a couple of hundred metres.
 const DRAG := {"carbine": 0.0011, "ak": 0.0012, "scar": 0.0008, "smg": 0.0018,
 	"vector": 0.0022, "shotgun": 0.006, "dmr": 0.0008, "sniper": 0.0005,
-	"pistol": 0.0022, "glock": 0.0022, "lmg": 0.0011, "gl": 0.0006}
+	"pistol": 0.0022, "glock": 0.0022, "lmg": 0.0011, "gl": 0.0006, "fifty": 0.0004}
 
 static func drag_of(g: Dictionary) -> float:
 	return float(DRAG.get(String(g.get("id", "")), 0.0011))
@@ -394,7 +437,7 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		Effects.bullet(world, muzzle, d * float(g["muzzle"]) * randf_range(0.97, 1.03)
 			* (0.93 if quiet else 1.0),
 			shooter, float(g["dmg"]) * dmg_scale, team,
-			0.55 if n > 1 else 1.0, 0.45 if n > 1 else 1.4, drag_of(g))
+			0.55 if n > 1 else 1.0, 0.45 if n > 1 else 1.4, drag_of(g), pen_of(g))
 	if quiet:
 		# no flash to speak of, no crack, and nothing that carries
 		Effects.muzzle_flash(world, muzzle + dir * 0.05, dir, 0.045)
@@ -426,12 +469,20 @@ class Frag extends Node3D:
 	var thrower: Node = null
 	const RADIUS := 8.5
 	const DAMAGE := 150.0
+	## A stun grenade instead: a bang and a flash and nothing else. Whoever is
+	## looking at it with nothing in between cannot see for a few seconds, and
+	## whoever has his back to it for rather less. It does not care whose side
+	## he is on, the man who threw it included.
+	var flash := false
+	const FLASH_RADIUS := 16.0
 
 	func _ready() -> void:
 		var st := MeshKit.begin()
 		MeshKit.box(st, Vector3(0.07, 0.09, 0.07), Vector3.ZERO)
 		MeshKit.box(st, Vector3(0.03, 0.03, 0.03), Vector3(0, 0.06, 0))
-		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.20, 0.25, 0.16), 0.7, 0.1)), "M"))
+		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
+			Color(0.62, 0.64, 0.66) if flash else Color(0.20, 0.25, 0.16), 0.7,
+			0.6 if flash else 0.1)), "M"))
 		reset_physics_interpolation.call_deferred()
 
 	func _physics_process(delta: float) -> void:
@@ -470,7 +521,49 @@ class Frag extends Node3D:
 			Sfx.play_at(get_tree().current_scene, "clink", global_position, -8.0,
 				randf_range(0.9, 1.2), 60.0)
 
+	func _dazzle() -> void:
+		var stage := get_tree().current_scene
+		var pop := global_position + Vector3(0, 0.3, 0)
+		Sfx.play_at(stage, "frag", pop, 2.0, randf_range(1.7, 1.9), 600.0)
+		var lamp := OmniLight3D.new()
+		lamp.light_color = Color(1.0, 0.98, 0.92)
+		lamp.light_energy = 40.0
+		lamp.omni_range = FLASH_RADIUS * 1.5
+		lamp.shadow_enabled = false
+		stage.add_child(lamp)
+		lamp.global_position = pop
+		var fade := lamp.create_tween()
+		fade.tween_property(lamp, "light_energy", 0.0, 0.35)
+		fade.tween_callback(lamp.queue_free)
+		Effects.dust(stage, pop, 0.8)
+		var done := {}
+		var all: Array = get_tree().get_nodes_in_group("infantry")
+		all.append_array(get_tree().get_nodes_in_group("hittable"))
+		for n in all:
+			if not is_instance_valid(n) or done.has(n) or not n.has_method("blind"):
+				continue
+			done[n] = true
+			if n.has_method("is_alive") and not n.is_alive():
+				continue
+			var eyes: Vector3 = (n as Node3D).global_position + Vector3(0, 1.5, 0)
+			if n.has_method("eye"):
+				eyes = n.eye()
+			var d: float = eyes.distance_to(pop)
+			if d > FLASH_RADIUS or Obstacles.segment(pop, eyes) < 1.0:
+				continue
+			# looking pop it, or looking away
+			var facing := Vector3.FORWARD
+			if "yaw" in n:
+				facing = Vector3(-sin(float(n.yaw)), 0.0, -cos(float(n.yaw)))
+			var toward: float = facing.dot((pop - eyes).normalized())
+			var secs: float = lerpf(5.0, 1.6, d / FLASH_RADIUS) * (1.0 if toward > 0.1 else 0.4)
+			n.blind(secs)
+		queue_free()
+
 	func _burst() -> void:
+		if flash:
+			_dazzle()
+			return
 		var world := get_tree().current_scene
 		var at := global_position + Vector3(0, 0.25, 0)
 		Sfx.play_at(world, "frag", at, 4.0, randf_range(0.92, 1.05), 900.0)

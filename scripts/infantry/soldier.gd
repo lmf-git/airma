@@ -69,6 +69,37 @@ var _last_head := false
 var _kneel := false
 var _last_amount := 0.0
 var _last_low := false
+## How pinned down he is, 0 to 1. Rounds going close past him put it up --
+## a big round more than a small one, a near one more than a wide one -- and
+## it drains away when they stop. A man under fire shoots worse and in
+## shorter bursts, and past `PINNED` he stops what he was doing and gets
+## behind something until it eases: which is what makes firing at somebody
+## you cannot quite hit worth doing.
+var _pinned := 0.0
+var _pin_from := Vector3.ZERO
+var _pin_try := 0.0
+const PINNED := 0.6
+
+func suppress(amount: float, from: Vector3) -> void:
+	if not alive:
+		return
+	_pinned = minf(_pinned + amount / maxf(skill, 0.5), 1.0)
+	_pin_from = from
+	_alert = 8.0
+	# he knows roughly where it is coming from, whether or not he saw it
+	if target == null and _seen_t > 1.0:
+		_seen_at = from
+		_seen_t = 0.8
+
+## Seconds left of not being able to see: a stun grenade went off in front of
+## him. He loses whoever he was shooting at and cannot find anybody else.
+var _blind := 0.0
+
+func blind(secs: float) -> void:
+	_blind = maxf(_blind, secs)
+	target = null
+	_acquired = 0.0
+	_burst = 0
 ## Seconds since he last fired, near enough: a shot gives a man away.
 var loud := 0.0
 ## What he carries on his back for the things a rifle does nothing to: "law"
@@ -179,6 +210,9 @@ func _process(delta: float) -> void:
 	delta = minf(delta, 0.1)
 	_seen_t += delta
 	_alert = maxf(_alert - delta, 0.0)
+	_blind = maxf(_blind - delta, 0.0)
+	_pinned = maxf(_pinned - delta * 0.22, 0.0)
+	_pin_try = maxf(_pin_try - delta, 0.0)
 	_hurt_recent = maxf(_hurt_recent - delta, 0.0)
 	loud = maxf(loud - delta, 0.0)
 	_think -= delta
@@ -291,6 +325,9 @@ func _heavy(delta: float) -> bool:
 
 # --------------------------------------------------------------------- senses
 func _sense() -> void:
+	if _blind > 0.0:
+		target = null
+		return
 	var from := eye()
 	var facing := Vector3(-sin(yaw), 0.0, -cos(yaw))
 	var best: Node3D = null
@@ -329,11 +366,26 @@ func _decide() -> void:
 		# stay put until the weapon is ready and the worst has passed
 		if _at_goal(1.4):
 			_kneel = true
-			if _reload <= 0.0 and _hold <= 0.0:
+			# and not while the rounds are still coming in
+			if _reload <= 0.0 and _hold <= 0.0 and _pinned < PINNED * 0.6:
 				_kneel = false
 				state = HUNT
 				_goal = Vector3.INF
 		return
+	# Pinned: behind something if there is something, and down where he is
+	# if there is not.
+	if _pinned > PINNED:
+		_kneel = true
+		if _pin_try <= 0.0:
+			_pin_try = 1.5
+			var threat: Vector3 = Soldier.chest_of(target) + Vector3(0, 0.4, 0) \
+				if is_instance_valid(target) else _pin_from
+			var behind: Vector3 = arena.find_cover(global_position, threat)
+			if behind != Vector3.INF:
+				state = COVER
+				_set_goal(behind)
+				_hold = randf_range(1.5, 3.0)
+				return
 	if is_instance_valid(target):
 		var d: float = global_position.distance_to(target.global_position)
 		var hurt: bool = health < 45.0 and _hurt_recent > 0.0
@@ -559,6 +611,8 @@ func _shoot(delta: float) -> void:
 		err *= 1.4
 	if crouching:
 		err *= 0.75
+	# with rounds going past his head he is not taking aim, he is pointing
+	err *= 1.0 + 2.2 * _pinned
 	err *= 1.0 + 1.3 * exp(-(_acquired - react) * 1.5)
 	var b := Basis.looking_at(aim, Vector3.UP)
 	aim = (b * Vector3(randfn(0.0, err), randfn(0.0, err), -1.0)).normalized()
@@ -573,7 +627,7 @@ func _shoot(delta: float) -> void:
 	_burst -= 1
 	_cd = float(gun["cd"]) if gun["auto"] else maxf(float(gun["cd"]), 0.26) + randf() * 0.25
 	if _burst <= 0:
-		_pause = randf_range(0.35, 0.95) / skill
+		_pause = randf_range(0.35, 0.95) / skill * (1.0 + 2.0 * _pinned)
 
 func _near_sound(id: String, db: float) -> void:
 	var ear := get_viewport().get_camera_3d()

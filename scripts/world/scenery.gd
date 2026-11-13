@@ -1234,8 +1234,57 @@ func _town_build(buckets: Array) -> void:
 	for i in 3:
 		var lot: Array = buckets[i]
 		_scatter(kinds[i], lot, "Town%d" % i, true)
+		if not lot.is_empty():
+			_breakable[_breakable.size() - 1]["town_kind"] = i
 		town_xforms.append_array(lot)
 		_stats["buildings"] = int(_stats.get("buildings", 0)) + lot.size()
+
+## What the three kinds of town block are faced in, for anything built to
+## match one: see `_town_build`.
+const TOWN_WALLS := [Color(0.70, 0.67, 0.61), Color(0.58, 0.59, 0.60), Color(0.64, 0.58, 0.51)]
+
+## The town block standing at `at`, as [batch, index in it], or nothing.
+func _block_at(at: Vector3) -> Array:
+	for b in _breakable:
+		if not b.has("town_kind"):
+			continue
+		if Vector2(at.x - b["centre"].x, at.z - b["centre"].z).length() > float(b["radius"]) + 2.0:
+			continue
+		var xf: Array = b["xforms"]
+		var dead: PackedByteArray = b["dead"]
+		for i in xf.size():
+			var o: Vector3 = (xf[i] as Transform3D).origin
+			if dead[i] == 0 and absf(o.x - at.x) < 0.3 and absf(o.z - at.z) < 0.3:
+				return [b, i]
+	return []
+
+## Lift the bottom `dy` of the town block at `at` off the ground, roof staying
+## where it is, so that a ground floor somebody can walk into can be built
+## underneath it. Returns which kind of block it is, or -1 if there is none.
+## Only what is drawn moves: the record of where the building stands does not,
+## so a bomb still brings it down onto its own footprint.
+func raise_block(at: Vector3, dy: float) -> int:
+	var found := _block_at(at)
+	if found.is_empty():
+		return -1
+	var b: Dictionary = found[0]
+	var t: Transform3D = (b["xforms"] as Array)[found[1]]
+	var h: float = t.basis.y.length()
+	if h - dy < 1.0:
+		return -1
+	var cut := Basis(t.basis.x, t.basis.y * ((h - dy) / h), t.basis.z)
+	(b["mmi"] as MultiMeshInstance3D).multimesh.set_instance_transform(found[1],
+		Transform3D(cut, t.origin + Vector3(0, dy, 0)))
+	return int(b["town_kind"])
+
+## ...and stand it back on the ground.
+func lower_block(at: Vector3) -> void:
+	var found := _block_at(at)
+	if found.is_empty():
+		return
+	var b: Dictionary = found[0]
+	(b["mmi"] as MultiMeshInstance3D).multimesh.set_instance_transform(found[1],
+		(b["xforms"] as Array)[found[1]])
 
 ## True when a point falls inside a town footprint, so nothing tall gets planted
 ## on top of the buildings.

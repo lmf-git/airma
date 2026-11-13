@@ -10220,6 +10220,7 @@ func town_set(i: int, unhurried := false) -> TownSet:
 	var ts := TownSet.new()
 	ts.name = "TownSet %s" % String(st.get("name", str(i)))
 	ts.slow = unhurried
+	ts.scenery = scenery
 	add_child(ts)
 	_town_sets[i] = ts
 	# not waited for: with `slow` off it is finished when this returns, and
@@ -18676,6 +18677,19 @@ func _tick_cqb_test(delta: float) -> void:
 			int(cqb.stats["free_cells"]), cqb._n * cqb._n, cqb.dressing._boxes.size()])
 		var a: Vector3 = cqb.spawn_point(0)
 		var b: Vector3 = cqb.spawn_point(1)
+		# The buildings that were opened up: can a man on the start line walk
+		# into each of them?
+		var ts_in: TownSet = cqb.dressing
+		var walk_in := 0
+		var a_piece: int = cqb._comp[cqb._cell(a).y * cqb._n + cqb._cell(a).x]
+		for hb in ts_in._hollowed:
+			var mid_c: Vector2i = cqb._cell(hb[3] + Vector3(1.6, 0, 1.6))
+			if not cqb._nav.is_point_solid(mid_c) \
+					and cqb._comp[mid_c.y * cqb._n + mid_c.x] == a_piece:
+				walk_in += 1
+		print("[cqb] buildings: %d of %d with a ground floor to go into (%d on too much of a slope), %d doors cut, %d of them reachable on foot from the start line" % [
+			int(ts_in.stats.get("interiors", 0)), int(ts_in.stats.get("blocks", 0)),
+			int(ts_in.stats.get("too_steep", 0)), int(ts_in.stats.get("doors", 0)), walk_in])
 		var route: PackedVector2Array = cqb.path(a, b)
 		var walked := 0.0
 		for i in range(1, route.size()):
@@ -18866,6 +18880,150 @@ func _tick_cqb_test(delta: float) -> void:
 			String(walker.gun_spec()["name"]), walker.ammo, walker.spare,
 			String(walker.spec_of(int(walker.slots[1]))["name"])])
 		var mk4: Dictionary = Firearm.fitted("carbine", {"sight": "scope", "grip": true, "mag": true})
+		# Each weapon of a class fitted on its own: a scope and a can on the
+		# rifle, and neither on the submachine gun beside it.
+		var own: Dictionary = (CqbMatch.kit_classes()[0] as Dictionary).duplicate(true)
+		own["primary"] = "carbine"
+		own["second"] = "smg"
+		own["fit"] = {"carbine": {"sight": "scope", "quiet": true, "grip": false, "mag": false},
+			"smg": {"sight": "dot", "quiet": false, "grip": true, "mag": true}}
+		walker.apply_class(own)
+		var own_a: Dictionary = walker.spec_of(Firearm.index_of("carbine"))
+		var own_b: Dictionary = walker.spec_of(Firearm.index_of("smg"))
+		print("[cqb] gunsmith, each on its own: carbine fov %.0f quiet=%s magazine %d; smg fov %.0f quiet=%s magazine %d -> %s" % [
+			float(own_a["fov"]), str(own_a["quiet"]), int(own_a["mag"]),
+			float(own_b["fov"]), str(own_b["quiet"]), int(own_b["mag"]),
+			"ok" if (bool(own_a["quiet"]) and not bool(own_b["quiet"]) and int(own_a["mag"]) == 30
+				and int(own_b["mag"]) == 60 and float(own_a["fov"]) < 25.0 and float(own_b["fov"]) > 40.0)
+			else "FAILED"])
+		# ...and the bench itself, worked the way a hand works it: fit the
+		# second weapon, look at the first, swap the first for another.
+		var bench_ui := DeployMenu.new()
+		add_child(bench_ui)
+		var pick_was: int = CqbMatch.class_pick
+		bench_ui.open("none", true, "usa")
+		bench_ui._pick(3)
+		var bc: Dictionary = CqbMatch.kit_classes()[3]
+		var bc_was: Dictionary = bc.duplicate(true)
+		bench_ui._to_bench(1)
+		bench_ui._sight.select(1)
+		bench_ui._sight.item_selected.emit(1)
+		bench_ui._grip.button_pressed = true
+		bench_ui._to_bench(0)
+		var fit_1: Dictionary = Firearm.setup_for(bc, String(bc["primary"]))
+		var fit_2: Dictionary = Firearm.setup_for(bc, String(bc["second"]))
+		bench_ui._primary.select(DeployMenu.LONG.find("fifty"))
+		bench_ui._primary.item_selected.emit(DeployMenu.LONG.find("fifty"))
+		print("[cqb] bench: %s keeps sight %s grip=%s; %s now sight %s grip=%s; swapped the first for %s, and the bench shows weapon %d -> %s" % [
+			String(bc_was["primary"]), String(fit_1["sight"]), str(fit_1["grip"]),
+			String(bc["second"]), String(fit_2["sight"]), str(fit_2["grip"]),
+			String(bc["primary"]), bench_ui._bench,
+			"ok" if (String(fit_1["sight"]) == String(bc_was["sight"]) and not bool(fit_1["grip"])
+				and String(fit_2["sight"]) == "dot" and bool(fit_2["grip"])
+				and String(bc["primary"]) == "fifty" and bench_ui._bench == 0) else "FAILED"])
+		print("[cqb] bench reads:\n%s" % bench_ui._stats.text)
+		bc.clear()
+		bc.merge(bc_was)
+		CqbMatch.class_pick = pick_was
+		bench_ui.queue_free()
+		# What goes through what: a wall of each thickness put up in clear air,
+		# and a round of each kind fired square at it.
+		var pen_bad := PackedStringArray()
+		var sky: Vector3 = walker.global_position + Vector3(0, 400.0, 0)
+		for pcase in [["pistol", 0.30, false], ["carbine", 0.14, true], ["carbine", 0.40, false],
+				["dmr", 0.40, true], ["sniper", 1.0, false], ["fifty", 1.0, true], ["fifty", 3.0, false]]:
+			var slab: int = Obstacles.add_box(sky + Vector3(0, -2.0, -20.0), 3.0, 4.0, float(pcase[1]) * 0.5)
+			var pg: Dictionary = Firearm.spec(String(pcase[0]))
+			var rd: Effects.Tracer = Effects.bullet(self, sky, Vector3(0, 0, -float(pg["muzzle"])), null,
+				float(pg["dmg"]), 0, 1.0, 1.4, Firearm.drag_of(pg), Firearm.pen_of(pg))
+			var went := false
+			for tick in 40:
+				if rd.is_queued_for_deletion():
+					break
+				rd._fly(1.0 / 240.0)
+				if rd.global_position.z < sky.z - 24.0:
+					went = true
+					break
+			if not rd.is_queued_for_deletion():
+				rd.queue_free()
+			Obstacles.remove(slab)
+			if went != bool(pcase[2]):
+				pen_bad.append("%s against %.2f m: through=%s" % [String(pcase[0]), float(pcase[1]), str(went)])
+		print("[cqb] penetration, seven cases of round against wall: %s" % (
+			"ok" if pen_bad.is_empty() else "FAILED " + "; ".join(pen_bad)))
+		# And through men: two of theirs stood one behind the other, and a
+		# round sent down the line of them.
+		var line_up: Array = []
+		for sd in cqb.soldiers:
+			if is_instance_valid(sd) and sd.alive and sd.team == 1 and line_up.size() < 2:
+				line_up.append(sd)
+		if line_up.size() == 2:
+			var was_at: Array = [line_up[0].global_position, line_up[1].global_position]
+			var was_hp: Array = [line_up[0].health, line_up[1].health]
+			var men_out := PackedStringArray()
+			for mcase in [["pistol", 1], ["carbine", 2], ["fifty", 2]]:
+				for mi2 in 2:
+					line_up[mi2].global_position = sky + Vector3(0, -1.2, -10.0 - 4.0 * mi2)
+					line_up[mi2].health = 100.0
+				Sim._hit_tick = -1
+				var mg: Dictionary = Firearm.spec(String(mcase[0]))
+				var mr: Effects.Tracer = Effects.bullet(self, sky, Vector3(0, 0, -300.0), null, 1.0, 0,
+					1.0, 1.4, 0.0, Firearm.pen_of(mg))
+				for tick2 in 30:
+					if mr.is_queued_for_deletion():
+						break
+					mr._fly(1.0 / 240.0)
+				if not mr.is_queued_for_deletion():
+					mr.queue_free()
+				var struck_n := 0
+				for mi3 in 2:
+					if line_up[mi3].health < 100.0:
+						struck_n += 1
+				men_out.append("%s %d%s" % [String(mcase[0]), struck_n,
+					"" if struck_n == int(mcase[1]) else " (FAILED, wanted %d)" % int(mcase[1])])
+			for mi4 in 2:
+				line_up[mi4].global_position = was_at[mi4]
+				line_up[mi4].health = was_hp[mi4]
+			Sim._hit_tick = -1
+			print("[cqb] one round down a line of two men, how many it hit: %s" % ", ".join(men_out))
+		# Being shot at and missed: a burst a metre past one of theirs, and
+		# one past him.
+		if line_up.size() == 2:
+			var pin_at: Vector3 = line_up[0].global_position
+			line_up[0].global_position = sky + Vector3(1.0, -0.9, -12.0)
+			line_up[0]._pinned = 0.0
+			var me_at: Vector3 = walker.global_position
+			walker.suppression = 0.0
+			for side_n in 2:
+				if side_n == 1:
+					line_up[0].global_position = pin_at
+					walker.global_position = sky + Vector3(1.0, -0.9, -12.0)
+				Sim._hit_tick = -1
+				for shot in 6:
+					var sr: Effects.Tracer = Effects.bullet(self, sky, Vector3(0, 0, -600.0), null, 26.0,
+						side_n, 1.0, 1.4, 0.0, 0.3)
+					for tick3 in 12:
+						if sr.is_queued_for_deletion():
+							break
+						sr._fly(1.0 / 240.0)
+					if not sr.is_queued_for_deletion():
+						sr.queue_free()
+			print("[cqb] six rifle rounds a metre wide: their man pinned %.2f (takes cover past %.2f), ours suppressed %.2f, nobody hit=%s" % [
+				line_up[0]._pinned, Soldier.PINNED, walker.suppression,
+				str(line_up[0].health >= 100.0)])
+			walker.global_position = me_at
+			walker.suppression = 0.0
+			line_up[0].global_position = pin_at
+			line_up[0]._pinned = 0.0
+			Sim._hit_tick = -1
+		# A stun grenade at his feet.
+		var bang := Firearm.Frag.new()
+		bang.flash = true
+		add_child(bang)
+		bang.global_position = walker.global_position + Vector3(0, 0.2, -1.5)
+		bang._dazzle()
+		print("[cqb] flashbang at his feet: blind for %.1f s, %d to throw" % [walker.flash_left(), walker.flashes])
+		walker._flash_until = 0.0
 		print("[cqb] gunsmith: carbine with scope, grip and long magazine: fov %.0f, magazine %d, kick %.4f (stock %.4f)" % [
 			float(mk4["fov"]), int(mk4["mag"]), float(mk4["kick"]), float(Firearm.spec("carbine")["kick"])])
 		walker.apply_class(CqbMatch.kit_classes()[0])

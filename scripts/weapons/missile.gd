@@ -809,6 +809,9 @@ func _fuse_check(from: Vector3, to: Vector3) -> bool:
 		var n: Variant = Sim.hit_nodes[i]
 		if not is_instance_valid(n) or n == shooter:
 			continue
+		# the aeroplane a decoy pulled this round off: see `_seduce`
+		if _seduced and n == _seduced_from:
+			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
 		if ("team" in n) and n.team == team and n != target:
@@ -921,7 +924,7 @@ func _guide(delta: float) -> void:
 			if randf() < pf:
 				if Sim.debug_weapons:
 					print("[msl] %s decoyed by flares at age %.1f (%.0f%%)" % [wid, age, pf * 100.0])
-				target = null
+				_seduce(true, tpos, tvel)
 				return
 	# and radar seekers by chaff, which until now nothing carried: a radar round
 	# had no counter at all, so a SAM site that got a shot off was unbeatable
@@ -989,7 +992,7 @@ func _guide(delta: float) -> void:
 			if randf() < pc:
 				if Sim.debug_weapons:
 					print("[msl] %s decoyed by chaff at age %.1f (%.0f%%)" % [wid, age, pc * 100.0])
-				target = null
+				_seduce(false, target.global_position, tvel)
 				return
 	# A lofted midcourse, applied before the line of sight is taken — putting it
 	# after was the same as not having it at all, since proportional navigation
@@ -1393,6 +1396,33 @@ func _guide(delta: float) -> void:
 		# slow round cannot brake itself to a standstill
 		vel -= vel.normalized() * minf(bleed, vel.length() * 0.25) * delta
 
+## A decoy took the track: the round goes after the decoy, not after nothing.
+##
+## Breaking the track used to mean only `target = null`, and what a round with
+## no target does is coast to the last place it saw one. That place was the
+## aeroplane, taken the same tick the decoy won -- and the round was already
+## on a collision course for it, with its proximity fuse still sweeping every
+## contact in the sky. So the warning went quiet, because nothing was guiding
+## on you any more, and the round arrived anyway and fused on the aeroplane it
+## had just been talked out of. Now the mark it coasts to is the decoy itself,
+## which falls away behind, and the fuse no longer answers to the aeroplane
+## the seeker let go of.
+var _seduced := false
+var _seduced_from: Node = null
+var _decoy_ir := false
+var _decoy_vel := Vector3.ZERO
+
+func _seduce(ir: bool, tpos: Vector3, tvel: Vector3) -> void:
+	_seduced = true
+	_seduced_from = target
+	_decoy_ir = ir
+	# the speed a flare or a chaff bundle leaves the dispenser with: see
+	# `Aircraft.drop_flare` and `drop_chaff`
+	_decoy_vel = tvel * (0.80 if ir else 0.35)
+	_last_aim = tpos
+	_mark_best = 1e9
+	target = null
+
 ## Keep flying the last place the target was, for a weapon that is aimed at
 ## the ground rather than at a thing. A missile has nothing to coast to.
 func _coast_to_mark(_delta: float) -> void:
@@ -1409,13 +1439,21 @@ func _coast_to_mark(_delta: float) -> void:
 	var k := String(ws["kind"])
 	if _last_aim == Vector3.INF:
 		return
+	# A seduced round is following the decoy, and the decoy is moving: it left
+	# the aeroplane at most of the aeroplane's speed and is falling behind it.
+	if _seduced:
+		if _decoy_ir:
+			_decoy_vel = _decoy_vel.lerp(Vector3(0, -16.0, 0), clampf(_delta * 0.55, 0.0, 1.0))
+		else:
+			_decoy_vel = _decoy_vel.lerp(Vector3.DOWN * 3.0, clampf(_delta * 2.2, 0.0, 1.0))
+		_last_aim += _decoy_vel * _delta
 	var v_dir := vel.normalized() if vel.length() > 1.0 else -global_transform.basis.z
 	var want_dir := (_last_aim - global_position).normalized()
 	# A bomb and a cruise round steer hard onto the line. A ballistic round
 	# trims the arc it is already flying, the same authority its own guidance
 	# uses -- hauling one onto the line of sight at 2.6 would have it fighting
 	# its own trajectory the whole way down.
-	var gain: float = 2.6 if (k == "bomb" or k == "cruise") else 1.1
+	var gain: float = 2.6 if (k == "bomb" or k == "cruise" or _seduced) else 1.1
 	var accel := (want_dir - v_dir) * maxf(vel.length(), 90.0) * gain
 	var g_max: float = ws["max_g"] * 9.81
 	if accel.length() > g_max:
