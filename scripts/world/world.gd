@@ -17,6 +17,10 @@ var base: Airbase
 var scenery: Scenery
 ## The planet as a body, for when the ground is too far below to be worth it.
 var planet: Planet
+## The lakes and inland seas: see `lakes.gd`. Loaded by path rather than by
+## class name, so a fresh checkout runs before the editor has scanned it.
+const LAKES_SCRIPT := preload("res://scripts/world/lakes.gd")
+var lakes: Node3D
 ## The cloud layer, wrapped round the planet rather than round the camera.
 var clouds: CloudShell
 ## The atmosphere shell.
@@ -811,11 +815,12 @@ func _run_cqb_fix(dir: String) -> void:
 			rad_to_deg(cm.vel.angle_to(cm._aim)) if is_instance_valid(cm) else -1.0])
 		if most_fin < deg_to_rad(8.0):
 			bad.append("the fins hardly moved")
-	# what is coming in, on the map: mortars, an airstrike and a nuke
+	# what is coming in, on the map: mortars, a gun run and a nuke
 	cqb._pick_at = w.global_position + Vector3(120.0, 0.0, -60.0)
 	cqb._call("mortar_at")
-	cqb._pick_at = w.global_position + Vector3(-80.0, 0.0, 90.0)
-	cqb._call("jdam_at")
+	cqb._strafe_from = w.global_position + Vector3(-80.0, 0.0, 90.0)
+	cqb._pick_at = w.global_position + Vector3(-80.0, 0.0, 260.0)
+	cqb._call("strafe_at")
 	cqb._pick_at = w.global_position + Vector3(400.0, 0.0, 300.0)
 	cqb._call("tacnuke_at")
 	var inbound: Array = cqb.inbound()
@@ -925,7 +930,6 @@ func _run_moon_test() -> void:
 ## its motor, open, and put every warhead on the mark it was given, from the
 ## far side of a quarter of the planet. --icbmtest=KIND,KM (with --preset=free).
 var _icbm_test := ""
-
 func _run_icbm_test(arg: String) -> void:
 	var parts := arg.split(",")
 	var kind: String = parts[0] if parts[0] != "" else "tel_yars"
@@ -2161,6 +2165,12 @@ func _ready() -> void:
 	# ...and this is the chart everything built once is laid down in: see
 	# `Sim.boot_affine` and `_carry_fixed`.
 	Sim.mark_boot_chart()
+	# Where the lakes are, before anything is sited: a town, a road and a tree
+	# all ask where the water is.
+	var _tl := Time.get_ticks_msec()
+	Sim.index_lakes()
+	if _boot_verbose:
+		print("[lakes] %d found round the chart in %d ms" % [Sim.lakes.size() >> 2, Time.get_ticks_msec() - _tl])
 	# The chart is on the country now, so the home strip can be put on the
 	# ground that is there rather than on the sea level it used to assume.
 	Sim.resite_home_field()
@@ -2316,6 +2326,11 @@ func _ready() -> void:
 	planet.name = "Planet"
 	add_child(planet)
 	planet.build(map.relief())
+	# The water standing above the sea, faded with the ground into the body.
+	lakes = LAKES_SCRIPT.new()
+	lakes.name = "Lakes"
+	lakes.set("planet", planet)
+	add_child(lakes)
 	clouds = CloudShell.new()
 	clouds.name = "Clouds"
 	add_child(clouds)
@@ -14987,13 +15002,13 @@ func _run_streak_test() -> void:
 		await get_tree().physics_frame
 	var bad: Array = []
 	var was_pick: Array = CqbMatch.streak_pick.duplicate()
-	CqbMatch.streak_pick = ["gunship", "jdam", "uav", "mortar"]
+	CqbMatch.streak_pick = ["gunship", "strafe", "uav", "mortar"]
 	var chosen: Array = CqbMatch.chosen_streaks()
 	var order := PackedStringArray()
 	for k in chosen:
 		order.append("%d=%s" % [int(k["key"]), String(k["id"])])
 	print("[streak] carried: %s" % " ".join(order))
-	if " ".join(order) != "4=uav 5=mortar 6=jdam 7=gunship":
+	if " ".join(order) != "4=uav 5=mortar 6=strafe 7=gunship":
 		bad.append("the keys are not cheapest first")
 	# kills by him, one at a time, on the enemy side
 	var earned: Array = []
@@ -15017,7 +15032,7 @@ func _run_streak_test() -> void:
 				earned.append("%d:%s" % [cqb.streak, id])
 		await get_tree().process_frame
 	print("[streak] earned on the way to %d kills: %s" % [cqb.streak, ", ".join(PackedStringArray(earned))])
-	if not earned.has("3:uav") or not earned.has("4:mortar") or not earned.has("6:jdam") \
+	if not earned.has("3:uav") or not earned.has("4:mortar") or not earned.has("6:strafe") \
 			or not earned.has("7:gunship"):
 		bad.append("not everything carried was earned at its count")
 	# round the ladder from the top: kill eight is the first rung again? no --
@@ -15029,23 +15044,106 @@ func _run_streak_test() -> void:
 	# a mortar barrage and the precision bomb, on a street
 	var spot := Vector3(cqb.centre.x + 30.0, 0.0, cqb.centre.y)
 	spot.y = Sim.height_at(spot.x, spot.z)
-	var queued_before: int = cqb._bombs.size()
+	# The mortar rounds are real rounds in the air now, not timers: counted
+	# where they are kept, and given their twelve second flight to land.
+	var in_flight := func() -> int:
+		var n_live := 0
+		for r0 in cqb._rounds:
+			if is_instance_valid(r0):
+				n_live += 1
+		return cqb._bombs.size() + n_live
+	var queued_before: int = in_flight.call()
 	cqb.bank["mortar"] = 1
-	cqb.bank["jdam"] = 1
 	cqb._picked("mortar", spot)
-	cqb._picked("jdam", spot + Vector3(-40, 0, 0))
-	var queued: int = cqb._bombs.size() - queued_before
-	print("[streak] mortar and bomb called: %d rounds on the way, banks now %s/%s" % [
-		queued, str(cqb.bank["mortar"]), str(cqb.bank["jdam"])])
-	if queued != 11 or int(cqb.bank["mortar"]) != 0 or int(cqb.bank["jdam"]) != 0:
-		bad.append("calling them did not queue ten rounds and one bomb and spend both")
-	var t := 0.0
-	while cqb._bombs.size() > queued_before and t < 14.0:
+	var queued: int = int(in_flight.call()) - queued_before
+	print("[streak] mortar called: %d rounds on the way, bank now %s" % [
+		queued, str(cqb.bank["mortar"])])
+	if queued != 10 or int(cqb.bank["mortar"]) != 0:
+		bad.append("calling it did not queue ten rounds and spend it")
+	# and the map has them coming in, not only where they will land
+	await get_tree().create_timer(3.0).timeout
+	var shown_shells := 0
+	var shown_gun := false
+	for it in cqb.inbound():
+		if String(it["kind"]) == "shell":
+			shown_shells += 1
+		elif String(it["kind"]) == "gun":
+			shown_gun = true
+	print("[streak] three seconds in, the map shows %d mortar rounds in the air and the battery %s" % [
+		shown_shells, "too" if shown_gun else "NOT"])
+	if shown_shells == 0 or not shown_gun:
+		bad.append("the mortar rounds were not on the map coming in")
+	var t := 3.0
+	while int(in_flight.call()) > queued_before and t < 24.0:
 		await get_tree().physics_frame
 		t += 1.0 / 120.0
 	print("[streak] all landed after %.1f s" % t)
-	if cqb._bombs.size() > queued_before:
+	if int(in_flight.call()) > queued_before:
 		bad.append("not everything landed")
+	# The airstrike: a pair of jets down the line from him to the mark, on the
+	# map as they come, and every bomb of the stick landing near the mark.
+	var landed_s: Array = []
+	var watch_s := func(nd: Node) -> void:
+		if nd is CqbMatch.CarpetBomb:
+			var cbm: Node3D = nd
+			cbm.tree_exiting.connect(func(): landed_s.append(cbm.global_position))
+	get_tree().node_added.connect(watch_s)
+	cqb.bank["strike"] = 1
+	var sk := Vector3(cqb.centre.x - 20.0, 0.0, cqb.centre.y + 10.0)
+	sk.y = Sim.height_at(sk.x, sk.z)
+	cqb._picked("strike", sk)
+	var srun: Node = null
+	for n0 in get_children():
+		if n0 is CqbMatch.CarpetRun:
+			srun = n0
+	# taken now: the run frees itself once it has flown out the far side
+	var came_over: bool = srun != null
+	var plane_on_map := false
+	var t_strike := 0.0
+	while is_instance_valid(srun) and t_strike < 40.0:
+		await get_tree().physics_frame
+		t_strike += 1.0 / 120.0
+		if not plane_on_map:
+			for it2 in cqb.inbound():
+				if String(it2["kind"]) == "plane" and String(it2.get("label", "")) == "AIRSTRIKE":
+					plane_on_map = true
+	get_tree().node_added.disconnect(watch_s)
+	var worst_s := 0.0
+	for lp in landed_s:
+		worst_s = maxf(worst_s, Vector2((lp as Vector3).x - sk.x, (lp as Vector3).z - sk.z).length())
+	print("[streak] airstrike: %s, %s on the map, %d bombs down, the furthest %.0f m from the mark" % [
+		"jets came over" if came_over else "NOTHING came over",
+		"shown" if plane_on_map else "NOT shown", landed_s.size(), worst_s])
+	if not came_over or not plane_on_map or landed_s.size() < 8 or worst_s > 90.0:
+		bad.append("the airstrike did not come over, show on the map, and put its stick on the mark")
+	# The gun run: a line drawn with two picks, two A-10s down it, on the map as
+	# they come, and their rounds landing along the line.
+	cqb.bank["strafe"] = 1
+	var g0 := Vector3(cqb.centre.x - 90.0, 0.0, cqb.centre.y - 30.0)
+	var g1 := Vector3(cqb.centre.x + 110.0, 0.0, cqb.centre.y + 40.0)
+	cqb._strafe_from = g0
+	var hits0: int = cqb.cannon_hits
+	cqb._picked("strafe", g1)
+	var grun: Node = null
+	for n1 in get_children():
+		if n1 is CqbMatch.GunRun:
+			grun = n1
+	var gun_came: bool = grun != null
+	var gun_on_map := false
+	var t_gun := 0.0
+	while is_instance_valid(grun) and t_gun < 45.0:
+		await get_tree().physics_frame
+		t_gun += 1.0 / 120.0
+		if not gun_on_map:
+			for it3 in cqb.inbound():
+				if String(it3.get("label", "")) == "A-10 GUN RUN":
+					gun_on_map = true
+	var gun_hits: int = cqb.cannon_hits - hits0
+	print("[streak] gun run: %s, %s on the map, %d rounds landed in %.1f s" % [
+		"A-10s came over" if gun_came else "NOTHING came over",
+		"shown" if gun_on_map else "NOT shown", gun_hits, t_gun])
+	if not gun_came or not gun_on_map or gun_hits < 30:
+		bad.append("the gun run did not come over, show on the map and put its rounds down")
 	# the carpet: a line drawn across the town, a B-2 down it, every bomb
 	# landing on the line and spread along it
 	var ca := Vector3(cqb.centre.x - 120.0, 0.0, cqb.centre.y + 40.0)
@@ -15157,7 +15255,7 @@ func _run_streak_test() -> void:
 	(dm._streak_ticks["strike"] as CheckButton).button_pressed = true
 	var five_refused: bool = not CqbMatch.streak_pick.has("strike") \
 		and CqbMatch.streak_pick.size() == 4
-	for id in ["gunship", "jdam", "mortar"]:
+	for id in ["gunship", "strafe", "mortar"]:
 		(dm._streak_ticks[id] as CheckButton).button_pressed = false
 	(dm._streak_ticks["uav"] as CheckButton).button_pressed = false
 	var none_refused: bool = CqbMatch.streak_pick == ["uav"]
@@ -18748,7 +18846,7 @@ func rechart(dir: Vector3) -> void:
 	var was: Array = []
 	for m in movers:
 		var p: Vector3 = (m as Node3D).global_position
-		was.append([Sim.chart_to_dir(p.x, p.z), p.y - Sim.sea_at(p.x, p.z)])
+		was.append([Sim.chart_to_dir(p.x, p.z), p.y - Sim.sea_shell(p.x, p.z)])
 	# The chart's old frame, so the world's works can be carried across it.
 	var o0: Vector3 = Sim.chart_origin
 	var e0: Vector3 = Sim.chart_east
@@ -18770,7 +18868,7 @@ func rechart(dir: Vector3) -> void:
 		var rec: Array = was[i]
 		var q: Vector2 = Sim.dir_to_chart(rec[0])
 		m2.global_position = Vector3(q.x,
-			Sim.sea_at(q.x, q.y) + float(rec[1]), q.y)
+			Sim.sea_shell(q.x, q.y) + float(rec[1]), q.y)
 		if m2 is RigidBody3D:
 			_reset_interp.call_deferred(m2)
 	# From above the air there is no ground to rebuild and no chart sheet

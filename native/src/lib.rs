@@ -592,6 +592,16 @@ impl Terra {
         PackedByteArray::from(bake_take(&PATCH).as_slice())
     }
 
+    /// The lakes and inland seas near a point of the chart: x and z of the
+    /// middle, the rim's radius and the surface above sea level, four floats
+    /// each. What the game draws them from and floats things on.
+    #[func]
+    fn lakes_in(&self, x: f64, z: f64, reach: f64) -> PackedFloat32Array {
+        let c = sphere::chart();
+        PackedFloat32Array::from(
+            sphere::lakes_in(&c, x as f32, z as f32, reach as f32).as_slice())
+    }
+
     /// The planet body's window under the eye, baked in the background:
     /// `sphere::body_window`, `n` texels square with its mips after it.
     #[func]

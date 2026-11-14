@@ -494,6 +494,15 @@ func _plan_network(nodes: Array, first_town: int, n_towns: int) -> Array:
 								best_at = li
 			if best_from == null:
 				break
+			# Unless the independent towns between them already make the road.
+			# They are sited on the line between the two regions, so the
+			# direct link ran down the same corridor a couple of kilometres off
+			# the chain for a hundred kilometres: two roads between every pair
+			# of regions, side by side, all the way.
+			if _chained(int(best_from), int(left[best_at])):
+				joined.append(left[best_at])
+				left.remove_at(best_at)
+				continue
 			# Two roads between them, not one. A single link makes the whole of
 			# one faction's country hang off one bridge: cut it and half the map
 			# is unreachable, and it reads as a chain of places rather than as
@@ -507,6 +516,17 @@ func _plan_network(nodes: Array, first_town: int, n_towns: int) -> Array:
 			joined.append(left[best_at])
 			left.remove_at(best_at)
 	return out
+
+## Whether a chain of independent towns, with at least one town in it, runs
+## between two regions. Hub indices and region numbers are the same thing: hub
+## zero is home, which is region zero.
+func _chained(ra: int, rb: int) -> bool:
+	for ch in _free_chains:
+		var a: int = int(ch[0])
+		var b: int = int(ch[1])
+		if ((a == ra and b == rb) or (a == rb and b == ra)) and not (ch[2] as Array).is_empty():
+			return true
+	return false
 
 ## The `k` shortest hops between two groups of places, each using a different
 ## town at either end -- so the second road is a separate route through

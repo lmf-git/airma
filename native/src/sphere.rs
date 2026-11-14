@@ -395,7 +395,303 @@ pub const OCEAN: f32 = 4600.0;
 
 /// Height above sea level for a direction, in metres, before anything built.
 pub fn generated(d: [f32; 3]) -> f32 {
-    generated_v(d, false)
+    lake_carve(generated_v(d, false), d, false)
+}
+
+/// The same with only the inland seas in it, for pictures too coarse to show a
+/// lake: the whole-planet sheet is twenty kilometres a texel, and asking every
+/// texel of it about every lake on the planet is most of a minute.
+pub fn generated_coarse(d: [f32; 3]) -> f32 {
+    lake_carve(generated_v(d, false), d, true)
+}
+
+// ------------------------------------------------------------------- lakes
+//
+// Standing water above the sea: lakes a few kilometres across, and inland seas
+// of a hundred.
+//
+// The planet had one body of water -- the ocean -- and everything inland was
+// dry: a river was a valley with a channel in it that only held water where the
+// cut went below sea level near the coast. These are basins with their own
+// surface, at their own height.
+//
+// Each sits on a cellular grid over the sphere, and whether a candidate is a
+// lake is decided by the ground it would sit in, not written down. Its surface
+// is the lowest point of the land round its rim, a few metres under it, so the
+// water cannot run out of the basin; a gentle bowl is taken out of the ground
+// inside the rim; and the water is wherever the land is then below the
+// surface. So a shore follows the ground's own contours -- inlets up valleys,
+// islands where a ridge stands clear -- rather than a circle, and the basin is
+// as deep as the ground lets it be. Candidates on a mountainside, too close to
+// the sea, or on a country's doorstep where the aerodrome and its towns are
+// built, are not lakes.
+
+/// Bit for `height_on`: the coarse ground, with the inland seas and not the
+/// lakes. Above the bits `carve` reads, so it means nothing to it.
+pub const G_COARSE: u32 = 1 << 8;
+
+struct LakeKind {
+    id: u64,
+    /// Grid spacing over the surface, in metres. Larger than the biggest
+    /// basin, so only the cells round a point can hold one that reaches it.
+    cell: f32,
+    /// How many cells hold a candidate.
+    chance: f32,
+    r_min: f32,
+    r_max: f32,
+    /// How far under its surface the middle of the basin ends up.
+    depth_min: f32,
+    depth_max: f32,
+    /// How much the rim may rise and fall and still hold water: past this the
+    /// "basin" is a hillside and the water would stand in a terrace.
+    spread: f32,
+    /// How far the middle may stand above the surface and still be dug out to
+    /// a basin: past this it is a hill, and a lake in it is a crater.
+    rise: f32,
+    seed: u32,
+}
+
+const LAKES: LakeKind = LakeKind {
+    id: 1, cell: 26_000.0, chance: 0.30, r_min: 2_000.0, r_max: 7_500.0,
+    depth_min: 10.0, depth_max: 55.0, spread: 150.0, rise: 90.0, seed: 0x1a4e_5eed,
+};
+const SEAS: LakeKind = LakeKind {
+    id: 2, cell: 240_000.0, chance: 0.28, r_min: 22_000.0, r_max: 65_000.0,
+    depth_min: 50.0, depth_max: 220.0, spread: 450.0, rise: 260.0, seed: 0x5ea5_0b0d,
+};
+
+/// The lowest a basin's surface may stand above the sea. Below this it would
+/// be the sea's own shore, and the two would meet in a step.
+const LAKE_MIN_LEVEL: f32 = 30.0;
+/// How far from a country's middle no lake is allowed: the aerodrome and the
+/// towns round it are laid out there on the ground as it was.
+const LAKE_CLEAR_HOME: f32 = 45_000.0;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Lake {
+    /// Direction of the middle, from the planet's centre.
+    pub c: [f32; 3],
+    /// Radius of the rim, in metres over the surface: the water is inside it.
+    pub r: f32,
+    /// The surface, in metres above sea level.
+    pub level: f32,
+    /// How much ground the bowl takes out at the middle.
+    pub sink: f32,
+}
+
+#[inline]
+fn hash3(i: i32, j: i32, k: i32, seed: u32) -> u32 {
+    let mut h = seed
+        ^ (i as u32).wrapping_mul(0x8da6_b343)
+        ^ (j as u32).wrapping_mul(0xd816_3841)
+        ^ (k as u32).wrapping_mul(0xcb1a_b31f);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    h
+}
+
+#[inline]
+fn unit(h: u32) -> f32 {
+    (h >> 8) as f32 / 16_777_216.0
+}
+
+/// Where a cell's candidate would be and how big, before the ground is asked
+/// whether it can hold it. Cheap: only hashes.
+#[inline]
+fn candidate(k: &LakeKind, i: i32, j: i32, l: i32, surf: f32) -> Option<([f32; 3], f32)> {
+    if unit(hash3(i, j, l, k.seed)) > k.chance {
+        return None;
+    }
+    let cs = k.cell / surf;
+    let p = [
+        (i as f32 + 0.1 + 0.8 * unit(hash3(i, j, l, k.seed ^ 0x11))) * cs,
+        (j as f32 + 0.1 + 0.8 * unit(hash3(i, j, l, k.seed ^ 0x22))) * cs,
+        (l as f32 + 0.1 + 0.8 * unit(hash3(i, j, l, k.seed ^ 0x33))) * cs,
+    ];
+    let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    // Only the cells the surface passes through own a candidate: one whose
+    // point is more than half a cell off it would be a second lake in the same
+    // place as its neighbour's.
+    if (len - 1.0).abs() > cs * 0.5 {
+        return None;
+    }
+    let r = k.r_min + (k.r_max - k.r_min) * unit(hash3(i, j, l, k.seed ^ 0x44)).powf(1.6);
+    Some(([p[0] / len, p[1] / len, p[2] / len], r))
+}
+
+/// Metres over the surface between two directions. The chord form: the
+/// arccosine of a dot product within a float of one has no digits left.
+#[inline]
+fn arc(a: [f32; 3], b: [f32; 3], surf: f32) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    2.0 * ((dx * dx + dy * dy + dz * dz).sqrt() * 0.5).min(1.0).asin() * surf
+}
+
+const LAKE_SHARDS: usize = 64;
+static LAKE_CACHE: OnceLock<Vec<std::sync::Mutex<std::collections::HashMap<u64, Option<Lake>>>>> =
+    OnceLock::new();
+
+/// Whether a candidate is a lake, and if so what kind. Asked of the ground,
+/// once per candidate, and remembered: every sample near it asks again.
+fn lake_in(k: &LakeKind, i: i32, j: i32, l: i32, c: [f32; 3], r: f32, surf: f32) -> Option<Lake> {
+    let key = (k.id << 60)
+        | (((i as u64) & 0xF_FFFF) << 40)
+        | (((j as u64) & 0xF_FFFF) << 20)
+        | ((l as u64) & 0xF_FFFF);
+    let shards = LAKE_CACHE.get_or_init(|| {
+        (0..LAKE_SHARDS).map(|_| std::sync::Mutex::new(std::collections::HashMap::new())).collect()
+    });
+    let shard = &shards[(key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58) as usize % LAKE_SHARDS];
+    if let Some(v) = shard.lock().unwrap().get(&key) {
+        return *v;
+    }
+    // Worked out with the lock let go: it is twenty height samples, and two
+    // threads arriving at the same answer at once is harmless.
+    let v = validate(k, i, j, l, c, r, surf);
+    shard.lock().unwrap().insert(key, v);
+    v
+}
+
+fn validate(k: &LakeKind, i: i32, j: i32, l: i32, c: [f32; 3], r: f32, surf: f32) -> Option<Lake> {
+    for hl in homelands().iter() {
+        if arc(c, *hl, surf) < r + LAKE_CLEAR_HOME {
+            return None;
+        }
+    }
+    // A lake inside one of the seas is a second surface in the same water.
+    if k.id == LAKES.id && lake_level(c, true) > f32::NEG_INFINITY {
+        return None;
+    }
+    // A frame on the surface at the middle, to walk the rim in.
+    let a = if c[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let e1 = norm(cross(c, a));
+    let e2 = cross(c, e1);
+    let ang = r / surf;
+    let (sa, ca) = ang.sin_cos();
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    const RIM: usize = 24;
+    for m in 0..RIM {
+        let t = std::f32::consts::TAU * m as f32 / RIM as f32;
+        let (st, ct) = t.sin_cos();
+        let q = norm([
+            c[0] * ca + (e1[0] * ct + e2[0] * st) * sa,
+            c[1] * ca + (e1[1] * ct + e2[1] * st) * sa,
+            c[2] * ca + (e1[2] * ct + e2[2] * st) * sa,
+        ]);
+        let h = generated_v(q, false);
+        lo = lo.min(h);
+        hi = hi.max(h);
+    }
+    if lo < LAKE_MIN_LEVEL + 4.0 || hi - lo > k.spread {
+        return None;
+    }
+    let level = lo - 4.0;
+    let hc = generated_v(c, false);
+    if hc - level > k.rise {
+        return None;
+    }
+    // Never down to the sea's own level: the ocean is drawn wherever the ground
+    // is under it, and through the lake that would be a second water surface.
+    let depth = (k.depth_min + (k.depth_max - k.depth_min) * unit(hash3(i, j, l, k.seed ^ 0x55)))
+        .min(level - 5.0);
+    if depth < 3.0 {
+        return None;
+    }
+    Some(Lake { c, r, level, sink: (hc - level).max(0.0) + depth })
+}
+
+/// Every lake whose rim reaches `d`, with how far its middle is, in metres.
+fn lakes_reaching<F: FnMut(&Lake, f32)>(d: [f32; 3], coarse: bool, mut f: F) {
+    let surf = planet().surf;
+    for k in [&SEAS, &LAKES] {
+        if coarse && k.id == LAKES.id {
+            continue;
+        }
+        let cs = k.cell / surf;
+        let i0 = (d[0] / cs).floor() as i32;
+        let j0 = (d[1] / cs).floor() as i32;
+        let l0 = (d[2] / cs).floor() as i32;
+        for di in -1..=1 {
+            for dj in -1..=1 {
+                for dl in -1..=1 {
+                    let (i, j, l) = (i0 + di, j0 + dj, l0 + dl);
+                    let Some((c, r)) = candidate(k, i, j, l, surf) else {
+                        continue;
+                    };
+                    let dist = arc(d, c, surf);
+                    if dist >= r {
+                        continue;
+                    }
+                    if let Some(lk) = lake_in(k, i, j, l, c, r, surf) {
+                        f(&lk, dist);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The ground with the basins taken out of it.
+fn lake_carve(h: f32, d: [f32; 3], coarse: bool) -> f32 {
+    let mut out = h;
+    lakes_reaching(d, coarse, |lk, dist| {
+        let t = dist / lk.r;
+        let b = 1.0 - t * t;
+        out -= lk.sink * b * b;
+    });
+    out
+}
+
+/// The surface of the standing water over `d`, in metres above sea level, or
+/// negative infinity where there is none. Over the whole of a basin's rim, not
+/// only where it is wet: whether the ground there is under it is the ground's
+/// business, the same as the sea's.
+pub fn lake_level(d: [f32; 3], coarse: bool) -> f32 {
+    let mut lv = f32::NEG_INFINITY;
+    lakes_reaching(d, coarse, |lk, _| lv = lv.max(lk.level));
+    lv
+}
+
+/// The lakes near a point of the chart, for the game to draw and to float
+/// things on: x, z of the middle in chart coordinates, rim radius and surface
+/// above sea level, four floats each.
+pub fn lakes_in(c: &Chart, x: f32, z: f32, reach: f32) -> Vec<f32> {
+    let surf = planet().surf;
+    let d0 = dir_from_chart(c, x, z);
+    let mut cands: Vec<(&LakeKind, i32, i32, i32, [f32; 3], f32)> = Vec::new();
+    for k in [&SEAS, &LAKES] {
+        let cs = k.cell / surf;
+        let span = reach / surf + 2.0 * cs;
+        let lo = |v: f32| ((v - span) / cs).floor() as i32;
+        let hi = |v: f32| ((v + span) / cs).floor() as i32;
+        for i in lo(d0[0])..=hi(d0[0]) {
+            for j in lo(d0[1])..=hi(d0[1]) {
+                for l in lo(d0[2])..=hi(d0[2]) {
+                    if let Some((cc, r)) = candidate(k, i, j, l, surf) {
+                        if arc(cc, d0, surf) < reach + r {
+                            cands.push((k, i, j, l, cc, r));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let found: Vec<Option<Lake>> = cands
+        .par_iter()
+        .map(|(k, i, j, l, cc, r)| lake_in(k, *i, *j, *l, *cc, *r, surf))
+        .collect();
+    let mut out = Vec::new();
+    for lk in found.into_iter().flatten() {
+        let (lx, lz) = chart_xz(c, lk.c);
+        out.extend_from_slice(&[lx, lz, lk.r, lk.level]);
+    }
+    out
 }
 
 /// The same field as it was before the country was given more relief and one
@@ -696,7 +992,7 @@ pub fn height(d: [f32; 3], radius: f32, flags: u32) -> f32 {
 /// The same, against a chart already in hand -- `ground_world_y` has one, and
 /// taking the lock again for every sample of a terrain chunk is not free.
 pub fn height_on(c: &Chart, d: [f32; 3], _radius: f32, flags: u32) -> f32 {
-    let gen = generated(d);
+    let gen = if flags & G_COARSE != 0 { generated_coarse(d) } else { generated(d) };
     // The carving is laid out in chart coordinates, which is where the roads
     // were surveyed and the fields sited, so it is asked for in those.
     let (x, z) = chart_xz(c, d);
@@ -1002,6 +1298,10 @@ fn sheet_texels(w: usize, h: usize, north: [f32; 3], radius: f32,
     const ONE: [(f32, f32); 1] = [(0.5, 0.5)];
     const FOUR: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
     let subs: &[(f32, f32)] = if relief { &FOUR } else { &ONE };
+    // Too coarse to show a lake -- the whole-planet sheet is twenty kilometres
+    // a texel -- and only the inland seas are asked about.
+    let coarse = texel > 9000.0;
+    let flags = if coarse { crate::G_ALL | G_COARSE } else { crate::G_ALL };
     out.par_chunks_mut(w * px).enumerate().for_each(|(j, row)| {
         for i in 0..w {
             let mut c = [0.0f32; 3];
@@ -1011,14 +1311,18 @@ fn sheet_texels(w: usize, h: usize, north: [f32; 3], radius: f32,
                 let u = u0 + (i as f32 + si) / w as f32 * du;
                 let v = v0 + (j as f32 + sj) / h as f32 * dv;
                 let d = sheet_dir(u, v, north);
-                let hs = height_on(&ch, d, radius, crate::G_ALL);
+                let hs = height_on(&ch, d, radius, flags);
                 let mo = p.moist.get_noise_3d(d[0], d[1], d[2]);
-                let cs = colour(d, hs, north, mo);
+                // Under a lake it is the lake's colour, by its own depth, the
+                // way the sea's is -- and frozen where the sea would be.
+                let lw = lake_level(d, coarse);
+                let cs = if hs < lw { colour(d, hs - lw, north, mo) } else { colour(d, hs, north, mo) };
                 for k in 0..3 {
                     c[k] += cs[k];
                 }
                 hh += hs;
-                land += hs.max(0.0);
+                // The relief is of what is seen: a lake's surface is flat.
+                land += hs.max(lw).max(0.0);
             }
             let n = subs.len() as f32;
             for k in 0..3 {
@@ -1055,8 +1359,18 @@ fn sheet_texels(w: usize, h: usize, north: [f32; 3], radius: f32,
     out
 }
 
-/// Sea level under a chart coordinate, in the same world `y` the ground uses.
+/// The water's surface under a chart coordinate, in the same world `y` the
+/// ground uses: the sea's, or a lake's where there is one. Mirrors
+/// `Sim.sea_at`.
 pub fn sea_at(c: &Chart, x: f32, z: f32) -> f32 {
+    let shell = sea_shell(c, x, z);
+    let lv = lake_level(dir_from_chart(c, x, z), false);
+    if lv > 0.0 { shell + lv } else { shell }
+}
+
+/// The sea's own level, with no lake in it: the curve of the planet and
+/// nothing else. Mirrors `Sim.sea_shell`.
+pub fn sea_shell(c: &Chart, x: f32, z: f32) -> f32 {
     crate::field::WATER_LEVEL - fall(c, x, z)
 }
 

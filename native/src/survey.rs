@@ -5,7 +5,7 @@
 //! stations, a handful of passes over all of them, and nothing worth handing
 //! back to script in between.
 
-use crate::field::{lerp, smoothstep, WATER_LEVEL};
+use crate::field::{lerp, smoothstep};
 use crate::index::{key, Map};
 use rayon::prelude::*;
 
@@ -659,10 +659,11 @@ fn project(p: &[(f32, f32)], y: &[f32], gr: &[f32]) -> Vec<f32> {
 /// by everything that comes after it -- over water the ground the profile is
 /// held near is the seabed -- so it runs again after every pass that could pull
 /// it back under.
-fn float_over_water(y: &mut [f32]) -> bool {
-    let deck = WATER_LEVEL + DECK_CLEAR;
+fn float_over_water(p: &[(f32, f32)], y: &mut [f32]) -> bool {
     let mut lifted = false;
-    for v in y.iter_mut() {
+    for (k, v) in y.iter_mut().enumerate() {
+        // Clear of the water that is there, a lake's as well as the sea's.
+        let deck = crate::world::water(p[k].0, p[k].1) + DECK_CLEAR;
         if *v < deck {
             *v = deck;
             lifted = true;
@@ -751,7 +752,7 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32],
                 total += over;
                 // A road cannot lie on the seabed, so a crossing is a bridge
                 // however short it is and however little it stands off the bed.
-                wet = wet || g[k] < WATER_LEVEL;
+                wet = wet || g[k] < crate::world::water(p[k].0, p[k].1);
                 // and one carried across a valley on purpose was meant to be
                 vale = vale || (kind == F_BRIDGE && deck[k].is_finite());
             }
@@ -910,7 +911,7 @@ pub fn finish(p: &[(f32, f32)], y0: &[f32], g: &[f32], gr: &[f32],
     let lines = starts.len().saturating_sub(1);
     let n = y0.len();
     let mut y = y0.to_vec();
-    float_over_water(&mut y);
+    float_over_water(p, &mut y);
     let owner = owners(n, starts);
     let grid = leg_grid(p, starts);
     let joins = junctions(p, starts, WELD);
@@ -936,7 +937,7 @@ pub fn finish(p: &[(f32, f32)], y0: &[f32], g: &[f32], gr: &[f32],
         // onto a deck and then settled is a bridge, one settled and then lifted
         // has a step at each abutment.
         let mut want = tie(&grid, p, &y, &owner, Some(&flags));
-        float_over_water(&mut want);
+        float_over_water(p, &mut want);
         // and where roads actually meet, one height rather than two
         let mut pin = vec![f32::NAN; n];
         for grp in &joins {

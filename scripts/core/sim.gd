@@ -243,6 +243,9 @@ func rechart_world(o: Vector3, e: Vector3, s2: Vector3) -> void:
 	_index_corridor()
 	_push_segments()
 	_push_world()
+	# The lakes are where they are on the planet; the chart's numbers for them
+	# are not.
+	index_lakes()
 
 # ------------------------------------------------------- the chart it was built on
 ## The chart the world's fixed works were laid down in.
@@ -321,7 +324,7 @@ func boot_to_world(p: Vector3) -> Vector3:
 		return p
 	var q := _chart_carry(boot_origin, boot_east, boot_south, chart_origin,
 		chart_east, chart_south, p.x, p.z)
-	return Vector3(q[0], p.y - sea_at(p.x, p.z) + sea_at(q[0], q[1]), q[1])
+	return Vector3(q[0], p.y - sea_shell(p.x, p.z) + sea_shell(q[0], q[1]), q[1])
 
 ## And back: a point in the chart there is now, in the one the world was built on.
 func world_to_boot(p: Vector3) -> Vector3:
@@ -329,12 +332,12 @@ func world_to_boot(p: Vector3) -> Vector3:
 		return p
 	var q := _chart_carry(chart_origin, chart_east, chart_south, boot_origin,
 		boot_east, boot_south, p.x, p.z)
-	return Vector3(q[0], p.y - sea_at(p.x, p.z) + sea_at(q[0], q[1]), q[1])
+	return Vector3(q[0], p.y - sea_shell(p.x, p.z) + sea_shell(q[0], q[1]), q[1])
 
 func _boot_map(x: float, y: float, z: float) -> PackedFloat64Array:
 	var q := _chart_carry(boot_origin, boot_east, boot_south, chart_origin,
 		chart_east, chart_south, x, z)
-	return PackedFloat64Array([q[0], y - sea_at(x, z) + sea_at(q[0], q[1]), q[1]])
+	return PackedFloat64Array([q[0], y - sea_shell(x, z) + sea_shell(q[0], q[1]), q[1]])
 
 ## The move from the chart the world was built on to the one there is now, as
 ## one transform good around `c` (a point in the built-on chart).
@@ -493,11 +496,72 @@ func warp_at(alt: float, powered: bool) -> float:
 var view_scale := 1.0
 var view_moon := Vector3.INF
 
-## Sea level at a point. The ocean is a shell, so it falls away with everything
-## else — a flat sea plane against curved ground would flood the far half of the
-## map. This is the MEAN surface: the swell rides on top of it.
+## The water's surface at a point: the sea's, or a lake's where there is one.
+## The ocean is a shell, so it falls away with everything else — a flat sea
+## plane against curved ground would flood the far half of the map. This is the
+## MEAN surface: the swell rides on top of it.
+##
+## A lake's surface counts. Nearly everything that asks this is asking where the
+## water is -- what a round splashes into, what a man wades in, where a town may
+## not be built, what a tree may not grow under -- and there was only ever one
+## kind of water to ask about. What wants the curve of the planet and nothing
+## else, the chart's own arithmetic, asks `sea_shell`.
 func sea_at(x: float, z: float) -> float:
+	var shell: float = WATER_LEVEL - planet_drop(x, z)
+	var lv: float = lake_level_at(x, z)
+	return shell + lv if lv > 0.0 else shell
+
+## The sea's own level with no lake in it: the curve of the planet.
+func sea_shell(x: float, z: float) -> float:
 	return WATER_LEVEL - planet_drop(x, z)
+
+# -------------------------------------------------------------------- lakes
+## The lakes and inland seas round the chart, as the extension found them: x and
+## z of the middle, the rim's radius and the surface above sea level, four
+## floats each. Rebuilt whenever the chart moves.
+var lakes := PackedFloat32Array()
+var _lake_grid: Dictionary = {}
+const LAKE_CELL := 20000.0
+## Far enough that the ground anyone can see from inside the air is covered.
+const LAKE_REACH := 900000.0
+signal lakes_changed
+
+func index_lakes() -> void:
+	lakes = PackedFloat32Array()
+	_lake_grid = {}
+	if globe and native != null and native.has_method("lakes_in"):
+		lakes = native.lakes_in(0.0, 0.0, LAKE_REACH)
+	for li in lakes.size() >> 2:
+		var b: int = li * 4
+		var cx: float = lakes[b]
+		var cz: float = lakes[b + 1]
+		var r: float = lakes[b + 2]
+		for cj in range(int(floor((cz - r) / LAKE_CELL)), int(floor((cz + r) / LAKE_CELL)) + 1):
+			for ci in range(int(floor((cx - r) / LAKE_CELL)), int(floor((cx + r) / LAKE_CELL)) + 1):
+				var k := Vector2i(ci, cj)
+				var arr: PackedInt32Array = _lake_grid.get(k, PackedInt32Array())
+				arr.append(li)
+				_lake_grid[k] = arr
+	lakes_changed.emit()
+
+## A lake's surface over this point, in metres above sea level, or -INF where
+## there is no lake: over the whole of its rim, wet or not, the way the sea's
+## surface is everywhere whether the ground is under it or not.
+func lake_level_at(x: float, z: float) -> float:
+	if _lake_grid.is_empty():
+		return -INF
+	var cell: Variant = _lake_grid.get(Vector2i(int(floor(x / LAKE_CELL)), int(floor(z / LAKE_CELL))))
+	if cell == null:
+		return -INF
+	var lv := -INF
+	for li in (cell as PackedInt32Array):
+		var b: int = li * 4
+		var dx: float = x - lakes[b]
+		var dz: float = z - lakes[b + 1]
+		var r: float = lakes[b + 2]
+		if dx * dx + dz * dz < r * r:
+			lv = maxf(lv, lakes[b + 3])
+	return lv
 
 # -------------------------------------------------------------------- swell
 ## Two long crossing swells, five hundred metres from crest to crest and a
@@ -576,6 +640,9 @@ static func _kept(sp: float, k: Vector2) -> float:
 
 ## The surface a hull actually floats on: the shell plus the swell riding on it.
 func sea_surface(x: float, z: float) -> float:
+	# A lake has no ocean swell on it.
+	if lake_level_at(x, z) > 0.0:
+		return sea_at(x, z)
 	return sea_at(x, z) + wave_at(x, z)
 
 const WATER_LEVEL := -35.0
@@ -1523,6 +1590,16 @@ func finish_roads() -> void:
 			failed += 1
 	_rt_jobs = []
 	_rt_out = []
+	var t_mg := Time.get_ticks_msec()
+	var n_before: int = lines.size()
+	lines = _split_at_towns(lines)
+	var n_split: int = lines.size()
+	lines = _merge_parallel(lines)
+	var n_merged: int = lines.size()
+	lines = _drop_twins(_snap_into_towns(lines))
+	if debug_roads:
+		print("[roads] %d legs: %d after going into the towns they pass through, %d after merging where they ran side by side, %d once twins were dropped (%d ms)" % [
+			n_before, n_split, n_merged, lines.size(), Time.get_ticks_msec() - t_mg])
 	_road_lines = _drop_orphans(lines)
 	var t_sv := Time.get_ticks_msec()
 	var verts := 0
@@ -1731,6 +1808,312 @@ func _on_drawn(drawn: PackedFloat32Array, grid: Dictionary, p: Vector2, y: float
 ## So the test is whether a component is a network rather than whether it
 ## reaches the airfield. Endpoints are shared exactly between legs that meet, so
 ## joining them up is a matter of matching coordinates.
+## Where two legs of the network run alongside one another, one road.
+##
+## Every leg is searched on its own, all of them at once, and none of them knows
+## the others exist. Two legs into the same town from places in roughly the
+## same direction both find the same cheap valley, and each builds its own road
+## down it: a trunk road that splits in two a few kilometres out and enters the
+## town twice, or a pair of carriageways a couple of hundred metres apart for
+## twenty kilometres. That is what was reported -- a road forking off into two
+## to head to the same city.
+##
+## So the legs are taken shortest first, and wherever a later one runs within
+## `MERGE_NEAR` of a road already laid for longer than `MERGE_RUN`, that
+## stretch is dropped: what is left of it joins the road it was shadowing, at a
+## junction, and the road it joins is split there so the junction is an end of
+## both -- which is what the survey welds and what the network is joined up by.
+## Two roads meeting at an angle are close for only a few hundred metres and are
+## left alone.
+const MERGE_NEAR := 500.0
+const MERGE_RUN := 1000.0
+const MERGE_STEP := 100.0
+const MERGE_CELL := 500.0
+## Shorter than this, what is left of a leg is not worth a road of its own.
+const MERGE_STUB := 250.0
+## A junction this close to the end of the road it lands on is that end.
+const MERGE_SNAP := 80.0
+
+static func _poly_len(pl: PackedVector2Array) -> float:
+	var s := 0.0
+	for k in range(pl.size() - 1):
+		s += pl[k].distance_to(pl[k + 1])
+	return s
+
+## The part of a polyline between two distances along it.
+static func _sub_poly(pl: PackedVector2Array, a: float, b: float) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	var s := 0.0
+	for k in range(pl.size() - 1):
+		var p: Vector2 = pl[k]
+		var q: Vector2 = pl[k + 1]
+		var d: float = p.distance_to(q)
+		var s1: float = s + d
+		if s1 >= a and s <= b and d > 0.0:
+			if out.is_empty():
+				out.append(p.lerp(q, clampf((a - s) / d, 0.0, 1.0)))
+			if s1 <= b:
+				out.append(q)
+			else:
+				out.append(p.lerp(q, clampf((b - s) / d, 0.0, 1.0)))
+				break
+		s = s1
+	return out
+
+func _merge_parallel(lines: Array) -> Array:
+	var order: Array = range(lines.size())
+	var lens: Array = []
+	for pl in lines:
+		lens.append(_poly_len(pl as PackedVector2Array))
+	order.sort_custom(func(x: int, y: int) -> bool: return float(lens[x]) < float(lens[y]))
+	var kept: Array = []
+	var grid: Dictionary = {}
+	# where each kept road is to be cut for a junction landing on it
+	var joins: Dictionary = {}
+	var cell_of := func(p: Vector2) -> Vector2i:
+		return Vector2i(int(floor(p.x / MERGE_CELL)), int(floor(p.y / MERGE_CELL)))
+	# Nearest point of the kept network to `p`, within one cell's reach, as
+	# [distance, line, distance along it, point]; distance is INF if none.
+	var nearest := func(p: Vector2) -> Array:
+		var best: Array = [INF, -1, 0.0, p]
+		var c: Vector2i = cell_of.call(p)
+		for dj in range(-1, 2):
+			for di in range(-1, 2):
+				var codes: Variant = grid.get(c + Vector2i(di, dj))
+				if codes == null:
+					continue
+				for code in (codes as PackedInt32Array):
+					var li: int = code >> 12
+					var si: int = code & 4095
+					var pl2: PackedVector2Array = kept[li]
+					var a: Vector2 = pl2[si]
+					var b: Vector2 = pl2[si + 1]
+					var ab: Vector2 = b - a
+					var t: float = clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1e-6), 0.0, 1.0)
+					var q: Vector2 = a + ab * t
+					var d: float = p.distance_to(q)
+					if d < float(best[0]):
+						var along := 0.0
+						for k in si:
+							along += pl2[k].distance_to(pl2[k + 1])
+						best = [d, li, along + a.distance_to(q), q]
+		return best
+	var keep := func(pl3: PackedVector2Array) -> void:
+		var li3: int = kept.size()
+		kept.append(pl3)
+		for si3 in range(mini(pl3.size() - 1, 4095)):
+			var a3: Vector2 = pl3[si3]
+			var b3: Vector2 = pl3[si3 + 1]
+			var lo: Vector2i = cell_of.call(Vector2(minf(a3.x, b3.x), minf(a3.y, b3.y)))
+			var hi: Vector2i = cell_of.call(Vector2(maxf(a3.x, b3.x), maxf(a3.y, b3.y)))
+			for cj in range(lo.y, hi.y + 1):
+				for ci in range(lo.x, hi.x + 1):
+					var k3 := Vector2i(ci, cj)
+					var arr: PackedInt32Array = grid.get(k3, PackedInt32Array())
+					arr.append((li3 << 12) | si3)
+					grid[k3] = arr
+	for li0 in order:
+		var pl: PackedVector2Array = lines[li0]
+		var total: float = float(lens[li0])
+		if pl.size() < 2 or total < 1.0:
+			continue
+		# which stretches of it shadow a road already laid
+		var n: int = maxi(int(ceil(total / MERGE_STEP)), 1)
+		var near := PackedByteArray()
+		near.resize(n + 1)
+		for k in n + 1:
+			var p: Vector2 = _sub_poly(pl, float(k) * total / float(n),
+				float(k) * total / float(n))[0] if k < n else pl[pl.size() - 1]
+			near[k] = 1 if float(nearest.call(p)[0]) < MERGE_NEAR else 0
+		var drops: Array = []
+		var k0 := -1
+		for k in n + 2:
+			var on: bool = k <= n and near[k] == 1
+			if on and k0 < 0:
+				k0 = k
+			elif not on and k0 >= 0:
+				var a: float = float(k0) * total / float(n)
+				var b: float = float(k - 1) * total / float(n)
+				if b - a >= MERGE_RUN:
+					drops.append([a, b])
+				k0 = -1
+		if drops.is_empty():
+			keep.call(pl)
+			continue
+		# what is left between the dropped stretches, each end that was cut
+		# joined to the road it ran beside
+		var from := 0.0
+		for di2 in drops.size() + 1:
+			var to: float = total if di2 == drops.size() else float(drops[di2][0])
+			var piece_cut_start: bool = di2 > 0
+			var piece_cut_end: bool = di2 < drops.size()
+			if to - from >= MERGE_STUB:
+				var piece: PackedVector2Array = _sub_poly(pl, from, to)
+				if piece.size() >= 2:
+					if piece_cut_start:
+						var j0: Array = nearest.call(piece[0])
+						if int(j0[1]) >= 0:
+							piece.insert(0, j0[3] as Vector2)
+							(joins.get_or_add(int(j0[1]), []) as Array).append(float(j0[2]))
+					if piece_cut_end:
+						var j1: Array = nearest.call(piece[piece.size() - 1])
+						if int(j1[1]) >= 0:
+							piece.append(j1[3] as Vector2)
+							(joins.get_or_add(int(j1[1]), []) as Array).append(float(j1[2]))
+					keep.call(piece)
+			if di2 < drops.size():
+				from = float(drops[di2][1])
+	# Split every kept road where something joins it, so each junction is the
+	# end of every road that meets there.
+	var out: Array = []
+	for li4 in kept.size():
+		var pl4: PackedVector2Array = kept[li4]
+		var cuts: Array = joins.get(li4, [])
+		var len4: float = _poly_len(pl4)
+		var at: Array = []
+		for c4 in cuts:
+			var s4: float = float(c4)
+			if s4 > MERGE_SNAP and s4 < len4 - MERGE_SNAP:
+				at.append(s4)
+		at.sort()
+		var prev := 0.0
+		for s5 in at:
+			if float(s5) - prev > 1.0:
+				out.append(_sub_poly(pl4, prev, float(s5)))
+				prev = float(s5)
+		out.append(_sub_poly(pl4, prev, len4))
+	# A junction that landed within a snap of a road's end is that end, so the
+	# piece that joins there has to end exactly on it.
+	return _snap_ends(out)
+
+## A leg that passes through a town on its way somewhere else goes into it.
+##
+## A leg is searched between its two ends and nothing else, so one bound for a
+## town beyond another ran through the nearer town's streets and out the far
+## side without stopping -- and the nearer town's own road to the same place
+## was built alongside it. Cut at the town, each half ends at the middle of it
+## like every other road there, and the half that duplicates the town's own
+## road is then a twin of it and goes.
+func _split_at_towns(lines: Array) -> Array:
+	var out: Array = []
+	for pl in lines:
+		var queue: Array = [pl]
+		var guard := 0
+		while not queue.is_empty() and guard < 256:
+			guard += 1
+			var p: PackedVector2Array = queue.pop_back()
+			var cut := false
+			for pad in _town_pads:
+				var c: Vector2 = pad["c"]
+				var r: float = float(pad["r"])
+				if p[0].distance_to(c) < r * 1.2 or p[p.size() - 1].distance_to(c) < r * 1.2:
+					continue
+				var best_d := INF
+				var best_s := 0.0
+				var along := 0.0
+				for k in range(p.size() - 1):
+					var a: Vector2 = p[k]
+					var ab: Vector2 = p[k + 1] - a
+					var t: float = clampf((c - a).dot(ab) / maxf(ab.length_squared(), 1e-6), 0.0, 1.0)
+					var d: float = c.distance_to(a + ab * t)
+					if d < best_d:
+						best_d = d
+						best_s = along + ab.length() * t
+					along += ab.length()
+				if best_d < r * 0.9:
+					var head: PackedVector2Array = _sub_poly(p, 0.0, best_s)
+					head.append(c)
+					var tail: PackedVector2Array = _sub_poly(p, best_s, along)
+					tail.insert(0, c)
+					queue.push_back(head)
+					queue.push_back(tail)
+					cut = true
+					break
+			if not cut:
+				out.append(p)
+	return out
+
+## A road that ends inside a town ends at its middle.
+##
+## Where a leg was cut back to a junction on the road it had been shadowing,
+## that junction can fall inside a town's streets a few hundred metres short of
+## the middle -- and a road from there to the next town is the same road as
+## the town's own, but to the twin test it ran between different places.
+func _snap_into_towns(lines: Array) -> Array:
+	for li in lines.size():
+		var p: PackedVector2Array = lines[li]
+		if p.size() < 2:
+			continue
+		for which in [0, p.size() - 1]:
+			var e: Vector2 = p[which]
+			for pad in _town_pads:
+				var c: Vector2 = pad["c"]
+				if e.distance_to(c) < float(pad["r"]) and e.distance_to(c) > 0.01:
+					p[which] = c
+					break
+		lines[li] = p
+	return lines
+
+## Of two roads between the same two places along much the same way, the
+## shorter. A loop round by a genuinely different route is left: past half as
+## long again it is a second way round, not a twin.
+static func _drop_twins(lines: Array) -> Array:
+	var lens: Array = []
+	for pl in lines:
+		lens.append(_poly_len(pl as PackedVector2Array))
+	var order: Array = range(lines.size())
+	order.sort_custom(func(x: int, y: int) -> bool: return float(lens[x]) < float(lens[y]))
+	var seen: Dictionary = {}
+	var keep := PackedByteArray()
+	keep.resize(lines.size())
+	keep.fill(1)
+	for li in order:
+		var p: PackedVector2Array = lines[li]
+		if p.size() < 2:
+			keep[li] = 0
+			continue
+		var ka: Vector2i = Vector2i((p[0] / 20.0).round())
+		var kb: Vector2i = Vector2i((p[p.size() - 1] / 20.0).round())
+		if ka == kb:
+			keep[li] = 0
+			continue
+		var key: String = "%s|%s" % [str(ka), str(kb)] if ka < kb else "%s|%s" % [str(kb), str(ka)]
+		if seen.has(key) and float(lens[li]) < float(seen[key]) * 1.5:
+			keep[li] = 0
+			continue
+		if not seen.has(key):
+			seen[key] = float(lens[li])
+	var out: Array = []
+	for li2 in lines.size():
+		if keep[li2] == 1:
+			out.append(lines[li2])
+	return out
+
+## Pull every road end that is within `MERGE_SNAP` of another road's end onto it.
+static func _snap_ends(lines: Array) -> Array:
+	var ends: Array = []
+	for pl in lines:
+		var p: PackedVector2Array = pl
+		if p.size() >= 2:
+			ends.append(p[0])
+			ends.append(p[p.size() - 1])
+	for li in lines.size():
+		var p2: PackedVector2Array = lines[li]
+		if p2.size() < 2:
+			continue
+		for which in [0, p2.size() - 1]:
+			var e: Vector2 = p2[which]
+			var best: Vector2 = e
+			var bd := MERGE_SNAP
+			for o in ends:
+				var d: float = e.distance_to(o as Vector2)
+				if d > 0.01 and d < bd:
+					bd = d
+					best = o
+			p2[which] = best
+		lines[li] = p2
+	return lines
+
 func _drop_orphans(lines: Array) -> Array:
 	if lines.size() < 2:
 		return lines
@@ -2075,7 +2458,9 @@ func register_town_pads(sites: Array) -> Array:
 		# small town on. Sites that are not already land are dropped, and the
 		# caller is told which so it does not build a town on a pad that is not
 		# there.
-		if y < WATER_LEVEL + 8.0:
+		# ...nor out of a lake: the platform has to stand clear of whichever
+		# water is there, in the same flat reckoning it is levelled in.
+		if y < sea_at(c.x, c.y) + planet_drop(c.x, c.y) + 8.0:
 			continue
 		kept.append(site)
 		_town_pads.append({"c": c, "r": r, "y": y})
@@ -2246,7 +2631,7 @@ func biome_weights(x: float, z: float, y_in: float, slope: float,
 	# moved with it. Measured, 44 of 120 places came back with a different
 	# biome after the chart was moved 150 km. Elevation above the local sea is
 	# the same number from any chart.
-	var y: float = y_in - sea_at(x, z) + WATER_LEVEL
+	var y: float = y_in - sea_shell(x, z) + WATER_LEVEL
 	# Latitude first, weather second. Without a band running with the map there
 	# is no reason for the far north to be colder than the middle, so climate
 	# was noise alone and the world had no geography to it — the same patchwork

@@ -169,6 +169,11 @@ func shelter(on: bool) -> void:
 
 ## Sights held up without the button, for the harness to photograph.
 var hold_ads := false
+## Sights latched up: ALT and the right button put them up and leave them
+## there, so a long watch down a street is not a finger held on a button. The
+## same again takes them down, and so does breaking into a run. The right
+## button on its own is still held to aim, as it always was.
+var ads_latched := false
 ## How far into the sights he is, 0 hip and 1 shouldered.
 var _ads := 0.0
 ## Field glasses, on B: the bomb bay lever in a cockpit and nothing at all out
@@ -991,6 +996,7 @@ func _on_wall(delta: float) -> void:
 	body.in_reload = -1.0
 	body.in_foot_ik = false
 	_ads = 0.0
+	ads_latched = false
 	binos = false
 	_bino = 0.0
 	body.animate(delta)
@@ -1443,8 +1449,12 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 		jam = Obstacles.segment(e0, e0 + ld * (float(g["len"]) + 0.35)) < 1.0
 	_block = move_toward(_block, 1.0 if jam else 0.0, delta * 6.0)
 	body.in_block = _block
-	var want_ads: float = 1.0 if ((Sim.held(&"ads") or hold_ads) and reloading <= 0.0
-		and not _sprint and not chute and _block < 0.3) else 0.0
+	if Sim.tapped(&"ads") and Sim.held(&"freelook"):
+		ads_latched = not ads_latched
+	if _sprint or chute or dead:
+		ads_latched = false
+	var want_ads: float = 1.0 if ((Sim.held(&"ads") or hold_ads or ads_latched)
+		and reloading <= 0.0 and not _sprint and not chute and _block < 0.3) else 0.0
 	if binos and (want_ads > 0.0 or _sprint or chute or reloading > 0.0 or _trav != ""
 			or _throw_t >= 0.0):
 		binos = false

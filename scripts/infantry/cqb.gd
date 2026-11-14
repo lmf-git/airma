@@ -84,8 +84,8 @@ const STREAK_POOL := [
 		"note": "Ten rounds walked over a spot you pick on the map."},
 	{"id": "strike", "name": "AIRSTRIKE", "at": 5,
 		"note": "A stick of seven along the line to your mark."},
-	{"id": "jdam", "name": "PRECISION BOMB", "at": 6,
-		"note": "One heavy bomb, exactly where you put it."},
+	{"id": "strafe", "name": "A-10 GUN RUN", "at": 6,
+		"note": "Two points on the map set a line; a pair of A-10s come down it with their guns."},
 	{"id": "gunship", "name": "AC-130 GUNNER", "at": 7,
 		"note": "You on the guns of a gunship over the town."},
 	{"id": "carpet", "name": "B-2 CARPET BOMB", "at": 8,
@@ -117,7 +117,7 @@ static func chosen_streaks() -> Array:
 
 const UAV_TIME := 30.0
 var streak := 0
-var bank := {"uav": 0, "mortar": 0, "strike": 0, "jdam": 0, "gunship": 0, "carpet": 0,
+var bank := {"uav": 0, "mortar": 0, "strike": 0, "strafe": 0, "gunship": 0, "carpet": 0,
 	"missile": 0, "cruise": 0, "tacnuke": 0, "stratnuke": 0}
 ## The cruise missile in the air, if there is one.
 var _cruise: CruiseMissile = null
@@ -129,12 +129,21 @@ const STRAT_LETHAL := 1500.0
 var _uav: UavDrone = null
 ## The first end of a carpet's line, while the map waits for the second.
 var _carpet_from := Vector3.INF
+## Where a gun run's line starts, between its two picks.
+var _strafe_from := Vector3.INF
+## Cannon rounds that have landed, for the harness.
+var cannon_hits := 0
 var uav_t := 0.0
 var map_tex: ImageTexture = null
 ## The player is somewhere else for a while -- at a gun station overhead --
 ## and the man standing in the street is not there to be shot.
 var away := false
 var _bombs: Array = []            # [seconds until it lands, where, how big]
+## Mortar rounds called down and not yet landed, in the air or waiting their
+## turn in the tube.
+var _rounds: Array = []
+## Where the last mortar barrage is being fired from, for the map.
+var _battery := Vector3.INF
 var stats := {"props": 0, "ruins": 0, "free_cells": 0}
 ## What was put down and where: [kind, position, yaw].
 var props: Array = []
@@ -878,6 +887,29 @@ func inbound() -> Array:
 		if not put:
 			groups.append({"kind": "bombs", "at": at, "pts": [at], "eta": float(b[0]),
 				"last": float(b[0]), "r": 9.0 * big})
+	# The mortar rounds' marks, the same way, and the rounds themselves in the
+	# air.
+	var live: Array = []
+	for mr in _rounds:
+		if not is_instance_valid(mr):
+			continue
+		live.append(mr)
+		var m2: MortarRound = mr
+		var put2 := false
+		for g in groups:
+			if Vector2(m2.to.x - (g["at"] as Vector3).x, m2.to.z - (g["at"] as Vector3).z).length() < 70.0:
+				(g["pts"] as Array).append(m2.to)
+				g["eta"] = minf(float(g["eta"]), m2.eta())
+				put2 = true
+				break
+		if not put2:
+			groups.append({"kind": "bombs", "at": m2.to, "pts": [m2.to], "eta": m2.eta(),
+				"last": m2.eta(), "r": 9.0 * 0.65})
+		if m2.in_air():
+			out.append({"kind": "shell", "at": m2.global_position, "head": m2.vel})
+	_rounds = live
+	if not live.is_empty() and _battery != Vector3.INF:
+		out.append({"kind": "gun", "at": _battery, "label": "MORTARS"})
 	for g in groups:
 		var n: int = (g["pts"] as Array).size()
 		g["label"] = "BOMB" if n == 1 else ("%d ROUNDS" % n)
@@ -888,11 +920,14 @@ func inbound() -> Array:
 	for n2 in world.get_children():
 		if n2 is CarpetRun and is_instance_valid(n2):
 			var cr := n2 as CarpetRun
-			var left: float = maxf(cr._end - cr._along, 0.0) / CarpetRun.SPEED
 			out.append({"kind": "plane", "at": cr.global_position, "head": cr._dir,
-				"from": cr.from, "to": cr.to, "label": "B-2",
-				"eta": maxf((cr._start.distance_to(cr.from) - cr._along) / CarpetRun.SPEED, 0.0),
-				"gone": left})
+				"from": cr.from, "to": cr.to, "label": cr.label,
+				"eta": cr.until_first(), "gone": cr.until_gone()})
+		elif n2 is GunRun and is_instance_valid(n2):
+			var gr2 := n2 as GunRun
+			out.append({"kind": "plane", "at": gr2.lead_at(), "head": gr2._dir,
+				"from": gr2.from, "to": gr2.to, "label": "A-10 GUN RUN",
+				"eta": gr2.until_fire()})
 		elif n2 is CarpetBomb and is_instance_valid(n2):
 			out.append({"kind": "falling", "at": (n2 as Node3D).global_position})
 	if is_instance_valid(_cruise):
@@ -914,10 +949,18 @@ func inbound() -> Array:
 		if t.map_target != Vector3.INF:
 			out.append({"kind": "mark", "at": t.map_target, "r": 25.0,
 				"label": "FIRE MISSION", "eta": -1.0})
+		# where it is firing from, so the rounds are seen coming from somewhere
+		out.append({"kind": "gun", "at": t.global_position, "label": t.display_name().to_upper()})
 		for m in get_tree().get_nodes_in_group("missiles"):
 			if is_instance_valid(m) and (m as Node).get("shooter") == t:
 				out.append({"kind": "missile", "at": (m as Node3D).global_position,
 					"head": (m as Node).get("vel"), "to": t.map_target, "label": ""})
+		# A rocket launcher's rounds are shells, not missiles: the M270 lays a
+		# ripple of them, and none of it was on the map until it had landed.
+		for sh2 in get_tree().get_nodes_in_group("shells"):
+			if is_instance_valid(sh2) and (sh2 as Node).get("shooter") == t:
+				out.append({"kind": "shell", "at": (sh2 as Node3D).global_position,
+					"head": (sh2 as Node).get("vel")})
 	return out
 
 func _call(id: String) -> bool:
@@ -965,36 +1008,84 @@ func _call(id: String) -> bool:
 			return false
 		"strike_at":
 			var at: Vector3 = _pick_at
-			# a stick of seven along the line from him to the mark
+			# A pair of strike jets down the line from him to the mark, low and
+			# fast, with a stick of bombs walked through it. It was seven bombs
+			# on a timer and the sound of a jet: nothing came over, and nothing
+			# was on the map until the bombs were.
 			var run := Vector3(at.x - player.global_position.x, 0.0, at.z - player.global_position.z)
 			run = run.normalized() if run.length() > 1.0 else Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
-			for i in 7:
-				var p: Vector3 = at + run * (i - 2) * 12.0 \
-					+ Vector3(_rng.randf_range(-3, 3), 0, _rng.randf_range(-3, 3))
-				_bombs.append([3.0 + i * 0.16, Vector3(p.x, _ground(p.x, p.z), p.z)])
-			Sim.report("airstrike inbound on your mark — three seconds, get down", Sim.Ev.GOOD)
-			Sfx.play_at(world, "roar", at + Vector3(0, 160, 0) - run * 300.0, 8.0, 1.35, 4000.0)
+			var nato: bool = ["usa", "uk", "france"].has(Sim.home_faction)
+			var sr := CarpetRun.new()
+			sr.arena = self
+			sr.spec_id = "a10" if nato else "su35"
+			sr.label = "AIRSTRIKE"
+			sr.speed = 210.0
+			sr.height = 320.0
+			sr.spacing = 13.0
+			sr.longest = 100.0
+			sr.run_in = 2600.0
+			sr.cluster = false
+			sr.load_weapon = "gbu32"
+			sr.min_bombs = 8
+			sr.max_bombs = 8
+			sr.wing = Vector3(38.0, 6.0, 34.0)
+			var a0: Vector3 = at - run * 45.0
+			var a1: Vector3 = at + run * 55.0
+			sr.from = Vector3(a0.x, _ground(a0.x, a0.z), a0.z)
+			sr.to = Vector3(a1.x, _ground(a1.x, a1.z), a1.z)
+			world.add_child(sr)
+			_pick_node = sr
+			Sim.report("airstrike inbound — a pair of %s down your line, bombs in about %d seconds, get down" % [
+				"A-10s" if nato else "Su-35s", int(sr.eta)], Sim.Ev.GOOD)
 			return true
-		"mortar", "jdam":
+		"mortar":
 			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
 				_picking = true
-				world.map.pick("MORTAR BARRAGE" if id == "mortar" else "PRECISION BOMB",
-					func(p: Vector3): _picked(id, p))
+				world.map.pick("MORTAR BARRAGE", func(p: Vector3): _picked(id, p))
 			return false
+		"strafe":
+			# two picks, like the carpet: where the guns open, then where they stop
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				_strafe_from = Vector3.INF
+				world.map.pick("A-10 GUN RUN — click where the strafe STARTS", func(p: Vector3):
+					_strafe_from = p
+					world.map.pick("A-10 GUN RUN — click where it ENDS",
+						func(q: Vector3): _picked("strafe", q)))
+			return false
+		"strafe_at":
+			if _strafe_from == Vector3.INF:
+				return false
+			var gr := GunRun.new()
+			gr.arena = self
+			gr.from = Vector3(_strafe_from.x, _ground(_strafe_from.x, _strafe_from.z), _strafe_from.z)
+			gr.to = Vector3(_pick_at.x, _ground(_pick_at.x, _pick_at.z), _pick_at.z)
+			world.add_child(gr)
+			_pick_node = gr
+			_strafe_from = Vector3.INF
+			Sim.report("A-10s inbound — a gun run down your line in about %d seconds" % int(gr.eta),
+				Sim.Ev.GOOD)
+			return true
 		"mortar_at":
-			# ten rounds walked over the spot, a few seconds' flight apart
+			# Ten rounds walked over the spot from a battery a kilometre and a
+			# bit back on his side of it, each in the air on its own arc.
+			var back := Vector3(player.global_position.x - _pick_at.x, 0.0,
+				player.global_position.z - _pick_at.z)
+			back = back.normalized() if back.length() > 5.0 else Vector3(sin(player.yaw), 0.0, cos(player.yaw))
+			var bat: Vector3 = _pick_at + back * 1300.0 + back.cross(Vector3.UP) * _rng.randf_range(-250.0, 250.0)
+			_battery = Vector3(bat.x, _ground(bat.x, bat.z) + 1.0, bat.z)
 			for i in 10:
 				var off := Vector3(_rng.randf_range(-20, 20), 0, _rng.randf_range(-20, 20))
 				var p: Vector3 = _pick_at + off
-				_bombs.append([4.0 + i * 0.7 + _rng.randf_range(0.0, 0.3),
-					Vector3(p.x, _ground(p.x, p.z), p.z), 0.65])
-			Sim.report("mortars on the way — ten rounds, first in four seconds", Sim.Ev.GOOD)
-			return true
-		"jdam_at":
-			var at2: Vector3 = _pick_at
-			_bombs.append([5.0, Vector3(at2.x, _ground(at2.x, at2.z), at2.z), 2.2])
-			Sim.report("precision bomb released — five seconds, get clear", Sim.Ev.GOOD)
-			Sfx.play_at(world, "roar", at2 + Vector3(0, 400, 0), 6.0, 1.2, 5000.0)
+				var mr := MortarRound.new()
+				mr.arena = self
+				mr.from = _battery + Vector3(_rng.randf_range(-6, 6), 0.0, _rng.randf_range(-6, 6))
+				mr.to = Vector3(p.x, _ground(p.x, p.z), p.z)
+				mr.flight = 12.0 + _rng.randf_range(-0.4, 0.4)
+				mr.delay = i * 0.7 + _rng.randf_range(0.0, 0.3)
+				world.add_child(mr)
+				_rounds.append(mr)
+			Sim.report("mortars firing — ten rounds, the first lands in twelve seconds", Sim.Ev.GOOD)
 			return true
 		"carpet":
 			# two picks: where the carpet starts, then where it ends
@@ -1079,8 +1170,8 @@ func _picked(id: String, at: Vector3) -> void:
 				world.map.pick_life = float(MARK_SECONDS[id])
 
 ## Seconds from the call to the last of it landing, and one more to see it.
-const MARK_SECONDS := {"tacnuke": 14.0, "stratnuke": 22.0, "strike": 5.5,
-	"mortar": 12.5, "jdam": 6.5, "missile": 50.0}
+const MARK_SECONDS := {"tacnuke": 14.0, "stratnuke": 22.0, "strike": 30.0,
+	"mortar": 20.0, "missile": 50.0}
 var _pick_node: Node = null
 
 ## A B-2 down a line the player drew on the map, laying a carpet of bombs
@@ -1090,13 +1181,26 @@ var _pick_node: Node = null
 ## far side. The bombs are real: they fall, and where they land they go off as
 ## the match's own bombs do, credited to the man who called it.
 class CarpetRun extends Node3D:
-	const SPEED := 230.0
-	const HEIGHT := 1100.0
+	## What flies it and how. As set out here it is the B-2's carpet; the
+	## airstrike sets it up as a pair of strike jets low and fast with a stick
+	## of bombs (see `_call("strike_at")`). One run, so the release is worked
+	## out the same way for both and the bombs land on the line either way.
+	var spec_id := "b2"
+	var speed := 230.0
+	var height := 1100.0
 	## Between canisters. Each one opens over the line and covers sixty metres
 	## of it with bomblets, so the footprints overlap at this.
-	const SPACING := 40.0
-	const LONGEST := 600.0
-	const RUN_IN := 7000.0
+	var spacing := 40.0
+	var longest := 600.0
+	var run_in := 7000.0
+	var cluster := true
+	var load_weapon := "cbu97"
+	var label := "B-2"
+	var min_bombs := 6
+	var max_bombs := 16
+	## A second aircraft on the leader's wing, in the run's own frame (x out to
+	## the right, z back), dropping every other bomb from its own track.
+	var wing := Vector3.ZERO
 	var arena: CqbMatch = null
 	var from := Vector3.ZERO
 	var to := Vector3.ZERO
@@ -1106,6 +1210,7 @@ class CarpetRun extends Node3D:
 	var _start := Vector3.ZERO
 	var _along := 0.0
 	var _drops: Array = []            # along-track distances to let go at
+	var _dropped := 0
 	var _end := 0.0
 
 	func _init() -> void:
@@ -1115,14 +1220,14 @@ class CarpetRun extends Node3D:
 		if not _drops.is_empty():
 			return
 		var flat := Vector3(to.x - from.x, 0.0, to.z - from.z)
-		var length: float = minf(flat.length(), LONGEST)
+		var length: float = minf(flat.length(), longest)
 		_dir = flat.normalized() if flat.length() > 1.0 else Vector3.FORWARD
-		bombs = clampi(int(length / SPACING) + 1, 6, 16)
+		bombs = clampi(int(length / spacing) + 1, min_bombs, max_bombs)
 		var base: float = from.y
 		# How far forward of its release a bomb lands from this height and speed,
 		# flown in the model the bombs fly.
-		var p := Vector3(0.0, base + HEIGHT, 0.0)
-		var v := Vector3(0.0, 0.0, -SPEED)
+		var p := Vector3(0.0, base + height, 0.0)
+		var v := Vector3(0.0, 0.0, -speed)
 		var flown := 0.0
 		var t := 0.0
 		while p.y > base and t < 60.0:
@@ -1131,52 +1236,306 @@ class CarpetRun extends Node3D:
 			flown += v.length() / 120.0
 			t += 1.0 / 120.0
 		var lead: float = -p.z
-		_start = from - _dir * (lead + RUN_IN)
-		_start.y = base + HEIGHT
+		_start = from - _dir * (lead + run_in)
+		_start.y = base + height
 		for i in bombs:
 			var s: float = length * float(i) / float(maxi(bombs - 1, 1))
-			_drops.append(RUN_IN + s)
-		_end = RUN_IN + lead + length + RUN_IN
-		eta = (RUN_IN + lead) / SPEED
-		# A carpet is cluster bombs, every one. The B-2 as it is set out carries
-		# a B83 and a B61 in its bays; this one is loaded for the job, and
-		# flies it with the doors open and the load showing.
-		var spec: Dictionary = JetSpec.get_spec("b2").duplicate(true)
-		for bay in spec["bays"]:
-			var st: Array = bay["stations"]
-			for i in st.size():
-				st[i]["weapon"] = "cbu97"
-		var m: Dictionary = JetFactory.build(spec)
-		var root: Node3D = m["root"]
-		for g in m["gear"]:
-			(g as Node3D).visible = false
-		for bay2 in spec["bays"]:
-			for d in (m["doors"] as Dictionary).get(bay2["id"], []):
-				(d as Node3D).rotation.z = deg_to_rad(float(bay2["door_angle"])) \
-					* float((d as Node).get_meta("side", 1.0))
-		for k in m["stores"]:
-			(m["stores"][k] as Node3D).visible = true
-		add_child(root)
+			_drops.append(run_in + s)
+		_end = run_in + lead + length + run_in
+		eta = (run_in + lead) / speed
+		add_child(_airframe())
+		if wing != Vector3.ZERO:
+			var w2: Node3D = _airframe()
+			w2.position = wing
+			add_child(w2)
 		global_position = _start
 		look_at(_start + _dir, Vector3.UP)
 		# put there, not flown there: without this the first frame is drawn
 		# part way between the middle of the world and the start of the run
 		reset_physics_interpolation()
-		Sfx.play_at(get_parent(), "roar", _start, 10.0, 0.8, 9000.0)
+		Sfx.play_at(get_parent(), "roar", _start, 10.0, 0.8 if spec_id == "b2" else 1.2, 9000.0)
+
+	## One of the aircraft flying it, loaded for the job and flying it with the
+	## doors open and the load showing. The B-2 as it is set out carries a B83
+	## and a B61 in its bays; a strike jet is set out for air to air.
+	func _airframe() -> Node3D:
+		var spec: Dictionary = JetSpec.get_spec(spec_id).duplicate(true)
+		for bay in spec.get("bays", []):
+			var st: Array = bay["stations"]
+			for i in st.size():
+				st[i]["weapon"] = load_weapon
+		var m: Dictionary = JetFactory.build(spec)
+		var root: Node3D = m["root"]
+		for g in m["gear"]:
+			(g as Node3D).visible = false
+		for bay2 in spec.get("bays", []):
+			for d in (m["doors"] as Dictionary).get(bay2["id"], []):
+				(d as Node3D).rotation.z = deg_to_rad(float(bay2.get("door_angle", 0.0))) \
+					* float((d as Node).get_meta("side", 1.0))
+		for k in m["stores"]:
+			(m["stores"][k] as Node3D).visible = true
+		return root
 
 	func _physics_process(delta: float) -> void:
-		_along += SPEED * delta
+		_along += speed * delta
 		global_position = _start + _dir * _along
 		while not _drops.is_empty() and _along >= float(_drops[0]):
 			_drops.pop_front()
 			var b := CarpetBomb.new()
 			b.arena = arena
-			b.vel = _dir * SPEED
-			b.cluster = true
+			b.vel = _dir * speed
+			b.cluster = cluster
 			get_parent().add_child(b)
-			b.place(global_position + Vector3(0.0, -3.0, 0.0))
+			# every other bomb off the wingman, from where he actually is
+			var off := Vector3(0.0, -3.0, 0.0)
+			if wing != Vector3.ZERO and _dropped % 2 == 1:
+				off += wing
+			b.place(global_transform * off)
+			_dropped += 1
 		if _along >= _end:
 			queue_free()
+
+	## Seconds until the first bomb lands, and until the run is gone.
+	func until_first() -> float:
+		return maxf((_start.distance_to(from) - _along) / speed, 0.0)
+
+	func until_gone() -> float:
+		return maxf(_end - _along, 0.0) / speed
+
+## A pair of A-10s down a line drawn on the map, guns firing.
+##
+## They come in from well out, diving shallow toward the start of the line; at a
+## kilometre and a bit the leader opens up and walks his fire from one end of
+## the line to the other, the wingman a second and a half behind him and a few
+## metres to one side, and both pull up and away over the far end. The rounds
+## are seen -- tracer from the nose to where they land -- and land a moment
+## after they are fired, which is the thing a gun run sounds like from the
+## ground: the strikes first, the gun after.
+class GunRun extends Node3D:
+	const SPEED := 190.0
+	const RUN_IN := 3600.0
+	## The dive, and the climb out after.
+	const DIVE := 0.19
+	const CLIMB := 0.26
+	## Lowest it comes, over the middle of the line.
+	const LOW := 110.0
+	const SLANT := 1150.0
+	const BURST := 2.2
+	## What is drawn and what lands, a second: the gun's sixty-five rounds a
+	## second, thinned to what the eye and the frame can take.
+	const RATE := 14.0
+	const SPREAD := 4.5
+	const SHELL_SPEED := 1000.0
+	const WING := Vector3(16.0, 0.0, 0.0)
+	const TRAIL := 1.5
+	var arena: CqbMatch = null
+	var from := Vector3.ZERO
+	var to := Vector3.ZERO
+	var eta := 0.0
+	var _dir := Vector3.FORWARD
+	var _len := 0.0
+	var _t := 0.0
+	var _jets: Array = []          # [model, lateral offset, delay]
+	var _fire0 := 0.0              # when the leader opens up, from the start
+	var _landing: Array = []       # [time it lands, where]
+	var _shots: Array = [0, 0]     # rounds fired by each jet
+	var _gone := 0.0
+	static var _tracer: Mesh = null
+
+	func _init() -> void:
+		top_level = true
+
+	func _enter_tree() -> void:
+		if not _jets.is_empty():
+			return
+		var flat := Vector3(to.x - from.x, 0.0, to.z - from.z)
+		_len = clampf(flat.length(), 40.0, 450.0)
+		_dir = flat.normalized() if flat.length() > 1.0 else Vector3.FORWARD
+		# fire opens when the leader is a slant range short of the line's start
+		var s_open: float = -sqrt(maxf(SLANT * SLANT - _height_at(-SLANT * 0.95) * _height_at(-SLANT * 0.95), 1.0))
+		_fire0 = (RUN_IN + s_open) / SPEED
+		eta = _fire0 + SLANT / SHELL_SPEED
+		_gone = (RUN_IN + _len + RUN_IN) / SPEED + TRAIL
+		for k in 2:
+			var spec: Dictionary = JetSpec.get_spec("a10").duplicate(true)
+			var m: Dictionary = JetFactory.build(spec)
+			for g in m["gear"]:
+				(g as Node3D).visible = false
+			for st in m["stores"]:
+				(m["stores"][st] as Node3D).visible = true
+			var root: Node3D = m["root"]
+			root.top_level = true
+			add_child(root)
+			_jets.append([root, WING * float(k), TRAIL * float(k)])
+		_place(0.0)
+		for j in _jets:
+			(j[0] as Node3D).reset_physics_interpolation()
+		Sfx.play_at(get_parent(), "roar", from - _dir * RUN_IN, 10.0, 1.15, 9000.0)
+		if GunRun._tracer == null:
+			var tm := BoxMesh.new()
+			tm.size = Vector3(0.12, 0.12, 1.0)
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.albedo_color = Color(1.0, 0.82, 0.4)
+			mat.emission_enabled = true
+			mat.emission = Color(1.0, 0.7, 0.3)
+			mat.emission_energy_multiplier = 5.0
+			tm.material = mat
+			GunRun._tracer = tm
+
+	## Height over the line's own ground at `s` metres along it: down the dive
+	## to the lowest point over the middle, then up the climb.
+	func _height_at(s: float) -> float:
+		var mid: float = _len * 0.5
+		if s < mid:
+			return LOW + (mid - s) * DIVE
+		return LOW + (s - mid) * CLIMB
+
+	## Where a jet is at `t` seconds into the run, `side` off the leader's track.
+	func _pos(t: float, side: Vector3) -> Vector3:
+		var s: float = t * SPEED - RUN_IN
+		var across: Vector3 = _dir.cross(Vector3.UP).normalized() * side.x
+		var g: Vector3 = from + _dir * s + across
+		return Vector3(g.x, from.y + minf(_height_at(s), 2500.0), g.z)
+
+	func _place(t: float) -> void:
+		for j in _jets:
+			var tt: float = t - float(j[2])
+			var p: Vector3 = _pos(tt, j[1])
+			var ahead: Vector3 = _pos(tt + 0.2, j[1])
+			var jn: Node3D = j[0]
+			jn.global_position = p
+			if ahead.distance_to(p) > 0.1:
+				jn.look_at(ahead, Vector3.UP)
+
+	func lead_at() -> Vector3:
+		return _pos(_t, Vector3.ZERO)
+
+	## Seconds until the first rounds land.
+	func until_fire() -> float:
+		return maxf(eta - _t, 0.0)
+
+	func _physics_process(delta: float) -> void:
+		_t += delta
+		_place(_t)
+		for k in _jets.size():
+			var j: Array = _jets[k]
+			var tf: float = _t - float(j[2]) - _fire0
+			if tf < 0.0 or tf > BURST:
+				continue
+			var want: int = int(tf * RATE)
+			while int(_shots[k]) < want:
+				_shots[k] = int(_shots[k]) + 1
+				# walked from one end of the line to the other over the burst
+				var f: float = clampf(float(_shots[k]) / (BURST * RATE), 0.0, 1.0)
+				var across: Vector3 = _dir.cross(Vector3.UP).normalized() * (j[1] as Vector3).x
+				var aim: Vector3 = from + _dir * (_len * f) + across \
+					+ Vector3(randf_range(-SPREAD, SPREAD), 0.0, randf_range(-SPREAD, SPREAD))
+				aim.y = Sim.height_at(aim.x, aim.z)
+				var muzzle: Vector3 = (j[0] as Node3D).global_position
+				_streak(muzzle, aim)
+				_landing.append([_t + muzzle.distance_to(aim) / SHELL_SPEED, aim])
+				if int(_shots[k]) % 6 == 1:
+					Sfx.play_at(get_parent(), "autocannon", muzzle, 9.0, 0.55, 6000.0)
+		var keep: Array = []
+		for l in _landing:
+			if _t >= float(l[0]):
+				if is_instance_valid(arena):
+					arena._cannon(l[1])
+			else:
+				keep.append(l)
+		_landing = keep
+		if _t >= _gone and _landing.is_empty():
+			queue_free()
+
+	## A tracer from the gun to where it lands, there for a blink.
+	func _streak(a: Vector3, b: Vector3) -> void:
+		var streak_mi := MeshInstance3D.new()
+		streak_mi.mesh = GunRun._tracer
+		streak_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		streak_mi.top_level = true
+		add_child(streak_mi)
+		var along_ab: Vector3 = a.lerp(b, randf_range(0.35, 0.8))
+		var lenv: float = minf(a.distance_to(b) * 0.25, 60.0)
+		streak_mi.global_position = along_ab
+		streak_mi.look_at(b, Vector3.UP if absf((b - a).normalized().y) < 0.98 else Vector3.FORWARD)
+		streak_mi.scale = Vector3(1.0, 1.0, lenv)
+		get_tree().create_timer(0.07).timeout.connect(streak_mi.queue_free)
+
+## One mortar round in the air. Fired from a battery off behind the man who
+## called it, it climbs and comes down on its mark when the plan said it would,
+## and goes off as the match's own bombs do, credited to him. It was a timer
+## with a bang at the end of it: nothing in the sky and nothing on the map
+## between the call and the round landing.
+class MortarRound extends Node3D:
+	const G := 9.81
+	var arena: CqbMatch = null
+	var from := Vector3.ZERO
+	var to := Vector3.ZERO
+	## Time of flight, and how long after the call it is fired.
+	var flight := 12.0
+	var delay := 0.0
+	var vel := Vector3.ZERO
+	var _t := 0.0
+	var _v0 := Vector3.ZERO
+	var _fired := false
+	var _whiz := false
+	static var _mesh: Mesh = null
+
+	func _init() -> void:
+		top_level = true
+
+	func _ready() -> void:
+		if MortarRound._mesh == null:
+			var st := MeshKit.begin()
+			MeshKit.cone(st, 0.06, 0.06, -0.22, 0.12, Vector3.ZERO, 8)
+			MeshKit.cone(st, 0.0, 0.06, -0.34, -0.22, Vector3.ZERO, 8)
+			MeshKit.box(st, Vector3(0.16, 0.01, 0.1), Vector3(0, 0, 0.18))
+			MeshKit.box(st, Vector3(0.01, 0.16, 0.1), Vector3(0, 0, 0.18))
+			MortarRound._mesh = MeshKit.finish(st, MeshKit.mat(Color(0.25, 0.28, 0.22), 0.6, 0.3))
+		var mi := MeshInstance3D.new()
+		mi.mesh = MortarRound._mesh
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mi)
+		# Up and over: the vertical speed that carries it from the tube to the
+		# mark in exactly the time of flight, which is a mortar's arc -- a few
+		# hundred metres up -- for a battery a kilometre or so off.
+		_v0 = Vector3((to.x - from.x) / flight,
+			(to.y - from.y + 0.5 * G * flight * flight) / flight, (to.z - from.z) / flight)
+		vel = _v0
+		visible = false
+		global_position = from
+		reset_physics_interpolation()
+
+	func _physics_process(delta: float) -> void:
+		if not _fired:
+			delay -= delta
+			if delay > 0.0:
+				return
+			_fired = true
+			visible = true
+			Sfx.play_at(get_parent(), "thump", from, 4.0, 0.85, 3000.0)
+			reset_physics_interpolation()
+		_t += delta
+		vel = _v0 - Vector3(0.0, G * _t, 0.0)
+		if not _whiz and flight - _t < 1.5:
+			_whiz = true
+			Sfx.play_at(get_parent(), "whiz", to + Vector3(0.0, 25.0, 0.0), 2.0, 0.65, 700.0)
+		if _t >= flight:
+			if is_instance_valid(arena):
+				arena._bomb(to, 0.65)
+			queue_free()
+			return
+		global_position = from + _v0 * _t + Vector3(0.0, -0.5 * G * _t * _t, 0.0)
+		if vel.length_squared() > 1.0:
+			look_at(global_position + vel, Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD)
+
+	## Seconds until it lands.
+	func eta() -> float:
+		return maxf(delay, 0.0) + flight - _t
+
+	func in_air() -> bool:
+		return _fired
 
 ## A cruise missile sent at a mark on the map. It flies itself most of the way,
 ## level and high; a kilometre and a half out and as far up, the picture is the
@@ -1876,6 +2235,40 @@ var _carpet_n := 0
 ## seconds, and each drawn as a bomb is -- three fireballs, two of them lamps
 ## reaching ninety metres, and a sound -- stopped the game while they went off
 ## and did less than it looked. They are drawn cheaply and hit as hard.
+## A round of thirty millimetre landing: small, many, and hard on anything with
+## armour. Not `_bomb` -- a cannon shell is not a bomblet, and sixty of those
+## booms in two seconds is a firework display rather than a gun.
+func _cannon(at: Vector3) -> void:
+	cannon_hits += 1
+	var fb := Effects.Boom.new()
+	fb.radius = 2.2
+	fb.smoke = false
+	fb.life_max = 0.3
+	fb.lit = cannon_hits % 8 == 0
+	world.add_child(fb)
+	fb.global_position = at + Vector3(0, 0.6, 0)
+	if cannon_hits % 2 == 0:
+		Effects.dust(world, at + Vector3(0, 0.3, 0), 1.6)
+	for n in soldiers.duplicate():
+		if not is_instance_valid(n) or (n as Soldier).team == 0:
+			continue
+		var off: Vector3 = (n as Soldier).global_position - at
+		off.y *= 0.5
+		var d: float = off.length()
+		if d < 3.6:
+			(n as Soldier).take_hit(260.0 * (1.0 - d / 3.6), player)
+	for v in get_tree().get_nodes_in_group("hittable"):
+		if not is_instance_valid(v) or not (v is Node3D) or v is Soldier or v == player \
+				or not v.has_method("take_hit") or not ("team" in v) or int(v.team) == 0:
+			continue
+		var dv: float = (v as Node3D).global_position.distance_to(at)
+		if dv < 6.0:
+			v.take_hit(95.0 * (1.0 - dv / 6.0), player)
+	if is_instance_valid(player) and not away:
+		var dp: float = player.global_position.distance_to(at)
+		if dp < 3.0:
+			player.take_hit(120.0 * (1.0 - dp / 3.0), player)
+
 func _bomb(at: Vector3, big := 1.0, many := false) -> void:
 	if many:
 		_carpet_n += 1

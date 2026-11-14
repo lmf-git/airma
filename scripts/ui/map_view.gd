@@ -925,13 +925,24 @@ func _draw_inbound(org: Vector2, ppm: float) -> void:
 	var now: float = float(Time.get_ticks_msec()) * 0.001
 	var blink: float = 0.55 + 0.45 * absf(sin(now * 6.0))
 	var warm := Color(1.0, 0.58, 0.18)
+	# What is on the chart. Something coming in from outside it -- a strike
+	# run starting kilometres out, a battery firing from beyond the town -- is
+	# shown at the edge, pointing at where it is, so it is seen coming rather
+	# than appearing at the moment it arrives.
+	var vp := get_viewport_rect().size
+	var box := Rect2(Vector2(28.0, 78.0), vp - Vector2(56.0, 170.0))
 	for it in (arena.call("inbound") as Array):
 		var d: Dictionary = it
 		var at: Vector3 = d["at"]
 		var q := _w2s(Vector2(at.x, at.z), org, ppm)
 		var eta: float = float(d.get("eta", -1.0))
 		var lab: String = String(d.get("label", ""))
-		match String(d["kind"]):
+		var kind := String(d["kind"])
+		if not box.has_point(q) and kind in ["plane", "missile", "shell", "gun"]:
+			_edge_arrow(q, box, kind, lab, eta, warm)
+			if kind != "plane" or not (d.has("from") and d.has("to")):
+				continue
+		match kind:
 			"bombs":
 				var r: float = maxf(float(d["r"]) * ppm, 3.0)
 				for p in (d["pts"] as Array):
@@ -978,10 +989,50 @@ func _draw_inbound(org: Vector2, ppm: float) -> void:
 					_label(q + Vector2(10.0, -8.0), txt, col, 12)
 			"falling":
 				draw_circle(q, 2.2, warm)
+			"shell":
+				# a round in the air: a dot, and a short tail back along where
+				# it has come from
+				var hv2: Variant = d.get("head", Vector3.ZERO)
+				var h2: Vector3 = hv2 if hv2 is Vector3 else Vector3.ZERO
+				var hd2 := Vector2(h2.x, h2.z)
+				if hd2.length() > 0.01:
+					draw_line(q, q - hd2.normalized() * 9.0, Color(warm.r, warm.g, warm.b, 0.55), 1.4)
+				draw_circle(q, 2.6, warm)
+			"gun":
+				var gc := Color(1.0, 0.86, 0.4)
+				draw_rect(Rect2(q - Vector2(4.5, 4.5), Vector2(9.0, 9.0)), gc, false, 1.6)
+				draw_circle(q, 1.6, gc)
+				if lab != "":
+					_label(q + Vector2(9.0, -6.0), lab, gc, 12)
 			"mark":
 				var mc := Color(1.0, 0.7, 0.3, blink)
 				draw_arc(q, maxf(float(d["r"]) * ppm, 6.0), 0.0, TAU, 24, mc, 1.6)
 				_label(q + Vector2(10.0, 14.0), lab, mc, 12)
+
+## Something inbound that is off the chart, drawn on its edge: an arrow
+## pointing out at it, and what it is and how long it has, or how far off.
+func _edge_arrow(q: Vector2, box: Rect2, kind: String, lab: String, eta: float,
+		warm: Color) -> void:
+	var c: Vector2 = box.get_center()
+	var dv: Vector2 = q - c
+	if dv.length() < 0.001:
+		return
+	var dn: Vector2 = dv.normalized()
+	# where the line out from the middle leaves the box
+	var tx: float = INF if absf(dn.x) < 1e-6 else ((box.size.x * 0.5) / absf(dn.x))
+	var ty: float = INF if absf(dn.y) < 1e-6 else ((box.size.y * 0.5) / absf(dn.y))
+	var e: Vector2 = c + dn * minf(tx, ty)
+	var col: Color = warm if kind == "shell" else Color(1.0, 0.86, 0.4)
+	var sd := Vector2(-dn.y, dn.x)
+	draw_colored_polygon(PackedVector2Array([e, e - dn * 12.0 + sd * 6.0, e - dn * 12.0 - sd * 6.0]), col)
+	if kind == "shell":
+		return
+	var txt := lab if lab != "" else kind.to_upper()
+	if eta > 0.0:
+		txt += "  %ds" % int(ceil(eta))
+	# inside the arrow, so it does not run off the screen with it
+	var at_l: Vector2 = e - dn * 22.0 + Vector2(-4.0 * float(txt.length()) * (0.5 + 0.5 * dn.x), 4.0)
+	_label(at_l, txt, col, 12)
 
 func _draw() -> void:
 	if globe:

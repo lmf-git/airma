@@ -5,7 +5,6 @@
 //! grade, and a hard penalty past the gradient a trunk road is built to -- plus
 //! water, the aerodrome keep-out and the runway itself.
 
-use crate::field::WATER_LEVEL;
 use crate::index::{key, Map};
 use crate::world::{on_runway, road_height, World};
 use std::collections::BinaryHeap;
@@ -79,7 +78,8 @@ pub fn step_cost(w: &World, ha: f32, hb: f32, run: f32, wx: f32, wz: f32) -> f32
     // Squared instead: a shallow river is worth about ten kilometres of detour,
     // the shelf is worth hundreds, and open ocean is still arithmetic nobody
     // will pay. `MAX_CROSSING` remains the hard limit on any single span.
-    let depth = WATER_LEVEL + 6.0 - hb;
+    // Against the water that is there: a lake's surface as well as the sea's.
+    let depth = crate::world::water(wx, wz) + 6.0 - hb;
     if depth > 0.0 {
         cost += run * (6.0 + depth * depth * 0.0165);
     }
@@ -310,7 +310,7 @@ pub fn worst_crossing(w: &World, pts: &[(f32, f32)]) -> f32 {
             let t = (k as f32 + 0.5) / steps as f32;
             let x = a.0 + (b.0 - a.0) * t;
             let z = a.1 + (b.1 - a.1) * t;
-            if road_height(w, x, z) < WATER_LEVEL {
+            if road_height(w, x, z) < crate::world::water(x, z) {
                 run += stride;
                 if run > worst {
                     worst = run;

@@ -667,6 +667,22 @@ pub fn set_globe(on: bool) {
     GLOBE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The water's surface at a chart point, in the flat frame `base` answers in:
+/// the sea's level, or a lake's above it. What a road has to bridge and what
+/// the router prices as wet -- the sea was the only water there was, so a road
+/// would have been laid across a lake bed under thirty metres of it.
+#[inline]
+pub fn water(x: f32, z: f32) -> f32 {
+    if GLOBE.load(std::sync::atomic::Ordering::Relaxed) {
+        let c = crate::sphere::chart();
+        let lv = crate::sphere::lake_level(crate::sphere::dir_from_chart(&c, x, z), false);
+        if lv > 0.0 {
+            return crate::field::WATER_LEVEL + lv;
+        }
+    }
+    crate::field::WATER_LEVEL
+}
+
 #[inline]
 pub fn base(x: f32, z: f32) -> f32 {
     if GLOBE.load(std::sync::atomic::Ordering::Relaxed) {
