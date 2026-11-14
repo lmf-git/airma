@@ -233,9 +233,144 @@ func rechart_world(o: Vector3, e: Vector3, s2: Vector3) -> void:
 			for p2 in pts:
 				np.append(move.call(p2))
 			b["pts"] = np
+	# The town streets, which are pushed to the extension with the trunk roads
+	# and were pushed again here unmoved: after a chart move the street stain
+	# and the clearance the buildable test keeps from a kerb were both still
+	# laid out wherever the towns had been in the old chart.
+	for si in _segments.size():
+		var sg: Array = _segments[si]
+		_segments[si] = [move.call(sg[0]), move.call(sg[1])]
 	_index_corridor()
 	_push_segments()
 	_push_world()
+
+# ------------------------------------------------------- the chart it was built on
+## The chart the world's fixed works were laid down in.
+##
+## The towns, the street furniture, the trees, the road surfaces, the
+## aerodromes -- everything built once rather than simulated -- is drawn in the
+## coordinates of the chart the world was built on, and none of it was ever
+## renumbered when the chart moved. The ground was, the town platforms were,
+## the aeroplanes were; the buildings stayed at their old numbers, which in the
+## new chart are somewhere else, at a height that belonged to other ground. Fly
+## a hundred and fifty kilometres and the towns you left were standing in the
+## sea, or a hundred metres underground, or in the air.
+##
+## They stay in this frame, and `boot_affine` carries them into whichever chart
+## is current. It is worked out afresh from this frame every time rather than
+## chained from one move to the next, so nothing creeps however many times the
+## chart moves, and back on this chart it is exactly the identity.
+var boot_origin := Vector3.ZERO
+var boot_east := Vector3.ZERO
+var boot_south := Vector3.ZERO
+
+## This chart is the one the world is being built on.
+func mark_boot_chart() -> void:
+	boot_origin = chart_origin
+	boot_east = chart_east
+	boot_south = chart_south
+
+## Whether the chart has moved off the one the world was built on.
+func off_boot_chart() -> bool:
+	return boot_origin != Vector3.ZERO and (boot_origin != chart_origin
+		or boot_east != chart_east or boot_south != chart_south)
+
+## A point of one chart as a point of another, x and z, in doubles.
+##
+## The same sums as `chart_to_dir` and `dir_to_chart`, written out in doubles
+## because they are differenced: the slope and turn `boot_affine` needs are a
+## few hundred metres of difference between numbers a hundred kilometres big,
+## and a Vector3 keeps those to a centimetre or so -- which over a 250 m step is
+## a turn of four parts in a hundred thousand, and a metre and a half at the
+## far edge of a forty kilometre road mesh.
+func _chart_carry(fo: Vector3, fe: Vector3, fs: Vector3, to: Vector3, te: Vector3,
+		ts: Vector3, x: float, z: float) -> PackedFloat64Array:
+	var ux: float = fo.x
+	var uy: float = fo.y
+	var uz: float = fo.z
+	var d: float = sqrt(x * x + z * z)
+	if d > 1e-9:
+		var tx: float = fe.x * x + fs.x * z
+		var ty: float = fe.y * x + fs.y * z
+		var tz: float = fe.z * x + fs.z * z
+		var tl: float = sqrt(tx * tx + ty * ty + tz * tz)
+		var ca: float = cos(d / PLANET_R)
+		var sa: float = sin(d / PLANET_R) / tl
+		ux = fo.x * ca + tx * sa
+		uy = fo.y * ca + ty * sa
+		uz = fo.z * ca + tz * sa
+	var ul: float = sqrt(ux * ux + uy * uy + uz * uz)
+	ux /= ul
+	uy /= ul
+	uz /= ul
+	var c: float = ux * to.x + uy * to.y + uz * to.z
+	var px: float = ux - to.x * c
+	var py: float = uy - to.y * c
+	var pz: float = uz - to.z * c
+	var pl: float = sqrt(px * px + py * py + pz * pz)
+	if pl < 1e-15:
+		return PackedFloat64Array([0.0, 0.0])
+	var k: float = atan2(pl, c) * PLANET_R / pl
+	return PackedFloat64Array([(px * te.x + py * te.y + pz * te.z) * k,
+		(px * ts.x + py * ts.y + pz * ts.z) * k])
+
+## A point laid down on the chart the world was built on, in the chart there is
+## now: the same place on the planet, at the same height above the sea.
+func boot_to_world(p: Vector3) -> Vector3:
+	if not off_boot_chart():
+		return p
+	var q := _chart_carry(boot_origin, boot_east, boot_south, chart_origin,
+		chart_east, chart_south, p.x, p.z)
+	return Vector3(q[0], p.y - sea_at(p.x, p.z) + sea_at(q[0], q[1]), q[1])
+
+## And back: a point in the chart there is now, in the one the world was built on.
+func world_to_boot(p: Vector3) -> Vector3:
+	if not off_boot_chart():
+		return p
+	var q := _chart_carry(chart_origin, chart_east, chart_south, boot_origin,
+		boot_east, boot_south, p.x, p.z)
+	return Vector3(q[0], p.y - sea_at(p.x, p.z) + sea_at(q[0], q[1]), q[1])
+
+func _boot_map(x: float, y: float, z: float) -> PackedFloat64Array:
+	var q := _chart_carry(boot_origin, boot_east, boot_south, chart_origin,
+		chart_east, chart_south, x, z)
+	return PackedFloat64Array([q[0], y - sea_at(x, z) + sea_at(q[0], q[1]), q[1]])
+
+## The move from the chart the world was built on to the one there is now, as
+## one transform good around `c` (a point in the built-on chart).
+##
+## Not a rotation and a shift. The two charts are each the planet laid flat
+## about a different point, and between them the same ground stands at a
+## height that changes across it -- the curve falls away from one middle and
+## not the other -- so the carry is a turn, a shift and a lean: x and z turned
+## and moved, y raised by an amount that runs linearly across the ground. The
+## curvature itself is the same in both charts and drops out, so the lean is
+## right to a few centimetres over tens of kilometres; what is left is the
+## projection's own stretch, which is under a metre forty kilometres from `c`
+## with the charts a hundred and fifty apart. Uprights stay upright: the y
+## axis is left alone, and what leans is the ground and everything lying on it.
+func boot_affine(c: Vector3) -> Transform3D:
+	if not off_boot_chart():
+		return Transform3D.IDENTITY
+	const H := 250.0
+	var m0 := _boot_map(c.x, c.y, c.z)
+	var mxp := _boot_map(c.x + H, c.y, c.z)
+	var mxn := _boot_map(c.x - H, c.y, c.z)
+	var mzp := _boot_map(c.x, c.y, c.z + H)
+	var mzn := _boot_map(c.x, c.y, c.z - H)
+	var ax: float = (mxp[0] - mxn[0]) / (2.0 * H)
+	var ay: float = (mxp[1] - mxn[1]) / (2.0 * H)
+	var az: float = (mxp[2] - mxn[2]) / (2.0 * H)
+	var bx: float = (mzp[0] - mzn[0]) / (2.0 * H)
+	var by: float = (mzp[1] - mzn[1]) / (2.0 * H)
+	var bz: float = (mzp[2] - mzn[2]) / (2.0 * H)
+	# The shift, worked in doubles: it is the difference of two numbers the
+	# size of the chart move.
+	var ox: float = m0[0] - (ax * c.x + bx * c.z)
+	var oy: float = m0[1] - (ay * c.x + c.y + by * c.z)
+	var oz: float = m0[2] - (az * c.x + bz * c.z)
+	return Transform3D(Basis(Vector3(ax, ay, az), Vector3.UP, Vector3(bx, by, bz)),
+		Vector3(ox, oy, oz))
 
 ## Latitude of a point on the ground, in radians: zero at the airfield, positive
 ## toward the top of the chart. Real, in the sense that it is the angle at the

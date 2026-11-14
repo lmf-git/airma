@@ -621,6 +621,164 @@ func build() -> void:
 	_landmarks()
 	_home_base()
 	mark.call("landmarks")
+	_lay_down()
+
+# -------------------------------------------------------------- chart moves
+## Everything this built, as it was built, so it can be carried into whatever
+## chart is current: see `Sim.boot_affine`. Each entry is the node, its
+## transform as built, the point it is carried about, how it is carried, and
+## for the pieces carried bit by bit, the bits as built.
+##
+## Nothing here was ever moved when the chart moved. Every building, lamp post,
+## tree, road surface and fuel tank stayed at its old numbers, and in the new
+## chart those numbers are another place at another height: fly a hundred and
+## fifty kilometres and turn round, and the towns you left were standing in the
+## sea, or under a hill, or in the air.
+var _laid: Array = []
+var _sites_laid: Array = []
+var _streets_laid: Array = []
+## Carried as one piece: the node's own transform. Good to a centimetre over a
+## town, under a metre over a forty kilometre road mesh.
+const CARRY_NODE := 0
+## A MultiMesh spread too wide for one transform -- fuel tanks a hundred
+## kilometres apart -- carried an instance at a time.
+const CARRY_EACH := 1
+## A mesh spread too wide for one transform, small enough to redo by vertex:
+## the bridges and the power lines.
+const CARRY_VERTS := 2
+## Wider than this and one transform for the whole node will not do.
+const ONE_PIECE := 8000.0
+## ...unless it is too many vertices to redo, which the road surfaces are:
+## thirty-odd of them came to a million vertices and a third of a second, every
+## chart move. One transform does them to under a metre.
+const VERTS_MAX := 20000
+## The MultiMeshes carried an instance at a time, and their entries in `_laid`:
+## anything that redraws one of their instances has to carry it the same way.
+var _each: Dictionary = {}
+
+func _lay_down() -> void:
+	_laid.clear()
+	_each.clear()
+	for ch in get_children():
+		if not (ch is Node3D):
+			continue
+		var n3: Node3D = ch
+		var xf: Transform3D = n3.transform
+		var entry: Array = [n3, xf, xf.origin, CARRY_NODE, null]
+		if ch is MultiMeshInstance3D and (ch as MultiMeshInstance3D).multimesh != null:
+			var mm: MultiMesh = (ch as MultiMeshInstance3D).multimesh
+			var ab: AABB = mm.get_aabb()
+			entry[2] = xf * ab.get_center()
+			if ab.size.length() > ONE_PIECE:
+				var xs: Array = []
+				for i in mm.instance_count:
+					xs.append(mm.get_instance_transform(i))
+				entry[3] = CARRY_EACH
+				entry[4] = xs
+				_each[ch] = entry
+		elif ch is MeshInstance3D and (ch as MeshInstance3D).mesh is ArrayMesh:
+			var me: ArrayMesh = (ch as MeshInstance3D).mesh
+			var ab2: AABB = me.get_aabb()
+			entry[2] = xf * ab2.get_center()
+			if ab2.size.length() > ONE_PIECE:
+				var surfs: Array = []
+				var verts := 0
+				for s in me.get_surface_count():
+					var arr: Array = me.surface_get_arrays(s)
+					verts += (arr[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+					surfs.append([me.surface_get_primitive_type(s), arr,
+						me.surface_get_material(s)])
+				if verts <= VERTS_MAX:
+					entry[3] = CARRY_VERTS
+					entry[4] = surfs
+		_laid.append(entry)
+	_sites_laid.clear()
+	for t in sites:
+		_sites_laid.append(t["c"])
+	_streets_laid = _streets.duplicate(true)
+
+## The chart has moved: carry everything built into it. Worked from what was
+## laid down every time, so there and back again is exactly where it started.
+func rechart() -> void:
+	for entry in _laid:
+		var n3: Node3D = entry[0]
+		if not is_instance_valid(n3):
+			continue
+		var xf: Transform3D = entry[1]
+		match int(entry[3]):
+			CARRY_NODE:
+				n3.transform = Sim.boot_affine(entry[2]) * xf
+			CARRY_EACH:
+				var mm: MultiMesh = (n3 as MultiMeshInstance3D).multimesh
+				var xs: Array = entry[4]
+				for i in xs.size():
+					mm.set_instance_transform(i, _carried(xf, xs[i]))
+			CARRY_VERTS:
+				_carry_mesh(n3 as MeshInstance3D, xf, entry[4])
+	for i in mini(sites.size(), _sites_laid.size()):
+		sites[i]["c"] = _carried_xz(_sites_laid[i])
+	for j in mini(_streets.size(), _streets_laid.size()):
+		var sg: Array = _streets_laid[j]
+		_streets[j] = [_carried_xz(sg[0]), _carried_xz(sg[1])]
+
+## One instance of a MultiMesh carried on its own, in its node's own frame.
+func _carried(node_xf: Transform3D, t: Transform3D) -> Transform3D:
+	var w: Transform3D = node_xf * t
+	return node_xf.affine_inverse() * (Sim.boot_affine(w.origin) * w)
+
+func _carried_xz(p: Vector2) -> Vector2:
+	var w: Vector3 = Sim.boot_to_world(Vector3(p.x, 0.0, p.y))
+	return Vector2(w.x, w.z)
+
+## A mesh redrawn with every vertex carried, a couple of kilometres of it at a
+## time by one transform: right to a centimetre, and a transform per patch
+## rather than per vertex.
+func _carry_mesh(mi: MeshInstance3D, node_xf: Transform3D, surfs: Array) -> void:
+	const PATCH := 2000.0
+	var me := mi.mesh as ArrayMesh
+	var back: Transform3D = node_xf.affine_inverse()
+	var patches := {}
+	me.clear_surfaces()
+	for s in surfs:
+		var arr: Array = (s[1] as Array).duplicate()
+		var vin: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var vout := PackedVector3Array()
+		vout.resize(vin.size())
+		var nin: Variant = arr[Mesh.ARRAY_NORMAL]
+		var nout := PackedVector3Array()
+		if nin is PackedVector3Array:
+			nout.resize((nin as PackedVector3Array).size())
+		for k in vin.size():
+			var w: Vector3 = node_xf * vin[k]
+			var key := Vector2i(int(floor(w.x / PATCH)), int(floor(w.z / PATCH)))
+			var a: Variant = patches.get(key)
+			if a == null:
+				a = Sim.boot_affine(Vector3((float(key.x) + 0.5) * PATCH, 0.0,
+					(float(key.y) + 0.5) * PATCH))
+				patches[key] = a
+			var at: Transform3D = a
+			vout[k] = back * (at * w)
+			if k < nout.size():
+				nout[k] = (back.basis * (at.basis * (node_xf.basis
+					* (nin as PackedVector3Array)[k]))).normalized()
+		arr[Mesh.ARRAY_VERTEX] = vout
+		if nout.size() > 0:
+			arr[Mesh.ARRAY_NORMAL] = nout
+		me.add_surface_from_arrays(int(s[0]), arr)
+		if s[2] != null:
+			me.surface_set_material(me.get_surface_count() - 1, s[2])
+
+## Redraw one instance of a MultiMesh from where it stands in the chart the world
+## was built on, carrying it the way its batch is carried -- and remember it
+## that way, so the next chart move carries what it has become and not what it
+## was built as.
+func _redraw(mmi: MultiMeshInstance3D, i: int, t: Transform3D) -> void:
+	var entry: Variant = _each.get(mmi)
+	if entry == null:
+		mmi.multimesh.set_instance_transform(i, t)
+		return
+	(entry[4] as Array)[i] = t
+	mmi.multimesh.set_instance_transform(i, _carried(entry[1], t))
 
 # -------------------------------------------------------------- town detail
 ## Street furniture: the things you only see when you are down among them.
@@ -735,9 +893,11 @@ func _furn_key(x: float, z: float) -> int:
 ## Flatten whatever street furniture is within `r` of `at`: a lamp post goes
 ## over the way it was pushed, a bench or a kiosk is driven into the ground.
 ## Returns how many went.
-func knock(at: Vector3, r: float, push: Vector3) -> int:
+func knock(at_in: Vector3, r: float, push: Vector3) -> int:
 	if _furniture.is_empty():
 		return 0
+	# Where the furniture stands is recorded where it was built: see `_laid`.
+	var at: Vector3 = Sim.world_to_boot(at_in)
 	if _furn_hash.is_empty():
 		for bi in _furniture.size():
 			var xs: Array = _furniture[bi][1]
@@ -1117,7 +1277,9 @@ func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false,
 
 ## Flatten anything inside the blast. Returns how many structures came down.
 ## How many breakable structures are still standing inside a radius.
-func count_standing(pos: Vector3, radius: float) -> int:
+func count_standing(pos_in: Vector3, radius: float) -> int:
+	# What is standing is recorded where it was built: see `_laid`.
+	var pos: Vector3 = Sim.world_to_boot(pos_in)
 	var n := 0
 	for b in _breakable:
 		var c: Vector3 = b["centre"]
@@ -1130,15 +1292,17 @@ func count_standing(pos: Vector3, radius: float) -> int:
 				n += 1
 	return n
 
-func damage_area(pos: Vector3, radius: float) -> int:
+func damage_area(pos_in: Vector3, radius: float) -> int:
 	var hits := 0
 	# A building you can no longer see is a building you can no longer hit.
-	Obstacles.kill_near(pos, radius)
+	# The field is in the chart there is now; what was built is recorded where
+	# it was built.
+	Obstacles.kill_near(pos_in, radius)
+	var pos: Vector3 = Sim.world_to_boot(pos_in)
 	for b in _breakable:
 		var c: Vector3 = b["centre"]
 		if c.distance_to(pos) > float(b["radius"]) + radius:
 			continue
-		var mm: MultiMesh = (b["mmi"] as MultiMeshInstance3D).multimesh
 		var xf: Array = b["xforms"]
 		var dead: PackedByteArray = b["dead"]
 		for i in xf.size():
@@ -1154,7 +1318,7 @@ func damage_area(pos: Vector3, radius: float) -> int:
 			wreck = wreck.scaled(Vector3(1.05, 0.14, 1.05))
 			wreck = wreck.rotated(Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)).normalized(),
 				randf_range(0.02, 0.09))
-			mm.set_instance_transform(i, Transform3D(wreck, t.origin - Vector3(0, 0.4, 0)))
+			_redraw(b["mmi"], i, Transform3D(wreck, t.origin - Vector3(0, 0.4, 0)))
 		b["dead"] = dead
 	return hits
 
@@ -1247,7 +1411,11 @@ func _town_build(buckets: Array) -> void:
 const TOWN_WALLS := [Color(0.70, 0.67, 0.61), Color(0.58, 0.59, 0.60), Color(0.64, 0.58, 0.51)]
 
 ## The town block standing at `at`, as [batch, index in it], or nothing.
-func _block_at(at: Vector3) -> Array:
+func _block_at(at_in: Vector3) -> Array:
+	# Asked with a point in the chart there is now -- the obstacle field's, which
+	# is where the ground floors are cut from -- of blocks recorded where they
+	# were built.
+	var at: Vector3 = Sim.world_to_boot(at_in)
 	for b in _breakable:
 		if not b.has("town_kind"):
 			continue
@@ -1276,8 +1444,7 @@ func raise_block(at: Vector3, dy: float) -> int:
 	if h - dy < 1.0:
 		return -1
 	var cut := Basis(t.basis.x, t.basis.y * ((h - dy) / h), t.basis.z)
-	(b["mmi"] as MultiMeshInstance3D).multimesh.set_instance_transform(found[1],
-		Transform3D(cut, t.origin + Vector3(0, dy, 0)))
+	_redraw(b["mmi"], found[1], Transform3D(cut, t.origin + Vector3(0, dy, 0)))
 	return int(b["town_kind"])
 
 ## ...and stand it back on the ground.
@@ -1286,8 +1453,7 @@ func lower_block(at: Vector3) -> void:
 	if found.is_empty():
 		return
 	var b: Dictionary = found[0]
-	(b["mmi"] as MultiMeshInstance3D).multimesh.set_instance_transform(found[1],
-		(b["xforms"] as Array)[found[1]])
+	_redraw(b["mmi"], found[1], (b["xforms"] as Array)[found[1]])
 
 ## True when a point falls inside a town footprint, so nothing tall gets planted
 ## on top of the buildings.

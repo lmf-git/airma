@@ -2158,6 +2158,9 @@ func _ready() -> void:
 	# On the country this sortie is flown from. There is no main airfield: the
 	# world is built around wherever you begin.
 	Sim.set_chart(Sim.home_dir())
+	# ...and this is the chart everything built once is laid down in: see
+	# `Sim.boot_affine` and `_carry_fixed`.
+	Sim.mark_boot_chart()
 	# The chart is on the country now, so the home strip can be put on the
 	# ground that is there rather than on the sea level it used to assume.
 	Sim.resite_home_field()
@@ -18725,12 +18728,22 @@ func rechart(dir: Vector3) -> void:
 	# renumbered, every terrain chunk rebuilt, and two sheets rasterised.
 	var _rc := Time.get_ticks_msec()
 	var movers: Array = []
-	for g in ["hittable", "vehicles", "ships", "satellites", "walkers"]:
+	# The capture zones as well: a zone is a flag and a ring standing over a
+	# town, and it stayed at its old numbers while the town was carried away
+	# from under it.
+	for g in ["hittable", "vehicles", "ships", "satellites", "walkers", "zones"]:
 		for n in get_tree().get_nodes_in_group(g):
 			if n is Node3D and not movers.has(n):
 				movers.append(n)
 	if is_instance_valid(player) and not movers.has(player):
 		movers.append(player)
+	# What was built once, as it stands on the chart the world was built on --
+	# taken before the first move, while that is still the chart.
+	if _bases_laid.is_empty() and not Sim.off_boot_chart():
+		for ab in bases:
+			if is_instance_valid(ab):
+				_bases_laid.append([ab, (ab as Node3D).transform])
+		_mask_laid = _mask_spots.duplicate()
 	# Read everything in the old chart before the chart moves.
 	var was: Array = []
 	for m in movers:
@@ -18744,6 +18757,14 @@ func rechart(dir: Vector3) -> void:
 	# Roads, towns and aerodromes are stored as chart pairs, so they move with
 	# the chart unless they are moved back.
 	Sim.rechart_world(o0, e0, s0)
+	# The aerodromes before what is parked on them: a parked jet is a child of
+	# its base and may be a mover as well, and a mover is put where it belongs
+	# outright below.
+	for e in _bases_laid:
+		var ab2: Node3D = e[0]
+		if is_instance_valid(ab2):
+			var bx: Transform3D = e[1]
+			ab2.transform = Sim.boot_affine(bx.origin) * bx
 	for i in movers.size():
 		var m2: Node3D = movers[i]
 		var rec: Array = was[i]
@@ -18761,12 +18782,18 @@ func rechart(dir: Vector3) -> void:
 	# are owed, and paid once when the eye comes back down: see `_settle_chart`.
 	var sub: Node3D = _chart_subject()
 	if (sub is LaunchVehicle or sub is Icbm) and is_instance_valid(planet) and planet.dormant:
+		# The towns and the obstacle field with them: nobody can see a street
+		# from orbit, and carrying twenty thousand boxes several times a second
+		# on time warp is the same waste the ground would be.
 		_chart_owed = true
 		_rechart_worst = maxi(_rechart_worst, Time.get_ticks_msec() - _rc)
 		if _boot_verbose:
 			print("[rechart] in space: %d ms" % (Time.get_ticks_msec() - _rc))
 		return
 	_chart_owed = false
+	var _rc_fixed := Time.get_ticks_msec()
+	_carry_fixed()
+	_rc_fixed = Time.get_ticks_msec() - _rc_fixed
 	# The ground is numbered in the same coordinates, so all of it is stale.
 	if is_instance_valid(terrain):
 		terrain.recentre(Vector3.ZERO, true)
@@ -18786,8 +18813,34 @@ func rechart(dir: Vector3) -> void:
 		terrain.rechart()
 		_rc_clim = Time.get_ticks_msec() - t_c
 	_rechart_worst = maxi(_rechart_worst, Time.get_ticks_msec() - _rc)
-	print("[rechart] %d ms: renumbering and the ground %d, the map sheet %d, the climate %d — the last two are asked for, not waited on" % [
-		Time.get_ticks_msec() - _rc, _rc_ground - _rc, _rc_sheet, _rc_clim])
+	print("[rechart] %d ms: renumbering and the ground %d (the built works %d), the map sheet %d, the climate %d — the last two are asked for, not waited on" % [
+		Time.get_ticks_msec() - _rc, _rc_ground - _rc, _rc_fixed, _rc_sheet, _rc_clim])
+
+## The aerodromes and the painted-ground spots as they were built: see
+## `_carry_fixed`.
+var _bases_laid: Array = []
+var _mask_laid: Array = []
+
+## Carry everything built once into the chart there is now.
+##
+## The towns and everything else the scenery put down, the obstacle field that
+## makes them solid, the aerodromes and where the painted ground is centred.
+## None of these were ever moved by a chart move, so all of them were left at
+## their old numbers -- which in the new chart are another place, at a height
+## that belonged to other ground. That is what put towns in the sea. All of it
+## is carried from where it was built rather than from wherever the last move
+## left it, so it cannot drift however many times the chart moves.
+func _carry_fixed() -> void:
+	if is_instance_valid(scenery):
+		scenery.rechart()
+	Obstacles.recharted()
+	if is_instance_valid(obstacles):
+		# the few real bodies near the eye are rebuilt on the next look round
+		obstacles._near_at = Vector3(1e12, 0.0, 1e12)
+	for i in mini(_mask_spots.size(), _mask_laid.size()):
+		var m: Vector2 = _mask_laid[i]
+		var w: Vector3 = Sim.boot_to_world(Vector3(m.x, 0.0, m.y))
+		_mask_spots[i] = Vector2(w.x, w.z)
 
 ## Keep the chart under the player. Called every frame; does nothing almost
 ## every frame, which is the point of the threshold.
@@ -18822,6 +18875,7 @@ func _settle_chart() -> void:
 	if not _chart_owed or (is_instance_valid(planet) and planet.dormant):
 		return
 	_chart_owed = false
+	_carry_fixed()
 	if is_instance_valid(terrain):
 		terrain.recentre(Vector3.ZERO, true)
 		terrain.rechart()

@@ -73,7 +73,23 @@ render_mode diffuse_burley, specular_schlick_ggx, cull_back;
 
 // The relief the tactical map is drawn from -- the same bake, so the ground you
 // fly over and the ground you see from orbit cannot disagree.
-uniform sampler2D relief : source_color, filter_linear, repeat_enable;
+//
+// Mipmapped and anisotropic: the body is seen from straight down to edge on at
+// the limb, and without either the far half of the view sparkles.
+uniform sampler2D relief : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+// The same rule baked finer over the cap under the eye, with the ground's
+// height in alpha: see `Planet._patch_window`. `patch_win` is the part of the
+// sheet it covers -- u0, u1, v0, v1 -- and `patch_on` is whether there is one.
+uniform sampler2D patch_tex : source_color, filter_linear_mipmap_anisotropic, repeat_disable;
+uniform vec4 patch_win = vec4(0.0, 1.0, 0.0, 1.0);
+uniform float patch_on = 0.0;
+// What a full alpha is worth in metres, and how much the slopes are steepened
+// for being seen from hundreds of kilometres off. Real slopes averaged over a
+// texel of a few kilometres are a degree or two, which the sun cannot pick out;
+// eight brings the ranges and the river valleys up without turning every
+// valley into a trench.
+uniform float relief_top = 8000.0;
+uniform float relief_gain = 8.0;
 uniform float map_half = 600000.0;
 // 0 hides the body, 1 draws it. The ground is dithering out over the same band.
 uniform float fade = 0.0;
@@ -116,7 +132,63 @@ void fragment() {
 	// it was baked from the same generator, so there is nothing to paint over
 	// the top of it here.
 	vec2 uv = vec2(lon / TAU_ + 0.5, 0.5 - lat / PI_);
-	ALBEDO = texture(relief, uv).rgb;
+	// The footprint of the pixel on the sheet, taken across the seam where
+	// longitude wraps. Left to the hardware, the jump from one edge of the
+	// sheet to the other reads as a pixel the size of the planet and draws
+	// the smallest mip down the far meridian: a dark line pole to pole.
+	vec2 gx = dFdx(uv);
+	vec2 gy = dFdy(uv);
+	gx.x -= round(gx.x);
+	gy.x -= round(gy.x);
+	vec3 col = textureGrad(relief, uv, gx, gy).rgb;
+	vec3 n_p = u;
+	if (patch_on > 0.5) {
+		float us = patch_win.y - patch_win.x;
+		float vs = max(patch_win.w - patch_win.z, 1e-6);
+		float uc = (patch_win.x + patch_win.y) * 0.5;
+		// Measured from the window's middle, the short way round, so a
+		// window across the seam is one window and not two halves.
+		vec2 pu = vec2((fract(uv.x - uc + 0.5) - 0.5) / us + 0.5,
+			(uv.y - patch_win.z) / vs);
+		vec2 px = vec2(gx.x / us, gx.y / vs);
+		vec2 py = vec2(gy.x / us, gy.y / vs);
+		vec2 edge = min(pu, 1.0 - pu);
+		// A window that takes in every meridian has no east and west edge.
+		if (us > 0.999) {
+			edge.x = 1.0;
+		}
+		// Faded in from its own edge, so where the fine picture stops and
+		// the whole-planet one carries on is not a line.
+		float wgt = smoothstep(0.0, 0.08, min(edge.x, edge.y));
+		if (wgt > 0.0) {
+			vec4 p = textureGrad(patch_tex, pu, px, py);
+			col = mix(col, p.rgb, wgt);
+			// The slopes, from the height either side. Stepped by whatever
+			// the pixel covers, never less than a texel, so a distant
+			// mountain range is lit as a range and not as noise.
+			float nt = float(textureSize(patch_tex, 0).x);
+			float st = max(max(length(px), length(py)) * nt, 1.0) / nt;
+			float a_e = textureGrad(patch_tex, pu + vec2(st, 0.0), px, py).a;
+			float a_w = textureGrad(patch_tex, pu - vec2(st, 0.0), px, py).a;
+			float a_n = textureGrad(patch_tex, pu - vec2(0.0, st), px, py).a;
+			float a_s = textureGrad(patch_tex, pu + vec2(0.0, st), px, py).a;
+			float h_e = a_e * a_e * relief_top;
+			float h_w = a_w * a_w * relief_top;
+			float h_n = a_n * a_n * relief_top;
+			float h_s = a_s * a_s * relief_top;
+			// Metres of ground across those two steps, east and north.
+			float run_e = 2.0 * st * us * TAU_ * radius * max(cos(lat), 0.02);
+			float run_n = 2.0 * st * vs * PI_ * radius;
+			vec3 east_p = normalize(cross(north, u));
+			vec3 north_p = cross(u, east_p);
+			vec3 tilt = east_p * ((h_e - h_w) / run_e)
+				+ north_p * ((h_n - h_s) / run_n);
+			n_p = normalize(u - tilt * relief_gain * wgt);
+		}
+	}
+	ALBEDO = col;
+	// Back out of the planet's frame into the world's, and into the view.
+	NORMAL = normalize((VIEW_MATRIX * vec4(n_p * to_planet, 0.0)).xyz);
 	ROUGHNESS = 0.94;
 	METALLIC = 0.0;
 	// Opaque. It was drawn at an opacity of `fade` while the ground dithered
@@ -135,16 +207,45 @@ void fragment() {
 ##
 ## Equirectangular, and read by both the body and the tactical globe, so the
 ## planet you see from orbit and the planet you see on the map are the same
-## planet. One texel is 39 km, which is right for a body seen from at least
-## thirty-eight kilometres up; the theatre's own detail comes from the map's
-## detail sheet and from the terrain itself.
-const SHEET_W := 1024
-const SHEET_H := 512
+## planet. One texel is 20 km. It was 39, which was only ever right for the
+## planet seen whole: from a thousand kilometres up the country under you was
+## a few dozen blocks. What is under the eye now comes from `_patch_window`;
+## this is the rest of the ball, the limb and the far side.
+const SHEET_W := 2048
+const SHEET_H := 1024
+
+## The finer picture of the cap the eye can see, baked in the background and
+## laid over the sheet. Texels square; 2048 over the cap seen from a thousand
+## kilometres is three and a half kilometres a texel, and under one at ninety.
+const PATCH_RES := 2048
+## How far round the planet it reaches from the point under the eye, in
+## radians. At least far enough to cover the hand-over from the ground, and no
+## further than the eye gains from. Past half a radian the ground is seen so
+## edge on that the sheet does as well -- and a window that big reaches a pole
+## from anywhere past sixty degrees, where it then has to take in every
+## meridian and the 2048 texels across it are spread round the whole planet:
+## at three quarters of a radian the country under a warhead coasting at
+## 1200 km came out ten kilometres a texel east to west and smeared.
+const PATCH_MIN := 0.06
+const PATCH_MAX := 0.5
+## How far the eye may move, or the cap grow or shrink, before the window is
+## baked again, as a fraction of its own span.
+const PATCH_SLACK := 0.2
+## Mirrors `sphere::BODY_RELIEF_TOP`: the height a full alpha stands for.
+const RELIEF_TOP := 8000.0
 
 var terrain_gen: PlanetTerrain
 var sheet: ImageTexture
 var _mi: MeshInstance3D
 var _mat: ShaderMaterial
+## The cap under the eye: the picture, the window of the sheet it is a picture
+## of, the window a bake is in flight for, and the newest one wanted since.
+## Kept apart for the reason the map's globe keeps its own apart -- a picture
+## hung on the window asked for after it is a picture in the wrong place.
+var _patch_tex: ImageTexture = null
+var _patch_win := PackedFloat32Array()
+var _patch_asked := PackedFloat32Array()
+var _patch_next := PackedFloat32Array()
 ## How much of the body is being drawn, and so how much of the ground is not.
 var fade := 0.0
 ## True once the ground is completely hidden and there is no reason to keep
@@ -181,8 +282,9 @@ func bake_sheet() -> ImageTexture:
 			print("[planet] sheet baked: %d x %d in %d ms" % [
 				SHEET_W, SHEET_H, Time.get_ticks_msec() - t0])
 		WorldBake.put("planet_sheet", buf)
-	return ImageTexture.create_from_image(Image.create_from_data(
-		SHEET_W, SHEET_H, false, Image.FORMAT_RGB8, buf))
+	var img := Image.create_from_data(SHEET_W, SHEET_H, false, Image.FORMAT_RGB8, buf)
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
 
 func build(_relief: Texture2D) -> void:
 	position = Sim.planet_centre
@@ -199,6 +301,8 @@ func build(_relief: Texture2D) -> void:
 	_mat.set_shader_parameter("north", Sim.PLANET_NORTH)
 	_mat.set_shader_parameter("home", Vector3.UP)
 	_mat.set_shader_parameter("radius", Sim.PLANET_R)
+	_mat.set_shader_parameter("relief_top", RELIEF_TOP)
+	_mat.set_shader_parameter("patch_on", 0.0)
 	_mi = MeshInstance3D.new()
 	_mi.name = "PlanetBody"
 	_mi.mesh = _sphere()
@@ -251,9 +355,22 @@ func _sphere() -> ArrayMesh:
 			var d := _on(t1, p0, r)
 			# The pole rings are a fan, not a strip: two of the four corners are
 			# the same point and the degenerate triangle is not worth emitting.
+			#
+			# Clockwise seen from outside, which is Godot's front face -- the
+			# moon's winding, not the air's. This was wound the other way, so
+			# `cull_back` threw away the whole near side of the planet and what
+			# was drawn was the INSIDE of the far side: the picture of the
+			# wrong hemisphere, lit from behind, and only as far as the far
+			# plane reaches. Looking down from a few hundred kilometres the
+			# far wall under you is past the far plane, so there was a hole
+			# round the point below the eye with the sky showing through it
+			# and the cloud and air -- which find the planet by arithmetic --
+			# still painted over the gap. It went wherever the camera went.
+			# The air and cloud shells draw `cull_disabled`, so their winding
+			# never mattered and they are left alone.
 			if i > 0:
-				_tri(st, a, b, c)
-			_tri(st, a, c, d)
+				_tri(st, a, c, b)
+			_tri(st, a, d, c)
 	# No tangents: there are no UVs to make them from and nothing sampling a
 	# normal map. Asking for them is an error, not a no-op.
 	return st.commit()
@@ -285,6 +402,12 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 	_mi.scale = Vector3.ONE * Sim.view_scale
 	_mat.set_shader_parameter("to_planet",
 		Basis(Sim.chart_east, Sim.chart_origin, Sim.chart_south))
+	# The fine cap under the eye. Asked for a little before the body starts
+	# to show, so the hand-over from the ground is onto the fine picture and
+	# not onto the whole-planet one with the fine one arriving half way.
+	_collect_patch()
+	if alt > FADE_LO - 10000.0:
+		_want_patch(_patch_window(cam))
 	# Only once there is something out there to see. Left at 2600 km from the
 	# ground the far plane would be paying for the whole cap on every frame of
 	# a landing circuit.
@@ -327,3 +450,99 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 		# Trees and streets are gone long before this, but the meshes are still
 		# being submitted; above the band there is no reason to submit them.
 		(scenery as Node3D).visible = not dormant
+
+## The part of the sheet the eye can see from where it is: the cap out to the
+## horizon round the point under it, as u0, u1, v0, v1.
+##
+## Worked out from the camera's direction off the planet's centre in the
+## planet's own frame -- the same sum the shader does per pixel -- so the
+## window lands where the shader looks for it wherever the chart has got to.
+func _patch_window(cam: Camera3D) -> PackedFloat32Array:
+	var rel: Vector3 = cam.global_position - Sim.planet_centre
+	var dist: float = maxf(rel.length(), 1.0)
+	# The horizon of the planet as drawn, which is the shrunken one when a
+	# spacecraft is a long way out.
+	var rk: float = Sim.PLANET_R * Sim.view_scale
+	var ang: float = clampf(acos(clampf(rk / dist, 0.0, 1.0)) * 1.1, PATCH_MIN, PATCH_MAX)
+	var d: Vector3 = Sim.world_to_planet_dir(rel / dist).normalized()
+	var north: Vector3 = Sim.PLANET_NORTH
+	var home := Vector3.UP
+	var east: Vector3 = north.cross(home).normalized()
+	var lat: float = asin(clampf(d.dot(north), -1.0, 1.0))
+	var lon: float = atan2(d.dot(east), d.dot(home))
+	var uc: float = lon / TAU + 0.5
+	var vc: float = 0.5 - lat / PI
+	var dv: float = ang / PI
+	# Meridians close up toward the poles, so the same cap spans more of them
+	# the further it is from the equator; one with a pole in it spans them all.
+	var du := 0.5
+	if sin(ang) < cos(lat) * 0.995:
+		du = minf(asin(sin(ang) / cos(lat)) / TAU, 0.5)
+	return PackedFloat32Array([uc - du, uc + du,
+		clampf(vc - dv, 0.0, 1.0), clampf(vc + dv, 0.0, 1.0)])
+
+## Bake the window if what is held no longer covers it. One bake in flight at a
+## time, and what goes out after it is the newest window wanted meanwhile.
+func _want_patch(win: PackedFloat32Array) -> void:
+	if Sim.native == null or not Sim.native.has_method("body_patch_request"):
+		return
+	if _patch_win.size() == 4 and not _patch_stale(_patch_win, win):
+		return
+	if _patch_asked.size() == 4:
+		if not _patch_stale(_patch_asked, win):
+			return
+		_patch_next = win
+		return
+	if Sim.native.body_patch_request(PATCH_RES, Sim.PLANET_NORTH,
+			win[0], win[1], win[2], win[3]):
+		_patch_asked = win
+		_patch_next = PackedFloat32Array()
+
+## Whether `held` is far enough from `want` to be worth baking again.
+func _patch_stale(held: PackedFloat32Array, want: PackedFloat32Array) -> bool:
+	var hu: float = held[1] - held[0]
+	var hv: float = maxf(held[3] - held[2], 1e-6)
+	var wu: float = want[1] - want[0]
+	var wv: float = want[3] - want[2]
+	var off_u: float = wrapf((want[0] + want[1] - held[0] - held[1]) * 0.5, -0.5, 0.5)
+	var off_v: float = (want[2] + want[3] - held[2] - held[3]) * 0.5
+	return absf(wu - hu) > hu * PATCH_SLACK or absf(wv - hv) > hv * PATCH_SLACK \
+		or absf(off_u) > hu * PATCH_SLACK or absf(off_v) > hv * PATCH_SLACK
+
+## Take delivery of a finished bake and hang it on the window it is of.
+func _collect_patch() -> void:
+	if _patch_asked.size() != 4 or Sim.native == null \
+			or not Sim.native.body_patch_ready():
+		return
+	var buf: PackedByteArray = Sim.native.body_patch_take()
+	var img := Image.create_from_data(PATCH_RES, PATCH_RES, true,
+		Image.FORMAT_RGBA8, buf) if buf.size() == _patch_bytes() else null
+	if img != null:
+		# Updated in place once there is one: the same size and format every
+		# time, so the texture keeps its RID and nothing has to be rebound.
+		if _patch_tex == null:
+			_patch_tex = ImageTexture.create_from_image(img)
+			_mat.set_shader_parameter("patch_tex", _patch_tex)
+		else:
+			_patch_tex.update(img)
+		_patch_win = _patch_asked
+		_mat.set_shader_parameter("patch_win", Vector4(_patch_win[0], _patch_win[1],
+			_patch_win[2], _patch_win[3]))
+		_mat.set_shader_parameter("patch_on", 1.0)
+	_patch_asked = PackedFloat32Array()
+	if _patch_next.size() == 4:
+		var again := _patch_next
+		_patch_next = PackedFloat32Array()
+		_want_patch(again)
+
+## What a baked window comes to with its mips, which is what the extension
+## hands back.
+func _patch_bytes() -> int:
+	var n := 0
+	var s := PATCH_RES
+	while true:
+		n += s * s * 4
+		if s == 1:
+			break
+		s = maxi(s >> 1, 1)
+	return n

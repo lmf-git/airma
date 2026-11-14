@@ -927,36 +927,129 @@ pub fn sheet(w: usize, h: usize, north: [f32; 3], radius: f32) -> Vec<u8> {
 /// and `v` from the north pole to the south.
 pub fn sheet_window(w: usize, h: usize, north: [f32; 3], radius: f32,
         u0: f32, u1: f32, v0: f32, v1: f32) -> Vec<u8> {
+    sheet_texels(w, h, north, radius, u0, u1, v0, v1, false)
+}
+
+/// The highest ground the body's relief channel can say, in metres above sea
+/// level. Mirrors `Planet.RELIEF_TOP`.
+pub const BODY_RELIEF_TOP: f32 = 8000.0;
+
+/// A window of the sheet for the planet body: RGBA8 with the ground's height in
+/// alpha, and its whole mip chain after it.
+///
+/// The body is a sphere seen from orbit, and the sheet it was painted with is
+/// one picture of the whole planet at 39 km a texel -- from a thousand
+/// kilometres up, a few dozen blocks across the country under you. This is the
+/// same rule baked over just the cap that can be seen, which brings it down to
+/// a few kilometres. The height is what the body lights its slopes from, so the
+/// mountains stand up in the real sun instead of being painted flat. Stored as
+/// the square root of the height, which spends the byte's steps where the land
+/// is low and a few tens of metres of rise is a hillside.
+///
+/// The mips are made here, on the bake's own thread, because the window is
+/// seen at every angle from straight down to the limb and without them the
+/// edge of the planet sparkles; making them on the main thread was a hitch
+/// every time the window moved.
+pub fn body_window(n: usize, north: [f32; 3], radius: f32,
+        u0: f32, u1: f32, v0: f32, v1: f32) -> Vec<u8> {
+    let mut out = sheet_texels(n, n, north, radius, u0, u1, v0, v1, true);
+    let (mut w, mut h) = (n, n);
+    let mut at = 0usize;
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut lev = vec![0u8; nw * nh * 4];
+        for j in 0..nh {
+            for i in 0..nw {
+                for k in 0..4 {
+                    let mut s = 0u32;
+                    for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let x = (i * 2 + di).min(w - 1);
+                        let y = (j * 2 + dj).min(h - 1);
+                        s += out[at + (y * w + x) * 4 + k] as u32;
+                    }
+                    lev[(j * nw + i) * 4 + k] = ((s + 2) / 4) as u8;
+                }
+            }
+        }
+        at += w * h * 4;
+        out.extend_from_slice(&lev);
+        w = nw;
+        h = nh;
+    }
+    out
+}
+
+fn sheet_texels(w: usize, h: usize, north: [f32; 3], radius: f32,
+        u0: f32, u1: f32, v0: f32, v1: f32, relief: bool) -> Vec<u8> {
     let p = planet();
     // Once, not once a texel. `height` and `road_ink` both want it, and at four
     // million texels across every core the read was the sheet's own bottleneck.
     let ch = chart();
-    let mut out = vec![0u8; w * h * 3];
+    let px = if relief { 4 } else { 3 };
+    let mut out = vec![0u8; w * h * px];
     let du = u1 - u0;
     let dv = v1 - v0;
     // What one texel of this window covers on the ground, which is what decides
     // how wide the roads are drawn and whether they are drawn at all.
     let texel = dv * std::f32::consts::PI * radius / h as f32;
-    out.par_chunks_mut(w * 3).enumerate().for_each(|(j, row)| {
-        let v = v0 + (j as f32 + 0.5) / h as f32 * dv;
+    // Where in its texel each sample is taken. The body's window is sampled
+    // four times a texel and averaged: a river bed is seven hundred metres
+    // across and a texel of the window two or three kilometres, so one sample
+    // in the middle either hit the channel or did not, and every river came
+    // out as a dotted line of sea-blue dashes -- in the colour, and again in
+    // the slopes lit off the height. The whole-planet sheet is far too coarse
+    // for that to be the question, and is left at one.
+    const ONE: [(f32, f32); 1] = [(0.5, 0.5)];
+    const FOUR: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
+    let subs: &[(f32, f32)] = if relief { &FOUR } else { &ONE };
+    out.par_chunks_mut(w * px).enumerate().for_each(|(j, row)| {
         for i in 0..w {
-            let u = u0 + (i as f32 + 0.5) / w as f32 * du;
-            let d = sheet_dir(u, v, north);
-            let hh = height_on(&ch, d, radius, crate::G_ALL);
-            let mo = p.moist.get_noise_3d(d[0], d[1], d[2]);
-            let mut c = colour(d, hh, north, mo);
+            let mut c = [0.0f32; 3];
+            let mut hh = 0.0f32;
+            let mut land = 0.0f32;
+            for &(si, sj) in subs {
+                let u = u0 + (i as f32 + si) / w as f32 * du;
+                let v = v0 + (j as f32 + sj) / h as f32 * dv;
+                let d = sheet_dir(u, v, north);
+                let hs = height_on(&ch, d, radius, crate::G_ALL);
+                let mo = p.moist.get_noise_3d(d[0], d[1], d[2]);
+                let cs = colour(d, hs, north, mo);
+                for k in 0..3 {
+                    c[k] += cs[k];
+                }
+                hh += hs;
+                land += hs.max(0.0);
+            }
+            let n = subs.len() as f32;
+            for k in 0..3 {
+                c[k] /= n;
+            }
+            hh /= n;
+            // The relief is of the land: a sub-sample in the sea counts as sea
+            // level rather than pulling a coast down to the floor of the shelf.
+            let land = land / n;
+            let d = sheet_dir(u0 + (i as f32 + 0.5) / w as f32 * du,
+                v0 + (j as f32 + 0.5) / h as f32 * dv, north);
             // The roads, where the picture is fine enough to be worth drawing
             // them on. Baked into the sheet rather than drawn over it every
             // frame: the network is fifty thousand legs and the map redraws
             // every frame it is open.
-            if texel < 4000.0 && hh > 0.0 {
+            //
+            // Not on the body's window. Roads are the map's ink, a line a
+            // texel wide however wide the road; seen from orbit they came out
+            // as dotted blue threads across the snow.
+            if !relief && texel < 4000.0 && hh > 0.0 {
                 let (rx, rz) = chart_xz(&ch, d);
                 c = crate::raster::road_ink(rx, rz, texel, c);
             }
-            let o = i * 3;
+            let o = i * px;
             row[o] = (c[0].clamp(0.0, 1.0) * 255.0) as u8;
             row[o + 1] = (c[1].clamp(0.0, 1.0) * 255.0) as u8;
             row[o + 2] = (c[2].clamp(0.0, 1.0) * 255.0) as u8;
+            if relief {
+                let r = (land / BODY_RELIEF_TOP).min(1.0).sqrt();
+                row[o + 3] = (r * 255.0 + 0.5) as u8;
+            }
         }
     });
     out

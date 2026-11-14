@@ -78,6 +78,10 @@ struct Bake {
 static PATCH: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
 static SHEET: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
 static CLIMATE: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
+/// The planet body's window under the eye. Its own slot, not the globe's: the
+/// map can be open over a view of the body, and the two would take each
+/// other's pictures.
+static BODY: std::sync::OnceLock<Mutex<Bake>> = std::sync::OnceLock::new();
 
 fn slot(cell: &'static std::sync::OnceLock<Mutex<Bake>>) -> &'static Mutex<Bake> {
     cell.get_or_init(|| Mutex::new(Bake::default()))
@@ -586,6 +590,28 @@ impl Terra {
     #[func]
     fn patch_take(&self) -> PackedByteArray {
         PackedByteArray::from(bake_take(&PATCH).as_slice())
+    }
+
+    /// The planet body's window under the eye, baked in the background:
+    /// `sphere::body_window`, `n` texels square with its mips after it.
+    #[func]
+    fn body_patch_request(&self, n: i64, north: Vector3,
+            u0: f64, u1: f64, v0: f64, v1: f64) -> bool {
+        let radius = sphere::chart().radius;
+        let nn = [north.x, north.y, north.z];
+        let n = n.max(1) as usize;
+        let (u0, u1, v0, v1) = (u0 as f32, u1 as f32, v0 as f32, v1 as f32);
+        bake_start(&BODY, move || sphere::body_window(n, nn, radius, u0, u1, v0, v1))
+    }
+
+    #[func]
+    fn body_patch_ready(&self) -> bool {
+        bake_ready(&BODY)
+    }
+
+    #[func]
+    fn body_patch_take(&self) -> PackedByteArray {
+        PackedByteArray::from(bake_take(&BODY).as_slice())
     }
 
     /// The close-in sheet, baked off the main thread.

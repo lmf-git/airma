@@ -58,13 +58,96 @@ const GONE := 1
 const SOFT := 2
 static var _cells: Dictionary = {}
 static var stats := {"count": 0, "cells": 0}
+## Every entry again, laid out the same way, in the chart the world was built
+## on: see `Sim.boot_affine`. `_ent` is these carried into the chart there is
+## now. Before the chart has ever moved the two are the same numbers.
+static var _laid := PackedFloat32Array()
 
 static func clear() -> void:
 	_light.clear()
 	_ent = PackedFloat32Array()
+	_laid = PackedFloat32Array()
 	_dead = PackedByteArray()
 	_cells = {}
 	stats = {"count": 0, "cells": 0}
+
+## How far the chart's own axes turn between the chart the world was built on
+## and the one there is now, at `p` in the first: what a yaw laid down there is
+## short of, here.
+static func _turn_at(p: Vector3) -> float:
+	var x: Vector3 = Sim.boot_affine(p).basis.x
+	return atan2(-x.z, x.x)
+
+## Keep the entry just added in the chart the world was built on too.
+static func _lay_last() -> void:
+	var b: int = _ent.size() - STRIDE
+	if not Sim.off_boot_chart():
+		_laid.append_array(_ent.slice(b))
+		return
+	var p: Vector3 = Sim.world_to_boot(Vector3(_ent[b], _ent[b + 1], _ent[b + 2]))
+	var yaw: float = atan2(-_ent[b + 7], _ent[b + 6]) - _turn_at(p)
+	_laid.append_array(PackedFloat32Array([p.x, p.y, p.z, _ent[b + 3], _ent[b + 4],
+		_ent[b + 5]]))
+	_laid.append_array(_turn(yaw))
+
+## File one entry under every cell its footprint's bounding circle touches.
+static func _file(id: int) -> void:
+	var b: int = id * STRIDE
+	var hx: float = _ent[b + 3]
+	var hz: float = _ent[b + 5]
+	var reach: float = sqrt(hx * hx + hz * hz)
+	var ox: float = _ent[b]
+	var oz: float = _ent[b + 2]
+	for cj in range(int(floor((oz - reach) / CELL)), int(floor((oz + reach) / CELL)) + 1):
+		for ci in range(int(floor((ox - reach) / CELL)), int(floor((ox + reach) / CELL)) + 1):
+			var k := _key(ci, cj)
+			var arr: PackedInt32Array = _cells.get(k, PackedInt32Array())
+			arr.append(id)
+			_cells[k] = arr
+
+## The chart has moved: carry every entry into it.
+##
+## The field is filed by where things are, and where things are is numbered
+## from the middle of the chart -- so after a move every box was still filed,
+## and still standing, at its old numbers: an invisible town of walls a
+## hundred and fifty kilometres from the one you could see, and nothing at all
+## where the buildings were drawn. Worked from `_laid` every time, so moving
+## the chart there and back puts every box exactly where it began.
+##
+## Carried a few kilometres of ground at a time, each patch by one transform
+## worked out at its middle, which is right to a centimetre across the patch
+## and costs one transform per patch rather than per box.
+const PATCH := 3000.0
+
+static func recharted() -> void:
+	var n: int = _dead.size()
+	if _laid.size() != _ent.size():
+		return
+	var patches := {}
+	for id in n:
+		var b: int = id * STRIDE
+		var bx: float = _laid[b]
+		var bz: float = _laid[b + 2]
+		var key := _key(int(floor(bx / PATCH)), int(floor(bz / PATCH)))
+		var pa: Variant = patches.get(key)
+		if pa == null:
+			var c := Vector3((floor(bx / PATCH) + 0.5) * PATCH, 0.0,
+				(floor(bz / PATCH) + 0.5) * PATCH)
+			var a: Transform3D = Sim.boot_affine(c)
+			pa = [a, atan2(-a.basis.x.z, a.basis.x.x)]
+			patches[key] = pa
+		var xf: Transform3D = (pa as Array)[0]
+		var w: Vector3 = xf * Vector3(bx, _laid[b + 1], bz)
+		var yaw: float = atan2(-_laid[b + 7], _laid[b + 6]) + float((pa as Array)[1])
+		_ent[b] = w.x
+		_ent[b + 1] = w.y
+		_ent[b + 2] = w.z
+		_ent[b + 6] = cos(yaw)
+		_ent[b + 7] = -sin(yaw)
+	_cells = {}
+	for id2 in n:
+		_file(id2)
+	stats["cells"] = _cells.size()
 
 ## Room for a cell index either way of 2^23, which at 24 m is two hundred
 ## thousand kilometres: the fields are seventeen thousand out, and at the old
@@ -123,6 +206,7 @@ static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT, soft_from 
 		ids.append(id)
 		_ent.append_array(PackedFloat32Array([o.x, o.y, o.z, hx, hy, hz]))
 		_ent.append_array(_turn(yaw))
+		_lay_last()
 		_dead.append(state)
 		# every cell the footprint's bounding circle touches
 		var reach: float = sqrt(hx * hx + hz * hz)
@@ -184,14 +268,9 @@ static func add_box(origin: Vector3, half_x: float, height: float, half_z: float
 	_ent.append_array(PackedFloat32Array([origin.x, origin.y, origin.z, half_x,
 		height, half_z]))
 	_ent.append_array(_turn(yaw))
+	_lay_last()
 	_dead.append(0)
-	var reach: float = sqrt(half_x * half_x + half_z * half_z)
-	for cj in range(int(floor((origin.z - reach) / CELL)), int(floor((origin.z + reach) / CELL)) + 1):
-		for ci in range(int(floor((origin.x - reach) / CELL)), int(floor((origin.x + reach) / CELL)) + 1):
-			var k := _key(ci, cj)
-			var arr: PackedInt32Array = _cells.get(k, PackedInt32Array())
-			arr.append(id)
-			_cells[k] = arr
+	_file(id)
 	stats["count"] = _dead.size()
 	stats["cells"] = _cells.size()
 	return id
@@ -572,6 +651,9 @@ static func lift(id: int, dy: float) -> void:
 	var b := id * STRIDE
 	_ent[b + 1] += dy
 	_ent[b + 4] -= dy
+	if b + 4 < _laid.size():
+		_laid[b + 1] += dy
+		_laid[b + 4] -= dy
 
 ## The height of one structure's roof, in the world.
 static func top_of(id: int) -> float:
