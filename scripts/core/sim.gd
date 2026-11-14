@@ -652,6 +652,8 @@ const RUNWAY_ELEV := 0.0
 
 
 signal mission_event(text: String, kind: int)   # kind: 0 info, 1 good, 2 bad
+## One line of the kill feed: see `KillFeed`.
+signal kill_event(e: Dictionary)
 
 enum Ev { INFO, GOOD, BAD }
 
@@ -2583,6 +2585,36 @@ func clear_of_roads(x: float, z: float, half: float) -> bool:
 		return false
 	return true
 
+## Places a town must not be built over besides the aerodromes: [centre,
+## radius]. The depot, for one: a town sited on its pad grew streets through
+## the hangars.
+var keep_out: Array = []
+
+## Can a whole town of radius `r` stand at `c`? `clear_of_airfield` was asked
+## of the centre alone, so a town a kilometre and a half across sited just
+## outside the box ran its streets and its blocks across the runway, the apron
+## and the approach lights. This is the disc against every aerodrome -- the
+## pavement it is levelled over and the approach off each end, in that field's
+## own frame -- and against everything in `keep_out`.
+func town_clear(c: Vector2, r: float) -> bool:
+	var need: float = r * 1.15 + 300.0
+	for fd in fields:
+		var l: Vector2 = field_local(fd, c.x, c.y)
+		if rect_gap(l, Vector2(950.0, 2600.0)) < need:
+			return false
+		if rect_gap(l, Vector2(260.0, 5200.0)) < need * 0.6:
+			return false
+	for k in keep_out:
+		if c.distance_to(k[0] as Vector2) < r * 1.15 + float(k[1]) + 100.0:
+			return false
+	return true
+
+## How far a point in a rectangle's own frame is outside it (0 inside).
+func rect_gap(l: Vector2, half: Vector2) -> float:
+	var dx := maxf(absf(l.x) - half.x, 0.0)
+	var dz := maxf(absf(l.y) - half.y, 0.0)
+	return sqrt(dx * dx + dz * dz)
+
 func clear_of_airfield(x: float, z: float) -> bool:
 	if absf(x) < 620.0 and absf(z) < 2600.0:
 		return false
@@ -2734,6 +2766,15 @@ func biome_kind(x: float, z: float, y: float, slope: float) -> String:
 			bv = w[i]
 			best = i
 	return BIOME_NAMES[best]
+
+## Somebody killed somebody. `killer` may be "" for a blast nobody owns.
+func kill(killer: String, killer_team: int, victim: String, victim_team: int,
+		weapon: String, head := false) -> void:
+	kill_event.emit({"k": killer, "kt": killer_team, "v": victim, "vt": victim_team,
+		"w": weapon, "h": head})
+	if OS.has_feature("headless") or OS.is_debug_build():
+		print("[kill %6.1f] %s [%s%s] %s" % [Time.get_ticks_msec() * 0.001, killer, weapon,
+			" HS" if head else "", victim])
 
 func report(text: String, kind: int = Ev.INFO) -> void:
 	mission_event.emit(text, kind)

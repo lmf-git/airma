@@ -121,6 +121,16 @@ const KIT := [
 		"side": 0.010, "sound": "dmr", "db": 5.0, "work": "bolt",
 		"len": 0.86, "stock": 0.30, "mag_len": 0.13, "sight": 0.10, "scope": true,
 		"grip_l": Vector3(0.0, -0.05, -0.33), "move": 0.76, "reach": 160.0},
+	# A shotgun that does not stop: gas operated, fully automatic, fed from a
+	# twenty round drum. Five shells a second of buckshot and a kick it keeps
+	# down by sheer weight -- and nothing at all past a street's width.
+	{"id": "aa20", "name": "AA-20 AUTO SHOTGUN", "mag": 20, "spare": 4, "cd": 0.2,
+		"auto": true, "dmg": 11.0, "muzzle": 400.0, "pellets": 8,
+		"hip": 0.046, "ads": 0.036, "fov": 56.0, "reload": 3.1, "kick": 0.030,
+		"side": 0.012, "sound": "shotgun", "db": -1.0, "work": "bolt",
+		"len": 0.46, "stock": 0.24, "mag_len": 0.10, "sight": 0.088, "dot": true,
+		"drum": true,
+		"grip_l": Vector3(0.0, -0.05, -0.27), "move": 0.93, "reach": 13.0},
 ]
 
 ## The loadouts a man can deploy with. Each is a starting point: the gunsmith
@@ -175,7 +185,8 @@ static func setup_for(c: Dictionary, id: String, make := false) -> Dictionary:
 	if fit.has(id):
 		return fit[id]
 	var s := {"sight": String(c.get("sight", "dot")), "quiet": bool(c.get("quiet", false)),
-		"grip": bool(c.get("grip", false)), "mag": bool(c.get("mag", false))}
+		"grip": bool(c.get("grip", false)), "mag": bool(c.get("mag", false)),
+		"choke": "none", "slug": false}
 	if make:
 		fit[id] = s
 		c["fit"] = fit
@@ -187,10 +198,22 @@ static func setup_for(c: Dictionary, id: String, make := false) -> Dictionary:
 ## the .50 through most of what a street is made of.
 const PEN := {"pistol": 0.10, "glock": 0.10, "smg": 0.14, "vector": 0.12, "shotgun": 0.05,
 	"carbine": 0.34, "ak": 0.36, "lmg": 0.34, "scar": 0.50, "dmr": 0.55, "sniper": 0.85,
-	"fifty": 1.7}
+	"fifty": 1.7, "aa20": 0.05}
 
 static func pen_of(g: Dictionary) -> float:
+	if g.get("slug", false):
+		return 0.30
 	return float(PEN.get(String(g.get("id", "")), 0.0))
+
+## What goes on the end of a shotgun, and what it does to the pattern.
+const CHOKES := ["none", "choke", "duckbill"]
+const CHOKE_NAMES := {"none": "Cylinder — the pattern it comes with",
+	"choke": "Full choke — a tighter cone, reaches further",
+	"duckbill": "Duckbill — a wide flat fan across a doorway"}
+
+## A shotgun is anything that fires more than one ball at a time.
+static func is_shotgun(g: Dictionary) -> bool:
+	return int(g.get("pellets", 1)) > 1
 
 ## One weapon as a particular man has it set up: the table entry with his
 ## sight, grip and magazine worked into the numbers.
@@ -238,7 +261,37 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 		g["reload"] = float(g["reload"]) * (1.0 if g.get("shells", false) else 1.14)
 		g["mag_len"] = float(g["mag_len"]) * 1.4
 		g["move"] = float(g["move"]) * 0.98
+	if is_shotgun(g):
+		_fit_shotgun(g, String(c.get("choke", "none")), bool(c.get("slug", false)))
 	return g
+
+## The muzzle device and the load. A choke squeezes the cone; a duckbill
+## flattens it into a fan, wide across and thin up and down, so one shot
+## sweeps a doorway or a corridor; a slug is one heavy lead round instead of
+## a handful of balls -- no pattern at all, a long reach, and it hits like a
+## rifle round the size of a thumb.
+static func _fit_shotgun(g: Dictionary, choke: String, slug: bool) -> void:
+	g["choke"] = choke
+	match choke:
+		"choke":
+			g["hip"] = float(g["hip"]) * 0.62
+			g["ads"] = float(g["ads"]) * 0.5
+			g["reach"] = float(g["reach"]) * 1.5
+		"duckbill":
+			g["pattern"] = Vector2(2.3, 0.32)
+			g["hip"] = float(g["hip"]) * 0.95
+			g["ads"] = float(g["ads"]) * 0.95
+	if slug:
+		var balls: int = int(g["pellets"])
+		g["slug"] = true
+		g["pellets"] = 1
+		g["dmg"] = float(g["dmg"]) * float(balls) * 1.05
+		g["muzzle"] = 460.0
+		g["hip"] = 0.024
+		g["ads"] = 0.0032
+		g["kick"] = float(g["kick"]) * 1.3
+		g["reach"] = 55.0
+		g.erase("pattern")
 
 
 ## What the air takes off each round, per metre at sea level: see
@@ -247,7 +300,8 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 ## shotgun pellet is a ball and stops in a couple of hundred metres.
 const DRAG := {"carbine": 0.0011, "ak": 0.0012, "scar": 0.0008, "smg": 0.0018,
 	"vector": 0.0022, "shotgun": 0.006, "dmr": 0.0008, "sniper": 0.0005,
-	"pistol": 0.0022, "glock": 0.0022, "lmg": 0.0011, "gl": 0.0006, "fifty": 0.0004}
+	"pistol": 0.0022, "glock": 0.0022, "lmg": 0.0011, "gl": 0.0006, "fifty": 0.0004,
+	"aa20": 0.006}
 
 static func drag_of(g: Dictionary) -> float:
 	return float(DRAG.get(String(g.get("id", "")), 0.0011))
@@ -274,9 +328,9 @@ static func index_of(id: String) -> int:
 	return 0
 
 const CAN_LEN := 0.16
-## Everything but the shotgun takes a suppressor.
+## Everything but the shotguns takes a suppressor.
 static func can_suppress(g: Dictionary) -> bool:
-	return not g.get("shells", false) and not g.has("launcher")
+	return not g.get("shells", false) and not g.has("launcher") and int(g["pellets"]) == 1
 
 ## How far forward of the origin the muzzle is.
 static func muzzle_z(g: Dictionary) -> float:
@@ -286,121 +340,7 @@ static func muzzle_z(g: Dictionary) -> float:
 ## Build one. The magazine is its own node so a reload can take it out, and the
 ## muzzle is a marker so nobody has to know how long the barrel is.
 static func build(g: Dictionary, quiet := false) -> Node3D:
-	var root := Node3D.new()
-	root.name = String(g["id"])
-	var dark := MeshKit.mat(Color(0.11, 0.11, 0.12), 0.55, 0.35)
-	var poly := MeshKit.mat(Color(0.17, 0.165, 0.15), 0.8, 0.05)
-	var ln: float = g["len"]
-	var st := MeshKit.begin()
-	var fu := MeshKit.begin()       # furniture: stock, grip, handguard
-	if String(g.get("launcher", "")) == "gl":
-		# a short fat barrel, the drum behind it, a pistol grip, a folding
-		# stock and a reflex sight on the top rail
-		MeshKit.cone(st, 0.030, 0.030, -ln, -0.12, Vector3(0, 0.004, 0.0), 10)
-		MeshKit.cone(st, 0.034, 0.034, -ln - 0.01, -ln + 0.04, Vector3(0, 0.004, 0.0), 10)
-		MeshKit.cone(fu, 0.062, 0.062, -0.13, 0.02, Vector3(0, -0.012, 0.0), 12)
-		MeshKit.box(st, Vector3(0.020, 0.020, 0.30), Vector3(0, 0.062, -0.12))
-		MeshKit.box(fu, Vector3(0.034, 0.095, 0.042), Vector3(0, -0.068, 0.05))
-		MeshKit.box(fu, Vector3(0.034, 0.080, 0.04), Vector3(0, -0.07, -0.26))
-		MeshKit.box(st, Vector3(0.020, 0.024, 0.22), Vector3(0, 0.0, 0.14))
-		MeshKit.box(fu, Vector3(0.034, 0.09, 0.05), Vector3(0, -0.02, 0.25))
-		for sx in [-1.0, 1.0]:
-			MeshKit.box(st, Vector3(0.005, 0.036, 0.04), Vector3(sx * 0.018, float(g["sight"]) - 0.006, -0.05))
-		MeshKit.box(st, Vector3(0.041, 0.005, 0.04), Vector3(0, float(g["sight"]) + 0.014, -0.05))
-	elif g.has("launcher"):
-		# a tube, a grip under it and a sight on top
-		MeshKit.cone(fu, 0.052, 0.052, -ln, 0.42, Vector3(0, 0.0, 0.0), 10)
-		MeshKit.cone(st, 0.060, 0.060, -ln - 0.03, -ln + 0.05, Vector3(0, 0.0, 0.0), 10)
-		MeshKit.cone(st, 0.062, 0.075, 0.36, 0.45, Vector3(0, 0.0, 0.0), 10)
-		MeshKit.box(st, Vector3(0.03, 0.10, 0.04), Vector3(0, -0.095, 0.04))
-		MeshKit.box(st, Vector3(0.03, 0.08, 0.04), Vector3(0, -0.085, -0.22))
-		MeshKit.box(st, Vector3(0.012, 0.06, 0.05), Vector3(0, float(g["sight"]) - 0.03, -0.05))
-		if String(g["launcher"]) == "sam":
-			MeshKit.box(st, Vector3(0.07, 0.07, 0.10), Vector3(0, -0.07, -ln + 0.18))
-			MeshKit.box(st, Vector3(0.09, 0.02, 0.09), Vector3(0, 0.075, -ln + 0.12))
-	elif g.get("hand", false):
-		MeshKit.box(st, Vector3(0.028, 0.034, ln + 0.06), Vector3(0, 0.014, -ln * 0.5 + 0.02))
-		MeshKit.box(st, Vector3(0.008, 0.010, 0.008), Vector3(0, 0.036, -ln + 0.005))
-		MeshKit.box(st, Vector3(0.016, 0.010, 0.006), Vector3(0, 0.036, 0.04))
-		MeshKit.box(fu, Vector3(0.030, 0.105, 0.045), Vector3(0, -0.052, 0.035))
-		MeshKit.box(fu, Vector3(0.026, 0.022, 0.07), Vector3(0, -0.008, -0.03))
-	else:
-		# receiver, barrel, and whatever the support hand holds
-		MeshKit.box(st, Vector3(0.044, 0.062, 0.24), Vector3(0, 0.0, -0.03))
-		MeshKit.box(st, Vector3(0.018, 0.018, ln * 0.55), Vector3(0, 0.004, -ln * 0.72))
-		MeshKit.box(st, Vector3(0.026, 0.026, 0.05), Vector3(0, 0.004, -ln + 0.01))
-		MeshKit.box(fu, Vector3(0.042, 0.050, ln * 0.52), Vector3(0, 0.0, -0.15 - ln * 0.26))
-		MeshKit.box(fu, Vector3(0.034, 0.095, 0.042), Vector3(0, -0.068, 0.05))
-		var sk: float = g["stock"]
-		if sk > 0.0:
-			MeshKit.box(st, Vector3(0.022, 0.026, sk * 0.6), Vector3(0, 0.004, 0.09 + sk * 0.3))
-			MeshKit.box(fu, Vector3(0.036, 0.105, sk * 0.45), Vector3(0, -0.022, 0.09 + sk * 0.78))
-		if g.get("shells", false):
-			# the tube under the barrel and the fore-end that rides it
-			MeshKit.box(st, Vector3(0.022, 0.022, ln * 0.62), Vector3(0, -0.028, -ln * 0.55))
-			MeshKit.box(fu, Vector3(0.046, 0.042, 0.15), Vector3(0, -0.032, -0.33))
-		var sy: float = g["sight"]
-		if g.get("scope", false) and String(g.get("reticle", "cross")) == "chevron":
-			# the prism: short, squat, and square-shouldered on its mount
-			MeshKit.cone(st, 0.024, 0.024, -0.15, 0.03, Vector3(0, sy, 0.0), 8)
-			MeshKit.cone(st, 0.029, 0.029, -0.18, -0.15, Vector3(0, sy, 0.0), 8)
-			MeshKit.box(st, Vector3(0.040, 0.030, 0.11), Vector3(0, sy - 0.012, -0.06))
-			MeshKit.box(st, Vector3(0.022, sy - 0.035, 0.10), Vector3(0, sy * 0.5 - 0.005, -0.06))
-		elif g.get("scope", false) and String(g.get("reticle", "cross")) == "ring":
-			# a stubby 2x: barely longer than it is wide
-			MeshKit.cone(st, 0.022, 0.022, -0.11, 0.01, Vector3(0, sy, 0.0), 8)
-			MeshKit.cone(st, 0.026, 0.026, -0.13, -0.11, Vector3(0, sy, 0.0), 8)
-			MeshKit.box(st, Vector3(0.020, sy - 0.03, 0.08), Vector3(0, sy * 0.5 + 0.010, -0.05))
-		elif g.get("scope", false):
-			MeshKit.cone(st, 0.021, 0.021, -0.19, 0.07, Vector3(0, sy, 0.0), 8)
-			MeshKit.cone(st, 0.027, 0.027, -0.26, -0.19, Vector3(0, sy, 0.0), 8)
-			MeshKit.box(st, Vector3(0.016, sy - 0.03, 0.03), Vector3(0, sy * 0.5 + 0.012, -0.10))
-			MeshKit.box(st, Vector3(0.016, sy - 0.03, 0.03), Vector3(0, sy * 0.5 + 0.012, 0.02))
-		elif g.get("dot", false):
-			# a window to look through: two posts and a hood, open in the middle
-			for sx in [-1.0, 1.0]:
-				MeshKit.box(st, Vector3(0.005, 0.040, 0.045), Vector3(sx * 0.019, sy - 0.006, -0.05))
-			MeshKit.box(st, Vector3(0.043, 0.005, 0.045), Vector3(0, sy + 0.016, -0.05))
-			MeshKit.box(st, Vector3(0.043, 0.020, 0.06), Vector3(0, sy - 0.036, -0.05))
-		else:
-			MeshKit.box(st, Vector3(0.006, 0.014, 0.006), Vector3(0, sy - 0.007, -ln + 0.02))
-			MeshKit.box(st, Vector3(0.018, 0.010, 0.008), Vector3(0, sy - 0.009, 0.02))
-	var can: bool = quiet and can_suppress(g)
-	if can:
-		MeshKit.cone(st, 0.021, 0.021, -CAN_LEN, 0.0,
-			Vector3(0, 0.004 if not g.get("hand", false) else 0.014, muzzle_z(g) + 0.01), 8)
-	root.add_child(MeshKit.mi(MeshKit.finish(st, dark), "Metal"))
-	root.add_child(MeshKit.mi(MeshKit.finish(fu, poly), "Furniture"))
-	if g.get("dot", false):
-		# the dot itself: small, bright, and the only lit thing on the weapon
-		var dm := MeshKit.begin()
-		MeshKit.box(dm, Vector3(0.0035, 0.0035, 0.001), Vector3(0, float(g["sight"]), -0.05))
-		var lit := MeshKit.mat(Color(1.0, 0.1, 0.05), 0.4, 0.0, Color(1.0, 0.12, 0.05))
-		lit.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		root.add_child(MeshKit.mi(MeshKit.finish(dm, lit), "Dot"))
-	var mag_len: float = g["mag_len"]
-	var mag := Node3D.new()
-	mag.name = "Mag"
-	root.add_child(mag)
-	if mag_len > 0.0 and g.get("box", false):
-		# a belt box hung under the receiver, a little to the left
-		var bs := MeshKit.begin()
-		MeshKit.box(bs, Vector3(0.075, mag_len, 0.10), Vector3(-0.02, -0.035 - mag_len * 0.5, -0.06))
-		mag.add_child(MeshKit.mi(MeshKit.finish(bs, poly), "M"))
-	elif mag_len > 0.0:
-		var ms := MeshKit.begin()
-		MeshKit.box(ms, Vector3(0.026, mag_len, 0.055), Vector3(0, -0.03 - mag_len * 0.5, -0.075))
-		var mm := MeshKit.mi(MeshKit.finish(ms, dark), "M")
-		mm.rotation.x = 0.12
-		mag.add_child(mm)
-	for c in root.find_children("*", "MeshInstance3D", true, false):
-		(c as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mz := Node3D.new()
-	mz.name = "Muzzle"
-	mz.position = Vector3(0.0, 0.004 if not g.get("hand", false) else 0.014,
-		muzzle_z(g) - (CAN_LEN if can else 0.0))
-	root.add_child(mz)
-	return root
+	return GunModel.build(g, quiet)
 
 # ---------------------------------------------------------------------- firing
 ## One pull of the trigger: the rounds, the flash, the report. `dir` is where
@@ -412,6 +352,8 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		return
 	var n: int = int(g["pellets"])
 	var basis := Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT)
+	# a duckbill's fan: the disc pulled out sideways and squashed flat
+	var fan: Vector2 = g.get("pattern", Vector2.ONE)
 	# A rifle is longer than a wall is thick. A man pressed up against one has
 	# his muzzle inside it or out the far side, and a round that starts there
 	# has no wall left to meet: every shot went through. So the stretch from
@@ -433,7 +375,7 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		# out than its sides, and a shotgun pattern does not have corners
 		var a := randf() * TAU
 		var r: float = sqrt(randf()) * spread
-		var d: Vector3 = (basis * Vector3(cos(a) * r, sin(a) * r, -1.0)).normalized()
+		var d: Vector3 = (basis * Vector3(cos(a) * r * fan.x, sin(a) * r * fan.y, -1.0)).normalized()
 		Effects.bullet(world, muzzle, d * float(g["muzzle"]) * randf_range(0.97, 1.03)
 			* (0.93 if quiet else 1.0),
 			shooter, float(g["dmg"]) * dmg_scale, team,
@@ -582,6 +524,8 @@ class Frag extends Node3D:
 		var world := get_tree().current_scene
 		var at := global_position + Vector3(0, 0.25, 0)
 		Sfx.play_at(world, "frag", at, 4.0, randf_range(0.92, 1.05), 900.0)
+		var was_cause: String = KillFeed.cause
+		KillFeed.cause = "grenade"
 		Effects.mute_blast = true          # the walls are checked below
 		Effects.he_impact(world, at, 2.4)
 		Effects.mute_blast = false
@@ -618,6 +562,7 @@ class Frag extends Node3D:
 						and thrower.has_method("hit_confirm"):
 					thrower.hit_confirm(false, was_alive and n.has_method("is_alive")
 						and not n.is_alive())
+		KillFeed.cause = was_cause
 		queue_free()
 
 # ------------------------------------------------------------- hits and sight
@@ -842,10 +787,13 @@ class Rocket extends Node3D:
 	func _burst(at: Vector3, struck: Node) -> void:
 		ended_at = at
 		var world := get_tree().current_scene
+		var was_cause: String = KillFeed.cause
+		KillFeed.cause = "gl" if small else "law"
 		if struck != null and struck.has_method("take_hit"):
 			struck.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
 		if _flown < arm:
 			# not armed yet: a lump of metal and nothing more
+			KillFeed.cause = was_cause
 			Effects.bullet_impact(world, at, true)
 			if is_instance_valid(shooter) and shooter.has_method("hit_confirm") and struck != null:
 				shooter.hit_confirm(false, struck.has_method("is_alive") and not struck.is_alive())
@@ -865,6 +813,7 @@ class Rocket extends Node3D:
 			Effects._blast_infantry(world, at, 9.0)
 		Effects.credit = was_credit
 		Effects.spare_team = was_spare
+		KillFeed.cause = was_cause
 		if is_instance_valid(shooter) and shooter.has_method("hit_confirm") and struck != null:
 			shooter.hit_confirm(false, struck.has_method("is_alive") and not struck.is_alive())
 		queue_free()

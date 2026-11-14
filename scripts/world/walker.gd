@@ -1584,9 +1584,13 @@ var _last_amount := 0.0
 var _last_head := false
 var _last_low := false
 
+## What the last thing to hurt him was, for the kill feed.
+var last_cause := ""
+
 func take_hit(amount: float, from: Node = null) -> void:
 	if dead or sheltered:
 		return
+	last_cause = KillFeed.weapon_of(from)
 	health -= amount
 	_last_amount = amount
 	if amount >= 120.0:

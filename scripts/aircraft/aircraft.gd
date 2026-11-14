@@ -392,6 +392,8 @@ func _tick_physics(delta: float) -> void:
 	_chaff_t = maxf(_chaff_t - delta, 0.0)
 	_chaff_cd = maxf(_chaff_cd - delta, 0.0)
 	gun_cd = maxf(gun_cd - delta, 0.0)
+	for gid in battery_cd:
+		battery_cd[gid] = maxf(float(battery_cd[gid]) - delta, 0.0)
 	_gun_snd = maxf(_gun_snd - delta, 0.0)
 	# trigger off: stop the buzzsaw rather than leaving it running
 	if _gun_snd <= 0.0 and is_instance_valid(_gun_audio) and _gun_audio.playing:
@@ -1282,6 +1284,18 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 		_rr_want = move_toward(_rr_want, rr_goal,
 			float(spec["max_roll_rate"]) * 3.0 * state.step)
 		var want_rr: float = _rr_want
+		# Wings-level capture. The law commands a roll *rate*, so with the
+		# stick centred it held whatever bank there was -- and a degree or two
+		# of it, which is all a keyboard tap or a twitch of the mouse leaves,
+		# was a slow turn one way or the other that had to be chased with
+		# more taps. Hands off and within a few degrees of level it takes the
+		# bank out itself, fading out by fifteen so a turn you have set up is
+		# still held where you left it.
+		if not on_ground and absf(in_roll) < 0.08 and absf(b.z.y) < 0.85:
+			var bank_now: float = asin(clampf(-b.x.y, -1.0, 1.0))
+			var near: float = clampf(1.0 - (absf(bank_now) - deg_to_rad(8.0)) / deg_to_rad(7.0),
+				0.0, 1.0)
+			want_rr -= bank_now * 1.8 * near * (1.0 - absf(in_roll) / 0.08)
 		var r_err := want_rr - rr
 		var r_raw := r_err * 1.4 + _rr_i
 		var r_auth: float = float(spec["max_roll_rate"]) / 4.1
@@ -1689,6 +1703,12 @@ func fire() -> String:
 		_note("away — no lock, unguided")
 	return ""
 
+## Each gun of a gunship's battery has its own crew and its own loader: the
+## time until it can fire again, by gun id. It was the one `gun_cd` for all
+## three, so a 105 round put the forty and the twenty-five out of action for
+## six seconds as well, and switching guns to keep shooting did nothing.
+var battery_cd := {}
+
 ## AC-130 style battery: side firing shells lobbed at a designated point.
 func gunship_gun() -> Dictionary:
 	if not spec.get("gunship", false):
@@ -1835,7 +1855,8 @@ func _bore(node: Node3D) -> Vector3:
 
 func fire_gunship(world: Node, aim: Vector3) -> bool:
 	var g := gunship_gun()
-	if g.is_empty() or gun_cd > 0.0 or not alive:
+	var gid := String(g.get("id", ""))
+	if g.is_empty() or float(battery_cd.get(gid, 0.0)) > 0.0 or not alive:
 		return false
 	var ports: Array = spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
 	var pick: int = randi() % ports.size()
@@ -1846,7 +1867,7 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 		return false
 	# One round, then the loader. This line went missing once and the 105 fired
 	# every physics step -- a hundred and twenty howitzer rounds a second.
-	gun_cd = 60.0 / float(g["rpm"])
+	battery_cd[gid] = 60.0 / float(g["rpm"])
 	# Along the barrel that is actually firing, not along the sight line. The
 	# two agree whenever the mount is on the mark, which is the point. With no
 	# mount to read it is the solution itself -- it was the sight line, which
@@ -1863,11 +1884,19 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	# loader had been started, so the 105 sat through six seconds for a round
 	# that never left, on the mark the whole time.
 	if dir.length_squared() < 1e-6:
-		gun_cd = 0.0
+		battery_cd[gid] = 0.0
 		return false
 	dir = dir.normalized()
+	# A cone round the bore, `spread` radians at its edge. It was a random
+	# box of that size on all three axes -- the corners half as wide again,
+	# and the part along the bore wasted -- and a gunship looks down at a
+	# shallow slant, so the up-and-down half of the error was stretched three
+	# times over along the ground.
 	var sp: float = g["spread"]
-	dir = (dir + Vector3(randf_range(-sp, sp), randf_range(-sp, sp), randf_range(-sp, sp))).normalized()
+	var a := randf() * TAU
+	var r: float = sqrt(randf()) * sp
+	var bb := Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT)
+	dir = (bb * Vector3(cos(a) * r, sin(a) * r, -1.0)).normalized()
 	var shell := Shell.new()
 	shell.vel = dir * float(g["muzzle"]) + linear_velocity
 	# laid by `battery_lead`, which allows for gravity and not for the air:
@@ -1994,8 +2023,30 @@ func fire_gun(world: Node) -> bool:
 ## it. Showing LOCK on a target twelve kilometres away from two thousand feet
 ## says a release will work when it cannot — toss it and it lands miles short,
 ## which looks like the weapon failing rather than the shot being impossible.
+## An air-to-air round: a seeker made to find something against the sky.
+static func is_air_to_air(w: String) -> bool:
+	if w == "gun":
+		return false
+	var ws := WeaponSpec.get_spec(w)
+	var k := String(ws["kind"])
+	return (k == "ir" or k == "radar") and not bool(ws.get("air_to_ground", false))
+
+## Something in the air: an aeroplane or a helicopter off the ground, or a drone.
+static func is_airborne(n: Node) -> bool:
+	if not is_instance_valid(n):
+		return false
+	if n.is_in_group("drones"):
+		return true
+	return n is Aircraft and not (n as Aircraft).on_ground
+
 func weapon_reaches(w: String, tgt: Node3D) -> bool:
 	if not is_instance_valid(tgt):
+		return false
+	# A Sidewinder or an AMRAAM on a tank was a lock, a tone and a launch, and
+	# the round flew into the ground beside it. Their seekers look for an
+	# aeroplane against the sky; a vehicle, a ship, a laser spot or an
+	# aeroplane sitting on the apron is not something they can hold.
+	if is_air_to_air(w) and not is_airborne(tgt):
 		return false
 	var ws := WeaponSpec.get_spec(w if w != "gun" else "aim9")
 	var rel: Vector3 = tgt.global_position - global_position
@@ -2044,6 +2095,8 @@ func shot_blocked(w: String, tgt: Node3D) -> String:
 		return "NO AIM"
 	if not is_instance_valid(tgt):
 		return "NO TGT"
+	if is_air_to_air(w) and not is_airborne(tgt):
+		return "AIR ONLY"
 	if weapon_reaches(w, tgt):
 		return ""
 	var ws := WeaponSpec.get_spec(w if w != "gun" else "aim9")

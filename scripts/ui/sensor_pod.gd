@@ -45,6 +45,14 @@ var lasing := false
 ## else for as long as the laser was lit.
 var _select_spot := false
 var _beam: MeshInstance3D
+## The last frame a corner panel asked for the picture. While one does, the
+## camera keeps pointing and rendering with the page shut, so the panel shows
+## what the pod sees: see `HUD._draw_sensor_panel`.
+var pip_frame := -100
+var _pip := false
+
+func pip_texture() -> Texture2D:
+	return _vp.get_texture() if _vp != null else null
 
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
@@ -218,7 +226,7 @@ func set_fullscreen(on: bool) -> void:
 ## of the world drawn into nothing for the whole of every sortie.
 func _render_when_up() -> void:
 	if _vp != null:
-		_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if active \
+		_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if (active or _pip) \
 			else SubViewport.UPDATE_DISABLED
 
 ## CTRL is the designate modifier while the page is up, not the throttle: see
@@ -720,7 +728,11 @@ func _process(delta: float) -> void:
 			_track_last = tracked.global_position
 		else:
 			_hold_area(_track_last)
-	if not active or platform == null:
+	var pip_now: bool = Engine.get_process_frames() - pip_frame <= 3 and platform != null
+	if pip_now != _pip:
+		_pip = pip_now
+		_render_when_up()
+	if platform == null or not (active or _pip):
 		# The beam lives in the world, not on the page. Without this it kept
 		# whatever state it had when the pod was closed -- visible from the
 		# cockpit and the chase camera, still pointing at a spot the aeroplane
@@ -736,6 +748,11 @@ func _process(delta: float) -> void:
 	var up := Vector3.UP if absf(dir.y) < 0.985 or holder == null \
 		else _mount_xf(holder).basis.y
 	_cam.look_at(origin + dir * 1000.0, up)
+	if not active:
+		# only the corner panel is watching: the picture, and nothing the
+		# page does with it
+		_stow()
+		return
 	if diag:
 		# Against the aeroplane as it is *drawn*, always — not against whatever
 		# transform the head happens to use. Measuring the head against its own

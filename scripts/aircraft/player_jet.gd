@@ -216,6 +216,7 @@ func cycle_target() -> void:
 	# missile selected and became invisible the moment you reached for a bomb.
 	var cand: Array = []
 	var groups := ["hittable"]
+	var air_only: bool = Aircraft.is_air_to_air(w)
 	if String(ws["kind"]) == "bomb":
 		groups = ["ground_targets", "ships"]
 	for grp in groups:
@@ -231,9 +232,12 @@ func cycle_target() -> void:
 				continue
 			if n.has_method("is_alive") and not n.is_alive():
 				continue
+			# an air-to-air round is only offered things in the air
+			if air_only and not Aircraft.is_airborne(n):
+				continue
 			if not cand.has(n):
 				cand.append(n)
-	if cand.is_empty() and _own_spots(INF).is_empty():
+	if cand.is_empty() and (air_only or _own_spots(INF).is_empty()):
 		say("no targets")
 		target = null
 		return
@@ -267,7 +271,7 @@ func cycle_target() -> void:
 	# And our own laser spot, which is a mark rather than a contact: it is on
 	# our side, so the hostile test above throws it out, and the pod is what is
 	# looking at it, so terrain between it and the radar is beside the point.
-	for sp in _own_spots(reach):
+	for sp in ([] if air_only else _own_spots(reach)):
 		cand.append(sp)
 	if cand.is_empty():
 		say("no radar contacts — terrain masked")

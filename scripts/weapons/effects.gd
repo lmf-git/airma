@@ -854,6 +854,10 @@ static var mute_blast := false
 static func _blast_infantry(world: Node, pos: Vector3, r: float) -> void:
 	if mute_blast or world == null or not world.is_inside_tree():
 		return
+	# a blast nobody has named is a blast
+	var was_cause: String = KillFeed.cause
+	if was_cause == "":
+		KillFeed.cause = "explosion"
 	for n in world.get_tree().get_nodes_in_group("infantry"):
 		if not is_instance_valid(n) or not n.has_method("take_hit"):
 			continue
@@ -862,6 +866,7 @@ static func _blast_infantry(world: Node, pos: Vector3, r: float) -> void:
 		var d: float = ((n as Node3D).global_position + Vector3(0, 0.9, 0)).distance_to(pos)
 		if d < r:
 			n.take_hit(280.0 * pow(1.0 - d / r, 1.2), credit if is_instance_valid(credit) else null)
+	KillFeed.cause = was_cause
 
 static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -> void:
 	_blast_infantry(world, pos, maxf(radius * 0.8, 5.0))

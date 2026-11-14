@@ -482,8 +482,10 @@ func _end(burst: bool) -> void:
 		elif n.has_method("hit_radius"):
 			d = maxf(d - n.hit_radius(), 0.0)
 		if d < lethal:
+			KillFeed.cause = "nuke"
 			n.take_hit(float(ws.get("damage", 90000.0)) * clampf(1.0 - d / lethal, 0.15, 1.0),
 				shooter if is_instance_valid(shooter) else null)
+			KillFeed.cause = ""
 			hit += 1
 	var flattened := 0
 	var scn: Variant = world.get("scenery")

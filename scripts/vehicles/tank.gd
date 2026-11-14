@@ -2716,9 +2716,16 @@ func hull_distance(p: Vector3) -> float:
 		clampf(lp.z, mn.z, mx.z))
 	return lp.distance_to(q)
 
-func take_hit(amount: float, _from: Node = null) -> void:
+## Who hit it last and with what, for the kill feed.
+var last_by: Node = null
+var last_cause := ""
+
+func take_hit(amount: float, from: Node = null) -> void:
 	if not alive:
 		return
+	if from != null and is_instance_valid(from):
+		last_by = from
+	last_cause = KillFeed.weapon_of(from)
 	# Whoever simulates this vehicle decides whether it just died. A ghost of a
 	# remote player's tank, or a garrison the host owns, reports the hit instead
 	# of applying it, and learns the outcome from replicated state.

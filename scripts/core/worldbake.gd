@@ -15,7 +15,7 @@ class_name WorldBake
 ## anyone having to notice. In an exported build the sources are not readable
 ## and the binary cannot change under itself, so VERSION carries it alone.
 
-const VERSION := 1
+const VERSION := 2
 const PATH := "user://world_bake.dat"
 ## Every script whose output ends up in the bake. Missing one means stale
 ## terrain that looks right and is not, so err towards listing too many.

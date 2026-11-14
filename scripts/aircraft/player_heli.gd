@@ -269,12 +269,15 @@ func _collective(want_vs: float, delta: float) -> void:
 
 func cycle_target() -> void:
 	var cand: Array = []
+	var air_only: bool = Aircraft.is_air_to_air(current_weapon())
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or n == self:
 			continue
 		if "team" in n and n.team == team:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
+			continue
+		if air_only and not Aircraft.is_airborne(n):
 			continue
 		cand.append(n)
 	var fwd := -global_transform.basis.z
@@ -288,7 +291,7 @@ func cycle_target() -> void:
 	cand = cand.filter(func(n): return \
 		global_position.distance_to(n.global_position) < reach)
 	# and our own laser spot, which the hostile test above passes over
-	for sp in get_tree().get_nodes_in_group("laser_spots"):
+	for sp in ([] if air_only else get_tree().get_nodes_in_group("laser_spots")):
 		if is_instance_valid(sp) and bool(sp.get("on")) and int(sp.get("team")) == team \
 				and global_position.distance_to((sp as Node3D).global_position) < reach \
 				and not cand.has(sp):

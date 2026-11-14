@@ -1328,6 +1328,7 @@ func _run_rof_test() -> void:
 			continue
 		player.set_weapon(wi)
 		player.gun_cd = 0.0
+		player.battery_cd.clear()
 		var before: int = get_tree().get_nodes_in_group("shells").size()
 		var shots := 0
 		var t := 0.0
@@ -2316,6 +2317,7 @@ func _ready() -> void:
 	map = MapView.new()
 	map.world = self
 	ui.add_child(map)
+	hud.map_view = map
 	await _paint("Drawing the map", 0.88)
 	map.bake()
 	_mark.call("map")
@@ -11093,7 +11095,7 @@ func _cqb_vehicle_spot(c3: Vector3, team: int) -> Vector3:
 
 func _on_cqb_vehicle_down(who: Node) -> void:
 	if is_instance_valid(cqb) and who is Tank:
-		cqb.vehicle_down((who as Tank).team, (who as Tank).display_name())
+		cqb.vehicle_down((who as Tank).team, (who as Tank).display_name(), who)
 	if who == tank and is_instance_valid(cqb):
 		# it was yours: out of the wreck, back to the start line, and choose
 		# again what to go in as
@@ -13256,17 +13258,49 @@ func _site_country_fields() -> void:
 ## extension -- it is a spiral of two hundred and sixty stops with an
 ## eighty-one point footprint tested at each, which written here was twenty-one
 ## thousand calls across the binding for every country on the planet.
+##
+## And not on a town. The towns are sited first, so a field that came down on
+## one laid its runway through the streets: the search is run again further
+## out, from where the last one landed, until it finds open country.
 func _dry_field_site(centre: Vector2) -> Vector2:
-	var q: Vector2 = Sim.native.dry_field_site(
-		centre.x, centre.y, 0.0, 1200.0, 0.41, 260, 0.0)
-	return Vector2.INF if is_inf(q.x) else q
+	var r0 := 0.0
+	for _attempt in 8:
+		var q: Vector2 = Sim.native.dry_field_site(
+			centre.x, centre.y, r0, 1200.0, 0.41, 260, 0.0)
+		if is_inf(q.x):
+			return Vector2.INF
+		if _field_clear_of_towns(q, deg_to_rad(28.0)):
+			return q
+		r0 = q.distance_to(centre) + 4000.0
+	return Vector2.INF
+
+## Would a field at `at`, turned to `yaw`, stand clear of every town?
+func _field_clear_of_towns(at: Vector2, yaw: float) -> bool:
+	if not is_instance_valid(scenery):
+		return true
+	var fd := {"at": at, "yaw": yaw}
+	for t in scenery.sites:
+		var c: Vector2 = t["c"]
+		var l: Vector2 = Sim.field_local(fd, c.x, c.y)
+		var need: float = float(t["r"]) * 1.15 + 300.0
+		if Sim.rect_gap(l, Vector2(950.0, 2600.0)) < need \
+				or Sim.rect_gap(l, Vector2(260.0, 5200.0)) < need * 0.6:
+			return false
+	return true
 
 ## The flat world has no countries in it, so it keeps the single opposing field
 ## it always had: a slow spiral outward from 74 km looking for room.
 func _site_flat_opfor() -> void:
 	# The same search, from 74 km out and kept inside the map's own edge.
-	var found: Vector2 = Sim.native.dry_field_site(
-		0.0, 0.0, 74000.0, 3500.0, 0.21, 90, Sim.WORLD_HALF * 0.8)
+	var found := Vector2.INF
+	var r0 := 74000.0
+	for _attempt in 8:
+		found = Sim.native.dry_field_site(
+			0.0, 0.0, r0, 3500.0, 0.21, 90, Sim.WORLD_HALF * 0.8)
+		if is_inf(found.x) or _field_clear_of_towns(found, deg_to_rad(28.0)):
+			break
+		r0 = found.length() + 3500.0
+		found = Vector2.INF
 	var spot: Vector2 = Vector2.INF if is_inf(found.x) else found
 	if spot == Vector2.INF:
 		push_warning("no dry ground found for the opposing field")
@@ -14261,6 +14295,8 @@ func _on_walker_died(where: Vector3) -> void:
 		var by: Node = walker.last_attacker if is_instance_valid(walker) else null
 		Sim.report("you were dropped by %s" % (String(by.get("callsign"))
 			if is_instance_valid(by) and by is Soldier else "your own grenade"), Sim.Ev.BAD)
+		fight.feed_player(by if by != walker else null,
+			String(walker.last_cause) if is_instance_valid(walker) else "explosion")
 		fight.player_down()
 	else:
 		Sim.report("pilot down", Sim.Ev.BAD)

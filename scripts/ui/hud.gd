@@ -23,12 +23,18 @@ var carrier: Carrier = null
 var rocket: LaunchVehicle = null
 ## The targeting pod, for the mark on the main view where it is looking.
 var pod: SensorPod = null
+## The tactical map, for the relief the minimap is drawn on.
+var map_view: MapView = null
 var mode = null
 var tank = null
 var ship = null
 var cam: Camera3D = null
 var base: Airbase = null
 var log_lines: Array = []
+## The kill feed, newest first: see `KillFeed`.
+var kill_lines: Array = []
+const KILL_KEEP := 5
+const KILL_LIFE := 7.0
 var show_help := true
 var _t := 0.0
 var _font: Font
@@ -45,6 +51,7 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	Sim.mission_event.connect(_on_event)
+	Sim.kill_event.connect(_on_kill)
 	# The key card draws itself, on its own schedule. A child, so it comes out
 	# over the symbology the way it did when it was drawn last.
 	_card = KeyCard.new()
@@ -53,6 +60,13 @@ func _ready() -> void:
 	_card.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_card)
+
+func _on_kill(e: Dictionary) -> void:
+	var line: Dictionary = e.duplicate()
+	line["age"] = 0.0
+	kill_lines.push_front(line)
+	if kill_lines.size() > KILL_KEEP:
+		kill_lines.resize(KILL_KEEP)
 
 func _on_event(text: String, kind: int) -> void:
 	log_lines.push_front({"t": text, "k": kind, "age": 0.0})
@@ -147,6 +161,8 @@ func _tick(delta: float) -> void:
 	_t += delta
 	for l in log_lines:
 		l["age"] += delta
+	for kl in kill_lines:
+		kl["age"] += delta
 	_refresh_help()
 	queue_redraw()
 
@@ -1773,7 +1789,7 @@ func _draw_panels(vp: Vector2) -> void:
 				_draw_minimap_at(slot[1], 82.0)
 				Sim.prof_end(&"hud.minimap", _p2)
 			1:
-				_draw_sensor_stub(slot[1], 82.0)
+				_draw_sensor_panel(slot[1], 82.0)
 
 ## Compass rose minimap: contacts and the runway, oriented to your nose.
 func _draw_minimap_at(c: Vector2, r: float) -> void:
@@ -1792,10 +1808,22 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 		var d := (w - here) / rng * r
 		return c + Vector2(d.x * cos(hdg) + d.y * sin(hdg),
 			-d.x * sin(hdg) + d.y * cos(hdg))
-	# runway
-	var rw_a: Vector2 = to_screen.call(Vector2(0, -Sim.RUNWAY_LEN * 0.5))
-	var rw_b: Vector2 = to_screen.call(Vector2(0, Sim.RUNWAY_LEN * 0.5))
-	draw_line(rw_a, rw_b, Color(0.8, 0.85, 0.9, 0.8), 2.0)
+	# The ground under it: the map's own relief, turned heading up. The panel
+	# was an empty box with dots in it -- nothing to say where the coast or
+	# the hills or the towns were. The four corners are taken back into the
+	# world and the sheet is laid across them, so it turns with the nose and
+	# stays inside the square.
+	_minimap_ground(c, r, here, hdg, rng)
+	# every aerodrome's runway, not only the one you took off from
+	for fd in Sim.fields:
+		var at: Vector2 = fd["at"]
+		var yaw: float = float(fd["yaw"])
+		var along := Vector2(sin(-yaw), cos(-yaw)) * Sim.RUNWAY_LEN * 0.5
+		var rw_a: Vector2 = to_screen.call(at - along)
+		var rw_b: Vector2 = to_screen.call(at + along)
+		if (rw_a - c).length() > r * 1.5 and (rw_b - c).length() > r * 1.5:
+			continue
+		draw_line(rw_a, rw_b, Color(0.85, 0.9, 0.95, 0.9), 2.4)
 	for z in _seen_zones:
 		if not is_instance_valid(z):
 			continue
@@ -1821,11 +1849,59 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 		c + Vector2(5, 5)]), GREEN)
 	_txt(c + Vector2(-r + 4, r - 6), "MAP %d km" % int(rng * 0.001), 12, DIM)
 
-## Placeholder frame when the sensor is assigned to a side slot but stowed.
-func _draw_sensor_stub(c: Vector2, r: float) -> void:
-	draw_rect(Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0), Color(0.02, 0.05, 0.04, 0.5), true)
-	_box(Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0), DIM, 1.2)
-	_txt(c - Vector2(r - 8, -4), "SENSOR   ALT+RMB", 13, DIM)
+## The relief sheet under the minimap's square, heading up. The close-in
+## sheet where it covers the whole square, the world sheet where it does not.
+func _minimap_ground(c: Vector2, r: float, here: Vector2, hdg: float, rng: float) -> void:
+	if map_view == null or not is_instance_valid(map_view):
+		return
+	var corners := [Vector2(-r, -r), Vector2(r, -r), Vector2(r, r), Vector2(-r, r)]
+	var world_pts: Array = []
+	var inside_detail := true
+	for s in corners:
+		var sv: Vector2 = s
+		# the inverse of the turn in `_draw_minimap_at`
+		var d := Vector2(sv.x * cos(hdg) - sv.y * sin(hdg), sv.x * sin(hdg) + sv.y * cos(hdg))
+		var w: Vector2 = here + d * rng / r
+		world_pts.append(w)
+		if absf(w.x) > MapView.DETAIL_HALF or absf(w.y) > MapView.DETAIL_HALF:
+			inside_detail = false
+	# the sheet as it stands: `detail()` waits for one being drawn, and the
+	# head-up display does not wait for anything
+	var tex: Texture2D = map_view._detail_tex \
+		if inside_detail and map_view._detail_tex != null else map_view.relief()
+	var half: float = MapView.DETAIL_HALF if tex == map_view._detail_tex else MapView.HALF
+	if tex == null:
+		return
+	var pts := PackedVector2Array()
+	var uvs := PackedVector2Array()
+	for i in 4:
+		var wp: Vector2 = world_pts[i]
+		pts.append(c + (corners[i] as Vector2))
+		uvs.append((wp + Vector2(half, half)) / (half * 2.0))
+	draw_polygon(pts, PackedColorArray([Color(0.85, 0.85, 0.85, 0.9)]), uvs, tex)
+
+## The sensor's own picture in a corner panel, with the page shut. It was a
+## frame with "ALT+RMB" in it and nothing else.
+func _draw_sensor_panel(c: Vector2, r: float) -> void:
+	var box := Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0)
+	draw_rect(box, Color(0.02, 0.05, 0.04, 0.5), true)
+	var mine: bool = pod != null and is_instance_valid(pod) and is_instance_valid(aircraft) \
+		and pod.platform == aircraft
+	if mine:
+		pod.pip_frame = Engine.get_process_frames()
+		var tex: Texture2D = pod.pip_texture()
+		if tex != null and (pod.active or pod._pip):
+			draw_texture_rect(tex, box, false)
+			var g := Color(0.55, 1.0, 0.62, 0.9)
+			draw_line(c - Vector2(14, 0), c - Vector2(4, 0), g, 1.2)
+			draw_line(c + Vector2(4, 0), c + Vector2(14, 0), g, 1.2)
+			draw_line(c - Vector2(0, 14), c - Vector2(0, 4), g, 1.2)
+			draw_line(c + Vector2(0, 4), c + Vector2(0, 14), g, 1.2)
+			var tag: String = ["SLEW", "AREA", "TRACK"][pod.mode]
+			_txt(c + Vector2(-r + 4, -r + 14), "TGP %s" % tag, 12, g)
+	_box(box, DIM, 1.2)
+	if not mine:
+		_txt(c - Vector2(r - 8, -4), "SENSOR   ALT+RMB", 13, DIM)
 
 ## When each contact was last actually seen, so a masked one leaves a fading
 ## trace rather than vanishing the instant it goes behind something.
@@ -2062,7 +2138,7 @@ func _draw_log(vp: Vector2) -> void:
 	const PT := 14
 	var w: float = clampf(vp.x * 0.30, 220.0, 440.0)
 	var x: float = vp.x - w - 16.0
-	var y := 90.0
+	var y: float = _draw_kills(vp, 90.0)
 	for l in log_lines:
 		var a: float = clampf(1.0 - (l["age"] - 5.0) / 2.0, 0.0, 1.0)
 		if a <= 0.0:
@@ -2079,6 +2155,56 @@ func _draw_log(vp: Vector2) -> void:
 			_txt(Vector2(x, y), part, PT, col, HORIZONTAL_ALIGNMENT_RIGHT, w)
 			y += 18.0
 		y += 2.0
+
+## The kill feed, right-aligned above the log: killer, weapon, a headshot
+## mark, victim. Returns where the log should start below it.
+func _draw_kills(vp: Vector2, y0: float) -> float:
+	const PT := 15
+	const ROW := 24.0
+	const ICON_H := 17.0
+	var y: float = y0
+	var right: float = vp.x - 16.0
+	for kl in kill_lines:
+		var age: float = kl["age"]
+		var a: float = clampf(1.0 - (age - (KILL_LIFE - 1.0)), 0.0, 1.0)
+		if a <= 0.0:
+			continue
+		var victim: String = kl["v"]
+		var killer: String = kl["k"]
+		var vw: float = _font.get_string_size(victim, HORIZONTAL_ALIGNMENT_LEFT, -1, PT).x
+		var kw: float = 0.0 if killer == "" else \
+			_font.get_string_size(killer, HORIZONTAL_ALIGNMENT_LEFT, -1, PT).x
+		var weapon: String = kl["w"]
+		var gun_w: float = KillFeed.icon_width(weapon, ICON_H)
+		var head: bool = kl["h"]
+		var head_w: float = ICON_H * 1.6 + 4.0 if head else 0.0
+		var total: float = vw + 10.0 + gun_w + head_w + 10.0 + kw + 16.0
+		var left: float = right - total
+		var mine: bool = killer == "YOU" or victim == "YOU"
+		var bg := Color(0.0, 0.0, 0.0, 0.42 * a)
+		draw_rect(Rect2(left, y, total, ROW - 3.0), bg)
+		if mine:
+			draw_rect(Rect2(left, y, total, ROW - 3.0),
+				Color(1.0, 0.86, 0.35, 0.75 * a), false, 1.5)
+		var cx: float = left + 8.0
+		var base_y: float = y + ROW * 0.5 + 4.0
+		if killer != "":
+			var kc: Color = KillFeed.colour(int(kl["kt"]))
+			kc.a = a
+			draw_string(_font, Vector2(cx, base_y), killer, HORIZONTAL_ALIGNMENT_LEFT, -1, PT, kc)
+			cx += kw + 10.0
+		var mid: float = y + (ROW - 3.0) * 0.5
+		KillFeed.draw_icon(self, weapon, Vector2(cx, mid), ICON_H, Color(0.95, 0.95, 0.92, a))
+		cx += gun_w + 4.0
+		if head:
+			KillFeed.draw_icon(self, "head", Vector2(cx, mid), ICON_H, Color(1.0, 0.82, 0.30, a))
+			cx += head_w
+		cx += 6.0
+		var vc: Color = KillFeed.colour(int(kl["vt"]))
+		vc.a = a
+		draw_string(_font, Vector2(cx, base_y), victim, HORIZONTAL_ALIGNMENT_LEFT, -1, PT, vc)
+		y += ROW
+	return y + (6.0 if y > y0 else 0.0)
 
 ## Break a line of text at spaces so that no piece is wider than `w`.
 func _wrap(t: String, w: float, pt: int) -> PackedStringArray:

@@ -1695,7 +1695,9 @@ func _hit(what: Node, miss := 0.0) -> void:
 	var reach: float = float(ws.get("lethal", maxf(float(ws["fuse"]), 1.0)))
 	var falloff: float = clampf(1.0 - miss / maxf(reach, 0.1), 0.22, 1.0)
 	if what.has_method("take_hit"):
+		KillFeed.cause = "missile"
 		what.take_hit(ws["damage"] * falloff, _from_who())
+		KillFeed.cause = ""
 	if shooter and shooter.has_method("on_weapon_hit"):
 		shooter.on_weapon_hit(what, wid)
 	_die(true)
@@ -1711,7 +1713,9 @@ func _ground_burst(at: Vector3) -> void:
 			continue
 		var d: float = n.global_position.distance_to(at)
 		if d < r:
+			KillFeed.cause = "missile"
 			n.take_hit(float(ws["damage"]) * clampf(1.0 - d / r, 0.2, 1.0), _from_who())
+			KillFeed.cause = ""
 	var scn = get_tree().current_scene.get("scenery")
 	if scn != null and is_instance_valid(scn) and scn.has_method("damage_area"):
 		var flat: int = scn.damage_area(at, r * 0.8)
@@ -1816,7 +1820,9 @@ func _die(big: bool) -> void:
 			elif n.has_method("hit_radius"):
 				d = maxf(d - n.hit_radius(), 0.0)
 			if d < lethal:
+				KillFeed.cause = "nuke" if nuke else "strike"
 				n.take_hit(float(ws["damage"]) * clampf(1.0 - d / lethal, 0.15, 1.0), _from_who())
+				KillFeed.cause = ""
 				hit += 1
 				if Sim.debug_weapons and not nuke:
 					print("[bomb]   damaged %s at %.1f m, hp now %s" % [

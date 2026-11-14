@@ -63,6 +63,18 @@ var _strafe := 0.0
 var _strafe_t := 0.0
 var _stuck := 0.0
 var _was := Vector3.ZERO
+## Times in a row the stuck check has found him not moving. A corner that the
+## route keeps walking him back into is given up on after a few.
+var _stuck_n := 0
+## A sidestep off whatever has him wedged, and how long it lasts.
+var _nudge := Vector3.ZERO
+var _nudge_t := 0.0
+## How long he has been in the state he is in.
+var _state_t := 0.0
+var _last_state := ROAM
+## Seconds with no enemy, no route and nothing happening: a man left standing
+## in the road. Past a few, he is given somewhere to go.
+var _idle := 0.0
 var _steps_seen := 0
 var _hurt_recent := 0.0
 var _last_head := false
@@ -156,9 +168,13 @@ static func chest_of(n: Node3D) -> Vector3:
 	var low: bool = (n.get("crouching") == true)
 	return n.global_position + Vector3(0.0, 0.75 if low else 1.15, 0.0)
 
+## What the last thing to hurt him was, for the kill feed: see `KillFeed`.
+var last_cause := ""
+
 func take_hit(amount: float, from: Node = null) -> void:
 	if not alive:
 		return
+	last_cause = KillFeed.weapon_of(from)
 	health -= amount
 	_last_amount = amount
 	if amount >= 120.0:
@@ -221,8 +237,14 @@ func _process(delta: float) -> void:
 		var _ps := Sim.prof_at()
 		_sense()
 		_decide()
+		_watchdog()
 		Sim.prof_end(&"ai.sense", _ps)
 	_acquired = _acquired + delta if is_instance_valid(target) else 0.0
+	_state_t += delta
+	if state != FIGHT and not is_instance_valid(target) and vel.length() < 0.5:
+		_idle += delta
+	else:
+		_idle = 0.0
 	var before := global_position
 	var _ph := Sim.prof_at()
 	var shouldered: bool = _heavy(delta)
@@ -364,13 +386,19 @@ func _sense() -> void:
 func _decide() -> void:
 	if state == COVER:
 		# stay put until the weapon is ready and the worst has passed
-		if _at_goal(1.4):
+		if _arrived(1.4):
 			_kneel = true
 			# and not while the rounds are still coming in
 			if _reload <= 0.0 and _hold <= 0.0 and _pinned < PINNED * 0.6:
 				_kneel = false
 				state = HUNT
 				_goal = Vector3.INF
+		# Cover he cannot get to, or has been crouched behind for long
+		# enough: back into it. He only came here to get out of the way.
+		if _state_t > 9.0 or (_state_t > 4.0 and not _arrived(1.4) and vel.length() < 0.3):
+			_kneel = false
+			state = HUNT
+			_goal = Vector3.INF
 		return
 	# Pinned: behind something if there is something, and down where he is
 	# if there is not.
@@ -406,13 +434,55 @@ func _decide() -> void:
 			_set_goal(_seen_at)
 		return
 	state = ROAM
-	if _goal == Vector3.INF or (_at_goal(3.0) and _hold <= 0.0):
+	if _goal == Vector3.INF or (_arrived(3.0) and _hold <= 0.0):
 		_set_goal(arena.objective_for(self))
 		_hold = randf_range(2.0, 6.0)
+
+## The things that leave a man standing still with a fight going on round
+## him. Each one has a way out.
+func _watchdog() -> void:
+	if state != _last_state:
+		_last_state = state
+		_state_t = 0.0
+		_idle = 0.0
+	if _idle < 4.0:
+		return
+	if state == HUNT:
+		# He got to where it came from and there is nobody there. Look
+		# round the next corner rather than stare at the last one.
+		_idle = 0.0
+		var ang := randf() * TAU
+		var probe: Vector3 = _seen_at + Vector3(cos(ang), 0.0, sin(ang)) * randf_range(10.0, 22.0)
+		var near: Vector3 = arena.free_near(probe)
+		if near == Vector3.INF:
+			_seen_t = 99.0
+			_goal = Vector3.INF
+		else:
+			_seen_at = near
+			_set_goal(near)
+	elif state == ROAM and _idle > 9.0:
+		# a hold never runs past six: anything longer is a goal he will not reach
+		_idle = 0.0
+		_goal = Vector3.INF
+		_hold = 0.0
 
 func _at_goal(within: float) -> bool:
 	return _goal != Vector3.INF \
 		and Vector2(global_position.x - _goal.x, global_position.z - _goal.z).length() < within
+
+## As near as the route will take him. A goal across a wall or inside a
+## courtyard with no way in gets a route that stops short of it, and a man who
+## waited to be within a metre or two of the goal itself waited for ever.
+func _route_done() -> bool:
+	if _goal == Vector3.INF or _path.is_empty():
+		return true
+	if _path_i < _path.size() - 1:
+		return false
+	var wp: Vector2 = _path[_path.size() - 1]
+	return Vector2(wp.x - global_position.x, wp.y - global_position.z).length() < 1.2
+
+func _arrived(within: float) -> bool:
+	return _at_goal(within) or _route_done()
 
 func _set_goal(at: Vector3) -> void:
 	_goal = at
@@ -424,7 +494,7 @@ func _set_goal(at: Vector3) -> void:
 
 # ------------------------------------------------------------------- movement
 func _move(delta: float) -> void:
-	_hold = maxf(_hold - delta, 0.0) if (_at_goal(3.0) or state == COVER) else _hold
+	_hold = maxf(_hold - delta, 0.0) if (_arrived(3.0) or state == COVER) else _hold
 	_repath -= delta
 	var wish := Vector3.ZERO
 	var speed := JOG
@@ -475,6 +545,9 @@ func _move(delta: float) -> void:
 		elif state == HUNT:
 			var look: Vector3 = _seen_at - global_position
 			face = atan2(-look.x, -look.z)
+	if _nudge_t > 0.0:
+		_nudge_t -= delta
+		wish = wish * 0.35 + _nudge
 	crouching = _kneel and wish.length() < 0.1
 	if crouching:
 		speed = 1.8
@@ -514,10 +587,21 @@ func _move(delta: float) -> void:
 		_stuck += delta
 		if _stuck > 0.8:
 			if _was.distance_to(p) < 0.35:
+				_stuck_n += 1
 				if _goal != Vector3.INF:
 					_set_goal(_goal)
 				_strafe = -_strafe if _strafe != 0.0 else 1.0
 				_strafe_t = 0.6
+				# Off the corner sideways: the strafe only counts in a fight,
+				# and the same route walks him straight back into it.
+				var flat_w := Vector3(wish.x, 0.0, wish.z).normalized()
+				_nudge = Vector3(-flat_w.z, 0.0, flat_w.x) * (1.0 if randf() < 0.5 else -1.0)
+				_nudge_t = 0.7
+				if _stuck_n >= 4:
+					_stuck_n = 0
+					_give_up_goal()
+			else:
+				_stuck_n = 0
 			_stuck = 0.0
 			_was = p
 	else:
@@ -531,6 +615,18 @@ func _move(delta: float) -> void:
 		var aim: Vector3 = Soldier.chest_of(target) - eye()
 		want_pitch = atan2(aim.y, Vector2(aim.x, aim.z).length())
 	pitch = lerpf(pitch, clampf(want_pitch, -1.2, 1.2), clampf(delta * 8.0, 0.0, 1.0))
+
+## Somewhere he keeps failing to get to. Wherever it was, it is not worth it.
+func _give_up_goal() -> void:
+	_goal = Vector3.INF
+	_hold = 0.0
+	_path = PackedVector2Array()
+	if state == COVER:
+		_kneel = false
+		state = HUNT
+	elif state == HUNT:
+		_seen_t = 99.0
+		state = ROAM
 
 ## Has he strayed from the route he was given? True with no route at all.
 func _off_route() -> bool:

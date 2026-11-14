@@ -298,6 +298,10 @@ func _free_near(p: Vector3) -> Vector3:
 	var id := _free_cell(_cell(p))
 	return Vector3.INF if id.x < 0 else _cell_pos(id)
 
+## The same, for the men: the nearest place a man can stand.
+func free_near(p: Vector3) -> Vector3:
+	return _free_near(p)
+
 ## Which connected piece of open ground each cell is in, -1 for solid. A route
 ## is asked for with a partial path allowed, so that a man sent somewhere he
 ## cannot get to walks as near as he can -- and A* finds that out by visiting
@@ -502,6 +506,7 @@ func _spawn(team: int, slot: int) -> void:
 func _on_died(who: Soldier, killer: Node, head: bool) -> void:
 	(_teams[who.team] as Array).erase(who)
 	soldiers.erase(who)
+	_feed(killer, who.callsign, who.team, who.last_cause, head)
 	var by_player: bool = is_instance_valid(player) and killer == player
 	if by_player:
 		kills += 1
@@ -521,16 +526,36 @@ func _on_died(who: Soldier, killer: Node, head: bool) -> void:
 			headshots += 1
 		Sim.score += 150 if head else 100
 		Sim.report("you dropped %s%s" % [who.callsign, " — headshot" if head else ""], Sim.Ev.GOOD)
-	elif who.team == 0:
-		Sim.report("%s is down" % who.callsign, Sim.Ev.BAD)
-	elif killer is Soldier:
-		Sim.report("%s dropped %s" % [(killer as Soldier).callsign, who.callsign], Sim.Ev.INFO)
+	# the rest is the kill feed's: see `_feed`
 	if is_instance_valid(mode) and mode.running:
 		mode.register_kill(who.team)
 	_queue.append([RESPAWN, who.team, int(who.get_meta("slot", 0))])
 
+## One line of the kill feed. A man in a vehicle is credited as the vehicle's
+## driver, and the player as YOU.
+func _feed(killer: Node, victim: String, victim_team: int, weapon: String,
+		head := false) -> void:
+	var by: Node = killer
+	if by is Tank and is_instance_valid(world) and world.get("tank") == by:
+		by = player
+	var kname: String = KillFeed.name_of(by, player)
+	var kteam: int = KillFeed.team_of(by)
+	if by == player and is_instance_valid(player):
+		kteam = 0
+	if kname == victim:
+		kname = ""
+	Sim.kill(kname, kteam, victim, victim_team, weapon, head)
+
+## The player went down.
+func feed_player(by: Node, weapon: String) -> void:
+	_feed(by, "YOU", 0, weapon)
+
 ## A vehicle was knocked out. It counts the same as a man.
-func vehicle_down(team: int, what: String) -> void:
+func vehicle_down(team: int, what: String, who: Node = null) -> void:
+	var by: Node = who.get("last_by") if is_instance_valid(who) and "last_by" in who else null
+	var cause: String = String(who.get("last_cause")) \
+		if is_instance_valid(who) and "last_cause" in who else "explosion"
+	_feed(by, what, team, cause if cause != "" else "explosion")
 	Sim.report("%s %s knocked out" % ["our" if team == 0 else "their", what],
 		Sim.Ev.BAD if team == 0 else Sim.Ev.GOOD)
 	if is_instance_valid(mode) and mode.running:
@@ -558,6 +583,7 @@ func _under_wheels() -> void:
 			# in front of the way it is going, not merely beside it
 			if rel.dot(t.linear_velocity) < 0.0:
 				continue
+			KillFeed.cause = "roadkill"
 			if s is Soldier:
 				s.take_hit(600.0, driver)
 				if world.get("tank") == t:
@@ -569,6 +595,7 @@ func _under_wheels() -> void:
 					Sim.score += 100
 			else:
 				s.take_hit(600.0, t)
+			KillFeed.cause = ""
 
 var run_over := 0
 
@@ -650,6 +677,18 @@ func _drive_armour(delta: float) -> void:
 				_routes.erase(key)
 			continue
 		t.set_meta("cqb_wait", 0.0)
+		# Not getting anywhere -- nosed into a wreck, a wall the grid did not
+		# know about, a corner too tight to turn in: somewhere else.
+		var prog: Array = t.get_meta("cqb_prog", [here, 0.0])
+		prog[1] = float(prog[1]) + 0.35
+		if (prog[0] as Vector3).distance_to(here) > 5.0:
+			prog = [here, 0.0]
+		t.set_meta("cqb_prog", prog)
+		if float(prog[1]) > 8.0:
+			t.set_meta("cqb_prog", [here, 0.0])
+			t.set_meta("cqb_goal", Vector3.INF)
+			_routes.erase(key)
+			continue
 		var route: PackedVector2Array = _route_for(t, key, here, goal)
 		if route.size() < 2:
 			t.set_meta("cqb_goal", Vector3.INF)
@@ -658,6 +697,13 @@ func _drive_armour(delta: float) -> void:
 		# aim a couple of cells along it, so corners are cut no finer than
 		# the street allows
 		var at: int = int((_routes[key] as Array)[2])
+		if at >= route.size() - 2:
+			# The end of the route and not the goal: a route that stops
+			# short is as near as it gets. It sat there pointing at the
+			# goal for good.
+			t.set_meta("cqb_goal", Vector3.INF)
+			_routes.erase(key)
+			continue
 		var wp: Vector2 = route[mini(at + 2, route.size() - 1)]
 		var dir := Vector3(wp.x - here.x, 0.0, wp.y - here.z)
 		if dir.length() < 0.5:
@@ -855,7 +901,7 @@ func _support(delta: float) -> void:
 		if float(b[0]) > 0.0:
 			keep.append(b)
 			continue
-		_bomb(b[1], float(b[2]) if b.size() > 2 else 1.0)
+		_bomb(b[1], float(b[2]) if b.size() > 2 else 1.0, false, "strike")
 	_bombs = keep
 
 ## What is on its way in, for the map: everything this side has called down
@@ -1523,7 +1569,7 @@ class MortarRound extends Node3D:
 			Sfx.play_at(get_parent(), "whiz", to + Vector3(0.0, 25.0, 0.0), 2.0, 0.65, 700.0)
 		if _t >= flight:
 			if is_instance_valid(arena):
-				arena._bomb(to, 0.65)
+				arena._bomb(to, 0.65, false, "mortar")
 			queue_free()
 			return
 		global_position = from + _v0 * _t + Vector3(0.0, -0.5 * G * _t * _t, 0.0)
@@ -1817,8 +1863,9 @@ class CruiseMissile extends Node3D:
 		if is_instance_valid(_view):
 			_view.queue_free()
 		if is_instance_valid(arena):
-			arena._bomb(at, BLAST)
-			arena._bomb(at + Vector3(randf_range(-6, 6), 0, randf_range(-6, 6)), BLAST * 0.6)
+			arena._bomb(at, BLAST, false, "cruise")
+			arena._bomb(at + Vector3(randf_range(-6, 6), 0, randf_range(-6, 6)), BLAST * 0.6,
+				false, "cruise")
 		# stand off and watch it for a moment before going back to the street
 		var back: Vector3 = at - dir * 70.0 + Vector3(0, 25.0, 0)
 		global_position = back
@@ -2060,7 +2107,8 @@ class CarpetBomb extends Node3D:
 			return
 		if nxt.y <= floor_y:
 			if is_instance_valid(arena):
-				arena._bomb(Vector3(nxt.x, floor_y, nxt.z), 1.0 if bomblet else 1.25, bomblet)
+				arena._bomb(Vector3(nxt.x, floor_y, nxt.z), 1.0 if bomblet else 1.25, bomblet,
+					"carpet")
 			else:
 				Effects.explosion(get_tree().current_scene, Vector3(nxt.x, floor_y, nxt.z), 6.0)
 			queue_free()
@@ -2098,6 +2146,7 @@ func _nuke(at: Vector3, lethal: float, strategic: bool) -> void:
 	if is_instance_valid(player) and not away:
 		hurt.append(player)
 	var credit: Node = player if is_instance_valid(player) else null
+	KillFeed.cause = "nuke"
 	for n in hurt:
 		if not is_instance_valid(n) or not (n is Node3D) or seen.has(n) \
 				or not n.has_method("take_hit"):
@@ -2109,6 +2158,7 @@ func _nuke(at: Vector3, lethal: float, strategic: bool) -> void:
 		elif d < lethal * 1.6:
 			# outside it, the blast: hurt, not killed
 			n.take_hit(70.0 * (1.0 - (d - lethal) / (lethal * 0.6)), credit)
+	KillFeed.cause = ""
 	if strategic and is_instance_valid(mode) and mode.running:
 		mode._finish(true, "STRATEGIC STRIKE")
 
@@ -2239,6 +2289,11 @@ var _carpet_n := 0
 ## armour. Not `_bomb` -- a cannon shell is not a bomblet, and sixty of those
 ## booms in two seconds is a firework display rather than a gun.
 func _cannon(at: Vector3) -> void:
+	KillFeed.cause = "strafe"
+	_cannon_hit(at)
+	KillFeed.cause = ""
+
+func _cannon_hit(at: Vector3) -> void:
 	cannon_hits += 1
 	var fb := Effects.Boom.new()
 	fb.radius = 2.2
@@ -2269,7 +2324,13 @@ func _cannon(at: Vector3) -> void:
 		if dp < 3.0:
 			player.take_hit(120.0 * (1.0 - dp / 3.0), player)
 
-func _bomb(at: Vector3, big := 1.0, many := false) -> void:
+## `why` is what the kill feed puts it down to.
+func _bomb(at: Vector3, big := 1.0, many := false, why := "strike") -> void:
+	KillFeed.cause = why
+	_bomb_hit(at, big, many)
+	KillFeed.cause = ""
+
+func _bomb_hit(at: Vector3, big: float, many: bool) -> void:
 	if many:
 		_carpet_n += 1
 		var fb := Effects.Boom.new()

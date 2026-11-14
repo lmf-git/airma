@@ -22,6 +22,8 @@ var _sight: OptionButton
 var _quiet: CheckButton
 var _grip: CheckButton
 var _mag: CheckButton
+var _choke: OptionButton
+var _slug: CheckButton
 var _note: Label
 var _stats: Label
 var _rides: ItemList
@@ -31,8 +33,9 @@ var _filling := false
 var _streak_ticks := {}
 var _streak_note: Label
 
-const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "lmg", "dmr", "sniper", "fifty"]
-const SECOND := ["smg", "vector", "glock", "carbine", "shotgun", "gl", "law", "stinger"]
+const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "aa20", "lmg", "dmr", "sniper",
+	"fifty"]
+const SECOND := ["smg", "vector", "glock", "carbine", "shotgun", "aa20", "gl", "law", "stinger"]
 
 func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -127,6 +130,11 @@ func _ready() -> void:
 	_quiet = _tick(mid, "Suppressor — quiet, no flash, a little slower")
 	_grip = _tick(mid, "Foregrip — less climb, less wander")
 	_mag = _tick(mid, "Extended magazine — half as many again, slower to change")
+	# shotguns only: what is on the muzzle, and what is in the shells
+	_choke = _choice(mid, "MUZZLE", [], false)
+	for ck in Firearm.CHOKES:
+		_choke.add_item(String(Firearm.CHOKE_NAMES[ck]))
+	_slug = _tick(mid, "Slugs — one heavy round, no spread, hits very hard")
 	_stats = Label.new()
 	_stats.add_theme_font_size_override("font_size", 13)
 	_stats.add_theme_color_override("font_color", Color(0.85, 0.92, 1.0))
@@ -286,11 +294,16 @@ func _to_bench(which: int) -> void:
 	_quiet.button_pressed = bool(s["quiet"]) and Firearm.can_suppress(g)
 	_grip.button_pressed = bool(s["grip"]) and not bare
 	_mag.button_pressed = bool(s["mag"]) and not bare
+	var shot: bool = Firearm.is_shotgun(g)
+	_choke.select(maxi(Firearm.CHOKES.find(String(s.get("choke", "none"))), 0) if shot else 0)
+	_slug.button_pressed = bool(s.get("slug", false)) and shot
 	_filling = false
 	_sight.disabled = bare
 	_quiet.disabled = not Firearm.can_suppress(g)
 	_grip.disabled = bare
 	_mag.disabled = bare
+	_choke.disabled = not shot
+	_slug.disabled = not shot
 	_show_stats(c)
 
 ## A different weapon was chosen for one of the two slots. What is fitted to
@@ -319,6 +332,9 @@ func _changed() -> void:
 	s["quiet"] = _quiet.button_pressed
 	s["grip"] = _grip.button_pressed
 	s["mag"] = _mag.button_pressed
+	if not _choke.disabled:
+		s["choke"] = Firearm.CHOKES[_choke.selected]
+		s["slug"] = _slug.button_pressed
 	_show_stats(c)
 
 ## One weapon as it is fitted, in two lines.

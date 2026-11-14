@@ -201,8 +201,14 @@ static func find_regions() -> Array:
 			break
 	return found
 
+## Can a town stand here: on dry land, clear of the aerodromes and the depot.
+static func _town_ok(q: Vector2, r: float, sea_margin: float) -> bool:
+	return Sim.height_at(q.x, q.y) >= Sim.sea_at(q.x, q.y) + sea_margin \
+		and Sim.town_clear(q, r)
+
 func _site_towns() -> void:
 	sites.clear()
+	Sim.keep_out = [[Vector2(-1500.0, -6600.0), 350.0]]     # the depot: see `_military`
 	var _t_lm := Time.get_ticks_msec()
 	# Which ground is reachable ground. A town across a strait is a town the
 	# trunk network has to swim to.
@@ -220,29 +226,35 @@ func _site_towns() -> void:
 		# was asked for never was -- so a settlement wanted somewhere that
 		# turned out to be under water stayed there unless something else beat
 		# it on roughness, and open sea is very smooth.
-		if Sim.height_at(want.x, want.y) < Sim.sea_at(want.x, want.y) + 25.0 \
-				or not Sim.clear_of_airfield(want.x, want.y) \
-				or not Sim.on_home_land(want.x, want.y):
+		if not _town_ok(want, r, 25.0) or not Sim.on_home_land(want.x, want.y):
 			best_rough = 1e9
 		var step: float = r * 0.45
-		for i in range(-3, 4):
-			for j in range(-3, 4):
-				if i == 0 and j == 0:
-					continue
-				var q := want + Vector2(float(i), float(j)) * step
-				# still near the airfield's valley, still on dry land
-				if Sim.height_at(q.x, q.y) < Sim.sea_at(q.x, q.y) + 25.0:
-					continue
-				if not Sim.clear_of_airfield(q.x, q.y):
-					continue
-				# and on the same land as everything else, or the road to it
-				# has to cross water
-				if not Sim.on_home_land(q.x, q.y):
-					continue
-				var rough := Sim.site_roughness(q, r)
-				if rough < best_rough:
-					best_rough = rough
-					best = q
+		# The ring it was always looked for in, and further out only if
+		# nothing in it is clear: a town is not put down on top of a runway
+		# for want of somewhere better.
+		for reach in [3, 6]:
+			for i in range(-reach, reach + 1):
+				for j in range(-reach, reach + 1):
+					if (i == 0 and j == 0) or maxi(absi(i), absi(j)) <= reach - 3 and reach > 3:
+						continue
+					var q := want + Vector2(float(i), float(j)) * step
+					# still near the airfield's valley, still on dry land, and
+					# all of it clear of the aerodrome rather than its middle
+					if not _town_ok(q, r, 25.0):
+						continue
+					# and on the same land as everything else, or the road to it
+					# has to cross water
+					if not Sim.on_home_land(q.x, q.y):
+						continue
+					var rough := Sim.site_roughness(q, r)
+					if rough < best_rough:
+						best_rough = rough
+						best = q
+			if best_rough < 1e8:
+				break
+		if best_rough > 1e8:
+			push_warning("no clear ground for %s: not built" % String(t[4]))
+			continue
 		sites.append({"c": best, "r": r, "density": float(t[2]),
 			"tallest": float(t[3]), "name": String(t[4]), "region": 0,
 			"was": want, "rough": best_rough})
@@ -265,7 +277,7 @@ func _site_towns() -> void:
 			for i2 in range(-3, 4):
 				for j2 in range(-3, 4):
 					var q2: Vector2 = want2 + Vector2(float(i2), float(j2)) * (rad * 0.7)
-					if Sim.height_at(q2.x, q2.y) < Sim.sea_at(q2.x, q2.y) + 30.0:
+					if not _town_ok(q2, rad, 30.0):
 						continue
 					var rg: float = Sim.site_roughness(q2, rad)
 					if rg < rough2:
@@ -321,7 +333,7 @@ func _site_towns() -> void:
 			for i3 in range(-3, 4):
 				for j3 in range(-3, 4):
 					var q3: Vector2 = want3 + Vector2(float(i3), float(j3)) * 1100.0
-					if Sim.height_at(q3.x, q3.y) < Sim.sea_at(q3.x, q3.y) + 30.0:
+					if not _town_ok(q3, rad3, 30.0):
 						continue
 					var rg3: float = Sim.site_roughness(q3, rad3)
 					if rg3 < rough3:

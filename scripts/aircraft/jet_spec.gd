@@ -993,8 +993,11 @@ static func _db() -> Dictionary:
 		"guns": [
 			{"id": "g105", "name": "105 mm M102", "rpm": 10.0, "damage": 620.0, "blast": 22.0, "frag": 45.0,
 			 "muzzle": 494.0, "spread": 0.004},
+			# One and a half milliradians, not eight: a Bofors on a fixed mount
+			# is a precise gun, and at eight a burst at two and a half kilometres
+			# spread forty metres along the ground round the mark.
 			{"id": "g40", "name": "40 mm Bofors", "rpm": 100.0, "damage": 150.0, "blast": 9.0, "frag": 16.0,
-			 "muzzle": 881.0, "spread": 0.008},
+			 "muzzle": 881.0, "spread": 0.0015},
 			# Five milliradians, not sixteen: about twelve metres either way at
 			# two and a half kilometres. At sixteen the burst covered a football
 			# pitch and hit what it was aimed at by chance.
