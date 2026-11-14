@@ -21,6 +21,8 @@ var planet: Planet
 var clouds: CloudShell
 ## The atmosphere shell.
 var atmo: Atmosphere
+## The moon: see `Moon` for why it is not where it is.
+var moon: Moon
 var weather: Weather
 var _env: Environment
 var _sun: DirectionalLight3D
@@ -417,6 +419,620 @@ func _run_mirv_lock_test() -> void:
 ## the way. --telrangetest=KIND,KM. Run at five times speed; a Zircon is six
 ## minutes in the air.
 var _tel_range := ""
+
+## The rocket, all the way: off the pad, three stages, into an orbit that
+## closes, once round the planet on time warp to see that it comes back to
+## where it was, a burn to come down, and the capsule onto the ground under its
+## parachute. Flown by the ascent autopilot, which uses the same controls a
+## player does. --launchtest
+var _launch_test := false
+
+func _run_launch_test() -> void:
+	_start("f16", "launch")
+	# the picture, if one was asked for, is taken when the flight says so
+	_shot_frames = 1 << 30
+	for i in 30:
+		await get_tree().physics_frame
+	var bad := PackedStringArray()
+	if not _in_rocket():
+		print("[launch] RESULT: FAILED — not in the rocket")
+		get_tree().quit()
+		return
+	var r := rocket
+	var g0: float = Sim.gravity_at(r.global_position).length()
+	print("[launch] on the pad at %s: %.0f t, gravity %.3f m/s2, thrust to weight %.2f" % [
+		str(r.global_position.round()), r.mass() * 0.001, g0,
+		float(r.stages[0]["thrust"]) / (r.mass() * g0)])
+	r.locked = true
+	r.engage()
+	Engine.time_scale = 8.0
+	var charts0: int = _rechart_n
+	var t_wall := Time.get_ticks_msec()
+	var next := 30.0
+	while r.autopilot and r.alive and r.met < 1500.0:
+		await get_tree().physics_frame
+		if r.met >= next:
+			next += 60.0
+			var a0: Dictionary = Orbit.apsides(r._s)
+			print("[launch]  T+%s stage %d %s: %.1f km up, %.0f m/s, high point %.0f km, %.1f g, %d%% propellant" % [
+				LaunchVehicle._clock(r.met), r.stage + 1, r.auto_phase, r.alt() * 0.001,
+				r.speed(), float(a0["ap"]) * 0.001, r.g_load, int(r.fuel() * 100.0)])
+	var orb: Dictionary = Orbit.apsides(r._s)
+	print("[launch] autopilot let go at T+%s: orbit %.1f by %.1f km, period %s, stage %d with %.0f m/s left; %d chart moves, %.0f s of wall clock" % [
+		LaunchVehicle._clock(r.met), float(orb["ap"]) * 0.001, float(orb["pe"]) * 0.001,
+		LaunchVehicle._clock(float(orb["period"])), r.stage + 1, r.delta_v(),
+		_rechart_n - charts0, float(Time.get_ticks_msec() - t_wall) * 0.001])
+	if not r.alive or float(orb["pe"]) < 120000.0 or is_inf(float(orb["ap"])):
+		bad.append("did not reach orbit")
+	var entry_shots: bool = OS.get_cmdline_user_args().has("--entry")
+	if _shot != "" and not entry_shots:
+		# a picture from orbit, and no further
+		Engine.time_scale = 1.0
+		r.throttle = 0.0
+		_shot_frames = 90
+		return
+	# once round, on time warp: does it come back to the orbit it left on
+	Sim.space_warp = 100.0
+	var lap_end: float = r.met + float(orb["period"])
+	while r.alive and r.met < lap_end and not bad.size() > 0:
+		await get_tree().physics_frame
+	var orb2: Dictionary = Orbit.apsides(r._s)
+	print("[launch] after one lap on time warp: %.2f by %.2f km (was %.2f by %.2f); %d chart moves in all, the longest %d ms" % [
+		float(orb2["ap"]) * 0.001, float(orb2["pe"]) * 0.001,
+		float(orb["ap"]) * 0.001, float(orb["pe"]) * 0.001, _rechart_n - charts0, _rechart_worst])
+	if absf(float(orb2["pe"]) - float(orb["pe"])) > 2000.0:
+		bad.append("the orbit drifted by %.1f km in a lap" % (
+			absf(float(orb2["pe"]) - float(orb["pe"])) * 0.001))
+	# and home: retrograde, burn until the low point is in the air, capsule only
+	Sim.space_warp = 1.0
+	r.sas = 3
+	var before_stage: int = r.stage
+	for i in 60 * 30:
+		await get_tree().physics_frame
+	# a stage only comes off dry: asked for with propellant in it, it stays on
+	r.next_stage()
+	if r.stage != before_stage:
+		bad.append("a stage with propellant in it was dropped")
+	r.throttle = 1.0
+	while r.alive and r.stage < r.stages.size() - 1:
+		await get_tree().physics_frame
+		if r.fuel() <= 0.0:
+			r.next_stage()
+			r.throttle = 1.0
+	# and the capsule's own engine, for whatever is left to take off
+	while r.alive and float(Orbit.apsides(r._s)["pe"]) > 35000.0 and r.fuel() > 0.0:
+		await get_tree().physics_frame
+	r.throttle = 0.0
+	Sim.space_warp = 50.0
+	var peak_g := 0.0
+	var chute_g := 0.0
+	var t_dn: float = r.met
+	var heat_shots := 0
+	var peak_heat := 0.0
+	while r.alive and not r.landed and r.met < t_dn + 6000.0:
+		await get_tree().physics_frame
+		peak_heat = maxf(peak_heat, r.heat)
+		if r.alt() < 140000.0 and Sim.space_warp > 1.0:
+			Sim.space_warp = 1.0
+			Engine.time_scale = 2.0
+		if entry_shots and heat_shots < 3 and r.heat > [0.3, 0.7, 0.9][heat_shots]:
+			heat_shots += 1
+			await RenderingServer.frame_post_draw
+			get_viewport().get_texture().get_image().save_png("%s_heat%d.png" % [_shot, heat_shots])
+			print("[launch] picture at %.0f km, %.0f m/s, heat %.2f, %.1f g" % [r.alt() * 0.001,
+				r.speed(), r.heat, r.g_load])
+		if r.alt() < 100000.0 and not r.chute:
+			peak_g = maxf(peak_g, r.g_load)
+		elif r.chute:
+			chute_g = maxf(chute_g, r.g_load)
+	Engine.time_scale = 1.0
+	print("[launch] down at T+%s: %s, peak %.1f g on the way in, %.1f g as the parachute opened, peak heat %.2f" % [
+		LaunchVehicle._clock(r.met), "landed" if (r.alive and r.landed) else "LOST",
+		peak_g, chute_g, peak_heat])
+	if not (r.alive and r.landed):
+		bad.append("the capsule did not land")
+	print("[launch] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED — " + "; ".join(bad)))
+	get_tree().quit()
+
+## What the rocket's camera sees at a run of heights, one picture each: the
+## planet, its air and its cloud from the pad to half way to the moon, and the
+## moon from its own orbit. --rocketview=DIR writes them there.
+var _rocket_view := ""
+
+func _run_rocket_view(dir: String) -> void:
+	_start("f16", "moon")
+	for i in 40:
+		await get_tree().physics_frame
+	var r := rocket
+	r.locked = true
+	r.landed = false
+	r._lifted = true
+	if is_instance_valid(hud):
+		hud.show_help = false
+	var here: Vector3 = Orbit.pos_of(r._s).normalized()
+	var east: Vector3 = Sim.chart_east
+	var heights: Array = [8.0, 30.0, 60.0, 90.0, 150.0, 290.0, 320.0, 1200.0, 20000.0, 200000.0]
+	if OS.get_cmdline_user_args().has("--maponly"):
+		heights = [290.0]
+	for km in heights:
+		var rad: float = Sim.PLANET_R + float(km) * 1000.0
+		r._s = Orbit.make(here * rad, east * sqrt(Sim.GM / rad))
+		r._att = Basis.looking_at(east, here)
+		r._cam_pitch = 0.22
+		r._cam_yaw = 2.2
+		for i in 50:
+			# held where it was put: this is about the picture, not the flight
+			r._s = Orbit.make(here * rad, east * sqrt(Sim.GM / rad))
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("%s/view_%06d.png" % [dir, int(km)])
+		var vc := get_viewport().get_camera_3d()
+		print("[view] %.0f km: far %.0f km, near %.1f m, scale %.4f" % [km, vc.far * 0.001,
+			vc.near, Sim.view_scale])
+	# the same height from four ways of looking: anything that moves across
+	# the picture as the camera turns is a fault in how it is drawn
+	for look in [[250.0, 0.4, -0.5], [250.0, 3.6, 0.9], [250.0, 5.0, -1.1],
+			[6000.0, 0.4, -0.6], [6000.0, 3.6, 0.9]]:
+		var rad2: float = Sim.PLANET_R + float(look[0]) * 1000.0
+		r._cam_yaw = float(look[1])
+		r._cam_pitch = float(look[2])
+		for i in 40:
+			r._s = Orbit.make(here * rad2, east * sqrt(Sim.GM / rad2))
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("%s/look_%05d_%d.png" % [
+			dir, int(look[0]), int(float(look[1]) * 10.0)])
+	# and round the moon
+	var ms: PackedFloat64Array = Orbit.moon_state(Sim.space_time)
+	var mdir: Vector3 = Orbit.pos_of(ms).normalized()
+	var side: Vector3 = mdir.cross(Vector3.UP).normalized()
+	var mr: float = Orbit.MOON_R + 150000.0
+	for i in 50:
+		ms = Orbit.moon_state(Sim.space_time)
+		r._s = Orbit.make(Orbit.pos_of(ms) + side * mr,
+			Orbit.vel_of(ms) + mdir * sqrt(Orbit.MOON_GM / mr))
+		r._cam_pitch = 0.5
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	get_viewport().get_texture().get_image().save_png("%s/view_moon.png" % dir)
+	# and the map: the lap round the moon, and then the planet with an orbit
+	# and the reach out to the moon drawn round it
+	map.toggle()
+	map.globe = true
+	map.globe_zoom = 0.014
+	for i in 20:
+		ms = Orbit.moon_state(Sim.space_time)
+		r._s = Orbit.make(Orbit.pos_of(ms) + side * mr,
+			Orbit.vel_of(ms) + mdir * sqrt(Orbit.MOON_GM / mr))
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	get_viewport().get_texture().get_image().save_png("%s/map_moon.png" % dir)
+	var rad3: float = Sim.PLANET_R + 300000.0
+	map.globe_zoom = 0.6
+	for which in [0, 1]:
+		# a round orbit; then the same place going fast enough for the moon
+		var sp3: float = sqrt(Sim.GM / rad3) + (3050.0 if which == 1 else 0.0)
+		r._path_ms = -100000
+		if which == 1:
+			map.globe_zoom = 0.014
+		for i in 20:
+			r._s = Orbit.make(here * rad3, east * sp3)
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("%s/map_orbit_%d.png" % [dir, which])
+	print("[view] done")
+	get_tree().quit()
+
+## The things a street fight kept getting wrong, each checked against the real
+## code paths: a grenade through a window and a doorway, a vault through a
+## window, a walk along inside a scaffold, a block's footprint against its
+## walls, the cruise missile's fins and steering, and what is coming in drawn
+## on the map. --cqbfix=DIR, with --preset=cqb; pictures go in DIR.
+var _cqb_fix := ""
+
+func _run_cqb_fix(dir: String) -> void:
+	_shot_frames = 1 << 30
+	for i in 60:
+		await get_tree().physics_frame
+	var bad := PackedStringArray()
+	var w: Walker = walker
+	# A wall with a window and a doorway in it, built the way a ground floor
+	# is, out in the open well clear of the town.
+	# somewhere level, with nothing standing on it
+	var wall0 := Vector3.INF
+	for k in 400:
+		var a: float = float(k) * 2.399
+		var rr: float = 30.0 + float(k) * 1.5
+		var c := Vector3(w.global_position.x + cos(a) * rr, 0.0, w.global_position.z + sin(a) * rr)
+		var h0: float = Sim.height_at(c.x, c.z)
+		var flat := true
+		for dx in [0.0, 6.0, 12.0]:
+			for dz in [-5.0, 0.0, 5.0]:
+				if absf(Sim.height_at(c.x + dx, c.z + dz) - h0) > 0.12 \
+						or Obstacles.hit(Vector3(c.x + dx, h0 + 1.0, c.z + dz), 1.5) >= 0:
+					flat = false
+		if flat:
+			wall0 = Vector3(c.x, h0, c.z)
+			break
+	if wall0 == Vector3.INF:
+		print("[cqbfix] RESULT: FAILED — nowhere level to build the test wall")
+		get_tree().quit()
+		return
+	var made: Array = []
+	# along x, 0.4 thick; window from 2 to 3.6 along it, door from 6 to 8.4
+	for seg in [[0.0, 2.0, 0.0, 2.25], [2.0, 3.6, 0.0, 1.0], [3.6, 6.0, 0.0, 2.25],
+			[8.4, 12.0, 0.0, 2.25], [0.0, 12.0, 2.25, 3.4]]:
+		var mid := wall0 + Vector3((float(seg[0]) + float(seg[1])) * 0.5, float(seg[2]), 0.0)
+		made.append(Obstacles.add_box(mid, (float(seg[1]) - float(seg[0])) * 0.5,
+			float(seg[3]) - float(seg[2]), 0.2, 0.0))
+	# grenades: thrown at the window from four metres out, and at the doorway
+	# thrown from four metres out so as to cross the wall at the middle of
+	# the opening: 1.6 m up for the window, 1.1 for the door
+	for case in [["window", 2.8, 1.6], ["doorway", 7.2, 1.1]]:
+		var f := Firearm.Frag.new()
+		f.fuse = 3.0
+		f.thrower = w
+		add_child(f)
+		f.global_position = wall0 + Vector3(float(case[1]), float(case[2]) + 0.6, 4.0)
+		# 0.4 s to the wall at 10 m/s, falling 7 * 0.16 = 1.12 against a 1.6 m/s rise
+		f.vel = Vector3(0.0, 1.3, -10.0)
+		var went := false
+		for i in 150:
+			await get_tree().physics_frame
+			if not is_instance_valid(f):
+				break
+			if f.global_position.z < wall0.z - 0.5:
+				went = true
+		var end_at: Vector3 = f.global_position - wall0 if is_instance_valid(f) else Vector3.INF
+		if not went and is_instance_valid(f):
+			var gp: Vector3 = f.global_position
+			var tt: float = Obstacles.segment(gp + Vector3(0, 0, 0.6), gp - Vector3(0, 0, 0.6))
+			var sid: int = Obstacles.seg_id
+			if sid >= 0:
+				print("[cqbfix]   in the way at %.2f: box %d centre %s half %s base %.2f top %.2f (ours: %s); vel %s" % [
+					tt, sid, str((Obstacles.centre_of(sid) - wall0).snapped(Vector3.ONE * 0.01)),
+					str(Obstacles.half_of(sid)), Obstacles.centre_of(sid).y - wall0.y,
+					Obstacles.top_of(sid) - wall0.y, str(made.has(sid)), str(f.vel.snapped(Vector3.ONE * 0.01))])
+			else:
+				print("[cqbfix]   nothing in the way along z; vel %s" % str(f.vel.snapped(Vector3.ONE * 0.01)))
+		if is_instance_valid(f):
+			f.queue_free()
+		print("[cqbfix] grenade through the %s: %s (ended at %s from the wall)" % [case[0],
+			"went through" if went else "BOUNCED", str(end_at.snapped(Vector3.ONE * 0.01))])
+		if not went:
+			bad.append("grenade bounced off the %s" % case[0])
+	# and one at the solid wall beside the window still comes back
+	var f2 := Firearm.Frag.new()
+	f2.fuse = 3.0
+	add_child(f2)
+	f2.global_position = wall0 + Vector3(1.0, 1.5, 3.0)
+	f2.vel = Vector3(0.0, 0.5, -9.0)
+	var through_wall := false
+	for i in 150:
+		await get_tree().physics_frame
+		if is_instance_valid(f2) and f2.global_position.z < wall0.z - 0.5:
+			through_wall = true
+	if is_instance_valid(f2):
+		f2.queue_free()
+	print("[cqbfix] grenade at the wall: %s" % ("WENT THROUGH" if through_wall else "bounced"))
+	if through_wall:
+		bad.append("grenade went through a solid wall")
+	# a vault through the window, from in front of it
+	var keep: Vector3 = w.global_position
+	w.global_position = wall0 + Vector3(2.8, 0.0, 0.2 + 0.42 + 0.15)
+	w.global_position.y = Sim.height_at(w.global_position.x, w.global_position.z)
+	var vaulted: bool = w._begin_traverse(Vector3(0, 0, -1), false)
+	print("[cqbfix] at the window: %s" % (w._trav if vaulted else "nothing"))
+	if not vaulted or w._trav != "vault":
+		bad.append("could not vault through the window (%s)" % (w._trav if vaulted else "nothing"))
+	w._trav = ""
+	w.global_position = keep
+	for id in made:
+		Obstacles.remove(int(id))
+	# walking along inside a scaffold
+	var walked := 0
+	var tried := 0
+	for t in TownSet.live:
+		if not is_instance_valid(t):
+			continue
+		for sc in (t as TownSet).scaffolds:
+			var mid: Vector3 = sc[0]
+			var axis: Vector3 = sc[1]
+			var run: float = sc[2]
+			var ok := true
+			var u := -run * 0.5 + 0.6
+			while u < run * 0.5 - 0.6:
+				var p: Vector3 = mid + axis * u
+				p.y = Sim.height_at(p.x, p.z)
+				if Obstacles.blocks(p, Walker.BODY_R) >= 0:
+					ok = false
+				u += 0.3
+			tried += 1
+			if ok:
+				walked += 1
+	print("[cqbfix] scaffolds walked along inside: %d of %d" % [walked, tried])
+	if tried > 0 and walked < tried:
+		bad.append("%d of %d scaffolds cannot be walked through" % [tried - walked, tried])
+	# town blocks: does the obstacle stop at the wall?
+	var worst := 0.0
+	var n_blocks := 0
+	for b in scenery._breakable:
+		if not (b as Dictionary).has("town_kind"):
+			continue
+		for xf in (b["xforms"] as Array):
+			var x: Transform3D = xf
+			if Vector2(x.origin.x - cqb.centre.x, x.origin.z - cqb.centre.y).length() > 200.0:
+				continue
+			var id: int = Obstacles.hit(x.origin + Vector3(0, 6.0, 0), 0.0)
+			if id < 0:
+				continue
+			var half: Vector2 = Obstacles.half_of(id)
+			worst = maxf(worst, absf(half.x - x.basis.x.length() * 0.5))
+			worst = maxf(worst, absf(half.y - x.basis.z.length() * 0.5))
+			n_blocks += 1
+	print("[cqbfix] %d town blocks: the obstacle stands at most %.2f m off the wall" % [n_blocks, worst])
+	if worst > 0.05:
+		bad.append("block obstacles stand %.2f m off their walls" % worst)
+	# the pictures want the street, not the deploy screen that is up over it
+	if is_instance_valid(deploy_ui):
+		deploy_ui.visible = false
+	if is_instance_valid(hud):
+		hud.show_help = false
+	# the cruise missile, flown: handed over, then aimed hard right and down
+	cqb._pick_at = w.global_position + Vector3(260.0, 0.0, -180.0)
+	cqb._pick_at.y = Sim.height_at(cqb._pick_at.x, cqb._pick_at.z)
+	cqb._call("cruise_at")
+	var cm: CqbMatch.CruiseMissile = cqb._cruise
+	Engine.time_scale = 3.0
+	while is_instance_valid(cm) and not cm._held:
+		await get_tree().physics_frame
+	Engine.time_scale = 1.0
+	if not is_instance_valid(cm):
+		bad.append("the cruise missile never reached the handover")
+	else:
+		for i in 20:
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("%s/cruise_level.png" % dir)
+		var most_fin := 0.0
+		var most_bank := 0.0
+		for i in 50:
+			cm._turn_aim(-0.012, -0.006)
+			await get_tree().physics_frame
+			if not is_instance_valid(cm):
+				break
+			for d in cm._defl:
+				most_fin = maxf(most_fin, absf(float(d)))
+			most_bank = maxf(most_bank, absf(cm._bank))
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png("%s/cruise_turning.png" % dir)
+		print("[cqbfix] cruise missile aimed right and down: fins up to %.0f deg, bank up to %.0f deg, aim %.0f deg off the flight" % [
+			rad_to_deg(most_fin), rad_to_deg(most_bank),
+			rad_to_deg(cm.vel.angle_to(cm._aim)) if is_instance_valid(cm) else -1.0])
+		if most_fin < deg_to_rad(8.0):
+			bad.append("the fins hardly moved")
+	# what is coming in, on the map: mortars, an airstrike and a nuke
+	cqb._pick_at = w.global_position + Vector3(120.0, 0.0, -60.0)
+	cqb._call("mortar_at")
+	cqb._pick_at = w.global_position + Vector3(-80.0, 0.0, 90.0)
+	cqb._call("jdam_at")
+	cqb._pick_at = w.global_position + Vector3(400.0, 0.0, 300.0)
+	cqb._call("tacnuke_at")
+	var inbound: Array = cqb.inbound()
+	print("[cqbfix] inbound for the map: %s" % ", ".join(PackedStringArray(
+		inbound.map(func(d: Dictionary) -> String: return "%s %s" % [d["kind"], d.get("label", "")]))))
+	if inbound.size() < 3:
+		bad.append("the map was given only %d inbound" % inbound.size())
+	map.toggle()
+	map.globe = false
+	map.zoom = 2200.0
+	map.centre = Vector2(w.global_position.x + 120.0, w.global_position.z + 60.0)
+	map.follow = false
+	for i in 10:
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	get_viewport().get_texture().get_image().save_png("%s/map_inbound.png" % dir)
+	# the nuke is not something to leave going off in the test
+	cqb._nukes.clear()
+	print("[cqbfix] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED — " + "; ".join(bad)))
+	get_tree().quit()
+
+## The moon rocket, to the moon: orbit, the burn out, five days of coast with
+## the corrections on the way, and the burn that stops it there -- and then
+## round the moon a few times on its own, to see that it stays. Flown by the
+## same programs the H key gives a player. --moontest
+var _moon_test := false
+
+func _run_moon_test() -> void:
+	_start("f16", "moon")
+	# the picture, if one was asked for, is taken when the flight says so
+	_shot_frames = 1 << 30
+	for i in 30:
+		await get_tree().physics_frame
+	if not _in_rocket():
+		print("[moon] RESULT: FAILED — not in the rocket")
+		get_tree().quit()
+		return
+	var r := rocket
+	var bad := PackedStringArray()
+	r.locked = true
+	print("[moon] %s on the pad: %.0f t, %d stages" % [r.display_name(), r.mass() * 0.001,
+		r.stages.size()])
+	r.engage()
+	Engine.time_scale = 8.0
+	var wall := Time.get_ticks_msec()
+	while r.autopilot and r.alive and r.met < 1500.0:
+		await get_tree().physics_frame
+	var park: Dictionary = Orbit.apsides(r._s)
+	print("[moon] parking orbit at T+%s: %.0f by %.0f km, stage %d with %.0f m/s in it, %.0f s of wall clock" % [
+		LaunchVehicle._clock(r.met), float(park["ap"]) * 0.001, float(park["pe"]) * 0.001,
+		r.stage + 1, r.delta_v(), float(Time.get_ticks_msec() - wall) * 0.001])
+	if not r.alive or float(park["pe"]) < 120000.0:
+		print("[moon] RESULT: FAILED — no parking orbit")
+		get_tree().quit()
+		return
+	# the rest of the way: H again, and as much time warp as it will take
+	r.engage()
+	var said := ""
+	var t_out: float = r.met
+	var closest := 1e30
+	while r.autopilot and r.alive and r.met < t_out + 12.0 * 86400.0:
+		Sim.space_warp = 10000.0
+		await get_tree().physics_frame
+		closest = minf(closest, Orbit.moon_range(r._s))
+		if r.program != said:
+			said = r.program
+			print("[moon]  T+%s  %s — %.0f km from the planet, %.0f km from the moon, %.0f m/s, stage %d" % [
+				LaunchVehicle._clock(r.met), said, Orbit.radius(r._s) * 0.001,
+				Orbit.moon_range(r._s) * 0.001, r.speed(), r.stage + 1])
+	Sim.space_warp = 1.0
+	var rel: PackedFloat64Array = Orbit.about_moon(r._s, Sim.space_time)
+	var orb: Dictionary = Orbit.apsides(rel, Orbit.MOON_GM, Orbit.MOON_R)
+	print("[moon] autopilot let go at T+%s: round the moon %.0f by %.0f km, %.0f m/s past it, stage %d with %.0f m/s left" % [
+		LaunchVehicle._clock(r.met), float(orb["ap"]) * 0.001, float(orb["pe"]) * 0.001,
+		Orbit.speed(rel), r.stage + 1, r.delta_v()])
+	if not r.alive:
+		bad.append("the vehicle was lost")
+	if is_inf(float(orb["ap"])) or float(orb["pe"]) < 15000.0:
+		bad.append("not in orbit round the moon")
+	# Does it stay? Three laps, left alone, with the planet pulling at it.
+	if bad.is_empty():
+		var laps: float = float(orb["period"]) * 3.0
+		var until: float = r.met + laps
+		var lo := 1e30
+		var hi := 0.0
+		while r.alive and r.met < until:
+			Sim.space_warp = 1000.0
+			await get_tree().physics_frame
+			var d: float = Orbit.moon_range(r._s) - Orbit.MOON_R
+			lo = minf(lo, d)
+			hi = maxf(hi, d)
+		Sim.space_warp = 1.0
+		print("[moon] three laps later: between %.0f and %.0f km over the moon, %s; view scale %.5f" % [
+			lo * 0.001, hi * 0.001, "still there" if r.alive else "LOST", Sim.view_scale])
+		if not r.alive or hi > 20.0e6:
+			bad.append("it did not stay in orbit round the moon")
+	Engine.time_scale = 1.0
+	print("[moon] RESULT: %s  (%.0f s of wall clock)" % [
+		"ok" if bad.is_empty() else "FAILED — " + "; ".join(bad),
+		float(Time.get_ticks_msec() - wall) * 0.001])
+	if _shot != "":
+		_shot_frames = 30
+		return
+	get_tree().quit()
+
+## An intercontinental shot, start to finish: does it burn three stages, cut
+## its motor, open, and put every warhead on the mark it was given, from the
+## far side of a quarter of the planet. --icbmtest=KIND,KM (with --preset=free).
+var _icbm_test := ""
+
+func _run_icbm_test(arg: String) -> void:
+	var parts := arg.split(",")
+	var kind: String = parts[0] if parts[0] != "" else "tel_yars"
+	var km: float = float(parts[1]) if parts.size() > 1 else 8000.0
+	Sim.debug_weapons = true
+	_shot_frames = 1 << 30
+	var t := _spawn_tank(Vector3(1400.0, 0.0, -2600.0), 0.0, 0, kind)
+	t.ai = false
+	for i in 120:
+		await get_tree().physics_frame
+	var aim := Vector3(1400.0 + km * 707.0, 0.0, -2600.0 - km * 707.0)
+	aim.y = Sim.height_at(aim.x, aim.z)
+	t.map_target = aim
+	var fired := false
+	for i2 in 2400:
+		await get_tree().physics_frame
+		if t.fire_main(self):
+			fired = true
+			break
+	if not fired:
+		print("[icbm] RESULT: FAILED — %s did not fire" % kind)
+		get_tree().quit()
+		return
+	if _shot != "":
+		# ridden on the weapon camera, with a picture at each stage of it
+		_shot_frames = 1 << 30
+		var ridden: Icbm = null
+		for n0 in get_tree().get_nodes_in_group("icbm"):
+			ridden = n0 as Icbm
+		if ridden != null:
+			_ride(ridden)
+		var marks: Array = [8.0, 30.0, 70.0, 120.0, 170.0]
+		var coast_shots := 0
+		var low_shots := 0
+		var last_alt := 0.0
+		while is_instance_valid(ridden) and not ridden.dead:
+			await get_tree().process_frame
+			if not is_instance_valid(ridden):
+				break
+			var snap := ""
+			# looked round at, for a few seconds of the climb: the round has to
+			# stay in the middle of the picture while the view goes about it
+			var turned: bool = ridden.age > 24.0 and ridden.age < 30.5
+			if turned:
+				cam.free_yaw = 1.3
+				cam.free_pitch = 0.35
+			if not marks.is_empty() and ridden.age >= float(marks[0]):
+				snap = "boost_%03d" % int(marks.pop_front())
+			elif marks.is_empty() and coast_shots < 2 and ridden.alt() > 600000.0 * float(coast_shots + 1):
+				coast_shots += 1
+				snap = "coast_%d" % coast_shots
+				Sim.space_warp = 50.0
+			elif coast_shots >= 1 and ridden.alt() < last_alt and low_shots < 3 \
+					and ridden.alt() < [90000.0, 40000.0, 12000.0][low_shots]:
+				low_shots += 1
+				snap = "entry_%d" % low_shots
+			elif marks.is_empty() and coast_shots == 0 and ridden.age > 260.0:
+				Sim.space_warp = 25.0
+			last_alt = ridden.alt()
+			if snap != "":
+				await RenderingServer.frame_post_draw
+				get_viewport().get_texture().get_image().save_png("%s_%s.png" % [_shot, snap])
+				var vc := get_viewport().get_camera_3d()
+				var on_screen: Vector2 = vc.unproject_position(
+					ridden.get_global_transform_interpolated() * ridden.ride_centre())
+				var vps: Vector2 = get_viewport().get_visible_rect().size
+				print("[icbm] picture %s: %.0f km up, camera far %.0f km near %.2f m, %.0f m from the round, round drawn %.0f px from the middle%s" % [
+					snap, ridden.alt() * 0.001, vc.far * 0.001, vc.near,
+					vc.global_position.distance_to(ridden.global_position),
+					on_screen.distance_to(vps * 0.5), " (looking round)" if turned else ""])
+		get_tree().quit()
+		return
+	Sim.space_warp = 100.0
+	Engine.time_scale = 4.0
+	var t0 := Time.get_ticks_msec()
+	var worst := 0.0
+	var seen := 0
+	var said := {}
+	var peak := 0.0
+	var count := 0
+	var done: Array = []
+	while Time.get_ticks_msec() - t0 < 400000:
+		await get_tree().physics_frame
+		var live: Array = get_tree().get_nodes_in_group("icbm")
+		for n in live:
+			var m := n as Icbm
+			if m == null:
+				continue
+			peak = maxf(peak, m.alt())
+			if not said.has(m.get_instance_id()):
+				said[m.get_instance_id()] = true
+				seen += 1
+				m.detonated.connect(func(w: Icbm) -> void:
+					done.append(w.last_miss))
+		count = maxi(count, live.size())
+		if seen > 0 and live.is_empty():
+			break
+	for d in done:
+		worst = maxf(worst, float(d))
+	Engine.time_scale = 1.0
+	var want: int = int(WeaponSpec.get_spec(String(Tank.KINDS[kind]["missile"])).get("mirv", 1))
+	print("[icbm] %s over %.0f km: %d warheads released, %d detonated, worst %.0f m off its mark, peak %.0f km, %.0f s of wall clock" % [
+		kind, km, count, done.size(), worst, peak * 0.001,
+		float(Time.get_ticks_msec() - t0) * 0.001])
+	print("[icbm] RESULT: %s" % ("ok" if done.size() == want and worst < 400.0
+		else "FAILED"))
+	get_tree().quit()
 
 func _run_tel_range_test(arg: String) -> void:
 	var parts := arg.split(",")
@@ -1612,28 +2228,21 @@ func _ready() -> void:
 		for c in lot:
 			acc += c as Vector2
 		_mask_spots.append(acc / float(maxi(lot.size(), 1)))
-	await _paint("Putting the fleet to sea", 0.87)
-	carrier = Carrier.new()
-	carrier.name = "Carrier"
-	add_child(carrier)
-	# One anchorage, found once, for the carrier and everything sailing with
-	# her. Her position was written down and never checked: on the flat world
-	# (24000, 1200) was open sea, and on the planet it is a country's interior.
-	# She was built on dry land with the terrain drawn over her -- which is
-	# what "spawned under sand" is -- while the fleet, which does look for
-	# water, put to sea somewhere else entirely and left her behind.
-	fleet_anchor = _deep_water(Vector3(24000.0, 0.0, 1200.0))
-	carrier.build(fleet_anchor, deg_to_rad(-18.0))
-	_build_fleet()
-	_mark.call("fleet")
+	# Nothing is put to sea here any more: not the squadron, not the carrier,
+	# not even the search for water to float them in. The missions that are
+	# fought at sea muster them when they start; see `_muster_fleet`.
+	for a in OS.get_cmdline_user_args():
+		if a == "--fleet" or a.contains("test"):
+			_fleet_always = true
+	if _fleet_always:
+		# a harness may look at the sea before it has started anything
+		_build_carrier()
+		_build_fleet()
 
 	menu_cam = Camera3D.new()
 	menu_cam.far = 45000.0
 	menu_cam.fov = 42.0
-	menu_cam.position = Vector3(30, 263.5, -30)
 	add_child(menu_cam)
-	menu_cam.look_at(Vector3(0, 258, 0), Vector3.UP)
-	menu_cam.rotate_y(deg_to_rad(19.0))
 	# And the camera the hangar actually opens on: a slow circuit over the
 	# country rather than a turntable in the middle of nothing. The world is the
 	# thing that took nine seconds to build; showing a jet against an empty
@@ -1655,8 +2264,8 @@ func _ready() -> void:
 
 	preview = Node3D.new()
 	preview.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
-	preview.position = Vector3(0, 258, 0)
 	add_child(preview)
+	_stand_rig()
 
 	net = NetLink.new()
 	net.name = "NetLink"
@@ -1714,6 +2323,10 @@ func _ready() -> void:
 	atmo.name = "Atmosphere"
 	add_child(atmo)
 	atmo.build()
+	moon = Moon.new()
+	moon.name = "Moon"
+	add_child(moon)
+	moon.build()
 	_mark.call("planet")
 	roster_view = RosterView.new()
 	roster_view.net = net
@@ -1813,6 +2426,26 @@ func _ready() -> void:
 	# not sit through three seconds of a fade it is never going to look at, and
 	# anything that has already been asked to fly is past the hangar anyway.
 	_reveal_menu()
+
+## Put the turntable and its camera in the air over the home field.
+##
+## They were written down as 258 m and 263.5 m, which was a quarter of a
+## kilometre of clear air when the ground at the origin was sea level. The home
+## strip is on its country's own ground now -- three hundred metres up for some
+## of them -- so the rig was inside the hill: the "sky" behind the vehicle was
+## the underside of the terrain, green, and the sea shell ran through the
+## picture below it. Measured from the ground that is actually there.
+const RIG_CLEAR := 256.0
+var _rig_y := 258.0
+
+func _stand_rig() -> void:
+	_rig_y = maxf(Sim.height_at(0.0, 0.0), Sim.sea_at(0.0, 0.0)) + RIG_CLEAR + 2.0
+	if preview != null:
+		preview.position = Vector3(0, _rig_y, 0)
+	if menu_cam != null:
+		menu_cam.position = Vector3(30, _rig_y + 5.5, -30)
+		menu_cam.look_at(Vector3(0, _rig_y, 0), Vector3.UP)
+		menu_cam.rotate_y(deg_to_rad(19.0))
 
 ## Hold on the flypast, then bring the hangar up over it.
 func _reveal_menu() -> void:
@@ -1938,6 +2571,8 @@ func _set_preview(id: String) -> void:
 	# Asking to see a vehicle is what ends the flypast. Until then the hangar
 	# stands over the country with nothing on the turntable.
 	if not booting and cine_cam != null and cine_cam.current:
+		# The chart may have moved since the rig was stood up.
+		_stand_rig()
 		menu_cam.current = true
 		preview.visible = true
 	if id == _preview_id:
@@ -2256,6 +2891,10 @@ func _tick_world(delta: float) -> void:
 			var vc: Camera3D = get_viewport().get_camera_3d()
 			if vc != null:
 				atmo.follow(vc)
+				# After the planet has set this camera's far plane: the moon
+				# is carried at a fraction of it.
+				if is_instance_valid(moon) and is_instance_valid(_sun):
+					moon.follow(vc, _sun.global_transform.basis.z)
 		# The same for the cloud: its mesh is only which pixels get to ask.
 		if is_instance_valid(clouds):
 			clouds.follow(get_viewport().get_camera_3d())
@@ -2579,6 +3218,20 @@ func _tick_world(delta: float) -> void:
 		if _fire_map_t > 3.0:
 			_fire_map_test = false
 			_run_fire_map_test()
+	if _rocket_view != "" and not booting:
+		var vt_arg := _rocket_view
+		_rocket_view = ""
+		_run_rocket_view(vt_arg)
+	if _moon_test and not booting:
+		_moon_test = false
+		_run_moon_test()
+	if _launch_test and not booting:
+		_launch_test = false
+		_run_launch_test()
+	if _icbm_test != "" and running:
+		var it_arg := _icbm_test
+		_icbm_test = ""
+		_run_icbm_test(it_arg)
 	if _obj_test and running and is_instance_valid(player):
 		_obj_t += delta
 		if _obj_t > 3.0:
@@ -9029,6 +9682,10 @@ func _tick_world(delta: float) -> void:
 	if _arms_test and is_instance_valid(cqb) and is_instance_valid(walker):
 		_arms_test = false
 		_run_arms_test()
+	if _cqb_fix != "" and is_instance_valid(cqb) and is_instance_valid(walker):
+		var cf := _cqb_fix
+		_cqb_fix = ""
+		_run_cqb_fix(cf)
 	if _streak_test and is_instance_valid(cqb) and is_instance_valid(walker):
 		_streak_test = false
 		_run_streak_test()
@@ -9530,6 +10187,7 @@ func _start(id: String, mission: String) -> void:
 	Sim.score = 0
 	get_tree().paused = false
 	_clear_mission()
+	_muster_fleet(kept_mission, ship_kind != "")
 	# no fight, no edges, and the whole country back
 	_bounds_c = Vector3.INF
 	_show_far_scenery()
@@ -9664,6 +10322,10 @@ func _start(id: String, mission: String) -> void:
 			_setup_cqb(mission)
 		"carrier":
 			_setup_carrier_approach()
+		"launch":
+			_setup_launch("orbital")
+		"moon":
+			_setup_launch("lunar")
 		"strike":
 			_setup_strike()
 		"free":
@@ -10448,6 +11110,88 @@ func _cqb_air(c3: Vector3) -> void:
 		_reset_interp.call_deferred(a)
 
 
+# ------------------------------------------------------------------ the rocket
+var _pad: Node3D = null
+
+func _in_rocket() -> bool:
+	return is_instance_valid(rocket) and rocket.occupied
+
+## Somewhere level and dry near the field to stand a rocket on: east of the
+## runway for choice, so the first thing it flies over is not the flight line.
+func _pad_site() -> Vector3:
+	var best := Vector3(2800.0, 0.0, -400.0)
+	var best_rough := 1e9
+	for o in [Vector2(2800, -400), Vector2(3600, 900), Vector2(2800, -2400),
+			Vector2(4800, 0), Vector2(-2800, -400), Vector2(-3600, 1200),
+			Vector2(0, -5200), Vector2(0, 5200)]:
+		var c: Vector2 = o
+		var h: float = Sim.height_at(c.x, c.y)
+		if h < Sim.sea_at(c.x, c.y) + 3.0:
+			continue
+		var rough := 0.0
+		for d in [Vector2(40, 0), Vector2(-40, 0), Vector2(0, 40), Vector2(0, -40)]:
+			rough = maxf(rough, absf(Sim.height_at(c.x + d.x, c.y + d.y) - h))
+		if rough < best_rough:
+			best_rough = rough
+			best = Vector3(c.x, 0.0, c.y)
+		if rough < 2.0:
+			break
+	return best
+
+## On the pad, in the capsule, with everything still to do.
+func _setup_launch(which := "orbital") -> void:
+	_setup_ramp()
+	var at := _pad_site()
+	var ground: float = maxf(Sim.height_at(at.x, at.z), Sim.sea_at(at.x, at.z))
+	_pad = Node3D.new()
+	_pad.name = "LaunchPad"
+	var st := MeshKit.begin()
+	MeshKit.box(st, Vector3(70.0, 8.0, 70.0), Vector3(0.0, -4.0, 0.0))
+	# the flame trench, and the tower beside it
+	MeshKit.box(st, Vector3(9.0, 108.0, 9.0), Vector3(22.0, 54.0, 0.0))
+	for arm_y in [28.0, 58.0, 82.0, 96.0]:
+		MeshKit.box(st, Vector3(16.0, 1.6, 2.4), Vector3(12.0, arm_y, 0.0))
+	_pad.add_child(MeshKit.mi(MeshKit.finish(st,
+		MeshKit.mat(Color(0.52, 0.50, 0.47), 0.85, 0.1)), "Pad"))
+	add_child(_pad)
+	_pad.global_position = Vector3(at.x, ground, at.z)
+	rocket = LaunchVehicle.new()
+	rocket.name = "LaunchVehicle"
+	rocket.setup(Vector3(at.x, ground, at.z), which)
+	add_child(rocket)
+	_enter_rocket()
+
+func _enter_rocket() -> void:
+	if not is_instance_valid(rocket):
+		return
+	on_foot = false
+	if is_instance_valid(walker):
+		walker.queue_free()
+	walker = null
+	hud.walker = null
+	if not rocket.dismount_requested.is_connected(_leave_rocket):
+		rocket.dismount_requested.connect(_leave_rocket)
+	rocket.mount(true)
+	hud.rocket = rocket
+	Sim.report("%s — hold SHIFT for full throttle; it lifts when thrust beats weight, or H flies it" %
+		rocket.display_name().to_upper(), Sim.Ev.GOOD)
+	Sim.report("straight up first, then lean east a little at a time. T sets the attitude hold; SPACE drops a dry stage",
+		Sim.Ev.INFO)
+	Sim.report("orbit is about 7.8 km/s ACROSS at 200 km, not up. The panel shows the orbit's high and low points",
+		Sim.Ev.INFO)
+
+func _leave_rocket() -> void:
+	if not is_instance_valid(rocket):
+		return
+	if rocket.alive and (not rocket.landed or rocket.throttle > 0.01):
+		Sim.report("not from up here: put it on the ground first", Sim.Ev.BAD)
+		return
+	var at: Vector3 = rocket.global_position + Vector3(16.0, 0.0, 6.0)
+	rocket.mount(false)
+	hud.rocket = null
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_spawn_walker(Vector3(at.x, maxf(Sim.height_at(at.x, at.z), Sim.sea_at(at.x, at.z)) + 1.2, at.z))
+
 ## Three km final on the boat.
 func _setup_carrier_approach() -> void:
 	var deck := carrier.global_position
@@ -10594,6 +11338,8 @@ func _entry_speed(want: float) -> float:
 ## something; this is that thing, and it is what anything wanting to mark "you"
 ## should ask for.
 func controlled() -> Node3D:
+	if _in_rocket():
+		return rocket
 	if is_instance_valid(carrier) and carrier.occupied:
 		return carrier
 	if is_instance_valid(ship) and ship.occupied:
@@ -11062,6 +11808,88 @@ func _deep_water_spiral(at: Vector3) -> Vector3:
 		print("[fleet] no water %.0f m deep within 170 km of %s; best was %.0f m" % [
 			DEEP_ENOUGH, str(Vector2(at.x, at.z).round()), best_d])
 	return best
+
+## The missions that have a sea in them: the strike range hunts shipping, the
+## sandbox is everything at once, and the boat does not sail alone.
+const FLEET_MISSIONS := ["strike", "sandbox", "carrier"]
+## A measurement run. The harnesses were written against a sea that always had
+## the squadron on it, whatever mission they happened to start.
+var _fleet_always := false
+
+## Put the squadron to sea, or take it off.
+##
+## It used to be built once at load and left there for good: ten hulls, each
+## with its captain, its sensors and its guns, steaming round an anchorage
+## twenty-four kilometres from a street fight that had no use for them -- and
+## the hostile half of them a threat in missions that say they have none.
+## Now it is there when the mission is fought at sea, or when you take a ship
+## out yourself, and gone otherwise.
+##
+## Decided from the mission alone once a session is up, so every peer musters
+## the same hulls under the same indices; what you chose to crew is your own
+## business and must not change what the others have afloat.
+func _muster_fleet(mission: String, crewing: bool) -> void:
+	var online: bool = net != null and net.active
+	var want: bool = _fleet_always or mission in FLEET_MISSIONS \
+		or (crewing and not online)
+	var have := false
+	for sh in get_tree().get_nodes_in_group("ships"):
+		var v := sh as Ship
+		if v == null or v.fleet_idx < 0 or v.is_queued_for_deletion():
+			continue
+		have = true
+		if not want:
+			# out of the group now, not at the end of the frame: the mission
+			# being set up in this same call must not find her
+			v.remove_from_group("ships")
+			v.remove_from_group("hittable")
+			v.remove_from_group("boardable")
+			v.queue_free()
+	# The carrier before her screen, so the squadron forms on her anchorage.
+	if want and not is_instance_valid(carrier):
+		_build_carrier()
+	elif not want and is_instance_valid(carrier):
+		_strike_carrier()
+	if want and not have:
+		_build_fleet()
+	elif not want:
+		fleet_count = 0
+	if _boot_verbose:
+		print("[fleet] %s: %d hulls at sea" % [mission,
+			get_tree().get_nodes_in_group("ships").size()])
+
+## One anchorage, found once, for the carrier and everything sailing with
+## her. Her position was written down and never checked: on the flat world
+## (24000, 1200) was open sea, and on the planet it is a country's interior.
+## She was built on dry land with the terrain drawn over her -- which is
+## what "spawned under sand" is -- while the fleet, which does look for
+## water, put to sea somewhere else entirely and left her behind.
+func _build_carrier() -> void:
+	if fleet_anchor.x == INF:
+		fleet_anchor = _deep_water(Vector3(24000.0, 0.0, 1200.0))
+	carrier = Carrier.new()
+	carrier.name = "Carrier"
+	add_child(carrier)
+	carrier.build(fleet_anchor, deg_to_rad(-18.0))
+
+## Take her off the sea, and her deck out of the ground with her: a deck is
+## part of `Sim.height_at`, and one left registered is a slab of invisible
+## flight deck standing in the ocean for the next mission to land on.
+func _strike_carrier() -> void:
+	if not is_instance_valid(carrier):
+		carrier = null
+		return
+	if carrier.occupied:
+		carrier.mount(false)
+	if is_instance_valid(hud) and hud.carrier == carrier:
+		hud.carrier = null
+	if is_instance_valid(pod) and pod.platform == carrier:
+		pod.platform = null
+	Sim.decks.erase(carrier.deck)
+	for g in ["carrier", "boardable", "hittable"]:
+		carrier.remove_from_group(g)
+	carrier.queue_free()
+	carrier = null
 
 func _build_fleet() -> void:
 	# The anchorage the carrier is already lying in, so the squadron forms on
@@ -13552,6 +14380,23 @@ func _join_game(jet_id: String, address: String) -> void:
 		_start(jet_id, "free")
 
 func _clear_mission() -> void:
+	# The rocket and its pad go with the mission, and time goes back to normal.
+	if is_instance_valid(rocket):
+		rocket.mount(false)
+		rocket.queue_free()
+	rocket = null
+	if is_instance_valid(hud):
+		hud.rocket = null
+	if is_instance_valid(_pad):
+		_pad.queue_free()
+	_pad = null
+	Sim.space_warp = 1.0
+	Sim.space_rate = 1.0
+	Sim.view_scale = 1.0
+	Sim.view_moon = Vector3.INF
+	# and nothing called down in the last match is still marked on the map
+	if is_instance_valid(map):
+		map.pick_marks.clear()
 	# the next mission decides for itself whether the range is a safe one
 	Sim.no_air_threat = false
 	on_foot = false
@@ -15269,6 +16114,8 @@ func _shell_input(e: InputEvent) -> void:
 		if is_instance_valid(cam):
 			cam.zoom = false
 	# ALT + right click raises the targeting pod; the wheel zooms it.
+	if e is InputEventMouseButton and _in_rocket():
+		return
 	if e is InputEventMouseButton and (e as InputEventMouseButton).pressed and running \
 			and not on_foot and not Sim.ui_modal:
 		var mb := e as InputEventMouseButton
@@ -15327,7 +16174,18 @@ func _shell_input(e: InputEvent) -> void:
 		return
 	if e is InputEventKey and e.pressed and not e.echo:
 		var k := (e as InputEventKey).physical_keycode
-		if k == KEY_EQUAL and running:
+		# In the capsule the keyboard is the rocket's. The aeroplane left on the
+		# ramp must not hear any of it: P would cycle its camera away from the
+		# rocket, U would climb out of it, TAB would open its stores.
+		if _in_rocket() and not k in [KEY_ESCAPE, KEY_M, KEY_F1, KEY_F2, KEY_F3,
+				KEY_PERIOD, KEY_COMMA, KEY_SLASH, KEY_APOSTROPHE]:
+			return
+		if (k == KEY_PERIOD or k == KEY_COMMA) and running and not Sim.typing:
+			# Time warp, for whatever of yours is coasting above the air.
+			Sim.warp_step(1 if k == KEY_PERIOD else -1)
+			Sim.report("time warp x%d — applies above the air, in free fall" % int(Sim.space_warp),
+				Sim.Ev.INFO)
+		elif k == KEY_EQUAL and running:
 			Sim.radar_range_idx = mini(Sim.radar_range_idx + 1, Sim.RADAR_RANGES.size() - 1)
 			Sim.report("radar range %d km" % int(Sim.radar_range() * 0.001), Sim.Ev.INFO)
 		elif k == KEY_MINUS and running:
@@ -15610,6 +16468,16 @@ func _parse_cmdline() -> void:
 			_mirv_lock_test = true
 		elif a == "--maplocktest":
 			_map_lock_test = true
+		elif a == "--launchtest":
+			_launch_test = true
+		elif a.begins_with("--cqbfix="):
+			_cqb_fix = a.substr(9)
+		elif a == "--moontest":
+			_moon_test = true
+		elif a.begins_with("--rocketview="):
+			_rocket_view = a.substr(13)
+		elif a.begins_with("--icbmtest="):
+			_icbm_test = a.substr(11)
 		elif a.begins_with("--telrangetest="):
 			_tel_range = a.substr(15)
 		elif a == "--terraintest":
@@ -15933,7 +16801,9 @@ func _parse_cmdline() -> void:
 	_shot_frames = 70
 	match preset:
 		"", "menu":
-			pass
+			# The hangar as it opens, or as it looks some way into the flypast.
+			if _shot_at > 0:
+				_shot_frames = _shot_at
 		"hangar":
 			menu.visible = false
 			_set_preview(menu.jet_id)
@@ -15941,8 +16811,9 @@ func _parse_cmdline() -> void:
 			preview.visible = true
 			spin = false
 			preview.rotation.y = deg_to_rad(215.0)
-			menu_cam.position = Vector3(13, 261.5, -15)
-			menu_cam.look_at(Vector3(0, 258.4, 0), Vector3.UP)
+			_stand_rig()
+			menu_cam.position = Vector3(13, _rig_y + 3.5, -15)
+			menu_cam.look_at(Vector3(0, _rig_y + 0.4, 0), Vector3.UP)
 			_shot_frames = 20
 		_:
 			var parts := preset.split(":")
@@ -17842,9 +18713,13 @@ const RECHART_AT := 150_000.0
 ## sea itself is at a different `y` under the new chart -- that is what the
 ## planet curving away from the middle means -- so keeping `y` would put an
 ## aeroplane at 3000 ft into the ground the moment the chart moved.
+var _rechart_n := 0
+var _rechart_worst := 0
+
 func rechart(dir: Vector3) -> void:
 	if not Sim.globe:
 		return
+	_rechart_n += 1
 	# Timed, because it all happens in one frame and it is the largest single
 	# thing the game ever does while you are flying: every position in the world
 	# renumbered, every terrain chunk rebuilt, and two sheets rasterised.
@@ -17877,6 +18752,21 @@ func rechart(dir: Vector3) -> void:
 			Sim.sea_at(q.x, q.y) + float(rec[1]), q.y)
 		if m2 is RigidBody3D:
 			_reset_interp.call_deferred(m2)
+	# From above the air there is no ground to rebuild and no chart sheet
+	# anybody can be looking at the country on: the planet is one sphere with a
+	# picture on it. Something in orbit moves the chart every minute or so, and
+	# on time warp many times a second, and paying a quarter of a second for
+	# terrain that is switched off each time is most of the frame. The world is
+	# renumbered now -- that part has to be -- and the ground and the sheets
+	# are owed, and paid once when the eye comes back down: see `_settle_chart`.
+	var sub: Node3D = _chart_subject()
+	if (sub is LaunchVehicle or sub is Icbm) and is_instance_valid(planet) and planet.dormant:
+		_chart_owed = true
+		_rechart_worst = maxi(_rechart_worst, Time.get_ticks_msec() - _rc)
+		if _boot_verbose:
+			print("[rechart] in space: %d ms" % (Time.get_ticks_msec() - _rc))
+		return
+	_chart_owed = false
 	# The ground is numbered in the same coordinates, so all of it is stale.
 	if is_instance_valid(terrain):
 		terrain.recentre(Vector3.ZERO, true)
@@ -17895,18 +18785,68 @@ func rechart(dir: Vector3) -> void:
 		var t_c := Time.get_ticks_msec()
 		terrain.rechart()
 		_rc_clim = Time.get_ticks_msec() - t_c
+	_rechart_worst = maxi(_rechart_worst, Time.get_ticks_msec() - _rc)
 	print("[rechart] %d ms: renumbering and the ground %d, the map sheet %d, the climate %d — the last two are asked for, not waited on" % [
 		Time.get_ticks_msec() - _rc, _rc_ground - _rc, _rc_sheet, _rc_clim])
 
 ## Keep the chart under the player. Called every frame; does nothing almost
 ## every frame, which is the point of the threshold.
 func _follow_chart() -> void:
-	if not Sim.globe or not is_instance_valid(player):
+	if not Sim.globe:
 		return
-	var p: Vector3 = player.global_position
-	if Vector2(p.x, p.z).length() < RECHART_AT:
+	_settle_chart()
+	var who: Node3D = _chart_subject()
+	if who == null:
+		return
+	var p: Vector3 = who.global_position
+	# Above the air the ground is one sphere with a picture on it and there is
+	# nothing to line up against, so the chart can be let run further before
+	# it is moved -- which matters, because something in orbit covers the
+	# usual hundred and fifty kilometres every nineteen seconds.
+	var reach: float = RECHART_AT
+	if p.y + Sim.planet_drop(p.x, p.z) > 100000.0:
+		# and further still on time warp, when it would otherwise be moved
+		# several times a second
+		reach = RECHART_HIGH if Sim.space_rate < 10.0 else RECHART_WARP
+	if Vector2(p.x, p.z).length() < reach:
 		return
 	rechart(Sim.chart_to_dir(p.x, p.z))
+
+const RECHART_HIGH := 600_000.0
+const RECHART_WARP := 2_500_000.0
+## The chart has moved and the ground under it has not been rebuilt yet.
+var _chart_owed := false
+
+## Pay what a chart move in space left owing, once the ground is wanted again.
+func _settle_chart() -> void:
+	if not _chart_owed or (is_instance_valid(planet) and planet.dormant):
+		return
+	_chart_owed = false
+	if is_instance_valid(terrain):
+		terrain.recentre(Vector3.ZERO, true)
+		terrain.rechart()
+	if is_instance_valid(map):
+		map.rechart()
+
+## What the chart is kept under: the thing the view is on. That was always the
+## aeroplane, which is right for as long as the aeroplane is what goes
+## somewhere. A spacecraft goes round the planet, and a warhead being ridden
+## down onto another continent arrives over ground that would otherwise never
+## have been built -- the far side of the world, seen from a camera standing
+## in nothing.
+func _chart_subject() -> Node3D:
+	if is_instance_valid(rocket) and rocket.occupied:
+		return rocket
+	if is_instance_valid(cam):
+		var ridden: Variant = (cam as Node).get("weapon_cam")
+		if ridden != null and is_instance_valid(ridden) and ridden is Icbm:
+			return ridden
+	if is_instance_valid(player):
+		return player
+	return null
+
+## The crewed launch vehicle, if there is one on the pad or in the sky.
+var rocket: LaunchVehicle = null
 
 ## Tracer, from the guns that fire it.
 ##

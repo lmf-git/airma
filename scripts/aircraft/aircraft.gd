@@ -17,6 +17,8 @@ var team := 0                    # 0 = player side, 1 = hostile
 # ---- control inputs (set by _pilot) --------------------------------------
 var in_pitch := 0.0
 var in_roll := 0.0
+## The roll rate the flight controls are working up to: see `_integrate_forces`.
+var _rr_want := 0.0
 var in_yaw := 0.0
 var throttle := 0.0
 var wheel_brake := false
@@ -1273,7 +1275,13 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 			p_cmd *= clampf(1.0 - (-g_load - 3.2) / 1.0, 0.0, 1.0)
 		# roll is only trimmed close to the AoA limit, where it would depart
 		var aoa_fade: float = clampf(1.0 - (absf(aoa) - a_lim * 0.78) / (a_lim * 0.5), 0.5, 1.0)
-		var want_rr: float = in_roll * spec["max_roll_rate"] * aoa_fade
+		# ...and the roll rate asked for is run up to, not jumped to: full rate
+		# takes a third of a second to come on and as long to come off, which is
+		# about what an aileron and a wing's worth of inertia really allow.
+		var rr_goal: float = in_roll * spec["max_roll_rate"] * aoa_fade
+		_rr_want = move_toward(_rr_want, rr_goal,
+			float(spec["max_roll_rate"]) * 3.0 * state.step)
+		var want_rr: float = _rr_want
 		var r_err := want_rr - rr
 		var r_raw := r_err * 1.4 + _rr_i
 		var r_auth: float = float(spec["max_roll_rate"]) / 4.1

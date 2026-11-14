@@ -253,8 +253,110 @@ func up_at(p: Vector3) -> Vector3:
 func altitude(p: Vector3) -> float:
 	return p.distance_to(planet_centre) - PLANET_R
 
+## Gravity, as Newton has it: towards the planet's centre and falling off with
+## the square of the distance from it.
+##
+## This was a flat 9.81 whatever the height, which is right on a runway and
+## wrong everywhere a rocket goes: at four hundred kilometres the real figure
+## is 8.7, and it is that inverse square -- not the number at the ground --
+## that makes an orbit close on itself. `GM` is the planet's gravitational
+## parameter, chosen so the surface value is still exactly 9.81.
+const GM := 9.81 * PLANET_R * PLANET_R
 func gravity_at(p: Vector3) -> Vector3:
-	return -up_at(p) * 9.81
+	var r: Vector3 = p - planet_centre
+	var d2: float = maxf(r.length_squared(), PLANET_R * PLANET_R * 0.25)
+	return r * (-GM / (d2 * sqrt(d2)))
+
+## Speed of a circular orbit at a height, and how long one lap takes.
+func orbit_speed(alt: float) -> float:
+	return sqrt(GM / (PLANET_R + maxf(alt, 0.0)))
+
+func orbit_period(alt: float) -> float:
+	var a: float = PLANET_R + maxf(alt, 0.0)
+	return TAU * sqrt(a * a * a / GM)
+
+# ------------------------------------------------------------------ the moon
+## One moon, at the real one's size, distance and month.
+const MOON_R := 1_737_400.0
+const MOON_GM := 4.9028e12
+const MOON_DIST := 384_400_000.0
+const MOON_PERIOD := 27.32 * 86400.0
+## The plane it goes round in, as the axis of it, in the planet's own frame:
+## tipped off the planet's axis so it is not always over the equator.
+const MOON_AXIS := Vector3(0.1908, 0.9063, 0.3772)
+## The clock everything in space runs on. It is the world's own time until a
+## spacecraft is coasting on time warp, when it runs ahead with the ship.
+var space_time := 0.0
+
+## Where the moon is, as a direction from the planet's centre in the planet's
+## frame -- the frame `chart_origin` and `PLANET_NORTH` are written in.
+func moon_dir() -> Vector3:
+	var ax: Vector3 = MOON_AXIS.normalized()
+	var u: Vector3 = ax.cross(Vector3.RIGHT).normalized()
+	var w: Vector3 = ax.cross(u)
+	var a: float = 0.9 + space_time * TAU / MOON_PERIOD
+	return (u * cos(a) + w * sin(a)).normalized()
+
+## Between the planet's own frame -- metres from its centre, along the axes
+## `chart_origin` and `PLANET_NORTH` are written in -- and the world.
+##
+## There are two ways to do it and they are for different things. The world is
+## not quite Euclidean: `x` and `z` are distance *along the ground* from the
+## middle of the chart, and `y` is height with the planet's curve taken off.
+## Anything that has to agree with the ground -- stand on it, hit it, be found
+## by what is on it -- goes through `space_to_world`, which is the same rule
+## `rechart` renumbers the world by and holds at any range. The moon, which
+## only has to be in the right part of the sky, takes the straight rotation.
+func space_to_world(p: Vector3) -> Vector3:
+	var r: float = maxf(p.length(), 1.0)
+	var q: Vector2 = dir_to_chart(p / r)
+	return Vector3(q.x, (r - PLANET_R) - planet_drop(q.x, q.y), q.y)
+
+func world_to_space(p: Vector3) -> Vector3:
+	return chart_to_dir(p.x, p.z) * (PLANET_R + p.y + planet_drop(p.x, p.z))
+
+func planet_to_world(p: Vector3) -> Vector3:
+	return Vector3(p.dot(chart_east), p.dot(chart_origin) - PLANET_R, p.dot(chart_south))
+
+## A direction or a velocity: the rotation, without the drop.
+func planet_to_world_dir(d: Vector3) -> Vector3:
+	return Vector3(d.dot(chart_east), d.dot(chart_origin), d.dot(chart_south))
+
+func world_to_planet_dir(d: Vector3) -> Vector3:
+	return chart_east * d.x + chart_origin * d.y + chart_south * d.z
+
+## The moon as a world point. A long way off: good for a direction and for the
+## pull of it, not for standing something on.
+func moon_world() -> Vector3:
+	return planet_to_world(moon_dir() * MOON_DIST)
+
+## Time warp, for what is coasting above the air. A lap of the planet is an
+## hour and a half and an intercontinental shot is half of one; neither is
+## something to sit through. It only ever applies to a thing in free fall
+## outside the atmosphere -- nothing under power and nothing in the air is
+## hurried -- and the rest of the world goes on at its own pace underneath.
+const WARPS := [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 1000.0, 10000.0]
+var space_warp := 1.0
+## What the space clock is actually running at this tick: the warp, when the
+## player's own ship is the thing coasting, and 1 otherwise.
+var space_rate := 1.0
+
+func warp_step(by: int) -> void:
+	var i: int = WARPS.find(space_warp)
+	i = clampi((0 if i < 0 else i) + by, 0, WARPS.size() - 1)
+	space_warp = WARPS[i]
+
+## How fast a body at this height may be hurried.
+func warp_at(alt: float, powered: bool) -> float:
+	if powered or alt < 100000.0:
+		return 1.0
+	# close in, a tick of the fastest warp is a sixth of the way round
+	return minf(space_warp, 100.0) if alt < 400000.0 else space_warp
+
+## How much smaller than life the planet is being drawn, and where the moon is
+## from the eye, for a spacecraft a long way out: see `LaunchVehicle._place`.
+var view_scale := 1.0
+var view_moon := Vector3.INF
 
 ## Sea level at a point. The ocean is a shell, so it falls away with everything
 ## else — a flat sea plane against curved ground would flood the far half of the
@@ -2334,6 +2436,8 @@ func block_until_released(actions: Array) -> void:
 ## question has one answer.
 func _physics_process(delta: float) -> void:
 	sea_time += delta
+	# whoever is flying on time warp adds the rest: see `LaunchVehicle`
+	space_time += delta
 
 func _process(_delta: float) -> void:
 	if _blocked.is_empty():

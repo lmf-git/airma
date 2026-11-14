@@ -232,6 +232,8 @@ var _slide := 0.0
 var _slide_dir := Vector3.ZERO
 ## Going over or up something: "vault" or "climb", and the path it takes.
 var _trav := ""
+## The way over has a top to it -- a window -- so it is taken crouched.
+var _trav_low := false
 var _trav_t := 0.0
 var _trav_span := 0.5
 var _trav_a := Vector3.ZERO
@@ -715,15 +717,23 @@ func _begin_traverse(dir_in: Vector3, auto: bool) -> bool:
 	var feet := global_position
 	var id := -1
 	var face := 0.0
+	# What is actually there at the height asked about. These asked `blocks`,
+	# which counts anything up to a man's height above the point -- so at a
+	# window the thing found at his shins was as often the wall over the
+	# window as the sill under it, and a sill to vault became a wall to climb.
+	# Through a window was never the answer it gave.
 	for step in 5:
 		face = 0.3 + step * 0.2
-		id = Obstacles.blocks(feet + dir * face + Vector3(0, 0.25, 0), 0.05)
+		id = Obstacles.hit(feet + dir * face + Vector3(0, 0.25, 0), 0.05)
 		if id >= 0:
 			break
 	if id < 0 and not auto:
 		# nothing at his shins: perhaps something to catch hold of overhead
 		face = 0.6
-		id = Obstacles.blocks(feet + dir * face + Vector3(0, 2.0, 0), 0.05)
+		id = Obstacles.hit(feet + dir * face + Vector3(0, 2.0, 0), 0.05)
+		# a hand's reach higher: the edge of a scaffold deck, a balcony
+		if id < 0:
+			id = Obstacles.hit(feet + dir * face + Vector3(0, 2.35, 0), 0.1)
 	if id < 0:
 		return false
 	var top: float = Obstacles.top_of(id)
@@ -754,9 +764,13 @@ func _begin_traverse(dir_in: Vector3, auto: bool) -> bool:
 				var crest: float = top
 				for k in 5:
 					var q: Vector3 = feet.lerp(land, (k + 1) / 6.0)
-					crest = maxf(crest, Obstacles.floor_under(q.x, q.z, feet.y + CLIMB_MAX))
+					crest = maxf(crest, Obstacles.clear_over(q.x, q.z, feet.y + VAULT_MAX + 0.2))
 				if crest - feet.y > VAULT_MAX:
 					break
+				# Through an opening rather than over a wall: something over
+				# the top of the way across, a window's lintel. He goes
+				# through low, head down, not stood up into the wall above.
+				_trav_low = Obstacles.hit(Vector3(_trav_grip.x, crest + 1.15, _trav_grip.z), 0.15) >= 0
 				_trav_top = crest
 				_trav = "vault"
 				_trav_b = land
@@ -807,7 +821,7 @@ func _traverse(delta: float) -> void:
 	global_position = p
 	rotation.y = yaw
 	on_floor = false
-	crouching = false
+	crouching = _trav_low
 	_slide = 0.0
 	_sprint = false
 	_shot_cd = maxf(_shot_cd, 0.15)

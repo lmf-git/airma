@@ -25,6 +25,8 @@ const MISSIONS := [
 	["arms", "COMBAT", "Hostile. Everything over one town: infantry in the streets, armour among them and both sides' aircraft overhead. Take an aeroplane, a helicopter, a vehicle, or go on foot. First side to the kills you set."],
 	["tdm", "TEAM DEATHMATCH", "Hostile. Two sides, first to twenty kills."],
 	["ffa", "FREE FOR ALL", "Hostile. Everyone shoots everyone; twelve kills wins."],
+	["launch", "SPACE LAUNCH", "No threats. On the pad in a three stage rocket with a capsule on top. Newton's gravity and nothing else: fly it to orbit by hand, come round the planet, and bring the capsule home under its parachute."],
+	["moon", "MOON SHOT", "No threats. On the pad in the big one: three stages and a spacecraft, three thousand tonnes. Orbit first; then a burn of three kilometres a second sends it to the moon, five days out on time warp, and another stops it there. H flies any part of it for you."],
 	["carrier", "CARRIER TRAP", "No threats. Three miles behind the boat with the hook down."],
 	["strike", "STRIKE", "No air threat. Armour columns, shipping and helicopters to hunt, wave after wave — nothing down there can shoot back at an aeroplane."],
 	["combat", "PATROL", "Hostile. Bandits and a SAM belt north of the field. Open the bay before you shoot."],

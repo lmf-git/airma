@@ -96,6 +96,11 @@ func cycle() -> void:
 	_aim = Vector3.ZERO
 
 ## On a round, or holding on where the last one went off.
+## How far off a ridden round the camera stands, on the mouse wheel: 1 is
+## what it would choose for itself.
+var ride_zoom := 1.0
+var _ride_s := 1.0
+
 func riding() -> bool:
 	return _wcam_live or _wcam_hold > 0.0
 
@@ -113,6 +118,12 @@ func _unhandled_input(e: InputEvent) -> void:
 		var mm := e as InputEventMouseMotion
 		orbit.x -= mm.relative.x * 0.006
 		orbit.y = clampf(orbit.y + mm.relative.y * 0.006, -1.3, 1.3)
+	if e is InputEventMouseButton and weapon_cam != null and (e as InputEventMouseButton).pressed:
+		var wb := e as InputEventMouseButton
+		if wb.button_index == MOUSE_BUTTON_WHEEL_UP:
+			ride_zoom = maxf(ride_zoom * 0.87, 0.35)
+		elif wb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			ride_zoom = minf(ride_zoom * 1.15, 14.0)
 	if e is InputEventMouseButton and mode == Mode.ORBIT:
 		var mb := e as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP:
@@ -189,6 +200,18 @@ func _process(delta: float) -> void:
 			# one tick of relative motion every frame, which is the judder.
 			var wxf := weapon_cam.get_global_transform_interpolated()
 			var wp: Vector3 = wxf.origin
+			# Sized to what is being ridden. The boom was twenty metres for
+			# everything, which is right for a missile four metres long and
+			# inside the smoke of one twenty-two: an intercontinental round
+			# filled the frame from nose to nozzle and the view pivoted about
+			# the middle of a stack most of which had already been dropped.
+			var rs: float = ride_zoom
+			if weapon_cam.has_method("ride_scale"):
+				rs *= float(weapon_cam.call("ride_scale"))
+			if weapon_cam.has_method("ride_centre"):
+				wp = wxf * (weapon_cam.call("ride_centre") as Vector3)
+			_ride_s = lerpf(_ride_s, rs, clampf(delta * 2.0, 0.0, 1.0))
+			rs = _ride_s
 			var wv := Vector3.FORWARD
 			if "vel" in weapon_cam:
 				wv = weapon_cam.get("vel")
@@ -220,7 +243,7 @@ func _process(delta: float) -> void:
 				_wcam_up = global_transform.basis.y
 			_wcam_side = _carry(_wcam_side, wdir, wdir.cross(u), delta)
 			var side := _wcam_side
-			var want := wp - wdir * 20.0 + side * 7.5 + u * 5.5
+			var want := wp - wdir * 20.0 * rs + side * 7.5 * rs + u * 5.5 * rs
 			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 3.0)
 			# Rigid on the round, eased on the boom. Lerping the world position
 			# toward a target doing six hundred metres a second leaves a steady
@@ -260,20 +283,42 @@ func _process(delta: float) -> void:
 			# across at the rest of the load, and it eases back when let go.
 			# The ride used to return before free look was ever read.
 			_free_look(delta)
+			# Which way up the picture is, for the view as it would be with
+			# nobody looking round. This switched reference from the sky to
+			# north at ten degrees off the vertical, which is a roll of
+			# anything up to half a turn in one frame -- on the way up off the
+			# launcher, and again on the way down onto the mark.
+			_wcam_up = _carry(_wcam_up, _wcam_look, u, delta)
+			# Looking round turns the whole view about the round, in the
+			# view's own frame: left and right about the picture's own up,
+			# up and down about its own across.
+			#
+			# It turned left and right about the PLANET'S up instead, and kept
+			# the picture's up where it was while the camera went round. For a
+			# round going along the ground those are the same thing. For one
+			# going straight up -- every ballistic launch, for its first
+			# minute -- the planet's up is the line of flight: turning about
+			# it moved the camera round the round without turning the view at
+			# all, so the round swung in a circle round the screen about a
+			# point in empty sky, and the mouse seemed to spin the world.
 			var turn := Basis.IDENTITY
-			if absf(free_yaw) > 0.0005 or absf(free_pitch) > 0.0005:
+			var looking: float = clampf((absf(free_yaw) + absf(free_pitch)) / 0.25, 0.0, 1.0)
+			if looking > 0.002:
 				var across := _wcam_look.cross(_wcam_up)
 				if across.length_squared() < 0.0001:
 					across = _wcam_side
-				turn = Basis(u, free_yaw) * Basis(across.normalized(), free_pitch)
+				turn = Basis(_wcam_up.normalized(), free_yaw) \
+					* Basis(across.normalized(), free_pitch)
 			var look: Vector3 = (turn * _wcam_look).normalized()
 			global_position = wp + turn * _wcam_off
-			# The same for which way up the picture is. This switched reference
-			# from the sky to north at ten degrees off the vertical, which is a
-			# roll of anything up to half a turn in one frame -- on the way up
-			# off the launcher, and again on the way down onto the mark.
-			_wcam_up = _carry(_wcam_up, look, u, delta)
-			look_at(wp + look * 40.0, _wcam_up)
+			# ...and what it turns about is the round. Left looking at a point
+			# well ahead of it, a look to one side put the round at the edge
+			# of the picture and a look back put it behind the lens.
+			var ahead: float = (40.0 if rs < 1.3 else 14.0 * rs) * (1.0 - looking)
+			var aim: Vector3 = wp + look * ahead
+			if aim.distance_to(global_position) < 0.5:
+				aim = global_position + look
+			look_at(aim, (turn * _wcam_up).normalized())
 			fov = lerpf(fov, (58.0) * _zoom_mul(), delta * 4.0)
 			if diag:
 				var d := global_position - wp

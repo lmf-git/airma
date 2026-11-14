@@ -66,7 +66,15 @@ func _pilot(delta: float) -> void:
 		target_stick = Vector2(clampf(_mouse.x + kr, -1, 1), clampf(-_mouse.y + kp, -1, 1))
 		_mouse = _mouse.lerp(Vector2.ZERO, delta * 0.9)
 	var rate := 7.5 if not mouse_fly else 14.0
-	stick = stick.lerp(target_stick, clampf(delta * rate, 0.0, 1.0))
+	# Roll on its own, slower clock. A key is all or nothing, and at the pitch
+	# axis's rate a tap of A or D was most of full aileron in a tenth of a
+	# second on an aeroplane that rolls two hundred degrees a second: the wing
+	# was down before the hand had finished pressing. Pitch has the airframe's
+	# own inertia and the g limiter between the stick and the result; roll has
+	# almost nothing, so the lag has to be here.
+	var roll_rate := 3.6 if not mouse_fly else 9.0
+	stick.x = lerpf(stick.x, target_stick.x, clampf(delta * roll_rate, 0.0, 1.0))
+	stick.y = lerpf(stick.y, target_stick.y, clampf(delta * rate, 0.0, 1.0))
 	in_roll = stick.x
 	in_pitch = stick.y
 	in_yaw = Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")

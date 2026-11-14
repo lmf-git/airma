@@ -493,16 +493,31 @@ class Frag extends Node3D:
 		vel.y -= 14.0 * delta
 		var was := global_position
 		var to := was + vel * delta
-		# a wall turns it back along whichever axis ran into it
-		if Obstacles.blocks(to, 0.08) >= 0:
-			var hit_x: bool = Obstacles.blocks(Vector3(to.x, to.y, was.z), 0.08) >= 0
-			var hit_z: bool = Obstacles.blocks(Vector3(was.x, to.y, to.z), 0.08) >= 0
-			if hit_x or not hit_z:
-				vel.x = -vel.x * 0.4
-			if hit_z or not hit_x:
-				vel.z = -vel.z * 0.4
-			to = was
-			_clink()
+		# A wall turns it back off whichever face it met.
+		#
+		# This asked `blocks`, which is the question for a man: is there
+		# anything here between his feet and the top of his head. A grenade is
+		# not a man. Every lintel is less than a man's height over a window,
+		# and over a doorway, so a grenade lobbed through either met the wall
+		# above the opening a metre and more over its head and came back off
+		# empty air -- nothing could be thrown into a building at all. It is
+		# the line it flew this tick, against the walls as they are, which also
+		# stops a fast throw stepping clean through a partition between ticks.
+		var t_wall: float = Obstacles.segment(was, to)
+		if t_wall < 1.0 and Obstacles.seg_id >= 0:
+			var at: Vector3 = was.lerp(to, t_wall)
+			var f: Dictionary = Obstacles.face_of(Obstacles.seg_id, at)
+			# coming down onto the top of a sill or a wall is a floor, and the
+			# floor below sees to that
+			if at.y < float(f["top"]) - 0.1 or vel.y >= 0.0:
+				var n: Vector3 = f["n"]
+				var into: float = vel.dot(n)
+				if into < 0.0:
+					vel -= n * into * 1.4
+					vel.x *= 0.7
+					vel.z *= 0.7
+				to = was.lerp(to, maxf(t_wall - 0.05, 0.0)) + n * 0.02
+				_clink()
 		var floor_y: float = maxf(Sim.height_at(to.x, to.z), Obstacles.floor_under(to.x, to.z, to.y + 0.3)) + 0.05
 		if to.y <= floor_y:
 			to.y = floor_y

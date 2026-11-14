@@ -19,6 +19,8 @@ var _ccip_t := 0
 var flight_page := true          # false from an outside camera: see world.gd
 var walker: Node = null
 var carrier: Carrier = null
+## The launch vehicle, while it is crewed.
+var rocket: LaunchVehicle = null
 ## The targeting pod, for the mark on the main view where it is looking.
 var pod: SensorPod = null
 var mode = null
@@ -199,6 +201,9 @@ func _draw_all() -> void:
 	# aeroplane one, and every other page returns before it gets there — so F2
 	# did nothing at all on a bridge, in a driver's seat or on foot, and the
 	# only place the keys appeared was the event log.
+	if rocket != null and is_instance_valid(rocket):
+		_draw_rocket()
+		return
 	if carrier != null and is_instance_valid(carrier):
 		_draw_conn()
 		return
@@ -430,7 +435,7 @@ func _draw_objective() -> void:
 
 ## Whichever camera the player is actually looking through.
 func _live_camera() -> Camera3D:
-	for c in [carrier, ship, tank]:
+	for c in [rocket, carrier, ship, tank]:
 		if c != null and is_instance_valid(c) and "cam" in c:
 			var cc: Camera3D = c.get("cam")
 			if is_instance_valid(cc) and cc.current:
@@ -515,6 +520,21 @@ func _draw_world_contacts(src: Node3D, eye_in: Camera3D) -> void:
 ## The carrier's bridge. She is not a `Ship` and she has no armament at all, so
 ## without a page of her own the HUD carried on drawing the aeroplane's -- gun,
 ## stores, weapon select and all -- for a ship that cannot fire anything.
+## The capsule's panel. Everything on it is a figure the vehicle works out
+## from where it is and how fast it is going: there is no instrument here that
+## is told the answer.
+func _draw_rocket() -> void:
+	var vp := get_viewport_rect().size
+	var lines: PackedStringArray = rocket.readout()
+	var y: float = vp.y - 40.0 - float(lines.size()) * 24.0
+	for i in lines.size():
+		_txt(Vector2(26, y + float(i) * 24.0), lines[i], 17 if i == 0 else 16,
+			GREEN if i != 4 else Color(0.6, 0.9, 1.0))
+	_txt(Vector2(26, vp.y - 22.0),
+		"SHIFT/CTRL throttle  X cut  W/S pitch  Q/E yaw  A/D roll  T attitude hold  SPACE stage  H autopilot  , . warp  M map  U out",
+		13, Color(0.6, 0.75, 0.85))
+	_draw_log(vp)
+
 func _draw_conn() -> void:
 	var vp := get_viewport_rect().size
 	var g := GREEN
@@ -2236,6 +2256,26 @@ func _conn_keys() -> Array:
 		["U", "hand over the conn"],
 	]], ["GENERAL", _general_keys()]]
 
+func _rocket_keys() -> Array:
+	return [["THE ROCKET", [
+		["SHIFT / CTRL", "throttle up / down"],
+		["X", "engine cut"],
+		["W / S", "pitch"],
+		["Q / E", "yaw"],
+		["A / D", "roll"],
+		["T", "attitude: free, hold, prograde, retrograde"],
+		["H", "autopilot: to orbit; in the moon rocket, on to the moon"],
+		["SPACE", "drop the spent stage, light the next"],
+		[", / .", "time warp, coasting above the air"],
+		["mouse / wheel", "look round / closer and further"],
+		["U", "climb out, once it is down"],
+	]], ["TO ORBIT", [
+		["1", "full throttle, straight up"],
+		["2", "from a kilometre up, lean east a little at a time"],
+		["3", "past 40 km, T to PROGRADE and let it follow"],
+		["4", "cut when LOW POINT passes 150 km"],
+	]], ["GENERAL", _general_keys()]]
+
 func _tank_keys() -> Array:
 	return [
 		["DRIVING", [
@@ -2401,7 +2441,9 @@ func _refresh_help() -> void:
 		return
 	var sig := 0
 	if show_help:
-		if carrier != null and is_instance_valid(carrier):
+		if rocket != null and is_instance_valid(rocket):
+			sig = 256
+		elif carrier != null and is_instance_valid(carrier):
 			sig = 64
 		elif ship != null and is_instance_valid(ship):
 			sig = 1 | (2 if ship.can_dive() else 0) | (4 if ship.can_launch() else 0) \
@@ -2418,7 +2460,9 @@ func _refresh_help() -> void:
 	_card.visible = show_help
 	if not show_help:
 		return
-	if sig == 64:
+	if sig == 256:
+		_card.show_keys(_rocket_keys())
+	elif sig == 64:
 		_card.show_keys(_conn_keys())
 	elif sig & 1 != 0:
 		_card.show_keys(_ship_keys())

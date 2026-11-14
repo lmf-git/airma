@@ -242,6 +242,52 @@ static func _db() -> Dictionary:
 		"flare_bait": 0.0, "chaff_bait": 0.0,
 		"desc": "Intermediate range hypersonic. Splits into six on the way down.",
 	},
+	# ------------------------------------------------------ intercontinental
+	# These do not fly as the rounds above do. `icbm` hands them to `Icbm`,
+	# which boosts on three stages, cuts its motor on the arc that falls onto
+	# the mark, and opens above the air into warheads that each go their own
+	# way. Almost nothing below is read by the flight -- the stages are the
+	# same for all three -- but the launcher, the map and the hangar read the
+	# rest: how far it goes, how many it carries, how big each one is.
+	"yars": {
+		"name": "RS-24 Yars", "short": "YARS", "kind": "radar", "icbm": true,
+		"folding": true, "mass": 49600.0, "length": 22.5, "dia": 2.0, "fin": 0.0,
+		"boost": 40.0, "burn": 186.0, "max_g": 4.0, "drag": 0.0000008,
+		"ref_speed": 7000.0, "life": 2400.0, "range": 11000000.0,
+		"seeker_fov": 180.0, "lock_time": 0.0, "arm_time": 8.0, "fuse": 60.0,
+		"mirv": 4, "mirv_spread": 9000.0,
+		"nuclear": true, "damage": 90000.0, "lethal": 3200.0,
+		"colour": Color(0.24, 0.27, 0.22), "band": Color(0.58, 0.52, 0.16),
+		"eject": 0.0, "trail": Color(0.95, 0.93, 0.90),
+		"flare_bait": 0.0, "chaff_bait": 0.0,
+		"desc": "Intercontinental. Three stages, eleven thousand kilometres, four warheads each to its own mark.",
+	},
+	"df41": {
+		"name": "DF-41", "short": "DF41", "kind": "radar", "icbm": true,
+		"folding": true, "mass": 80000.0, "length": 21.0, "dia": 2.25, "fin": 0.0,
+		"boost": 40.0, "burn": 186.0, "max_g": 4.0, "drag": 0.0000008,
+		"ref_speed": 7200.0, "life": 2400.0, "range": 13000000.0,
+		"seeker_fov": 180.0, "lock_time": 0.0, "arm_time": 8.0, "fuse": 60.0,
+		"mirv": 6, "mirv_spread": 12000.0,
+		"nuclear": true, "damage": 90000.0, "lethal": 2600.0,
+		"colour": Color(0.27, 0.30, 0.24), "band": Color(0.62, 0.14, 0.12),
+		"eject": 0.0, "trail": Color(0.95, 0.93, 0.90),
+		"flare_bait": 0.0, "chaff_bait": 0.0,
+		"desc": "Intercontinental. Thirteen thousand kilometres and six warheads.",
+	},
+	"minuteman": {
+		"name": "LGM-30G Minuteman III", "short": "MMIII", "kind": "radar", "icbm": true,
+		"folding": true, "mass": 36000.0, "length": 18.2, "dia": 1.67, "fin": 0.0,
+		"boost": 40.0, "burn": 186.0, "max_g": 4.0, "drag": 0.0000008,
+		"ref_speed": 7000.0, "life": 2400.0, "range": 13000000.0,
+		"seeker_fov": 180.0, "lock_time": 0.0, "arm_time": 8.0, "fuse": 60.0,
+		"mirv": 3, "mirv_spread": 8000.0,
+		"nuclear": true, "damage": 90000.0, "lethal": 3600.0,
+		"colour": Color(0.80, 0.80, 0.78), "band": Color(0.20, 0.24, 0.30),
+		"eject": 0.0, "trail": Color(0.95, 0.93, 0.90),
+		"flare_bait": 0.0, "chaff_bait": 0.0,
+		"desc": "Intercontinental. Thirteen thousand kilometres and three warheads.",
+	},
 	"khorram": {
 		# Khorramshahr. Nineteen and a half tonnes, thirteen metres, a metre and
 		# a half across, liquid fuelled, and it carries most of two tonnes of

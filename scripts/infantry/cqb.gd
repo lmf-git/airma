@@ -849,6 +849,77 @@ func _support(delta: float) -> void:
 		_bomb(b[1], float(b[2]) if b.size() > 2 else 1.0)
 	_bombs = keep
 
+## What is on its way in, for the map: everything this side has called down
+## that has not arrived yet, as dictionaries the map knows how to draw.
+##   kind   "bombs", "nuke", "plane", "missile", "drone", "mark"
+##   at     where it is coming down, or where it is now if it flies
+##   eta    seconds until it lands, where that is known
+##   r      how far its blast reaches, in metres
+##   from / to   a line it is flying along
+##   head   which way it is pointing, flat
+##   label  what to call it
+func inbound() -> Array:
+	var out: Array = []
+	# Bombs and shells that have been called and not landed: grouped by where
+	# they fall, so an airstrike is one mark with a countdown and not seven.
+	var groups: Array = []
+	for b in _bombs:
+		var at: Vector3 = b[1]
+		var big: float = float(b[2]) if b.size() > 2 else 1.0
+		var put := false
+		for g in groups:
+			if Vector2(at.x - (g["at"] as Vector3).x, at.z - (g["at"] as Vector3).z).length() < 70.0:
+				(g["pts"] as Array).append(at)
+				g["eta"] = minf(float(g["eta"]), float(b[0]))
+				g["last"] = maxf(float(g["last"]), float(b[0]))
+				g["r"] = maxf(float(g["r"]), 9.0 * big)
+				put = true
+				break
+		if not put:
+			groups.append({"kind": "bombs", "at": at, "pts": [at], "eta": float(b[0]),
+				"last": float(b[0]), "r": 9.0 * big})
+	for g in groups:
+		var n: int = (g["pts"] as Array).size()
+		g["label"] = "BOMB" if n == 1 else ("%d ROUNDS" % n)
+		out.append(g)
+	for nk in _nukes:
+		out.append({"kind": "nuke", "at": nk[1], "eta": float(nk[0]), "r": float(nk[2]),
+			"label": "STRATEGIC NUKE" if bool(nk[3]) else "TACTICAL NUKE"})
+	for n2 in world.get_children():
+		if n2 is CarpetRun and is_instance_valid(n2):
+			var cr := n2 as CarpetRun
+			var left: float = maxf(cr._end - cr._along, 0.0) / CarpetRun.SPEED
+			out.append({"kind": "plane", "at": cr.global_position, "head": cr._dir,
+				"from": cr.from, "to": cr.to, "label": "B-2",
+				"eta": maxf((cr._start.distance_to(cr.from) - cr._along) / CarpetRun.SPEED, 0.0),
+				"gone": left})
+		elif n2 is CarpetBomb and is_instance_valid(n2):
+			out.append({"kind": "falling", "at": (n2 as Node3D).global_position})
+	if is_instance_valid(_cruise):
+		var v: Vector3 = _cruise.vel
+		out.append({"kind": "missile", "at": _cruise.global_position, "head": v,
+			"to": _cruise.target, "label": "CRUISE MISSILE",
+			"eta": _cruise.global_position.distance_to(_cruise.target) / maxf(v.length(), 1.0)})
+	if is_instance_valid(_uav):
+		out.append({"kind": "drone", "at": _uav.global_position, "head": _uav.linear_velocity,
+			"r": UavDrone.RADIUS, "mid": _uav._mid, "label": "UAV %ds" % int(uav_t)})
+	var ship: Variant = world.get("_cqb_gunship")
+	if ship != null and is_instance_valid(ship):
+		var sh := ship as Node3D
+		out.append({"kind": "plane", "at": sh.global_position,
+			"head": (sh as Aircraft).linear_velocity, "label": "GUNSHIP"})
+	var tel: Variant = world.get("_cqb_tel")
+	if tel != null and is_instance_valid(tel) and float(world.get("_cqb_tel_t")) > 0.0:
+		var t := tel as Tank
+		if t.map_target != Vector3.INF:
+			out.append({"kind": "mark", "at": t.map_target, "r": 25.0,
+				"label": "FIRE MISSION", "eta": -1.0})
+		for m in get_tree().get_nodes_in_group("missiles"):
+			if is_instance_valid(m) and (m as Node).get("shooter") == t:
+				out.append({"kind": "missile", "at": (m as Node3D).global_position,
+					"head": (m as Node).get("vel"), "to": t.map_target, "label": ""})
+	return out
+
 func _call(id: String) -> bool:
 	match id:
 		"uav":
@@ -943,6 +1014,7 @@ func _call(id: String) -> bool:
 			run.from = _carpet_from
 			run.to = _pick_at
 			world.add_child(run)
+			_pick_node = run
 			_carpet_from = Vector3.INF
 			Sim.report("B-2 inbound — a carpet of %d along your line in about %d seconds" % [
 				run.bombs, int(run.eta)], Sim.Ev.GOOD)
@@ -979,6 +1051,7 @@ func _call(id: String) -> bool:
 			_cruise.from_dir = back.normalized() if back.length() > 5.0 \
 				else Vector3(sin(player.yaw), 0.0, cos(player.yaw))
 			world.add_child(_cruise)
+			_pick_node = _cruise
 			Sim.report("cruise missile launched — it is yours in about %d seconds" % int(_cruise.eta),
 				Sim.Ev.GOOD)
 			return true
@@ -994,8 +1067,21 @@ func _picked(id: String, at: Vector3) -> void:
 	if int(bank.get(id, 0)) <= 0 or not is_instance_valid(player):
 		return
 	_pick_at = at
+	_pick_node = null
 	if _call(id + "_at"):
 		bank[id] = int(bank[id]) - 1
+		# tell the map how long its mark is worth keeping: until the thing
+		# itself has gone, or for as long as the last of it takes to land
+		if world.get("map") != null and is_instance_valid(world.map):
+			if is_instance_valid(_pick_node):
+				world.map.pick_life = _pick_node
+			elif MARK_SECONDS.has(id):
+				world.map.pick_life = float(MARK_SECONDS[id])
+
+## Seconds from the call to the last of it landing, and one more to see it.
+const MARK_SECONDS := {"tacnuke": 14.0, "stratnuke": 22.0, "strike": 5.5,
+	"mortar": 12.5, "jdam": 6.5, "missile": 50.0}
+var _pick_node: Node = null
 
 ## A B-2 down a line the player drew on the map, laying a carpet of bombs
 ## along it. It comes in from well short of the line at height, lets each bomb
@@ -1105,23 +1191,36 @@ class CruiseMissile extends Node3D:
 	## so that it is already flying the line when it is handed over.
 	const DIVE := 0.74
 	const BLAST := 2.4
-	## The aeroplane it is. It was a point pushed along a direction at a fixed
-	## speed, turned by the mouse: no wings, no weight, no bank, and nothing it
-	## did cost it anything. It flies now -- lift from the angle the wing meets
-	## the air at, drag that grows with the lift, a small engine, gravity -- and
-	## it is flown the way everything else here is: a stick, bank to turn, pull
-	## to tighten. All of these are accelerations, per unit of what they act on.
-	const LIFT := 0.00394          # per (m/s)^2 per radian: six g at 240 m/s
-	const SIDE := 0.0016
-	const DRAG0 := 0.000052        # three metres a second squared at 240
-	const INDUCED := 200.0
-	const STALL := 0.27
-	const THRUST_MAX := 4.5
-	const ROLL_RATE := 3.0
+	## How it is flown. The mouse is where you want it to go -- move it and the
+	## aim moves, leave it and the aim stays -- and the missile turns its
+	## flight onto that as hard as its wings let it. The picture looks where
+	## you aim, from just behind the missile, level with the horizon.
+	##
+	## It was a stick that sprang back to the middle, through an angle-of-attack
+	## loop, with the camera bolted to the airframe's own attitude. Pulling
+	## meant the nose came up first and the flight followed after, so the
+	## crosshair was never where it was going; letting go of the mouse let the
+	## stick go back to centre, so holding a dive meant moving the mouse the
+	## whole way down; and every bit of that was seen through a camera that
+	## pitched and rolled with the airframe. Steered by where it is aimed, the
+	## middle of the screen is the target and the missile comes round onto it.
+	const TURN_G := 9.0            # the most its wings pull
+	const AIM_SENS := 0.0021       # radians of aim per pixel of mouse
+	const KEY_RATE := 0.75         # radians a second of aim off the keys
+	const AIM_UP := 0.55           # how far above the horizon it may be aimed
+	const AIM_DOWN := 1.45         # and how far below
+	## Four tail fins in an X, as a Tomahawk has, each turning about its own
+	## span: pitch, yaw and roll all show as trailing edges moving. Two fins
+	## welded flat and edge-on to a camera directly behind them did move, and
+	## nobody could see it.
+	const FIN_MAX := 0.45
+	var _fins: Array = []          # [hinge, angle round the body]
+	var _aim := Vector3.FORWARD
+	var _aim_seen := Vector3.FORWARD
+	var _bank := 0.0
+	var _cmd := Vector3.ZERO       # pitch, yaw, roll demand, -1..1, for the fins
+	var _defl: PackedFloat32Array = PackedFloat32Array([0.0, 0.0, 0.0, 0.0])
 	var vel := Vector3.ZERO
-	var stick := Vector2.ZERO
-	var _mouse := Vector2.ZERO
-	var _roll_p := 0.0
 	var arena: CqbMatch = null
 	var target := Vector3.ZERO
 	var from_dir := Vector3.BACK
@@ -1142,10 +1241,23 @@ class CruiseMissile extends Node3D:
 		MeshKit.cone(st, 0.26, 0.26, -2.2, 2.6, Vector3.ZERO, 10)
 		MeshKit.cone(st, 0.02, 0.26, -3.0, -2.2, Vector3.ZERO, 10)
 		MeshKit.box(st, Vector3(2.6, 0.04, 0.5), Vector3(0, -0.1, 0.2))
-		MeshKit.box(st, Vector3(0.9, 0.04, 0.35), Vector3(0, 0, 2.3))
-		MeshKit.box(st, Vector3(0.04, 0.6, 0.35), Vector3(0, 0.3, 2.3))
-		_body = MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.62, 0.64, 0.66), 0.5, 0.4)), "Body")
+		var skin := MeshKit.mat(Color(0.62, 0.64, 0.66), 0.5, 0.4)
+		_body = MeshKit.mi(MeshKit.finish(st, skin), "Body")
 		add_child(_body)
+		for k in 4:
+			var ang: float = PI * 0.25 + PI * 0.5 * float(k)
+			var hinge := Node3D.new()
+			hinge.position = Vector3(0.0, 0.0, 2.3)
+			hinge.rotation.z = ang
+			var flap := Node3D.new()
+			hinge.add_child(flap)
+			var fs := MeshKit.begin()
+			# out along the hinge's own x from the skin, chord along the body,
+			# the hinge a third of the way back from the leading edge
+			MeshKit.box(fs, Vector3(0.58, 0.035, 0.46), Vector3(0.26 + 0.29, 0.0, 0.08))
+			flap.add_child(MeshKit.mi(MeshKit.finish(fs, skin), "Fin"))
+			_body.add_child(hinge)
+			_fins.append([flap, ang])
 		_cam = Camera3D.new()
 		_cam.fov = 58.0
 		_cam.near = 0.5
@@ -1156,7 +1268,9 @@ class CruiseMissile extends Node3D:
 		# anything. From here the missile is in the bottom of the picture and
 		# the cross above it is still where it is pointed -- the two lines are
 		# parallel and two metres apart.
-		_cam.position = Vector3(0.0, 2.0, 11.5)
+		# Its own node in the world, not bolted to the missile: see `_trail_cam`.
+		_cam.top_level = true
+		_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 		add_child(_cam)
 		# and something burning at the back of it, which from behind is most of
 		# what there is to see
@@ -1186,18 +1300,28 @@ class CruiseMissile extends Node3D:
 		global_position = start
 		look_at(start + dir, Vector3.UP)
 		reset_physics_interpolation()
-		eta = (RANGE - HANDOVER) / cos(DIVE) / (SPEED * 1.15)
+		_aim = dir
+		_aim_seen = dir
+		_cam.global_transform = Transform3D(Basis.looking_at(dir, Vector3.UP),
+			start - dir * 10.0 + Vector3.UP * 1.8)
+		eta = (RANGE - HANDOVER) / cos(DIVE) / SPEED
 		Sfx.play_at(get_parent(), "roar", start, 8.0, 1.1, 9000.0)
 
 	func _unhandled_input(e: InputEvent) -> void:
-		if not guided or _done >= 0.0 or not (e is InputEventMouseMotion):
+		if not guided or not _held or _done >= 0.0 or not (e is InputEventMouseMotion):
 			return
-		# the mouse is the stick, the way it is in a cockpit: off centre holds
-		# it over, and it comes back to the middle by itself
-		var vp := get_viewport().get_visible_rect().size
-		_mouse += Sim.mouse_rel(e as InputEventMouseMotion) / (vp.y * 0.42)
-		_mouse.x = clampf(_mouse.x, -1.0, 1.0)
-		_mouse.y = clampf(_mouse.y, -1.0, 1.0)
+		var m: Vector2 = Sim.mouse_rel(e as InputEventMouseMotion)
+		_turn_aim(-m.x * AIM_SENS, -m.y * AIM_SENS)
+
+	## Move the aim: left and right about the vertical, up and down about the
+	## aim's own level across, and never over the top.
+	func _turn_aim(yaw: float, pitch: float) -> void:
+		var a: Vector3 = _aim.rotated(Vector3.UP, yaw)
+		var el: float = asin(clampf(a.y, -1.0, 1.0))
+		var want: float = clampf(el + pitch, -AIM_DOWN, AIM_UP)
+		var flat := Vector3(a.x, 0.0, a.z)
+		flat = flat.normalized() if flat.length() > 1e-4 else Vector3.FORWARD
+		_aim = (flat * cos(want) + Vector3.UP * sin(want)).normalized()
 
 	func _take() -> void:
 		guided = true
@@ -1207,6 +1331,7 @@ class CruiseMissile extends Node3D:
 			return                      # nobody to give it to: it flies itself in
 		_held = true
 		arena.set_away(true)
+		_aim = vel.normalized()
 		_cam.current = true
 		_view = CanvasLayer.new()
 		_view.layer = 20
@@ -1214,7 +1339,7 @@ class CruiseMissile extends Node3D:
 		v.missile = self
 		_view.add_child(v)
 		add_child(_view)
-		Sim.report("CRUISE MISSILE — you have it. Mouse or W/S/A/D flies it: bank to turn.", Sim.Ev.GOOD)
+		Sim.report("CRUISE MISSILE — you have it. Aim with the mouse (or W/S/A/D) and it turns onto it.", Sim.Ev.GOOD)
 
 	func _physics_process(delta: float) -> void:
 		if _done >= 0.0:
@@ -1241,80 +1366,92 @@ class CruiseMissile extends Node3D:
 			_go_off(nxt)
 			return
 		global_position = nxt
-		# The camera trails it now, and a camera eleven metres behind a missile
-		# going down a street is inside the building it has just passed.
-		if is_instance_valid(_cam):
-			var want: Vector3 = global_transform * Vector3(0.0, 2.0, 11.5)
-			var clear: float = Obstacles.segment(nxt, want)
-			if clear < 1.0:
-				want = nxt.lerp(want, maxf(clear - 0.1, 0.15))
-			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.6)
-			_cam.global_position = want
 
-	## What the stick is asked for when nobody is holding it: bank towards the
-	## mark, pull or push the nose onto it.
-	func _autopilot(b: Basis) -> Vector3:
-		var e: Vector3 = b.inverse() * (target - global_position).normalized()
-		# Where it is *going* against where the mark is, not where the nose is:
-		# the nose rides a couple of degrees above the flight path, and a nose
-		# held on the mark is a missile landing short of it.
-		var vb: Vector3 = b.inverse() * vel.normalized()
-		var yaw_err: float = atan2(e.x, -e.z) - atan2(vb.x, -vb.z)
-		var pitch_err: float = atan2(e.y, -e.z) - atan2(vb.y, -vb.z)
-		var bank: float = atan2(-b.x.y, b.y.y)
-		return Vector3(clampf((clampf(yaw_err * 3.0, -1.0, 1.0) - bank) * 2.5, -1.0, 1.0),
-			clampf(pitch_err * 5.0, -1.0, 1.0), clampf(yaw_err * 2.0, -1.0, 1.0))
+	## The camera, every drawn frame rather than every physics tick.
+	##
+	## It was a child of the missile, moved sixty times a second with it: every
+	## twitch of the airframe was a twitch of the whole picture, and on a
+	## display faster than the physics it stepped. It follows now -- where the
+	## missile is drawn this frame, and round to its attitude over a fifth of a
+	## second, so a roll is something you watch the missile do against a
+	## horizon that follows it over rather than the world snapping on its side.
+	func _process(delta: float) -> void:
+		if _done >= 0.0 or not is_instance_valid(_cam):
+			return
+		var xf: Transform3D = get_global_transform_interpolated()
+		# Behind it along where it is aimed, a little above, and level: the
+		# horizon stays the horizon while the missile banks under it.
+		_aim_seen = _aim_seen.slerp(_aim, clampf(delta * 9.0, 0.0, 1.0)).normalized()
+		var want: Vector3 = xf.origin - _aim_seen * 10.0 + Vector3.UP * 1.8
+		# A camera ten metres behind a missile going down a street is inside
+		# the building it has just passed.
+		var clear: float = Obstacles.segment(xf.origin, want)
+		if clear < 1.0:
+			want = xf.origin.lerp(want, maxf(clear - 0.1, 0.15))
+		want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.6)
+		var look: Vector3 = xf.origin + _aim_seen * 60.0 - want
+		if look.length() > 0.01:
+			var up_ref := Vector3.UP if absf(look.normalized().y) < 0.995 else Vector3.BACK
+			_cam.global_transform = Transform3D(Basis.looking_at(look.normalized(), up_ref), want)
+		# and the tail, deflected to what is being asked of it, each fin about
+		# its own span: an X tail mixes all three into every fin
+		var k: float = clampf(delta * 14.0, 0.0, 1.0)
+		for i in _fins.size():
+			var flap: Node3D = _fins[i][0]
+			var ang: float = _fins[i][1]
+			var d: float = clampf(-_cmd.x * cos(ang) * 1.41 - _cmd.y * sin(ang) * 1.41
+				+ _cmd.z, -1.0, 1.0) * FIN_MAX
+			_defl[i] = lerpf(_defl[i], d, k)
+			flap.rotation.x = _defl[i]
+
+	## Where it is told to go when nobody has it: straight at the mark.
+	func _autopilot() -> void:
+		var to: Vector3 = target - global_position
+		if to.length() > 1.0:
+			_aim = to.normalized()
 
 	func _fly(delta: float) -> void:
-		var b: Basis = global_transform.basis.orthonormalized()
-		var rudder := 0.0
 		if guided and _held:
-			var want := Vector2(
-				clampf(_mouse.x + Sim.strength(&"roll_right") - Sim.strength(&"roll_left"), -1.0, 1.0),
-				clampf(-_mouse.y + Sim.strength(&"pitch_up") - Sim.strength(&"pitch_down"), -1.0, 1.0))
-			_mouse = _mouse.lerp(Vector2.ZERO, delta * 0.9)
-			stick = stick.lerp(want, clampf(delta * 14.0, 0.0, 1.0))
-			rudder = Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
+			var kx: float = Sim.strength(&"roll_left") - Sim.strength(&"roll_right") \
+				+ Sim.strength(&"yaw_left") - Sim.strength(&"yaw_right")
+			var ky: float = Sim.strength(&"pitch_up") - Sim.strength(&"pitch_down")
+			if absf(kx) > 0.01 or absf(ky) > 0.01:
+				_turn_aim(kx * KEY_RATE * delta, ky * KEY_RATE * delta)
 		else:
-			var ap := _autopilot(b)
-			stick = stick.lerp(Vector2(ap.x, ap.y), clampf(delta * 8.0, 0.0, 1.0))
-			rudder = ap.z
+			_autopilot()
 		var v: float = maxf(vel.length(), 1.0)
-		var vdir: Vector3 = vel / v
-		var vb: Vector3 = b.inverse() * vdir
-		# how the wing meets the air: nose above the flight path, and beside it
-		var alpha: float = atan2(-vb.y, -vb.z)
-		var beta: float = atan2(vb.x, -vb.z)
-		var q: float = v * v
-		var up: Vector3 = b.y - vdir * b.y.dot(vdir)
-		up = up.normalized() if up.length() > 0.01 else b.y
-		var side: Vector3 = b.x - vdir * b.x.dot(vdir)
-		side = side.normalized() if side.length() > 0.01 else b.x
-		var lift: float = LIFT * q * clampf(alpha, -0.20, STALL)
-		var slip: float = -SIDE * q * clampf(beta, -0.3, 0.3)
-		var drag: float = DRAG0 * q + INDUCED * (lift * lift + slip * slip) / q
-		# a small engine on a governor: flat out it holds its cruise, and it
-		# comes back to idle on the way down
-		var thrust: float = clampf(3.0 + (SPEED - v) * 0.08, 0.2, THRUST_MAX)
-		var acc: Vector3 = up * lift + side * slip - vdir * drag - b.z * thrust \
-			+ Vector3.DOWN * 9.81
-		vel += acc * delta
-		dir = vel.normalized()
-		# Trimmed for where it is: stick in the middle carries its own weight
-		# across the wing, no more. Wings level that is a straight line; banked
-		# over it is not enough, and the nose falls into the turn until pulled.
-		var trim: float = 9.81 * b.y.y / (LIFT * q)
-		var want_a: float = clampf(trim + stick.y * 0.22, -0.16, STALL)
-		# less air over the fins, less of everything they do
-		var auth: float = clampf(v / 200.0, 0.3, 1.3)
-		var pitch_r: float = clampf((want_a - alpha) * 6.0, -1.6, 1.6) * auth \
-			+ (lift - 9.81 * b.y.y) / v
-		var yaw_r: float = beta * 4.0 + rudder * 0.35 * auth
-		_roll_p = lerpf(_roll_p, stick.x * ROLL_RATE * auth, clampf(delta * 8.0, 0.0, 1.0))
-		b = b.rotated(b.x, pitch_r * delta)
-		b = b.rotated(b.y, -yaw_r * delta)
-		b = b.rotated(b.z, -_roll_p * delta)
+		var was_dir: Vector3 = vel / v
+		var vdir: Vector3 = was_dir
+		# onto the aim, easing in as it gets there, never harder than it pulls
+		var off: float = vdir.angle_to(_aim)
+		var most: float = TURN_G * 9.81 / maxf(v, 60.0)
+		var rate: float = minf(off * 2.6, most)
+		var axis: Vector3 = vdir.cross(_aim)
+		if axis.length() > 1e-6 and off > 1e-5:
+			vdir = vdir.rotated(axis.normalized(), minf(rate * delta, off))
+		# Speed: what a dive gives it and a climb takes, and an engine that
+		# holds it near its cruise.
+		v += (-9.81 * vdir.y * 0.7 + clampf((SPEED - v) * 0.35, -8.0, 6.0)) * delta
+		v = clampf(v, 140.0, 330.0)
+		vel = vdir * v
+		dir = vdir
+		# How the turn shows on the airframe: it banks into it, as hard as the
+		# turn is, and the nose rides a little ahead of the flight path.
+		var acc: Vector3 = (vdir - was_dir) / maxf(delta, 1e-4) * v
+		var right: Vector3 = vdir.cross(Vector3.UP)
+		right = right.normalized() if right.length() > 0.05 else Vector3.RIGHT
+		var bank_want: float = clampf(atan2(acc.dot(right), 9.81), -1.3, 1.3)
+		var bank_was: float = _bank
+		_bank = lerpf(_bank, bank_want, clampf(delta * 3.5, 0.0, 1.0))
+		var nose: Vector3 = vdir.slerp(_aim, clampf(rate / maxf(most, 1e-3), 0.0, 1.0) * 0.12)
+		var up_ref := Vector3.UP if absf(nose.y) < 0.995 else Vector3.BACK
+		var b := Basis.looking_at(nose, up_ref).rotated(nose, _bank)
 		global_transform = Transform3D(b.orthonormalized(), global_position)
+		# what the fins are asked for, in the airframe's own frame
+		var a_n: float = clampf(acc.length() / (most * v), 0.0, 1.0)
+		var a_dir: Vector3 = acc.normalized() if acc.length() > 0.01 else Vector3.ZERO
+		_cmd = Vector3(a_dir.dot(b.y) * a_n, a_dir.dot(b.x) * a_n,
+			clampf((_bank - bank_was) / maxf(delta, 1e-4) / 1.2, -1.0, 1.0))
 
 	func _go_off(at: Vector3) -> void:
 		_body.visible = false
@@ -1328,7 +1465,7 @@ class CruiseMissile extends Node3D:
 		global_position = back
 		look_at(at, Vector3.UP)
 		# the stand-off view is from this point itself, not from behind it
-		_cam.position = Vector3.ZERO
+		_cam.global_transform = global_transform
 		reset_physics_interpolation()
 		_done = 1.4 if _held else 0.05
 
@@ -1395,7 +1532,7 @@ class CruiseView extends Control:
 		_mark(cam, missile.target, 3.0, Color(1, 1, 1, 0.6), "MARK")
 		var gy: float = Sim.height_at(missile.global_position.x, missile.global_position.z)
 		draw_string(ThemeDB.fallback_font, Vector2(28, size.y - 60),
-			"CRUISE MISSILE    ALT %d m    %d km/h    mouse or W/S/A/D: bank to turn" % [
+			"CRUISE MISSILE    ALT %d m    %d km/h    mouse or W/S/A/D aims it" % [
 				int(missile.global_position.y - gy), int(missile.vel.length() * 3.6)],
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, w)
 

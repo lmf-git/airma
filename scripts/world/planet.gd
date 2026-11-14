@@ -81,6 +81,12 @@ uniform float fade = 0.0;
 // way the middle of the theatre lies. Longitude is measured from the theatre,
 // so the world lands on the planet where the world actually is.
 uniform vec3 centre = vec3(0.0);
+// The world's frame into the planet's: see the cloud shell, which had the same
+// fault. `north` and `home` are the planet's own axes, the ones the sheet was
+// baked about; a direction in the world has to be turned into that frame
+// before it is looked up, or the picture is of whatever is under the chart's
+// middle as if that were always the same place.
+uniform mat3 to_planet = mat3(1.0);
 uniform vec3 north = vec3(0.0, 0.0, -1.0);
 uniform vec3 home = vec3(0.0, 1.0, 0.0);
 uniform float radius = 6371000.0;
@@ -99,7 +105,7 @@ void fragment() {
 	// turned back into metres so the world lands at its true size. Directly
 	// over the theatre this comes out as the point's own x and z, which is what
 	// makes the body agree with the terrain it is fading into.
-	vec3 u = normalize(wpos - centre);
+	vec3 u = to_planet * normalize(wpos - centre);
 	float lat = asin(clamp(dot(u, north), -1.0, 1.0));
 	// East and the theatre's own meridian, which together fix where longitude
 	// is measured from.
@@ -113,7 +119,15 @@ void fragment() {
 	ALBEDO = texture(relief, uv).rgb;
 	ROUGHNESS = 0.94;
 	METALLIC = 0.0;
-	ALPHA = fade;
+	// Opaque. It was drawn at an opacity of `fade` while the ground dithered
+	// out over the same band, so through the whole of the hand-over, from
+	// thirty-eight kilometres to ninety, the two together covered at most
+	// three quarters of the picture -- and wherever the ground had not been
+	// built yet, which is everywhere a rocket has just got to, the body alone
+	// covered a third. The sky showed through the planet: patches with
+	// straight edges where tiles were missing, and a ring where the built
+	// ground ran out. The ground dithers away over a body that is always all
+	// there, so between the two every pixel is one or the other.
 }
 """
 
@@ -267,6 +281,10 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 	dormant = fade >= 0.999
 	_mi.visible = fade > 0.001
 	_mat.set_shader_parameter("fade", fade)
+	# Drawn smaller for a spacecraft a long way out: see `LaunchVehicle._place`.
+	_mi.scale = Vector3.ONE * Sim.view_scale
+	_mat.set_shader_parameter("to_planet",
+		Basis(Sim.chart_east, Sim.chart_origin, Sim.chart_south))
 	# Only once there is something out there to see. Left at 2600 km from the
 	# ground the far plane would be paying for the whole cap on every frame of
 	# a landing circuit.
@@ -298,6 +316,9 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 	cam.far = maxf(FAR_LO, ground_reach)
 	if fade > 0.0:
 		cam.far = maxf(cam.far, maxf(lerpf(FAR_LO, FAR_HI, fade), (to_limb + beyond) * 1.05))
+	if Sim.view_scale < 0.999:
+		# the whole shrunken body, and the moon beyond it if it is that close
+		cam.far = maxf(cam.far, (r + alt) * 1.3)
 	cam.near = clampf(cam.far / NEAR_RATIO, NEAR_LO, NEAR_MAX)
 	if is_instance_valid(terrain) and terrain.has_method("set_ground_fade"):
 		terrain.call("set_ground_fade", 1.0 - fade)

@@ -72,6 +72,23 @@ const KINDS := {
 			 "hp": 150.0, "power": 460_000.0, "top": 13.0, "gun": 400.0,
 			 "muzzle": 400.0, "reload": 90.0, "blast": 10.0,
 			 "missile": "oreshnik", "rounds": 1},
+	# Strategic. Three stages and a bus of warheads, off a road-mobile
+	# launcher: one round, and a very long time to put another on the erector.
+	"tel_yars": {"faction": "russia", "name": "RS-24 Yars ICBM", "class": "tel",
+			 "hull": Color(0.25, 0.28, 0.22),
+			 "hp": 170.0, "power": 600_000.0, "top": 11.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 240.0, "blast": 10.0,
+			 "missile": "yars", "rounds": 1},
+	"tel_df41": {"faction": "china", "name": "DF-41 ICBM", "class": "tel",
+			 "hull": Color(0.27, 0.30, 0.24),
+			 "hp": 170.0, "power": 600_000.0, "top": 11.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 240.0, "blast": 10.0,
+			 "missile": "df41", "rounds": 1},
+	"tel_minuteman": {"faction": "usa", "name": "Minuteman III ICBM", "class": "tel",
+			 "hull": Color(0.31, 0.33, 0.27),
+			 "hp": 170.0, "power": 600_000.0, "top": 11.0, "gun": 400.0,
+			 "muzzle": 400.0, "reload": 240.0, "blast": 10.0,
+			 "missile": "minuteman", "rounds": 1},
 	# ------------------------------------------------- more of what exists
 	# Filling the holes in the order of battle. Britain and France had no
 	# artillery of any kind, China had no gun or rocket artillery, and Iran had
@@ -673,6 +690,8 @@ func _build() -> void:
 		"ifv":
 			MeshKit.box(gst, Vector3(0.42, 0.34, 0.44), Vector3(0, 0, 0.1))
 			MeshKit.cone(gst, 0.055, 0.048, -2.35, 0.0, Vector3.ZERO, 8)
+			# the coaxial, beside the cannon rather than inside it
+			MeshKit.cone(gst, 0.024, 0.024, -0.62, 0.0, Vector3(0.15, 0, 0), 6)
 		"spaag":
 			# twin barrels side by side, which is what one of these looks like
 			MeshKit.box(gst, Vector3(0.85, 0.38, 0.50), Vector3(0, 0, 0.1))
@@ -681,6 +700,7 @@ func _build() -> void:
 		_:
 			MeshKit.box(gst, Vector3(1.05, 0.62, 0.55), Vector3(0, 0, 0.1))
 			MeshKit.cone(gst, 0.135, 0.115, -5.6, 0.0, Vector3.ZERO, 10)
+			MeshKit.cone(gst, 0.030, 0.030, -0.80, 0.0, Vector3(0.36, 0, 0), 6)
 			MeshKit.cone(gst, 0.20, 0.20, -4.3, -3.3, Vector3.ZERO, 10)
 			MeshKit.cone(gst, 0.19, 0.19, -5.75, -5.35, Vector3.ZERO, 10)
 	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst, dark), "Gun"))
@@ -2121,13 +2141,13 @@ func fire_main(world: Node) -> bool:
 		Effects.tracer(world, _muzzle.global_position - adir * 1.5,
 			adir * float(kd["muzzle"]) + linear_velocity, self,
 			float(kd["gun"]), team, float(kd.get("blast", 3.0)) * 0.4)
-		Effects.muzzle_flash(world, _muzzle.global_position - adir * 1.2, adir, 1.1)
-		# "rifle", not "gun": the gun clip is a looping buzzsaw meant to be
+		Effects.muzzle_flash(world, _muzzle.global_position - adir * 1.2, adir, 1.7)
+		# Its own clip, not "gun": the gun clip is a looping buzzsaw meant to be
 		# started and stopped, and firing it as a one-shot sixteen times a
 		# second stacks up loops that never end. A shell leaving an autocannon
-		# is a discrete crack, which is what this clip is.
-		Sfx.play_at(world, "rifle", _muzzle.global_position, -5.0,
-			randf_range(0.92, 1.08), 1800.0)
+		# is a discrete thump, and a heavier one than the coaxial beside it.
+		Sfx.play_at(world, "autocannon", _muzzle.global_position, -3.0,
+			randf_range(0.94, 1.06), 2400.0)
 		return true
 	if vclass() == "sam":
 		return _fire_sam(world, kd)
@@ -2418,6 +2438,12 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	# the round's reach, not a shell's
 	var spec := WeaponSpec.get_spec(String(kd.get("missile", "kalibr")))
 	var rng := global_position.distance_to(mark)
+	if bool(spec.get("icbm", false)):
+		# Over the ground, not through it. A quarter of the way round the
+		# planet the straight line between two points in the world's own
+		# coordinates is a third longer than the journey, and a round that
+		# reaches thirteen thousand kilometres was refused a shot of that.
+		rng = Vector2(mark.x - global_position.x, mark.z - global_position.z).length()
 	if rng > float(spec.get("range", 100000.0)):
 		Sim.report("%s: mark is %.0f km away, the round reaches %.0f" % [
 			display_name(), rng * 0.001,
@@ -2442,6 +2468,8 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 	if is_instance_valid(_muzzle):
 		from = _muzzle.global_position
 		dir = -_muzzle.global_transform.basis.z
+	if bool(spec.get("icbm", false)):
+		return _fire_icbm(world, id, from, mark, rng)
 	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 	var m := Missile.new()
 	# Guide onto the unit itself when one was locked; onto a bare mark otherwise.
@@ -2486,6 +2514,37 @@ func _fire_tel(world: Node, kd: Dictionary) -> bool:
 		mirv_marks.clear()
 		map_lock = null
 		map_target = Vector3.INF
+	return true
+
+## An intercontinental round. It is not guided onto anything: every warhead it
+## carries is given its own mark before it leaves, and the bus puts each on
+## the arc that falls there. See `Icbm`.
+func _fire_icbm(world: Node, id: String, from: Vector3, mark: Vector3, rng: float) -> bool:
+	var targets: Array = warhead_marks()
+	if targets.is_empty():
+		targets = [mark]
+	var live: Array = []
+	for t in targets:
+		# a unit is followed; a patch of ground is where it was put
+		if t is Node:
+			if is_instance_valid(t):
+				live.append(t)
+		elif mark_at(t) != Vector3.INF:
+			live.append(mark_at(t))
+	if live.is_empty():
+		live = [mark]
+	var m := Icbm.launch(world, id, from, self, team, live)
+	store_released.emit(m)
+	var brg: float = rad_to_deg(atan2(mark.x - from.x, -(mark.z - from.z)))
+	var spec := WeaponSpec.get_spec(id)
+	Sim.report("%s: %s away — %.0f km on %03d, %d warheads on %d marks" % [
+		display_name(), String(spec["short"]), rng * 0.001,
+		int(wrapf(brg, 0.0, 360.0)), int(spec.get("mirv", 1)), live.size()], Sim.Ev.BAD)
+	Sim.report("three stages, then it coasts: . and , change the time warp while it is above the air",
+		Sim.Ev.INFO)
+	mirv_marks.clear()
+	map_lock = null
+	map_target = Vector3.INF
 	return true
 
 ## A place for the round to guide onto. A patch of ground is not a contact, so
@@ -2600,11 +2659,22 @@ func fire_coax(world: Node) -> bool:
 	var dir := -_muzzle.global_transform.basis.z
 	dir = (dir + Vector3(randf_range(-spread, spread), randf_range(-spread, spread),
 		randf_range(-spread, spread))).normalized()
-	Effects.tracer(world, _muzzle.global_position - dir * 1.5,
+	# From its own port. It left the main gun's muzzle with the main gun's
+	# streak and the main gun's report, so on a fighting vehicle there was no
+	# telling which of the two was firing.
+	var port: Vector3 = _muzzle.global_position - dir * 1.5
+	match vclass():
+		"ifv":
+			port = _mantlet.global_transform * Vector3(0.15, 0.0, -0.66)
+		"mbt":
+			port = _mantlet.global_transform * Vector3(0.36, 0.0, -0.84)
+	Effects.mg_round(world, port,
 		dir * float(kd.get("muzzle", 900.0)) + linear_velocity,
 		self, float(kd.get("mg_damage", 26.0)), team)
-	Effects.muzzle_flash(world, _muzzle.global_position - dir * 1.2, dir, 0.8)
-	Sfx.play_at(world, "rifle", _muzzle.global_position, -8.0, 0.85, 600.0)
+	Effects.muzzle_flash(world, port + dir * 0.2, dir, 0.35)
+	# The roof gun on a patrol car is a .50: the same rattle, lower and slower.
+	Sfx.play_at(world, "mg", port, -8.0,
+		randf_range(0.78, 0.84) if vclass() == "lav" else randf_range(0.96, 1.06), 700.0)
 	return true
 
 func hit_radius() -> float:

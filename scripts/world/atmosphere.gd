@@ -110,9 +110,22 @@ void fragment() {
 	}
 	// clip against the real scene (terrain, aircraft, ships): haze only
 	// integrates up to the nearest opaque surface = true aerial perspective
+	//
+	// Only where there IS a surface. Sky reads as zero, and unprojected that
+	// is not "nothing in the way": it is a point on the camera's far plane.
+	// So every pixel of open sky had its air cut off at the far plane -- which
+	// is flat, and square to the view, so the cut was nearest in the middle of
+	// the screen and further out toward the edges. Wherever the air runs on
+	// past the far plane, which is any long look along or just over the
+	// horizon from a rocket, the middle of the picture got less of it than
+	// the rim: a pale disc with thicker haze round it, centred on wherever the
+	// camera was pointed and sliding across the sky as it turned. The cloud
+	// shell has always made this test; the air did not.
 	float sd = texture(depth_tex, SCREEN_UV).r;
-	vec4 sview = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, sd, 1.0);
-	t1 = min(t1, length(sview.xyz / sview.w));
+	if (sd > 0.0) {
+		vec4 sview = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, sd, 1.0);
+		t1 = min(t1, length(sview.xyz / sview.w));
+	}
 
 	// Split the column at the cloud deck. Haze in FRONT of the clouds must blend
 	// OVER them; haze beyond them must be blended UNDER. One pass can only do
@@ -309,6 +322,19 @@ func follow(cam: Camera3D) -> void:
 	# Inside the far plane and outside the near one, with room either side.
 	var r: float = clampf(cam.far * 0.2, cam.near * 12.0, 2.0e6)
 	_mi.scale = Vector3.ONE * r
+	# The air goes with the planet when the planet is being drawn small for a
+	# spacecraft a long way out: the same thin blue line round a smaller disc.
+	var k: float = Sim.view_scale
+	if not is_equal_approx(k, _scale_was):
+		_scale_was = k
+		for mat in [near_mat, far_mat]:
+			mat.set_shader_parameter("planet_radius", Sim.PLANET_R * k)
+			mat.set_shader_parameter("atmo_radius", (Sim.PLANET_R + HEIGHT) * k)
+			mat.set_shader_parameter("cloud_radius",
+				(Sim.PLANET_R + (CloudShell.BASE + CloudShell.TOP) * 0.5) * k)
+			mat.set_shader_parameter("cloud_band", (CloudShell.TOP - CloudShell.BASE) * k)
+
+var _scale_was := 1.0
 
 ## Which way the sun is, from the planet's centre.
 func aim(sun_dir: Vector3) -> void:

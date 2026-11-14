@@ -1338,6 +1338,18 @@ void vertex() {
 }
 
 void fragment() {
+	// Dithered out with the ground it lies over, the same pixels on the same
+	// pattern, not faded. Faded, it went thin over the seabed through the whole
+	// hand-over to the planet body and the sand showed through it -- pale tiles
+	// with straight edges wherever the ground under the sea had been built, and
+	// the body's dark ocean wherever it had not.
+	if (ground_fade < 0.999) {
+		float ign = fract(52.9829189 * fract(dot(FRAGCOORD.xy,
+			vec2(0.06711056, 0.00583715))));
+		if (ground_fade <= ign) {
+			discard;
+		}
+	}
 	if (abs(wpos.x) > root_half || abs(wpos.z) > root_half) {
 		discard;
 	}
@@ -1371,7 +1383,7 @@ void fragment() {
 	RIM = 0.7;
 	// clearer looking down into it, a mirror at a glance
 	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 5.0);
-	ALPHA = mix(0.84, 0.98, fres) * ground_fade;
+	ALPHA = mix(0.84, 0.98, fres);
 }
 """
 

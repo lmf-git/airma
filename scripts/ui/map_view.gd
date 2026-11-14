@@ -74,11 +74,110 @@ var pick_label := ""
 var pick_from := Vector3.INF
 ## Where support has been called down: {at, from, label, until (msec)}.
 var pick_marks: Array = []
+## How long the mark just laid should stay, set by whoever was called back
+## with it: a number of seconds, or the thing it was laid for, in which case
+## the mark goes when that does. Nothing set means half a minute.
+var pick_life: Variant = null
 var _close_tok := 0
 
 ## Chart zoom for a globe zoom at the same scale in the middle of the screen,
 ## and back. The chart is `0.86 * zoom` screens to its `2 * HALF` metres; the
 ## globe is `0.42 * globe_zoom` screens to the planet's radius.
+## How far out the planet map will go. Far enough to see the planet whole,
+## which was all there was to see -- and, with something of yours in space,
+## far enough to see the moon and the road to it.
+## The rocket being flown, if one is.
+func _crewed_rocket() -> LaunchVehicle:
+	for n in get_tree().get_nodes_in_group("rockets"):
+		var lv := n as LaunchVehicle
+		if lv != null and lv.occupied:
+			return lv
+	return null
+
+func _globe_min() -> float:
+	if not get_tree().get_nodes_in_group("rockets").is_empty():
+		return 0.012
+	return 0.6
+
+## Where a point in the planet's own frame falls on the planet map: screen x
+## and y, and in z whether it can be seen -- positive in front of the ball or
+## clear of its edge, negative only when it is round the back and hidden by it.
+func _space_at(p: Vector3, org: Vector2, rad: float, b: Basis) -> Vector3:
+	var v: Vector3 = b * (p / Sim.PLANET_R)
+	var seen: float = 1.0
+	if v.z < 0.0 and Vector2(v.x, v.y).length() < 1.0:
+		seen = -1.0
+	return Vector3(org.x + v.x * rad, org.y - v.y * rad, seen)
+
+## A path through space, as a line that goes behind the planet where it does.
+func _space_line(path: PackedVector3Array, org: Vector2, rad: float, b: Basis,
+		col: Color, width := 1.6) -> void:
+	var prev := Vector3.ZERO
+	var have := false
+	for p in path:
+		var q := _space_at(p, org, rad, b)
+		if have and prev.z > 0.0 and q.z > 0.0:
+			draw_line(Vector2(prev.x, prev.y), Vector2(q.x, q.y), col, width, true)
+		prev = q
+		have = true
+
+## What is in space, drawn round the planet: the moon where it is, the path
+## each rocket of yours is on if nothing more is done to it, and where every
+## warhead in the air is going to come down.
+##
+## The lines are the flight worked out ahead -- the same sums that fly it, run
+## forward -- not a shape assumed for it. A rocket still climbing shows the arc
+## that falls back; one that has made orbit shows the lap, closed; one on its
+## way to the moon shows the long reach out, bent at the far end where the
+## moon takes hold.
+func _globe_space(org: Vector2, rad: float, b: Basis) -> void:
+	var rockets: Array = get_tree().get_nodes_in_group("rockets")
+	var shots: Array = get_tree().get_nodes_in_group("icbm")
+	if rockets.is_empty() and shots.is_empty():
+		return
+	var moon_p: Vector3 = Sim.moon_dir() * Sim.MOON_DIST
+	var mq := _space_at(moon_p, org, rad, b)
+	var mr: float = maxf(rad * Sim.MOON_R / Sim.PLANET_R, 2.5)
+	if mq.z > 0.0 and Rect2(Vector2(-200, -200), get_viewport_rect().size
+			+ Vector2(400, 400)).has_point(Vector2(mq.x, mq.y)):
+		draw_circle(Vector2(mq.x, mq.y), mr, Color(0.62, 0.62, 0.60))
+		draw_arc(Vector2(mq.x, mq.y), mr, 0, TAU, 32, Color(0.85, 0.85, 0.82), 1.2)
+		_label(Vector2(mq.x + mr + 6.0, mq.y + 4.0), "MOON", Color(0.85, 0.85, 0.82), 12)
+		# the road it goes round on, faintly
+		var ring := PackedVector3Array()
+		var ax: Vector3 = Sim.MOON_AXIS.normalized()
+		var u: Vector3 = ax.cross(Vector3.RIGHT).normalized()
+		var w: Vector3 = ax.cross(u)
+		for i in 97:
+			var a: float = TAU * float(i) / 96.0
+			ring.append((u * cos(a) + w * sin(a)) * Sim.MOON_DIST)
+		_space_line(ring, org, rad, b, Color(0.6, 0.6, 0.6, 0.22), 1.0)
+	for n in rockets:
+		var lv := n as LaunchVehicle
+		if lv == null or not lv.alive:
+			continue
+		_space_line(lv.path_ahead(), org, rad, b, Color(0.45, 1.0, 0.65, 0.9), 1.8)
+		var at := _space_at(lv.space_pos(), org, rad, b)
+		if at.z > 0.0:
+			draw_circle(Vector2(at.x, at.y), 4.0, Color(0.45, 1.0, 0.65))
+			_label(Vector2(at.x + 8.0, at.y - 6.0), lv.display_name().to_upper(),
+				Color(0.45, 1.0, 0.65), 12)
+			for mk in lv.path_marks():
+				var mp := _space_at(mk[1], org, rad, b)
+				if mp.z > 0.0:
+					draw_arc(Vector2(mp.x, mp.y), 3.5, 0, TAU, 10, Color(0.8, 1.0, 0.85), 1.2)
+					_label(Vector2(mp.x + 7.0, mp.y + 12.0), String(mk[0]),
+						Color(0.8, 1.0, 0.85), 11)
+	for n2 in shots:
+		var m := n2 as Icbm
+		if m == null or m.dead:
+			continue
+		var col := Color(1.0, 0.72, 0.36, 0.9) if m.team == 0 else Color(1.0, 0.4, 0.35, 0.9)
+		_space_line(m.path_ahead(), org, rad, b, col, 1.3)
+		var mat := _space_at(m.space_pos(), org, rad, b)
+		if mat.z > 0.0:
+			draw_circle(Vector2(mat.x, mat.y), 2.6, col)
+
 func _chart_zoom_for(gz: float) -> float:
 	return gz * 0.42 * HALF * 2.0 / (0.86 * Sim.PLANET_R)
 
@@ -167,7 +266,16 @@ func bake() -> void:
 	var t0 := Time.get_ticks_msec()
 	var buf: PackedByteArray
 	var cached: Variant = WorldBake.get_baked("map_relief")
-	if cached is PackedByteArray and (cached as PackedByteArray).size() == RES * RES * 3:
+	if Sim.globe:
+		# The planet's ground, from the planet's rasteriser -- the one the
+		# close-in sheet is drawn with. This took the flat world's picture off
+		# the disk instead, so until the chart first moved the map was two
+		# worlds: zoom out and it was the old 1200 km field's biomes, zoom in
+		# to where the buildings show and it was the planet's, and the country
+		# changed colour under you at the hand-over between the sheets. Not
+		# kept on disk either: it is a picture of wherever the chart is.
+		buf = Sim.native.map_relief_globe(RES, HALF)
+	elif cached is PackedByteArray and (cached as PackedByteArray).size() == RES * RES * 3:
 		buf = cached
 	else:
 		# The whole picture in one call: relief, hill shade, biome colour and
@@ -304,6 +412,15 @@ func detail() -> ImageTexture:
 
 func toggle() -> void:
 	visible = not visible
+	# From a spacecraft the planet map opens tipped over. It opens looking
+	# straight down on wherever you are, which for an aeroplane is the point;
+	# for something in orbit it is the one direction from which the orbit is a
+	# straight line across the planet and the way to the moon is hidden behind
+	# it. Tipped, a lap is an ellipse and the reach out to the moon has length.
+	if visible and _crewed_rocket() != null:
+		globe = true
+		globe_tilt = 0.95
+		globe_spin = 0.35
 	if not visible:
 		cancel_pick()
 	set_process(visible)
@@ -410,23 +527,23 @@ func _gui_input(e: InputEvent) -> void:
 		# the map simply could not be zoomed on a laptop.
 		if e is InputEventPanGesture:
 			globe_zoom = clampf(globe_zoom * pow(1.08,
-				-(e as InputEventPanGesture).delta.y), 0.6, GLOBE_MAX)
+				-(e as InputEventPanGesture).delta.y), _globe_min(), GLOBE_MAX)
 			_handover()
 			queue_redraw()
 			return
 		if e is InputEventMagnifyGesture:
 			globe_zoom = clampf(
-				globe_zoom * (e as InputEventMagnifyGesture).factor, 0.6, GLOBE_MAX)
+				globe_zoom * (e as InputEventMagnifyGesture).factor, _globe_min(), GLOBE_MAX)
 			_handover()
 			queue_redraw()
 			return
 		if e is InputEventMouseButton:
 			var gb := e as InputEventMouseButton
 			if gb.button_index == MOUSE_BUTTON_WHEEL_UP and gb.pressed:
-				globe_zoom = clampf(globe_zoom * 1.2, 0.6, GLOBE_MAX)
+				globe_zoom = clampf(globe_zoom * 1.2, _globe_min(), GLOBE_MAX)
 				_handover()
 			elif gb.button_index == MOUSE_BUTTON_WHEEL_DOWN and gb.pressed:
-				globe_zoom = clampf(globe_zoom / 1.2, 0.6, GLOBE_MAX)
+				globe_zoom = clampf(globe_zoom / 1.2, _globe_min(), GLOBE_MAX)
 			elif gb.button_index == MOUSE_BUTTON_RIGHT and gb.pressed:
 				# Something on the ground under the cursor first. Zoomed out, the
 				# whole theatre is a few pixels of globe with the satellites
@@ -519,6 +636,7 @@ func _gui_input(e: InputEvent) -> void:
 				var from := pick_from
 				var at1 := Vector3(w1.x, Sim.height_at(w1.x, w1.y), w1.y)
 				cancel_pick()
+				pick_life = null
 				cb.call(at1)
 				if pick_cb.is_valid():
 					# a second click is wanted: this one is the start of a line
@@ -527,8 +645,20 @@ func _gui_input(e: InputEvent) -> void:
 					# Leave the mark where it was put and the map up for a
 					# moment. Closing on the click itself showed nothing: no
 					# way to tell where it had gone, or that it had gone.
-					pick_marks.append({"at": at1, "from": from, "label": what,
-						"until": Time.get_ticks_msec() + 30000})
+					# For as long as what it was laid for is still coming, and
+					# no longer. Every mark stayed half a minute whatever it
+					# was: a bomb that landed in five seconds left its cross
+					# on the map for another twenty-five, and by the third
+					# call the chart was a litter of strikes long over.
+					var mark := {"at": at1, "from": from, "label": what,
+						"until": Time.get_ticks_msec() + 30000}
+					if pick_life is float or pick_life is int:
+						mark["until"] = Time.get_ticks_msec() + int(float(pick_life) * 1000.0)
+					elif pick_life is Node:
+						mark["node"] = pick_life
+						mark["until"] = Time.get_ticks_msec() + 240000
+					pick_marks.append(mark)
+					pick_life = null
 					_close_tok += 1
 					var tok := _close_tok
 					get_tree().create_timer(0.7).timeout.connect(func():
@@ -782,6 +912,77 @@ func _pick_satellite(at: Vector2) -> bool:
 func _w2s(p: Vector2, org: Vector2, px_per_m: float) -> Vector2:
 	return org + (p - centre) * px_per_m
 
+## Everything called down that has not arrived yet: where it will land and
+## how long it has to go, and anything still flying in, where it is now and
+## where it is going. The mark laid for it shows where it was asked for; this
+## shows it coming.
+func _draw_inbound(org: Vector2, ppm: float) -> void:
+	if world == null or not is_instance_valid(world):
+		return
+	var arena: Variant = world.get("cqb")
+	if arena == null or not is_instance_valid(arena) or not arena.has_method("inbound"):
+		return
+	var now: float = float(Time.get_ticks_msec()) * 0.001
+	var blink: float = 0.55 + 0.45 * absf(sin(now * 6.0))
+	var warm := Color(1.0, 0.58, 0.18)
+	for it in (arena.call("inbound") as Array):
+		var d: Dictionary = it
+		var at: Vector3 = d["at"]
+		var q := _w2s(Vector2(at.x, at.z), org, ppm)
+		var eta: float = float(d.get("eta", -1.0))
+		var lab: String = String(d.get("label", ""))
+		match String(d["kind"]):
+			"bombs":
+				var r: float = maxf(float(d["r"]) * ppm, 3.0)
+				for p in (d["pts"] as Array):
+					var pq := _w2s(Vector2((p as Vector3).x, (p as Vector3).z), org, ppm)
+					draw_arc(pq, r, 0.0, TAU, 20, Color(warm.r, warm.g, warm.b, 0.45 * blink), 1.4)
+					draw_circle(pq, 2.0, warm)
+				_label(q + Vector2(r + 6.0, 4.0), "%s  %.1fs" % [lab, maxf(eta, 0.0)], warm, 13)
+			"nuke":
+				var nc := Color(1.0, 0.25, 0.15, blink)
+				var rr: float = maxf(float(d["r"]) * ppm, 6.0)
+				draw_arc(q, rr, 0.0, TAU, 48, nc, 2.4)
+				draw_arc(q, rr * 0.55, 0.0, TAU, 40, Color(nc.r, nc.g, nc.b, 0.5), 1.4)
+				draw_circle(q, 3.0, nc)
+				_label(q + Vector2(8.0, -rr - 6.0), "%s  %ds" % [lab, int(ceil(maxf(eta, 0.0)))],
+					Color(1.0, 0.4, 0.3), 14)
+			"plane", "missile", "drone":
+				var col := Color(1.0, 0.86, 0.4) if String(d["kind"]) != "drone" \
+					else Color(0.5, 0.9, 1.0)
+				if d.has("from") and d.has("to"):
+					var a0: Vector3 = d["from"]
+					var a1: Vector3 = d["to"]
+					draw_dashed_line(_w2s(Vector2(a0.x, a0.z), org, ppm),
+						_w2s(Vector2(a1.x, a1.z), org, ppm), Color(col.r, col.g, col.b, 0.7), 2.0, 8.0)
+				elif d.has("to"):
+					var a2: Vector3 = d["to"]
+					draw_dashed_line(q, _w2s(Vector2(a2.x, a2.z), org, ppm),
+						Color(col.r, col.g, col.b, 0.6), 1.4, 6.0)
+				if d.has("mid"):
+					var mid: Vector3 = d["mid"]
+					draw_arc(_w2s(Vector2(mid.x, mid.z), org, ppm), float(d["r"]) * ppm,
+						0.0, TAU, 40, Color(col.r, col.g, col.b, 0.3), 1.2)
+				var hv: Variant = d.get("head", Vector3.ZERO)
+				var h3: Vector3 = hv if hv is Vector3 else Vector3.ZERO
+				var hd := Vector2(h3.x, h3.z)
+				hd = hd.normalized() if hd.length() > 0.01 else Vector2(0, -1)
+				var sd := Vector2(-hd.y, hd.x)
+				var s: float = 7.0 if String(d["kind"]) != "missile" else 5.0
+				draw_colored_polygon(PackedVector2Array([q + hd * s * 1.4, q - hd * s + sd * s,
+					q - hd * s * 0.4, q - hd * s - sd * s]), col)
+				if lab != "":
+					var txt := lab
+					if eta > 0.0:
+						txt += "  %ds" % int(ceil(eta))
+					_label(q + Vector2(10.0, -8.0), txt, col, 12)
+			"falling":
+				draw_circle(q, 2.2, warm)
+			"mark":
+				var mc := Color(1.0, 0.7, 0.3, blink)
+				draw_arc(q, maxf(float(d["r"]) * ppm, 6.0), 0.0, TAU, 24, mc, 1.6)
+				_label(q + Vector2(10.0, 14.0), lab, mc, 12)
+
 func _draw() -> void:
 	if globe:
 		_draw_globe()
@@ -842,6 +1043,10 @@ func _draw() -> void:
 	var mkc := Color(1.0, 0.35, 0.2)
 	for i in range(pick_marks.size() - 1, -1, -1):
 		var pm: Dictionary = pick_marks[i]
+		# its own thing gone: a moment more, to see where it went in
+		if pm.has("node") and not is_instance_valid(pm["node"]):
+			pm.erase("node")
+			pm["until"] = mini(int(pm["until"]), now_ms + 1500)
 		if now_ms > int(pm["until"]):
 			pick_marks.remove_at(i)
 			continue
@@ -856,6 +1061,7 @@ func _draw() -> void:
 		draw_line(q - Vector2(18, 0), q + Vector2(18, 0), mkc, 1.6)
 		draw_line(q - Vector2(0, 18), q + Vector2(0, 18), mkc, 1.6)
 		_label(q + Vector2(16, -20), String(pm["label"]).get_slice(" — ", 0), mkc, 13)
+	_draw_inbound(org, ppm)
 	if pick_cb.is_valid():
 		# the cursor is the aiming mark while a pick is waited for
 		var mq := get_local_mouse_position()
@@ -1259,11 +1465,19 @@ func _draw_globe() -> void:
 	var org := vp * 0.5
 	var rad: float = minf(vp.x, vp.y) * 0.42 * globe_zoom
 	var b := _globe_basis()
+	# Round the moon, the moon is the middle of the map. The planet stays where
+	# it is in space -- sixty of its own radii off to one side -- and what is
+	# on the screen is the thing being flown round.
+	var crew: LaunchVehicle = _crewed_rocket()
+	if crew != null and crew.by_moon():
+		var fv: Vector3 = b * (Sim.moon_dir() * Sim.MOON_DIST / Sim.PLANET_R)
+		org -= Vector2(fv.x, -fv.y) * rad
 	var lit := _globe_light(b)
 	_globe_body(org, rad, b, lit)
 	_globe_patch(org, rad, b, lit)
 	_globe_graticule(org, rad, b)
 	_globe_marks(org, rad, b)
+	_globe_space(org, rad, b)
 	# Whatever you are in, not the aeroplane: on a ship's bridge or in a tank
 	# the readout was the parked aircraft's, or nothing.
 	var me2: Node3D = _me()

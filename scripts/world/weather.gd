@@ -636,7 +636,12 @@ func thin_air(env: Environment, alt: float, psm: ShaderMaterial = null) -> void:
 		psm.set_shader_parameter("top_colour", sky_top)
 		psm.set_shader_parameter("horizon_colour", sky_horizon)
 		# where the planet's edge is from this height, so the sky starts there
-		var rr: float = Sim.PLANET_R / (Sim.PLANET_R + maxf(alt, 0.0))
+		# From a spacecraft a long way out the planet is drawn small rather
+		# than the eye being drawn far, so the edge is where the *shrunken*
+		# planet's is. Worked out for the full-size one, the sky went on
+		# painting "ground" under a horizon three hundred kilometres below the
+		# eye: a great grey disc standing round a planet a tenth its size.
+		var rr: float = Sim.PLANET_R * Sim.view_scale / (Sim.PLANET_R + maxf(alt, 0.0))
 		psm.set_shader_parameter("horizon_dip", -sqrt(maxf(1.0 - rr * rr, 0.0)))
 	if env == null:
 		return

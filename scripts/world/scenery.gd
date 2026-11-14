@@ -1084,7 +1084,8 @@ func _block_mesh(w: float, h: float, d: float, roof: Color, wall: Color) -> Arra
 	mesh.surface_set_material(1, MeshKit.mat(roof, 0.95, 0.0))
 	return mesh
 
-func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false) -> void:
+func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false,
+		foot := AABB()) -> void:
 	if xforms.is_empty():
 		return
 	var mmi := MultiMeshInstance3D.new()
@@ -1099,7 +1100,7 @@ func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false) -> void
 	add_child(mmi)
 	# and into the obstacle field, so it is something you can fly into rather
 	# than something you fly through
-	Obstacles.add_batch(mesh, xforms)
+	Obstacles.add_batch(mesh, xforms, Obstacles.MIN_HEIGHT, 0.45, false, foot)
 	if breakable:
 		var centre := Vector3.ZERO
 		var rad := 0.0
@@ -1233,7 +1234,9 @@ func _town_build(buckets: Array) -> void:
 	]
 	for i in 3:
 		var lot: Array = buckets[i]
-		_scatter(kinds[i], lot, "Town%d" % i, true)
+		# the walls' footprint: the roof slab overhangs them
+		_scatter(kinds[i], lot, "Town%d" % i, true,
+			AABB(Vector3(-0.5, 0.0, -0.5), Vector3(1.0, 1.0, 1.0)))
 		if not lot.is_empty():
 			_breakable[_breakable.size() - 1]["town_kind"] = i
 		town_xforms.append_array(lot)

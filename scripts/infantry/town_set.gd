@@ -729,6 +729,8 @@ func _crane(cx: float, cz: float) -> void:
 	crane_at = o + Vector3(0, h, 0)
 
 var crane_at := Vector3.INF
+## [middle at the foot, along it, its length, out from the wall, height]
+var scaffolds: Array = []
 
 ## Ladders: [foot, outward normal, structure id, top]. A ladder is a line up a
 ## face that somebody has bolted rungs to; the man climbing it is on the same
@@ -796,7 +798,6 @@ func _scaffold(lot: Vector2) -> void:
 	mid.y = _seat(mid.x, mid.z, 1.0)
 	if Obstacles.hit(mid + n * 1.4 + Vector3(0, 1.0, 0), 0.6) >= 0:
 		return
-	var size := Vector3(1.5, h, run) if is_x else Vector3(run, h, 1.5)
 	var st := MeshKit.begin()
 	var poles := int(run / 2.4) + 1
 	for k in poles + 1:
@@ -821,9 +822,31 @@ func _scaffold(lot: Vector2) -> void:
 	var nmi := MeshKit.mi(MeshKit.finish(net, nm), "Net")
 	add_child(nmi)
 	nmi.global_position = mid
-	_solid(mid, size, 0.0)
+	# What it is, not the box round it. It was one solid block a metre and a
+	# half deep from the ground to the top deck: you could not walk along
+	# inside it, stand on any deck but the top one, or get between it and the
+	# wall -- and a round put into the gap between two poles stopped on air.
+	# The poles, each deck, and the net on the outside, each as itself.
+	var axis := Vector3(0, 0, 1) if is_x else Vector3(1, 0, 0)
+	for k in poles + 1:
+		var s: float = -run * 0.5 + run * float(k) / float(poles)
+		for dep in [-0.7, 0.7]:
+			var across := Vector3(dep, 0, 0) if is_x else Vector3(0, 0, dep)
+			_solid(mid + axis * s + across, Vector3(0.12, h, 0.12), 0.0)
+	var deck2 := 2.3
+	var top_deck := 0.0
+	while deck2 <= h + 0.01:
+		_solid(mid + Vector3(0, deck2 - 0.07, 0),
+			Vector3(1.5, 0.14, run) if is_x else Vector3(run, 0.14, 1.5), 0.0)
+		top_deck = deck2
+		deck2 += 2.3
+	# the net last, for the ladder: it goes up the outside of it, to the top
+	# deck, and a man at the top of a ladder steps off onto what is there
+	var net_h: float = maxf(top_deck, 2.3)
+	_solid(mid + n * 0.76, Vector3(0.08, net_h, run) if is_x else Vector3(run, net_h, 0.08), 0.0)
 	# and the ladder up the outside of it
 	_ladder(_boxes[_boxes.size() - 1], mid + n * 6.0, run * 0.5 - 1.0)
+	scaffolds.append([mid, axis, run, n, h])
 	stats["scaffolds"] = int(stats.get("scaffolds", 0)) + 1
 
 ## Lay the town out. The same town always comes out the same: the seed is the

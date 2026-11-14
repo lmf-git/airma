@@ -224,6 +224,13 @@ static func _bake(id: String) -> AudioStreamWAV:
 		# down. A report has three parts and each weapon weights them its own
 		# way: the crack of the gas leaving the muzzle, the thump of the
 		# action and the chest, and the tail the street hands back.
+		# Vehicle guns. Both were the rifle clip, so a coaxial and an autocannon
+		# were the same noise at two volumes: one is a rattle, the other a
+		# thump you feel, and they should not need looking at to tell apart.
+		"mg":
+			return _wav(_shot(0.20, 0.90, 0.26, 0.60, 190.0, 0.30, 0.10, 251), false)
+		"autocannon":
+			return _wav(_shot(0.62, 0.55, 0.14, 1.90, 58.0, 1.20, 0.34, 257), false)
 		"carbine":
 			return _wav(_shot(0.34, 0.80, 0.30, 0.95, 150.0, 0.55, 0.20, 211), false)
 		"smg":

@@ -149,6 +149,27 @@ static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: fl
 	watch(t, owner)
 	return t
 
+## A machine-gun round from a vehicle: a coaxial, a roof gun.
+##
+## It was fired as `tracer`, which is the cannon shell -- the same thick yellow
+## streak with a ribbon behind it and the same ball of dust where it landed --
+## so a fighting vehicle's coaxial and its autocannon could not be told apart
+## from the gunner's seat or from the receiving end. The same flight and the
+## same hits, drawn as what it is: a thin red line, nothing left hanging in
+## the air behind it, and a flick of dirt where it goes in.
+static func mg_round(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
+		team: int) -> Tracer:
+	var t := Tracer.new()
+	t.vel = vel
+	t.shooter = owner
+	t.dmg = dmg
+	t.team = team
+	t.light = true
+	world.add_child(t)
+	t.global_position = pos
+	watch(t, owner)
+	return t
+
 ## A rifle round rather than a cannon shell. The same projectile -- travel time,
 ## drop, a streak you can see -- but drawn at the size of the thing, stopped by
 ## walls, and able to tell a head from a chest. `glow` is how much of it burns:
@@ -981,6 +1002,138 @@ static func _one_shot(world: Node, p: GPUParticles3D, extra := 2.0) -> void:
 		if is_instance_valid(p):
 			p.queue_free())
 
+# ----------------------------------------------------------------- re-entry
+## How hot the air is being made by something going `speed` through it at
+## `alt`, from 0 to 1: the stagnation heating, half rho v cubed, on a log
+## scale. A capsule coming in from orbit is barely warm at a hundred
+## kilometres, white at sixty-five and out by thirty; a warhead, which keeps
+## its speed, is white from fifty to the ground. A rocket climbing out is not
+## going fast enough low enough to light up at all, which is right.
+static func reentry_heat(alt: float, speed: float) -> float:
+	if alt > 125000.0 or speed < 900.0:
+		return 0.0
+	var rho: float = 1.225 * exp(-maxf(alt, 0.0) / 8500.0)
+	var q: float = 0.5 * rho * speed * speed * speed
+	if q <= 1.0:
+		return 0.0
+	return smoothstep(6.8, 8.6, log(q) / log(10.0))
+
+## The glow round something coming in hot, for `reentry_heat`: a sheath of
+## plasma bunched on the face meeting the air, a trail of it streaming off
+## behind, and the light it throws. Hung on whatever is coming in and told
+## each frame how fast, which way and how hot; it points itself.
+static func plasma(on: Node3D, size: float) -> Plasma:
+	var p := Plasma.new()
+	p.size = size
+	on.add_child(p)
+	return p
+
+class Plasma extends Node3D:
+	const SHADER := """
+shader_type spatial;
+render_mode blend_add, unshaded, cull_disabled, depth_draw_never, fog_disabled;
+uniform float heat = 0.0;
+uniform float plume = 0.0;
+varying float along;
+varying vec3 lpos;
+void vertex() {
+	along = VERTEX.z;
+	lpos = VERTEX;
+}
+vec3 ramp(float h) {
+	vec3 c = mix(vec3(0.5, 0.05, 0.01), vec3(1.0, 0.36, 0.05), smoothstep(0.0, 0.4, h));
+	return mix(c, vec3(1.0, 0.7, 0.32), smoothstep(0.45, 1.0, h));
+}
+float n3(vec3 p) {
+	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+void fragment() {
+	float edge = 1.0 - abs(dot(normalize(NORMAL), normalize(VIEW)));
+	float flick = 0.8 + 0.2 * sin(TIME * 47.0 + along * 9.0)
+		+ 0.15 * (n3(floor(lpos * 6.0 + TIME * 20.0)) - 0.5);
+	float a;
+	if (plume > 0.5) {
+		// bright at the body, gone at the tail, hottest down the middle
+		float t = clamp(along, 0.0, 1.0);
+		float k = 1.0 - t;
+		a = k * k * k * (1.0 - edge) * 0.9;
+		ALBEDO = ramp(heat * (1.0 - t * 0.5)) * heat * a * flick;
+	} else {
+		// A cap on the face meeting the air, not a bubble round the whole of
+		// it: hottest at the front (-z), gone by the back, where the trail
+		// takes over. Brightest at the rim, where you look through most of it.
+		float front = smoothstep(0.7, -0.9, lpos.z);
+		a = (pow(edge, 1.6) * 0.9 + 0.3) * front;
+		ALBEDO = mix(ramp(heat), vec3(1.0, 0.9, 0.75), smoothstep(0.85, 1.0, heat) * 0.5)
+			* heat * a * flick;
+	}
+}
+"""
+	var size := 1.0
+	var heat := 0.0
+	var _sheath: MeshInstance3D
+	var _plume: MeshInstance3D
+	var _light: OmniLight3D
+	var _ms: ShaderMaterial
+	var _mp: ShaderMaterial
+
+	func _ready() -> void:
+		top_level = true
+		var sh := Shader.new()
+		sh.code = SHADER
+		_ms = ShaderMaterial.new()
+		_ms.shader = sh
+		_ms.render_priority = 6
+		_mp = ShaderMaterial.new()
+		_mp.shader = sh
+		_mp.set_shader_parameter("plume", 1.0)
+		_mp.render_priority = 6
+		var sm := SphereMesh.new()
+		sm.radius = 1.0
+		sm.height = 2.0
+		sm.radial_segments = 20
+		sm.rings = 10
+		_sheath = MeshInstance3D.new()
+		_sheath.mesh = sm
+		_sheath.material_override = _ms
+		_sheath.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(_sheath)
+		# a unit cone, base at the body and point one unit back; scaled to length
+		var st := MeshKit.begin()
+		MeshKit.cone(st, 1.0, 0.04, 0.0, 1.0, Vector3.ZERO, 14, false)
+		_plume = MeshInstance3D.new()
+		_plume.mesh = MeshKit.finish(st)
+		_plume.material_override = _mp
+		_plume.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(_plume)
+		_light = OmniLight3D.new()
+		_light.light_color = Color(1.0, 0.6, 0.3)
+		_light.shadow_enabled = false
+		add_child(_light)
+		visible = false
+
+	## Where the body is, which way the air is coming from, and how hot.
+	func feed(at: Vector3, vel: Vector3, h: float) -> void:
+		heat = lerpf(heat, h, 0.25)
+		visible = heat > 0.01 and vel.length() > 1.0
+		if not visible:
+			return
+		var fwd: Vector3 = vel.normalized()
+		var up_ref := Vector3.UP if absf(fwd.y) < 0.99 else Vector3.RIGHT
+		# -Z along the flight, so +Z, where the plume runs, is behind it
+		global_transform = Transform3D(Basis.looking_at(fwd, up_ref), at)
+		var r: float = size
+		_sheath.position = Vector3(0.0, 0.0, -r * 0.2)
+		_sheath.scale = Vector3(r * 1.1, r * 1.1, r * (1.1 + heat * 0.6))
+		_plume.position = Vector3(0.0, 0.0, -r * 0.2)
+		var long: float = r * (4.0 + heat * 30.0) * (0.92 + 0.16 * randf())
+		_plume.scale = Vector3(r * 0.85, r * 0.85, long)
+		_ms.set_shader_parameter("heat", heat)
+		_mp.set_shader_parameter("heat", heat)
+		_light.light_color = Color(1.0, 0.45 + heat * 0.4, 0.25 + heat * 0.55)
+		_light.light_energy = heat * 18.0
+		_light.omni_range = r * 40.0 + 60.0
+
 static func trail_particles(colour: Color, size := 0.6, amount := 48) -> GPUParticles3D:
 	# Rocket smoke: alpha-blended puffs that expand and fade. Additive smoke reads
 	# as a laser beam against a bright sky, which is what we do *not* want.
@@ -1153,6 +1306,8 @@ class Tracer extends Node3D:
 	var he := 0.0
 	## Small arms: drawn thin, stopped by buildings, heard going past.
 	var small := false
+	## A vehicle's machine gun: flies and hits as a shell does, drawn slighter.
+	var light := false
 	var glow := 1.0
 	var _whizzed := false
 	## How much it can still go through, as metres of wall. A round used to
@@ -1243,6 +1398,12 @@ class Tracer extends Node3D:
 			half = clampf(speed * 0.0032, 0.7, 2.8)
 			wide = 0.035
 			colour = Color(2.2, 1.5, 0.7, 0.9 * glow)
+		elif light:
+			# Between the two: a third of a shell's streak and a fifth of its
+			# width, and red where the shell is yellow-white.
+			half = clampf(speed * 0.0045, 2.0, 6.0)
+			wide = 0.18
+			colour = Color(2.6, 0.42, 0.22, 0.9)
 		# A handful of shapes rather than one per round: the length to a
 		# quarter metre on a rifle round and a metre on a shell, which is
 		# less than the streak moves in a frame.
@@ -1333,6 +1494,8 @@ class Tracer extends Node3D:
 			return
 		var far: float = eye.global_position.distance_to(global_position)
 		var s: float = clampf(far / 420.0, 1.0, 7.0)
+		if light:
+			s = clampf(far / 160.0, 1.0, 9.0)
 		if small:
 			s = clampf(far / 22.0, 1.0, 24.0)
 		var gone: float = 0.0 if _born == Vector3.INF else _born.distance_to(global_position)
@@ -1415,7 +1578,7 @@ class Tracer extends Node3D:
 					if he > 0.0:
 						Effects.he_impact(get_tree().current_scene, end, he)
 					else:
-						Effects.dust(get_tree().current_scene, end, 1.2)
+						Effects.dust(get_tree().current_scene, end, 0.4 if light else 1.2)
 					queue_free()
 					return
 		if wall_t < 1.0 and wall_t <= dirt_t:
@@ -1433,7 +1596,7 @@ class Tracer extends Node3D:
 			if he > 0.0:
 				Effects.he_impact(get_tree().current_scene, end, he * 0.85)
 			else:
-				Effects.dust(get_tree().current_scene, end, 1.6)
+				Effects.dust(get_tree().current_scene, end, 0.5 if light else 1.6)
 			queue_free()
 		elif life <= 0.0:
 			queue_free()

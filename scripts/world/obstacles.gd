@@ -84,7 +84,7 @@ static func _key(ci: int, cj: int) -> int:
 ## height, for street furniture that a tank knocks over rather than stops at.
 ## Returns the entry for each instance, -1 where nothing was registered.
 static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT, soft_from := 0.45,
-		all_soft := false) -> PackedInt32Array:
+		all_soft := false, foot := AABB()) -> PackedInt32Array:
 	var ids := PackedInt32Array()
 	if mesh == null or xforms.is_empty():
 		return ids
@@ -99,8 +99,17 @@ static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT, soft_from 
 		var sc := xf.basis.get_scale()
 		# The mesh is modelled with its base at y = 0, so the AABB's own
 		# position carries any offset the author gave it.
-		var hx: float = ab.size.x * 0.5 * sc.x
-		var hz: float = ab.size.z * 0.5 * sc.z
+		# Across, the caller's footprint if it gave one. The whole mesh's box
+		# is the right height and can be the wrong width: a town block's roof
+		# overhangs its walls by two per cent each way, and taken from the
+		# mesh the obstacle did too -- all the way down to the street. Forty
+		# centimetres of invisible wall in front of every face of a twenty
+		# metre block, and at every corner a post of it that rounds struck
+		# going past what anyone could see was the edge of the building.
+		var fx: float = (foot.size.x if foot.size.x > 0.0 else ab.size.x) * 0.5
+		var fz: float = (foot.size.z if foot.size.z > 0.0 else ab.size.z) * 0.5
+		var hx: float = fx * sc.x
+		var hz: float = fz * sc.z
 		var hy: float = (ab.position.y + ab.size.y) * sc.y
 		var state := LIVE
 		if all_soft or hy < min_h:
@@ -422,6 +431,33 @@ static func floor_under(x: float, z: float, y: float) -> float:
 		var b: int = id * STRIDE
 		var top: float = _ent[b + 1] + _ent[b + 4]
 		if top > y + 0.55 or top <= best:
+			continue
+		var dx: float = x - _ent[b]
+		var dz: float = z - _ent[b + 2]
+		var c: float = _ent[b + 6]
+		var s: float = _ent[b + 7]
+		if absf(dx * c + dz * s) <= _ent[b + 3] and absf(-dx * s + dz * c) <= _ent[b + 5]:
+			best = top
+	return best
+
+## The highest top, here, of anything that starts below `below`: what a body
+## going over at that height has to clear. `floor_under` takes anything whose
+## top is low enough and does not ask where it starts, so the wall *over* a
+## window -- which starts above a man's head and ends a metre above that --
+## counted as something to vault, and no window could be got through.
+static func clear_over(x: float, z: float, below: float) -> float:
+	var best := -1e9
+	var cell: Variant = _cells.get(_key(int(floor(x / CELL)), int(floor(z / CELL))))
+	if cell == null:
+		return best
+	for id in (cell as PackedInt32Array):
+		if _dead[id] != 0:
+			continue
+		var b: int = id * STRIDE
+		if _ent[b + 1] >= below:
+			continue
+		var top: float = _ent[b + 1] + _ent[b + 4]
+		if top <= best:
 			continue
 		var dx: float = x - _ent[b]
 		var dz: float = z - _ent[b + 2]

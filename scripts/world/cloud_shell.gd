@@ -126,6 +126,15 @@ shader_type spatial;
 render_mode blend_mix, depth_draw_never, depth_test_disabled, cull_disabled, unshaded;
 
 uniform vec3 centre = vec3(0.0);
+// From the world's frame into the planet's own. The world is the tangent frame
+// at the middle of the chart, and the chart is moved to stay under whatever
+// the view is on -- so a direction in the world's frame is a direction
+// *relative to the viewer*, and a field looked up by it is welded to him. From
+// an aeroplane the chart moves every hundred and fifty kilometres and nobody
+// saw it. From orbit it moves every minute, and the whole deck stood still
+// under the spacecraft and jumped back each time. The weather is looked up by
+// where it is on the planet.
+uniform mat3 to_planet = mat3(1.0);
 uniform float r_base = 6373200.0;
 uniform float r_top = 6374600.0;
 // The ground, as a sphere: sea level. A ray that goes into it has no cloud
@@ -214,7 +223,8 @@ float density(vec3 p, out float column) {
 	float profile = smoothstep(0.0, 0.16, h) * (1.0 - smoothstep(0.42, 1.0, h));
 	// The weather system: a few hundred kilometres of it, which is what
 	// `noise_scale` is for.
-	vec3 q = up * noise_scale + wind_uv * wind_time;
+	vec3 pu = to_planet * up;
+	vec3 q = pu * noise_scale + wind_uv * wind_time;
 	float shape = texture(vol, q).r * profile - (1.0 - coverage);
 	if (shape <= 0.0) {
 		return 0.0;
@@ -232,7 +242,7 @@ float density(vec3 p, out float column) {
 	// field so the two do not line up; only nudged, because at the whole tile
 	// this used the detail was read by the *gradient of the weather* rather
 	// than by where in the sky it was, and came out smeared along it.
-	vec3 qd = up * detail_scale + vec3(shape * detail_warp)
+	vec3 qd = pu * detail_scale + vec3(shape * detail_warp)
 		+ wind_uv * wind_time * 3.0;
 	float detail = texture(vol, qd).g;
 	float cut = (1.0 - detail) * erode;
@@ -461,6 +471,13 @@ func follow(cam: Camera3D) -> void:
 		return
 	_mi.global_position = cam.global_position
 	_mi.scale = Vector3.ONE * clampf(cam.far * 0.2, cam.near * 12.0, 2.0e6)
+	_mat.set_shader_parameter("to_planet",
+		Basis(Sim.chart_east, Sim.chart_origin, Sim.chart_south))
+	# with the planet, when the planet is being drawn small
+	var k: float = Sim.view_scale
+	_mat.set_shader_parameter("r_base", (Sim.PLANET_R + BASE) * k)
+	_mat.set_shader_parameter("r_top", (Sim.PLANET_R + TOP) * k)
+	_mat.set_shader_parameter("r_ground", Sim.PLANET_R * k)
 
 func _shell() -> ArrayMesh:
 	var r := 1.0
