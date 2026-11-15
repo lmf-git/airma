@@ -148,6 +148,12 @@ func _build() -> Array:
 		"note": "DOWN" if aircraft.gear_down else "UP"})
 	out.append({"id": "flaps", "label": "Flaps",
 		"note": "DOWN" if aircraft.flaps > 0.5 else "UP"})
+	# Which runway the landing aid flies to. Offered once there is more than one
+	# end in reach -- which is always, a runway having two -- so that near a
+	# second field the aid can be told which one you mean.
+	if Airbase.approaches(aircraft.get_tree(), aircraft.global_position).size() > 1:
+		out.append({"id": "rwy", "label": "Landing runway",
+			"note": Airbase.pick_label(aircraft.get_tree(), aircraft.global_position)})
 	if aircraft.has_canopy():
 		out.append({"id": "canopy", "label": "Canopy",
 			"note": "OPEN" if aircraft.canopy_open else "SHUT"})

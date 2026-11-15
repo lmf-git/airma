@@ -1899,14 +1899,22 @@ func _build_roads() -> void:
 	# One material for all the buckets, so they still batch: what is being
 	# bought here is culling, and paying for it in draw calls would be a poor
 	# trade.
-	var kerb_mat := MeshKit.mat(Color(0.34, 0.32, 0.28), 0.98, 0.0)
-	var road_mat := MeshKit.mat(Color(0.105, 0.105, 0.115), 0.94, 0.0)
+	var kerb_mat := _road_shader(Color(0.34, 0.32, 0.28), 0.98)
+	var road_mat := _road_shader(Color(0.105, 0.105, 0.115), 0.94)
+	var wall_mat := _road_shader(Color(0.50, 0.49, 0.46), 0.95)
 	var cells := 0
-	for i in range(0, out.size(), 4):
+	for i in range(0, out.size(), 5):
 		var cx: int = int(out[i])
 		var cz: int = int(out[i + 1])
 		var surf: PackedVector3Array = out[i + 2]
 		var kerb: PackedVector3Array = out[i + 3]
+		var wall: PackedVector3Array = out[i + 4]
+		# retaining walls where a raised road crosses a town: few, and upright,
+		# so they get real normals
+		if not wall.is_empty():
+			var wm := MeshKit.mi(_faced_mesh(wall, wall_mat), "Walls %d,%d" % [cx, cz])
+			wm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			add_child(wm)
 		tris += int((surf.size() + kerb.size()) / 3.0)
 		cells += 1
 		if not surf.is_empty():
@@ -1921,6 +1929,39 @@ func _build_roads() -> void:
 			add_child(km)
 	_stats["road_tris"] = tris
 	_stats["road_cells"] = cells
+
+## A road surface that wins against the ground it lies on without being lifted
+## off it. Each vertex is pulled a fraction of its own distance toward the eye
+## before projection: the picture is unchanged, only the depth moves, and by an
+## amount that grows with range exactly as the depth buffer's coarseness does --
+## a few millimetres under your boots, a few decimetres a kilometre off. It used
+## to be done by standing the ribbon sixteen centimetres up, and every soldier
+## on a street was in it to the ankles.
+static var _road_sh: Shader = null
+static func _road_shader(col: Color, rough: float) -> ShaderMaterial:
+	if _road_sh == null:
+		_road_sh = Shader.new()
+		_road_sh.code = """
+shader_type spatial;
+render_mode cull_back;
+uniform vec3 albedo : source_color;
+uniform float roughness = 0.94;
+void vertex() {
+	vec4 v = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
+	v.xyz *= 0.9988;
+	POSITION = PROJECTION_MATRIX * v;
+}
+void fragment() {
+	ALBEDO = albedo;
+	ROUGHNESS = roughness;
+	METALLIC = 0.0;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = _road_sh
+	m.set_shader_parameter("albedo", col)
+	m.set_shader_parameter("roughness", rough)
+	return m
 
 ## Viaducts and tunnel portals.
 ##
@@ -2068,6 +2109,26 @@ func _build_structures() -> void:
 
 ## Ground-hugging triangles need no normal but up, so the mesh is a vertex list
 ## and nothing else.
+## Triangles with their own face normals, for what is not lying flat.
+func _faced_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
+	var m := ArrayMesh.new()
+	if verts.is_empty():
+		return m
+	var nrm := PackedVector3Array()
+	nrm.resize(verts.size())
+	for t in range(0, verts.size() - 2, 3):
+		var n: Vector3 = (verts[t + 1] - verts[t]).cross(verts[t + 2] - verts[t]).normalized()
+		nrm[t] = n
+		nrm[t + 1] = n
+		nrm[t + 2] = n
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = nrm
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	m.surface_set_material(0, mat)
+	return m
+
 func _flat_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
 	var m := ArrayMesh.new()
 	if verts.is_empty():

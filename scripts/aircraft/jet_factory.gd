@@ -46,7 +46,9 @@ static func build(spec: Dictionary) -> Dictionary:
 					stations.append(mid)
 	for s in stations:
 		rings.append(MeshKit.ring(s[1], s[2], s[3], s[0], s[4], 12))
-	_cut_cockpit(rings, cz_a, cz_b, float(cp0["y"]) - 0.62)
+	var unmanned: bool = bool(spec.get("unmanned", false))
+	if not unmanned:
+		_cut_cockpit(rings, cz_a, cz_b, float(cp0["y"]) - 0.62)
 	MeshKit.loft(st, rings, Vector3(0, 0, sections[int(sections.size() * 0.5)][0]))
 
 	# wings: the trailing edge is carved off and rebuilt as hinged flaperons
@@ -196,7 +198,9 @@ static func build(spec: Dictionary) -> Dictionary:
 		MeshKit.loft(cst, crings, Vector3(0, cp["y"], (cp["z0"] + cp["z1"]) * 0.5))
 	var canopy_mi := MeshKit.mi(MeshKit.finish(cst, mat_glass), "Canopy")
 	canopy_mi.position = -hinge_pt
-	canopy_hinge.add_child(canopy_mi)
+	# A drone has no glazing: there is nobody in it to see out.
+	if not unmanned:
+		canopy_hinge.add_child(canopy_mi)
 
 	# boarding ladder, shown while the canopy is up
 	var lad := MeshKit.begin()
@@ -213,7 +217,7 @@ static func build(spec: Dictionary) -> Dictionary:
 	if opens:
 		out["ladder"] = lad_mi
 		out["ladder_pos"] = Vector3(lx - 0.55, 0.0, lz)
-	else:
+	elif not unmanned:
 		# airliners and transports board through a door on the forward left
 		var door := MeshKit.begin()
 		var dz: float = lerpf(cp["z0"], cp["z1"], 0.75) + 1.2
@@ -521,12 +525,18 @@ void fragment() {
 		for pside in sides:
 			var ppos: Vector3 = pr["pos"]
 			ppos = Vector3(ppos.x * pside, ppos.y, ppos.z)
-			var nac := MeshKit.begin()
-			MeshKit.cone(nac, 0.95, 0.55, -2.6, 2.4, ppos, 10)
-			root.add_child(MeshKit.mi(MeshKit.finish(nac, mat_paint), "Nacelle"))
+			# A pusher's disc is where it is asked for, at the end of the
+			# fuselage, with nothing but a spinner behind it. Built as a wing
+			# nacelle it got a metre-wide pod hung past the tail and its blades
+			# turning inside the fuselage three metres further forward.
+			var pusher: bool = bool(pr.get("pusher", false))
+			if not pusher:
+				var nac := MeshKit.begin()
+				MeshKit.cone(nac, 0.95, 0.55, -2.6, 2.4, ppos, 10)
+				root.add_child(MeshKit.mi(MeshKit.finish(nac, mat_paint), "Nacelle"))
 			var hub := Node3D.new()
 			hub.name = "Prop"
-			hub.position = ppos + Vector3(0, 0, -2.8)
+			hub.position = ppos if pusher else ppos + Vector3(0, 0, -2.8)
 			var bst := MeshKit.begin()
 			var pr_r: float = pr["r"]
 			for bnum in 4:
@@ -537,7 +547,10 @@ void fragment() {
 				MeshKit.prism(bst, blade, dir, Vector3(0, 0, 1),
 					dir.cross(Vector3(0, 0, 1)).normalized(),
 					PackedFloat32Array([0.07, 0.03, 0.03, 0.07]))
-			MeshKit.cone(bst, 0.34, 0.16, -0.5, 0.3, Vector3.ZERO, 8)
+			if pusher:
+				MeshKit.cone(bst, 0.16, 0.02, 0.0, 0.45, Vector3.ZERO, 8)
+			else:
+				MeshKit.cone(bst, 0.34, 0.16, -0.5, 0.3, Vector3.ZERO, 8)
 			hub.add_child(MeshKit.mi(MeshKit.finish(bst, mat_dark), "Blades"))
 			root.add_child(hub)
 			out["props"].append(hub)
@@ -795,6 +808,15 @@ void fragment() {
 	root.add_child(dash_mi)
 	out["cockpit_parts"].append(dash_mi)
 
+	# A drone has no cockpit to furnish. The seat and the eye point are kept --
+	# the first-person view is the nose camera -- but nothing is built there.
+	if unmanned:
+		for part in out["cockpit_parts"]:
+			root.remove_child(part)
+			(part as Node).free()
+		out["cockpit_parts"] = []
+		_add_sensor_ball(root, sh, mat_dark, mat_glass)
+
 	# tailhook, stowed under the aft fuselage
 	var tail_z: float = sections[sections.size() - 1][0] - 1.2
 	var hook := Node3D.new()
@@ -805,6 +827,7 @@ void fragment() {
 	MeshKit.box(hst, Vector3(0.42, 0.26, 0.34), Vector3(0, -0.06, 2.5))
 	hook.add_child(MeshKit.mi(MeshKit.finish(hst, MeshKit.mat(Color(0.16, 0.16, 0.17), 0.7, 0.4)), "Hook"))
 	root.add_child(hook)
+	hook.visible = not unmanned
 	out["hook"] = hook
 	out["hook_tip"] = hook.position + Vector3(0, 0, 2.5)
 
@@ -817,6 +840,41 @@ void fragment() {
 		Vector3(tip_x, float(wing["y"]) + 0.05, lerpf(tip_c.x, tip_c.y, 0.62))]
 	out["cockpit"] = Vector3(0.0, cp["y"] - 0.10, lerpf(cp["z0"], cp["z1"], 0.34))
 	return out
+
+## The sensor turret under a drone's chin: a gimballed ball with a window in
+## it, which is the drone's whole reason for being up there. Optional -- a
+## one-way attack drone has no use for one.
+static func _add_sensor_ball(root: Node3D, sh: Dictionary, mat_dark: Material, mat_glass: Material) -> void:
+	if not sh.has("sensor"):
+		return
+	var sn: Dictionary = sh["sensor"]
+	var at: Vector3 = sn["pos"]
+	var r: float = float(sn.get("r", 0.3))
+	var bst := MeshKit.begin()
+	MeshKit.box(bst, Vector3(r * 0.7, r * 0.6, r * 0.7), at + Vector3(0, r * 0.75, 0))
+	root.add_child(MeshKit.mi(MeshKit.finish(bst, mat_dark), "SensorMount"))
+	var ball := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = r
+	sm.height = r * 2.0
+	sm.radial_segments = 12
+	sm.rings = 6
+	ball.mesh = sm
+	ball.material_override = MeshKit.mat(Color(0.30, 0.31, 0.32), 0.6, 0.2)
+	ball.position = at
+	ball.name = "SensorBall"
+	root.add_child(ball)
+	var win := MeshInstance3D.new()
+	var wm := CylinderMesh.new()
+	wm.top_radius = r * 0.42
+	wm.bottom_radius = r * 0.42
+	wm.height = 0.04
+	wm.radial_segments = 10
+	win.mesh = wm
+	win.material_override = mat_glass
+	win.rotation_degrees = Vector3(90, 0, 0)
+	win.position = at + Vector3(0, -r * 0.2, -r * 0.96)
+	root.add_child(win)
 
 ## Sink a trough into the top of the fuselage so the crew sit IN the aeroplane
 ## instead of on top of the skin. The upper vertices of every station inside the

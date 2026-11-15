@@ -478,8 +478,12 @@ func _refresh_contacts() -> void:
 	var air_reach: float = maxf(Sim.coverage(0), 26000.0)
 	for h in theirs:
 		var p: Vector3 = (h as Node3D).global_position
-		var seen := false
+		# The strike range is a range: its targets are on the chart from the
+		# start, or the last of a wave is a hunt for something you cannot see.
+		var seen: bool = (h as Node).has_meta("strike")
 		for f2 in mine:
+			if seen:
+				break
 			var fp: Vector3 = (f2 as Node3D).global_position
 			var d: float = fp.distance_to(p)
 			# an aeroplane carries a radar; anything else has to be able to see it
@@ -940,7 +944,9 @@ func _draw_inbound(org: Vector2, ppm: float) -> void:
 		var kind := String(d["kind"])
 		if not box.has_point(q) and kind in ["plane", "missile", "shell", "gun"]:
 			_edge_arrow(q, box, kind, lab, eta, warm)
-			if kind != "plane" or not (d.has("from") and d.has("to")):
+			# still draw the track across the chart, so you see where a strike
+			# run or a warhead is coming in along before it gets here
+			if kind not in ["plane", "missile"] or not (d.has("from") and d.has("to")):
 				continue
 		match kind:
 			"bombs":

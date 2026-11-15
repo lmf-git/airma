@@ -49,6 +49,9 @@ static func kit_classes() -> Array:
 
 ## Aircraft over the town as well.
 var air := false
+## The firing range: the town, the deploy screen and the rules of a street
+## fight, and nobody else in it.
+var range_mode := false
 
 ## Vehicles in the fight as well as men.
 var armour := false
@@ -173,6 +176,8 @@ func setup(at: Vector2, game: GameMode, owner_world: Node, town_set: TownSet) ->
 		if p != Vector3.INF:
 			_spots.append(p)
 	Sfx.warm(Firearm.SOUNDS)
+	if range_mode:
+		return
 	for t in [0, 1]:
 		for i in side_size(t):
 			if t == 0 and i == 0:
@@ -182,6 +187,10 @@ func setup(at: Vector2, game: GameMode, owner_world: Node, town_set: TownSet) ->
 func _exit_tree() -> void:
 	Effects.credit = null
 	Effects.spare_team = -1
+	# a warhead still on its way down belongs to the world, not to the match
+	for nk in _nukes:
+		if nk.size() > 6 and is_instance_valid(nk[6]):
+			(nk[6] as Node).queue_free()
 
 func _ground(x: float, z: float) -> float:
 	return Sim.height_at(x, z)
@@ -443,6 +452,11 @@ func set_player(w: Walker) -> void:
 ## Where a side comes back in. Along its own street, at whichever point the
 ## other side is furthest from and cannot see.
 func spawn_point(team: int, slot := -1) -> Vector3:
+	# on the range, back on the firing line
+	if range_mode and world != null:
+		var fr: Variant = world.get("firing_range")
+		if fr != null and is_instance_valid(fr):
+			return (fr as FiringRange).origin - (fr as FiringRange).dir * 1.5
 	var z: float = centre.y + (118.0 if team == 0 else -118.0)
 	var best := Vector3.INF
 	var best_score := -1e9
@@ -881,9 +895,18 @@ func _support(delta: float) -> void:
 	var still: Array = []
 	for nk in _nukes:
 		nk[0] = float(nk[0]) - delta
+		var rv: Node3D = nk[6] if nk.size() > 6 else null
 		if float(nk[0]) > 0.0:
 			still.append(nk)
+			if is_instance_valid(rv):
+				var pos := _warhead_at(nk)
+				var dir: Vector3 = (nk[1] as Vector3) - pos
+				rv.global_position = pos
+				if dir.length() > 1.0:
+					rv.look_at(pos + dir, Vector3.UP if absf(dir.normalized().y) < 0.98 else Vector3.FORWARD)
 		else:
+			if is_instance_valid(rv):
+				rv.queue_free()
 			_nuke(nk[1], float(nk[2]), bool(nk[3]))
 	_nukes = still
 	_plan_tick(delta)
@@ -963,6 +986,11 @@ func inbound() -> Array:
 	for nk in _nukes:
 		out.append({"kind": "nuke", "at": nk[1], "eta": float(nk[0]), "r": float(nk[2]),
 			"label": "STRATEGIC NUKE" if bool(nk[3]) else "TACTICAL NUKE"})
+		# and the warhead itself, on its way down the track to the mark
+		if nk.size() > 5:
+			out.append({"kind": "missile", "at": _warhead_at(nk),
+				"head": (nk[1] as Vector3) - (nk[4] as Vector3),
+				"from": nk[4], "to": nk[1], "label": "WARHEAD", "eta": float(nk[0])})
 	for n2 in world.get_children():
 		if n2 is CarpetRun and is_instance_valid(n2):
 			var cr := n2 as CarpetRun
@@ -1032,14 +1060,14 @@ func _call(id: String) -> bool:
 			return false
 		"tacnuke_at":
 			var at3: Vector3 = _pick_at
-			_nukes.append([12.0, Vector3(at3.x, _ground(at3.x, at3.z), at3.z), TAC_LETHAL, false])
+			_add_nuke(12.0, Vector3(at3.x, _ground(at3.x, at3.z), at3.z), TAC_LETHAL, false)
 			Sim.report("TACTICAL NUKE inbound — twelve seconds, get eighty metres clear of the mark", Sim.Ev.BAD)
 			Effects.nuke_warm(world)
 			Sfx.play_at(world, "roar", at3 + Vector3(0, 900, 0), 9.0, 0.7, 9000.0)
 			return true
 		"stratnuke_at":
 			var at4: Vector3 = _pick_at
-			_nukes.append([20.0, Vector3(at4.x, _ground(at4.x, at4.z), at4.z), STRAT_LETHAL, true])
+			_add_nuke(20.0, Vector3(at4.x, _ground(at4.x, at4.z), at4.z), STRAT_LETHAL, true)
 			Sim.report("STRATEGIC NUKE inbound — twenty seconds. It has been an honour.", Sim.Ev.BAD)
 			Effects.nuke_warm(world)
 			Sfx.play_at(world, "roar", at4 + Vector3(0, 2000, 0), 10.0, 0.55, 12000.0)
@@ -1369,8 +1397,8 @@ class GunRun extends Node3D:
 	const BURST := 2.2
 	## What is drawn and what lands, a second: the gun's sixty-five rounds a
 	## second, thinned to what the eye and the frame can take.
-	const RATE := 14.0
-	const SPREAD := 4.5
+	const RATE := 24.0
+	const SPREAD := 6.0
 	const SHELL_SPEED := 1000.0
 	const WING := Vector3(16.0, 0.0, 0.0)
 	const TRAIL := 1.5
@@ -2127,6 +2155,61 @@ func uav_lost() -> void:
 ## is, whoever's side it is on and the man who called it included; every
 ## building and everything standing in the street inside it comes down. The
 ## strategic one ends the match as well: there is nobody left to play it.
+## A nuclear call is not just a countdown: there is a warhead, and it comes in
+## from somewhere. It used to be a timer and a ring on the map -- nothing on the
+## chart and nothing in the sky until the flash. Each one now has a track, from
+## well out over the caller's shoulder down to the mark, flown so it arrives on
+## the timer: a short range ballistic round for the tactical, a re-entry vehicle
+## from much further for the strategic.
+##   [eta, at, lethal, strategic, from (with its height), total, the visible body]
+func _add_nuke(eta: float, at: Vector3, lethal: float, strategic: bool) -> void:
+	var reach: float = 120000.0 if strategic else 24000.0
+	var top: float = 70000.0 if strategic else 20000.0
+	var back := Vector3.ZERO
+	if is_instance_valid(player):
+		back = player.global_position - at
+	back.y = 0.0
+	if back.length() < 50.0:
+		var a := randf() * TAU
+		back = Vector3(cos(a), 0.0, sin(a))
+	var from: Vector3 = at + back.normalized() * reach + Vector3(0, top, 0)
+	var rv := _warhead_body(strategic)
+	world.add_child(rv)
+	rv.global_position = from
+	_nukes.append([eta, at, lethal, strategic, from, eta, rv])
+
+## Where a warhead is on its track now: straight down the line, so it is where
+## the map says and arrives when the countdown says.
+func _warhead_at(nk: Array) -> Vector3:
+	var total: float = maxf(float(nk[5]), 0.01)
+	var f: float = clampf(1.0 - float(nk[0]) / total, 0.0, 1.0)
+	return (nk[4] as Vector3).lerp(nk[1] as Vector3, f)
+
+## A hot re-entry body with a trail: seen as a streak coming down, and the
+## glow is what you would actually see of one.
+func _warhead_body(strategic: bool) -> Node3D:
+	var n := Node3D.new()
+	n.name = "Warhead"
+	var mi := MeshInstance3D.new()
+	var cone := CylinderMesh.new()
+	cone.top_radius = 0.0
+	cone.bottom_radius = 0.5 if strategic else 0.4
+	cone.height = 2.2 if strategic else 1.8
+	cone.radial_segments = 10
+	mi.mesh = cone
+	mi.rotation_degrees = Vector3(-90, 0, 0)
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.2, 0.15, 0.12)
+	m.emission_enabled = true
+	m.emission = Color(1.0, 0.55, 0.25)
+	m.emission_energy_multiplier = 6.0
+	mi.material_override = m
+	n.add_child(mi)
+	var trail := Effects.trail_particles(Color(1.0, 0.75, 0.45), 6.0 if strategic else 4.0, 60)
+	trail.emitting = true
+	n.add_child(trail)
+	return n
+
 func _nuke(at: Vector3, lethal: float, strategic: bool) -> void:
 	var scn: Variant = world.get("scenery")
 	var flat := lethal * 1.2
@@ -2296,9 +2379,9 @@ func _cannon(at: Vector3) -> void:
 func _cannon_hit(at: Vector3) -> void:
 	cannon_hits += 1
 	var fb := Effects.Boom.new()
-	fb.radius = 2.2
+	fb.radius = 3.4
 	fb.smoke = false
-	fb.life_max = 0.3
+	fb.life_max = 0.35
 	fb.lit = cannon_hits % 8 == 0
 	world.add_child(fb)
 	fb.global_position = at + Vector3(0, 0.6, 0)
@@ -2310,19 +2393,23 @@ func _cannon_hit(at: Vector3) -> void:
 		var off: Vector3 = (n as Soldier).global_position - at
 		off.y *= 0.5
 		var d: float = off.length()
-		if d < 3.6:
-			(n as Soldier).take_hit(260.0 * (1.0 - d / 3.6), player)
+		if d < 6.5:
+			(n as Soldier).take_hit(300.0 * clampf(1.15 - d / 6.5, 0.0, 1.0), player)
 	for v in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(v) or not (v is Node3D) or v is Soldier or v == player \
 				or not v.has_method("take_hit") or not ("team" in v) or int(v.team) == 0:
 			continue
 		var dv: float = (v as Node3D).global_position.distance_to(at)
-		if dv < 6.0:
-			v.take_hit(95.0 * (1.0 - dv / 6.0), player)
+		if v.has_method("surface_gap"):
+			dv = maxf(float(v.call("surface_gap", at)), 0.0)
+		elif v.has_method("hit_radius"):
+			dv = maxf(dv - float(v.call("hit_radius")), 0.0)
+		if dv < 7.0:
+			v.take_hit(130.0 * clampf(1.1 - dv / 7.0, 0.0, 1.0), player)
 	if is_instance_valid(player) and not away:
 		var dp: float = player.global_position.distance_to(at)
-		if dp < 3.0:
-			player.take_hit(120.0 * (1.0 - dp / 3.0), player)
+		if dp < 5.0:
+			player.take_hit(160.0 * (1.0 - dp / 5.0), player)
 
 ## `why` is what the kill feed puts it down to.
 func _bomb(at: Vector3, big := 1.0, many := false, why := "strike") -> void:

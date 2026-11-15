@@ -86,6 +86,10 @@ func start(id: String) -> void:
 		"cqb", "ground", "arms":
 			kill_goal = CqbMatch.kill_goal
 			Sim.no_air_threat = mode != "arms"
+		"range":
+			# nobody to beat: it runs until you leave it
+			kill_goal = 1 << 30
+			Sim.no_air_threat = true
 		"strike":
 			# Nothing on this range shoots at an aeroplane, whatever it is.
 			Sim.no_air_threat = true
@@ -492,19 +496,25 @@ func _strike_wave() -> void:
 			t.global_transform = Tank.ground_pose(at, head, t.rest_height())
 			t.ai_goal = dest if dest != Vector3.INF else Vector3.INF
 			_wave_units.append(t)
-	# Shipping: merchantmen and gun boats. A destroyer's tubes would be an air
-	# threat, so nothing that carries any is put on this range.
-	if world.has_method("_deep_water"):
-		var ships: int = mini(1 + wave, 5)
-		for i in ships:
-			var sh := Ship.new()
-			sh.setup("cargo" if i % 2 == 0 else "patrol", 1)
-			world.add_child(sh)
-			var sea: Vector3 = world.call("_deep_water",
-				Vector3(22000.0 + float(i) * 2600.0, 0.0, -3000.0 + float(i) * 1800.0))
-			sh.global_position = Vector3(sea.x, Sim.sea_surface(sea.x, sea.z), sea.z)
-			sh.name = "Shipping %d-%d" % [wave, i + 1]
-			_wave_units.append(sh)
+	# Shipping, but only where there is sea close by. The wave is one place to
+	# go: ships sent off to the nearest deep water -- which on the globe can be
+	# hundreds of kilometres from the column -- were the last two of every wave,
+	# off the chart and nowhere near anything else.
+	var centre: Vector3 = from if from != Vector3.INF else Vector3(0, 0, -9000)
+	if world.has_method("_deep_water_near"):
+		var ships: int = mini(1 + int(wave / 2.0), 3)
+		var sea: Vector3 = world.call("_deep_water_near", centre, 14)
+		if Sim.height_at(sea.x, sea.z) < Sim.sea_at(sea.x, sea.z) - 40.0:
+			for i in ships:
+				var at: Vector3 = world.call("_deep_water_near",
+					sea + Vector3(float(i) * 500.0, 0.0, float(i) * 300.0), 2)
+				var sh := Ship.new()
+				sh.setup("cargo" if i % 2 == 0 else "patrol", 1)
+				sh.set_meta("strike", true)
+				world.add_child(sh)
+				sh.global_position = Vector3(at.x, Sim.sea_surface(at.x, at.z), at.z)
+				sh.name = "Shipping %d-%d" % [wave, i + 1]
+				_wave_units.append(sh)
 	# And helicopters, working low over the column.
 	var helis: int = mini(1 + int(wave / 2.0), 4)
 	var rotary: Array = ["mi28", "z10"] if JetSpec.bloc_of(Sim.selected_jet) == "nato" \
@@ -514,8 +524,8 @@ func _strike_wave() -> void:
 		h.setup(rotary[i % rotary.size()])
 		h.team = 1
 		h.name = "Helicopter %d-%d" % [wave, i + 1]
-		var hp: Vector3 = from if from != Vector3.INF else Vector3(0, 0, -9000)
-		h.home = hp + Vector3(float(i) * 900.0 - 450.0, 0.0, 600.0)
+		h.set_meta("strike", true)
+		h.home = centre + Vector3(float(i) * 900.0 - 450.0, 0.0, 600.0)
 		world.add_child(h)
 		h.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(180.0)),
 			Vector3(h.home.x, Sim.height_at(h.home.x, h.home.z) + 180.0, h.home.z))

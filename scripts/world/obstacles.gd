@@ -500,7 +500,8 @@ static func top_at(x: float, z: float) -> float:
 ## the right question for a helicopter and the wrong one for somebody walking
 ## underneath a scaffold -- it puts him on top of it.
 static func floor_under(x: float, z: float, y: float) -> float:
-	var best := -1e9
+	# a bridge deck is a floor too, for whoever is up at its level
+	var best: float = Sim.bridge_floor(x, z, y)
 	var cell: Variant = _cells.get(_key(int(floor(x / CELL)), int(floor(z / CELL))))
 	if cell == null:
 		return best

@@ -762,15 +762,19 @@ var _nav_hold := 0.0
 func _way_clear(from: Vector3, ground: float, dir: Vector3) -> bool:
 	var near: Vector3 = from + dir * 22.0
 	var far: Vector3 = from + dir * 45.0
-	var h1: float = Sim.height_at(near.x, near.z)
+	# Along a deck, the deck: the valley under a bridge is not a drop. Looked
+	# for as far up as the road could have climbed by then -- asked at the
+	# hull's own height, a deck twenty metres up a six per cent approach is a
+	# metre too high to count, and the drop under it turned him back every time.
+	var h1: float = Sim.drive_height(near.x, near.z, ground + 0.6 + 22.0 * 0.12)
 	if h1 < Sim.sea_at(near.x, near.z) + 1.0 or absf(h1 - ground) > 10.0:
 		return false
-	var h2: float = Sim.height_at(far.x, far.z)
+	var h2: float = Sim.drive_height(far.x, far.z, h1 + 0.6 + 23.0 * 0.12)
 	return h2 >= Sim.sea_at(far.x, far.z) + 1.0 and absf(h2 - ground) <= 18.0
 
 func _pick_way(to_goal: Vector3) -> void:
 	var from: Vector3 = global_position
-	var ground: float = Sim.height_at(from.x, from.z)
+	var ground: float = Sim.drive_height(from.x, from.z, from.y)
 	var nose := -global_transform.basis.z
 	nose.y = 0.0
 	_nav_nose_shut = nose.length_squared() > 0.01 \
@@ -781,7 +785,7 @@ func _pick_way(to_goal: Vector3) -> void:
 	# believes it, or he turns back into the bay he has just driven out of.
 	if _way_clear(from, ground, to_goal):
 		var beyond: Vector3 = from + to_goal * 110.0
-		if _nav_hold <= 0.0 or Sim.height_at(beyond.x, beyond.z) \
+		if _nav_hold <= 0.0 or Sim.drive_height(beyond.x, beyond.z, ground + 0.6 + 110.0 * 0.12) \
 				>= Sim.sea_at(beyond.x, beyond.z) + 1.0:
 			_nav_way = to_goal
 			if _nav_hold <= 0.0:
@@ -1532,6 +1536,19 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 	for i in nw:
 		_w_wp[i] = xf * _w_lp[i]
 	var gnd := Sim.wheel_ground(_w_wp, _w_r)
+	# and a bridge deck under any wheel that is up at its level: the field
+	# does not know about decks, so without this a tank that reached the
+	# abutment drove off into the air and down to the valley floor
+	if not Sim.road_bridges.is_empty():
+		for wi in _w_wp.size():
+			var wq: Vector3 = _w_wp[wi]
+			var deck: float = Sim.bridge_floor(wq.x, wq.z, wq.y)
+			if deck > gnd[wi * 5]:
+				gnd[wi * 5] = deck
+				gnd[wi * 5 + 1] = 0.0
+				gnd[wi * 5 + 2] = 1.0
+				gnd[wi * 5 + 3] = 0.0
+				gnd[wi * 5 + 4] = 1.0
 	for i in nw:
 		var wp: Vector3 = _w_wp[i]
 		var ground: float = gnd[i * 5]

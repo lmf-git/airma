@@ -2238,6 +2238,82 @@ func _group_structures() -> void:
 				road_tunnels.append(rec)
 			i0 = i1 + 1
 
+# ---------------------------------------------------------- bridge decks
+## The road bridges as something to stand on. A deck was drawn and nothing
+## more: a vehicle that climbed the approach bank reached the abutment and fell
+## through the span to the valley floor. A deck is not part of the height field
+## -- the ground under a bridge has to stay where it is, for whatever is down
+## there -- so it is a floor for whatever arrives at its own level, which is
+## the same rule a building's upper storey is.
+const BRIDGE_HALF := 8.5            # matches `Scenery.DECK_HALF`
+const BRIDGE_LAP := 2.5             # the end panels reach this far past the stations
+## How far above something a deck can be and still be stepped onto: anything
+## further below it is underneath the bridge, not on it.
+const BRIDGE_STEP := 0.6
+var _deck_src: Array = []
+var _deck_idx: Array = []           # {lo, hi, pts, ys}
+
+func _index_bridge_decks() -> void:
+	_deck_src = road_bridges
+	_deck_idx = []
+	for br in road_bridges:
+		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
+		if pts.size() < 2 or ys.size() != pts.size():
+			continue
+		var lo := Vector2(INF, INF)
+		var hi := Vector2(-INF, -INF)
+		for q in pts:
+			lo = Vector2(minf(lo.x, q.x), minf(lo.y, q.y))
+			hi = Vector2(maxf(hi.x, q.x), maxf(hi.y, q.y))
+		var m := BRIDGE_HALF + BRIDGE_LAP + 1.0
+		_deck_idx.append({"lo": lo - Vector2(m, m), "hi": hi + Vector2(m, m), "pts": pts, "ys": ys})
+
+## The top of a road bridge's deck at (x, z), for something at height `y_ref`:
+## -1e9 when there is no deck there, or when it is more than a step above.
+func bridge_floor(x: float, z: float, y_ref: float) -> float:
+	if road_bridges.is_empty():
+		return -1e9
+	if not is_same(_deck_src, road_bridges):
+		_index_bridge_decks()
+	var best := -1e9
+	var q := Vector2(x, z)
+	for b in _deck_idx:
+		var lo: Vector2 = b["lo"]
+		var hi: Vector2 = b["hi"]
+		if x < lo.x or x > hi.x or z < lo.y or z > hi.y:
+			continue
+		var pts: PackedVector2Array = b["pts"]
+		var ys: PackedFloat32Array = b["ys"]
+		var last := pts.size() - 2
+		for i in pts.size() - 1:
+			var a: Vector2 = pts[i]
+			var c: Vector2 = pts[i + 1]
+			var run := a.distance_to(c)
+			if run < 0.5:
+				continue
+			var dir := (c - a) / run
+			var a2 := a - dir * BRIDGE_LAP if i == 0 else a
+			var c2 := c + dir * BRIDGE_LAP if i == last else c
+			var span := a2.distance_to(c2)
+			var t: float = (q - a2).dot(dir)
+			if t < 0.0 or t > span:
+				continue
+			var off: float = absf((q - a2).dot(Vector2(-dir.y, dir.x)))
+			if off > BRIDGE_HALF:
+				continue
+			# along the station-to-station profile, as the deck is drawn
+			var f: float = clampf((t - (a.distance_to(a2))) / run, 0.0, 1.0)
+			var y: float = lerpf(ys[i], ys[i + 1], f) - planet_drop(x, z)
+			if y <= y_ref + BRIDGE_STEP and y > best:
+				best = y
+	return best
+
+## The ground, or the deck of a bridge if he is up on one: what something
+## moving on the surface stands on.
+func drive_height(x: float, z: float, y_ref: float) -> float:
+	return maxf(height_at(x, z), bridge_floor(x, z, y_ref))
+
 ## Is the road inside a structure at this station?
 func _in_structure(li: int, i: int) -> bool:
 	if li >= _road_struct.size():
@@ -2571,6 +2647,8 @@ func buildable(x: float, z: float, flat := 0.86, clearance := 4.0,
 		return false
 	if not clear_of_roads(x, z, road_clear):
 		return false
+	if not clear_of_works(x, z, road_clear):
+		return false
 	if absf(x) < 340.0 and absf(z) < 2100.0:
 		return false
 	return true
@@ -2583,6 +2661,41 @@ func clear_of_roads(x: float, z: float, half: float) -> bool:
 		return true
 	if road_distance(x, z) < 13.0 + half:            # carriageway plus kerbs
 		return false
+	return true
+
+## Clear of what the road network built that its centrelines do not show: a
+## bridge and the legs onto it, which are not in the road index at all, and the
+## bank or cutting the earthworks made, which reaches well past the kerb. A
+## town laid out by the kerb alone put houses against the abutments, under the
+## decks and half buried in the bank of a raised approach.
+const WORKS_GAP := 8.0
+func clear_of_works(x: float, z: float, half: float) -> bool:
+	var q := Vector2(x, z)
+	var need: float = BRIDGE_HALF + WORKS_GAP + half
+	for coll in [road_bridges, road_tunnels]:
+		for br in coll:
+			var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+			if pts.size() < 2:
+				continue
+			# a station or two out past each end, where the approach is
+			var a0: Vector2 = pts[0]
+			var a1: Vector2 = pts[pts.size() - 1]
+			var e0: Vector2 = a0 + (a0 - pts[1]).normalized() * 60.0
+			var e1: Vector2 = a1 + (a1 - pts[pts.size() - 2]).normalized() * 60.0
+			if _seg_dist(q, e0, a0) < need or _seg_dist(q, a1, e1) < need:
+				return false
+			for i in pts.size() - 1:
+				if _seg_dist(q, pts[i], pts[i + 1]) < need:
+					return false
+	if _corr.is_empty():
+		return true
+	# where the road has moved the ground, anywhere under the footprint
+	var r: float = half + 4.0
+	for o in [Vector2.ZERO, Vector2(r, r), Vector2(-r, r), Vector2(r, -r), Vector2(-r, -r)]:
+		var px: float = x + o.x
+		var pz: float = z + o.y
+		if absf(native.ground(px, pz, G_ALL) - native.ground(px, pz, G_ALL & ~G_ROADS)) > 0.6:
+			return false
 	return true
 
 ## Places a town must not be built over besides the aerodromes: [centre,

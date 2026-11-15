@@ -1486,7 +1486,9 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	body.in_crouch = crouching and on_floor
 	body.in_prone = prone and _slide <= 0.0
 	body.in_air = 0 if on_floor else (1 if vel.y > 0.0 else -1)
-	body.in_pitch = pitch + _recoil * 0.5
+	# the weapon follows the whole of the climb the view takes, or the sights
+	# sit below the crosshair while it settles
+	body.in_pitch = pitch + _recoil
 	body.in_ready = 0.0 if (_sprint and moving) or chute or _grab_t >= 0.0 else 1.0
 	body.in_ads = _ads
 	body.in_lean = _lean if not chute else _chute_turn

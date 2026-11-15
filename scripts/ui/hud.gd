@@ -2076,31 +2076,69 @@ func _draw_service(vp: Vector2) -> void:
 
 # ---------------------------------------------------------------- landing aid
 func _draw_landing(vp: Vector2) -> void:
-	if base == null:
+	# Whichever runway the aid is set to (TAB, "Landing runway"), worked in that
+	# field's own frame. It was worked in the world's, against a runway assumed
+	# to lie north-south at the origin: at any other field -- and the home one
+	# is turned as well now -- the needles answered for somewhere else and sat
+	# pinned at the stops whatever you did.
+	var ap := Airbase.approach_for(get_tree(), aircraft.global_position)
+	if ap.is_empty():
 		return
-	var p := aircraft.global_position
-	var aim := Vector3(0, 0, Airbase.AIM_Z)
-	var to_36 := p.z > Airbase.AIM_Z
-	var d := Vector2(p.x - aim.x, p.z - aim.z).length()
-	if not (aircraft.gear_down and d < 18000.0 and aircraft.agl < 3000.0):
+	var ab: Airbase = ap["base"]
+	var end: int = int(ap["end"])
+	var s := 1.0 if end == 36 else -1.0
+	var l: Vector3 = ab.to_local(aircraft.global_position)
+	var aim := Airbase.aim_for(end)
+	var d := Vector2(l.x - aim.x, l.z - aim.z).length()
+	if not (aircraft.gear_down and d < Airbase.AID_REACH and aircraft.agl < 3000.0):
 		return
 	var cx := vp.x * 0.5
 	var cy := vp.y * 0.5
-	var gs_ang := rad_to_deg(atan2(maxf(p.y, 0.0), maxf(d, 1.0)))
+	var gs_ang := rad_to_deg(atan2(maxf(l.y, 0.0), maxf(d, 1.0)))
+	# How far off you are: positive high, positive right of the centreline as
+	# seen flying the approach.
 	var dev_gs := clampf((gs_ang - Airbase.GLIDE) / 1.6, -1.0, 1.0)
-	var loc := p.x if to_36 else -p.x
-	var dev_loc := clampf(loc / maxf(d * 0.06, 40.0), -1.0, 1.0)
+	var dev_loc := clampf(l.x * s / maxf(d * 0.06, 40.0), -1.0, 1.0)
+	# Fly-to, as a real ILS is: each needle shows where the beam is, so you
+	# steer toward it. They were drawn fly-from -- high put the bar above the
+	# centre -- and following them took you further off.
+	var gs_bar := dev_gs
+	var loc_bar := -dev_loc
 	var half := 130.0
-	draw_line(Vector2(cx - half, cy - half * dev_gs), Vector2(cx + half, cy - half * dev_gs), Color(0.4, 0.85, 1.0, 0.9), 2.0)
-	draw_line(Vector2(cx + half * dev_loc, cy - half), Vector2(cx + half * dev_loc, cy + half), Color(0.4, 0.85, 1.0, 0.9), 2.0)
+	var on_c := Color(0.35, 1.0, 0.45, 0.95)
+	var off_c := Color(0.4, 0.85, 1.0, 0.9)
+	var gs_col := on_c if absf(dev_gs) < 0.15 else off_c
+	var loc_col := on_c if absf(dev_loc) < 0.15 else off_c
+	draw_line(Vector2(cx - half, cy + half * gs_bar), Vector2(cx + half, cy + half * gs_bar), gs_col, 2.0)
+	draw_line(Vector2(cx + half * loc_bar, cy - half), Vector2(cx + half * loc_bar, cy + half), loc_col, 2.0)
+	# The scale: half a dot and a full dot either way. The one a needle is
+	# sitting on fills in, so the dots read as how far off you are and not as
+	# decoration; the centre box is where both needles cross when you are on.
 	for i in [-1.0, -0.5, 0.5, 1.0]:
-		draw_arc(Vector2(cx + half * i, cy), 3.0, 0, TAU, 8, Color(0.4, 0.85, 1.0, 0.5), 1.0)
-		draw_arc(Vector2(cx, cy + half * i), 3.0, 0, TAU, 8, Color(0.4, 0.85, 1.0, 0.5), 1.0)
-	var txt := "RWY %s   %.1f km   GS %.1f deg" % ["36" if to_36 else "18", d * 0.001, gs_ang]
-	_txt(Vector2(cx - 150, cy + half + 26), txt, 14, Color(0.5, 0.9, 1.0))
-	if aircraft.on_ground and Sim.on_runway(p.x, p.z):
-		var heading_north: bool = (-aircraft.global_transform.basis.z).z < 0.0
-		var rem: float = (p.z + Sim.RUNWAY_LEN * 0.5) if heading_north else (Sim.RUNWAY_LEN * 0.5 - p.z)
+		var hx: bool = absf(loc_bar - i) < 0.25
+		var hy: bool = absf(gs_bar - i) < 0.25
+		draw_arc(Vector2(cx + half * i, cy), 4.0, 0, TAU, 10, Color(0.4, 0.85, 1.0, 0.55), 1.2)
+		draw_arc(Vector2(cx, cy + half * i), 4.0, 0, TAU, 10, Color(0.4, 0.85, 1.0, 0.55), 1.2)
+		if hx:
+			draw_circle(Vector2(cx + half * i, cy), 4.0, Color(0.4, 0.85, 1.0, 0.95))
+		if hy:
+			draw_circle(Vector2(cx, cy + half * i), 4.0, Color(0.4, 0.85, 1.0, 0.95))
+	var on_both := absf(dev_gs) < 0.15 and absf(dev_loc) < 0.15
+	draw_rect(Rect2(cx - 7.0, cy - 7.0, 14.0, 14.0), on_c if on_both else Color(0.4, 0.85, 1.0, 0.55), false, 1.5)
+	var cue: Array = []
+	if absf(dev_gs) >= 0.15:
+		cue.append("FLY DOWN" if dev_gs > 0.0 else "FLY UP")
+	if absf(dev_loc) >= 0.15:
+		cue.append("FLY LEFT" if loc_bar < 0.0 else "FLY RIGHT")
+	var picked := "" if Airbase.pick.is_empty() else "  [SET]"
+	var txt := "RWY %s%s   %.1f km   GS %.1f deg" % [Airbase.end_label(ab, end), picked,
+		d * 0.001, gs_ang]
+	_txt(Vector2(cx - 170, cy + half + 26), txt, 14, Color(0.5, 0.9, 1.0))
+	if not cue.is_empty() and not aircraft.on_ground:
+		_txt(Vector2(cx - 170, cy + half + 46), "   ".join(cue), 14, Color(0.5, 0.9, 1.0))
+	if aircraft.on_ground and Sim.on_runway(aircraft.global_position.x, aircraft.global_position.z):
+		var fwd_l: Vector3 = ab.global_transform.basis.inverse() * (-aircraft.global_transform.basis.z)
+		var rem: float = (l.z + Airbase.HALF) if fwd_l.z < 0.0 else (Airbase.HALF - l.z)
 		_txt(Vector2(cx - 60, cy + half + 46), "REMAINING %d m" % int(rem), 15,
 			RED if rem < 400.0 else GREEN)
 
@@ -2252,11 +2290,15 @@ func _draw_mode(vp: Vector2) -> void:
 	var y := 96.0
 	var name_map := {"conquest": "CONQUEST", "rush": "RUSH", "warlords": "WARLORDS",
 		"tdm": "TEAM DEATHMATCH", "ffa": "FREE FOR ALL", "strike": "STRIKE",
-		"cqb": "CLOSE QUARTERS", "ground": "GROUND COMBAT", "arms": "COMBAT"}
+		"cqb": "CLOSE QUARTERS", "ground": "GROUND COMBAT", "arms": "COMBAT",
+		"range": "FIRING RANGE"}
 	_txt(Vector2(0, y), str(name_map.get(st["mode"], st["mode"])).to_upper(), 15,
 		Color(0.7, 0.85, 1.0), HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 	y += 22.0
-	if st["mode"] == "strike":
+	if st["mode"] == "range":
+		# no score to keep: the boards keep their own
+		pass
+	elif st["mode"] == "strike":
 		_txt(Vector2(0, y), "WAVE %d    %d LEFT    %d DESTROYED" % [int(st["wave"]),
 			int(st["left"]), int(st["destroyed"])], 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		y += 26.0

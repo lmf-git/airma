@@ -115,6 +115,18 @@ pub fn on_runway(w: &World, x: f32, z: f32) -> bool {
 pub const ROAD_HALF: f32 = 7.5;
 pub const ROAD_SHOULDER: f32 = 24.0;
 pub const ROAD_FILL_MAX: f32 = 22.0;
+/// How far an embankment's side is graded out, per metre of fill. A fixed 24 m
+/// shoulder put a 22 m bank's side at better than one in one -- and in a town,
+/// where the platform switched the grading off altogether, at three in one:
+/// a wall along every approach to a bridge, which nothing could drive up and
+/// the terrain mesh drew as a jagged ridge. Three to one is a bank you can
+/// drive a vehicle up and walk up -- four and a half, because the blend is
+/// steepest in the middle of the bank, half again the average.
+const FILL_BATTER: f32 = 4.5;
+/// The widest shoulder an embankment is graded over.
+const SHOULDER_MAX: f32 = 100.0;
+/// How far from a leg the corridor index has to reach for that.
+const CORR_REACH: f32 = ROAD_HALF + SHOULDER_MAX;
 pub const ROAD_CUT_MAX: f32 = 34.0;
 const CORR_CELL: f32 = 64.0;
 /// How far apart in height two stretches of road may be and still be treated as
@@ -157,7 +169,9 @@ pub fn publish_corridor(legs: Vec<Leg>) {
         legs,
         grid: HashMap::new(),
     };
-    let pad = ROAD_HALF + ROAD_SHOULDER;
+    let pad = CORR_REACH;
+    // cells enough to cover `pad` either side of every point on the leg
+    let span = ((2.0 * pad) / CORR_CELL).ceil() as i32 + 1;
     for (idx, l) in c.legs.iter().enumerate() {
         let dx = l.bx - l.ax;
         let dz = l.bz - l.az;
@@ -169,8 +183,8 @@ pub fn publish_corridor(legs: Vec<Leg>) {
             let qz = l.az + dz * t;
             let ci = ((qx - pad) / CORR_CELL).floor() as i32;
             let cj = ((qz - pad) / CORR_CELL).floor() as i32;
-            for oi in 0..3 {
-                for oj in 0..3 {
+            for oi in 0..=span {
+                for oj in 0..=span {
                     let e = c.grid.entry(key(ci + oi, cj + oj)).or_default();
                     if e.last() != Some(&(idx as u32)) {
                         e.push(idx as u32);
@@ -197,10 +211,25 @@ fn foot(l: &Leg, x: f32, z: f32) -> (f32, f32) {
 /// The made surface at a point: its height, how much of it applies here, and
 /// the ground it was cut from. Zero weight means the land is left as it was.
 pub fn road_surface(c: &Corridor, x: f32, z: f32) -> (f32, f32, f32) {
+    road_surface_in(c, x, z, 0.0)
+}
+
+/// In a town the bank is not graded out. Spread over the made ground at four
+/// and a half to one, a bridge approach in the middle of a town buried its
+/// streets and the buildings beside them under a hundred metres of slope; there
+/// it stands on a retaining wall a few metres outside the carriageway instead,
+/// which is what a raised road through a town is. `town` is how much town
+/// platform applies at the point, 0 to 1.
+const TOWN_SHOULDER: f32 = 1.0;
+/// ...and the top is carried flat out past the kerbs before it drops, so the
+/// wall stands at the back of the footway rather than the bank starting at the
+/// edge of the carriageway.
+const TOWN_TOP: f32 = 1.6;
+
+pub fn road_surface_in(c: &Corridor, x: f32, z: f32, town: f32) -> (f32, f32, f32) {
     if c.legs.is_empty() {
         return (0.0, 0.0, 0.0);
     }
-    let reach = ROAD_HALF + ROAD_SHOULDER;
     let k = key((x / CORR_CELL).floor() as i32, (z / CORR_CELL).floor() as i32);
     let bucket = match c.grid.get(&k) {
         Some(b) => b,
@@ -226,6 +255,15 @@ pub fn road_surface(c: &Corridor, x: f32, z: f32) -> (f32, f32, f32) {
             near_g = lerp(l.na, l.nb, t);
         }
     }
+    // The shoulder is as wide as the bank is high, four and a half times: a road
+    // on the ground keeps the old 24 m, one on a 22 m fill grades out over 99.
+    let fill = (near_y - near_g).max(0.0);
+    let open = (fill * FILL_BATTER).clamp(ROAD_SHOULDER, SHOULDER_MAX);
+    // only a raised road closes in: one at the town's own level keeps its
+    // shoulder, which the town platform overrides anyway
+    let walled = town.clamp(0.0, 1.0) * smoothstep(1.0, 3.0, fill);
+    let inner = lerp(ROAD_HALF, ROAD_HALF * TOWN_TOP, walled);
+    let reach = inner + lerp(open, TOWN_SHOULDER, walled);
     if best > reach {
         return (0.0, 0.0, 0.0);
     }
@@ -248,9 +286,9 @@ pub fn road_surface(c: &Corridor, x: f32, z: f32) -> (f32, f32, f32) {
         wsum += w;
     }
     if wsum <= 0.0 {
-        return (near_y, 1.0 - smoothstep(ROAD_HALF, reach, best), near_g);
+        return (near_y, 1.0 - smoothstep(inner, reach, best), near_g);
     }
-    (ysum / wsum, 1.0 - smoothstep(ROAD_HALF, reach, best), gsum / wsum)
+    (ysum / wsum, 1.0 - smoothstep(inner, reach, best), gsum / wsum)
 }
 
 // ------------------------------------------------------------------ decks
@@ -713,7 +751,7 @@ pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
         // was drawn against the levelled apron and then imposed on the hillside
         // underneath it. Nothing is at risk on the runway itself -- the router
         // charges four thousand times the going rate to cross one.
-        return road_over(c, x, z, h, pad_w);
+        return road_over_with(road_surface_in(c, x, z, pad_w), h, pad_w);
     }
     h
 }
@@ -728,7 +766,7 @@ pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
 pub fn carve_road(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
         -> (f32, (f32, f32, f32)) {
     let (h, pad_w) = carve_built(w, base, x, z, flags);
-    let rs = road_surface(c, x, z);
+    let rs = road_surface_in(c, x, z, pad_w);
     let h = if flags & G_ROADS != 0 {
         road_over_with(rs, h, pad_w)
     } else {
@@ -742,7 +780,7 @@ pub fn carve_road(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32
 /// because a road through a town runs on the made ground rather than in a
 /// cutting of its own.
 #[inline]
-fn carve_built(w: &World, base: f32, x: f32, z: f32, flags: u32) -> (f32, f32) {
+pub fn carve_built(w: &World, base: f32, x: f32, z: f32, flags: u32) -> (f32, f32) {
     let mut h = base;
     let mut pad_w = 0.0f32;
     for p in &w.pads {
@@ -771,13 +809,8 @@ fn carve_built(w: &World, base: f32, x: f32, z: f32, flags: u32) -> (f32, f32) {
     (h, pad_w)
 }
 
-/// The earthworks: what the corridor does to the ground it passes over.
-#[inline]
-fn road_over(c: &Corridor, x: f32, z: f32, h: f32, pad_w: f32) -> f32 {
-    road_over_with(road_surface(c, x, z), h, pad_w)
-}
-
-/// The same with the made surface already in hand.
+/// The earthworks: what the corridor does to the ground it passes over, with
+/// the made surface already in hand.
 fn road_over_with(rs: (f32, f32, f32), h: f32, pad_w: f32) -> f32 {
     let (ry, rw, _) = rs;
     if rw <= 0.0 {
@@ -788,8 +821,11 @@ fn road_over_with(rs: (f32, f32, f32), h: f32, pad_w: f32) -> f32 {
     let mut carry = 1.0 - smoothstep(ROAD_FILL_MAX, ROAD_FILL_MAX * 2.2, ry - h);
     carry *= 1.0 - smoothstep(ROAD_CUT_MAX, ROAD_CUT_MAX * 2.4, h - ry);
     // a town has already been levelled; a road through it runs on the made
-    // ground rather than in a cutting of its own
-    carry *= 1.0 - pad_w;
+    // ground rather than in a cutting of its own -- but only a road that is
+    // near the level of it. One carried up on a bank to a bridge still has to
+    // be graded down to the town, or it stands in the streets as a wall.
+    let raised = smoothstep(2.0, 6.0, ry - h);
+    carry *= 1.0 - pad_w * (1.0 - raised);
     // The carriageway itself is always levelled; only the grading out to
     // either side of it eases off.
     let core = ((rw - 0.82) / 0.18).clamp(0.0, 1.0);

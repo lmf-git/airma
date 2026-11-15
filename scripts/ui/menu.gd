@@ -28,6 +28,7 @@ const MISSIONS := [
 	["launch", "SPACE LAUNCH", "No threats. On the pad in a three stage rocket with a capsule on top. Newton's gravity and nothing else: fly it to orbit by hand, come round the planet, and bring the capsule home under its parachute."],
 	["moon", "MOON SHOT", "No threats. On the pad in the big one: three stages and a spacecraft, three thousand tonnes. Orbit first; then a burn of three kilometres a second sends it to the moon, five days out on time warp, and another stops it there. H flies any part of it for you."],
 	["carrier", "CARRIER TRAP", "No threats. Three miles behind the boat with the hook down."],
+	["range", "FIRING RANGE", "No threats. On foot at a range on the edge of town: boards at 10 to 300 metres, every weapon on the rack behind the line and ammunition that does not run out. Each board shows its hits and where the last one went."],
 	["strike", "STRIKE", "No air threat. Armour columns, shipping and helicopters to hunt, wave after wave — nothing down there can shoot back at an aeroplane."],
 	["combat", "PATROL", "Hostile. Bandits and a SAM belt north of the field. Open the bay before you shoot."],
 ]
@@ -465,7 +466,7 @@ func mode_takes(id: String) -> String:
 	# The three fought over a town take nothing from here at all: class,
 	# weapons and vehicle are chosen on the deploy screen inside the match,
 	# where they can be changed between lives.
-	if id in ["cqb", "ground", "arms"]:
+	if id in ["cqb", "ground", "arms", "range"]:
 		return "none"
 	return "air"
 

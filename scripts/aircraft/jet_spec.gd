@@ -288,13 +288,13 @@ static func _db() -> Dictionary:
 		# The GAU-8 fires 30 mm high explosive incendiary, and it is the reason
 		# this aeroplane exists: its rounds burst where they land rather than
 		# raising the puff of dust every other cannon in the game does.
-		"gun": {"rounds": 1174, "rpm": 3900, "muzzle": 1010.0, "damage": 26.0,
+		"gun": {"rounds": 1174, "rpm": 3900, "muzzle": 1010.0, "damage": 34.0,
 				# Under the tip of the nose and a little left of centre, which is
 				# where a GAU-8 comes out: the gun is carried offset so that the
 				# barrel firing is the one on the centreline. It was 2.7 m back
 				# inside the forward fuselage, and the flash and the tracer both
 				# started from inside the cockpit section.
-				"he": 1.15, "pos": Vector3(-0.10, -0.42, -8.3)},
+				"he": 1.8, "pos": Vector3(-0.10, -0.42, -8.3)},
 		"gear": [
 			{"pos": Vector3(0.45, -1.92, -4.6), "r": 0.36, "steer": true, "brake": false, "len": 1.20},
 			{"pos": Vector3(-2.30, -1.82, 1.15), "r": 0.46, "steer": false, "brake": true, "len": 1.15},
@@ -1785,6 +1785,7 @@ static func _db() -> Dictionary:
 			]},
 		],
 		"canopy_opens": false,
+		"unmanned": true,
 		"shape": {
 			"paint": Color(0.86, 0.86, 0.84), "dark": Color(0.20, 0.21, 0.22),
 			"glass": Color(0.22, 0.24, 0.26),
@@ -1799,16 +1800,18 @@ static func _db() -> Dictionary:
 			],
 			"wing": {"poly": [Vector2(0.55, -1.1), Vector2(10.05, -0.2), Vector2(10.05, 0.7), Vector2(0.55, 1.5)],
 					 "y": 0.42, "t_root": 0.20, "t_tip": 0.07},
-			# V tail, so the "stab" is small and the fins are canted right over
-			"stab": {"poly": [Vector2(0.4, 4.4), Vector2(1.5, 4.9), Vector2(1.5, 5.5), Vector2(0.4, 5.7)],
-					 "y": 0.10, "t_root": 0.10, "t_tip": 0.05},
-			"fins": [{"x": 0.45, "cant": 38.0, "poly": [Vector2(4.1, 0.30), Vector2(5.5, 1.9), Vector2(6.0, 1.9), Vector2(6.0, 0.35)], "t": 0.11}],
+			# Y tail: two ruddervators canted up in a V and a ventral fin under
+			# the propeller to keep it off the runway. No flat tailplane -- the
+			# one that was here sat inside the V and made it read as a T.
+			"fins": [{"x": 0.22, "cant": 48.0, "poly": [Vector2(4.3, 0.18), Vector2(5.35, 1.85), Vector2(5.8, 1.85), Vector2(5.95, 0.20)], "t": 0.10}],
+			"vents": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(4.7, -0.12), Vector2(5.5, -1.05), Vector2(5.85, -1.05), Vector2(5.95, -0.12)], "t": 0.09}],
 			"canopy": {"z0": -5.0, "z1": -3.4, "w": 0.34, "h": 0.24, "y": 0.46},
+			"sensor": {"pos": Vector3(0.0, -0.86, -4.5), "r": 0.30},
 			"intakes": [],
 			"nozzles": [],
 			"nozzle_kind": "round",
 			# pusher: the propeller is behind everything
-			"props": [{"pos": Vector3(0.0, 0.0, 6.15), "r": 0.86}],
+			"props": [{"pos": Vector3(0.0, 0.10, 6.25), "r": 0.86, "pusher": true}],
 		},
 	},
 	"wingloong": {
@@ -1845,6 +1848,7 @@ static func _db() -> Dictionary:
 			]},
 		],
 		"canopy_opens": false,
+		"unmanned": true,
 		"shape": {
 			"paint": Color(0.80, 0.81, 0.80), "dark": Color(0.19, 0.20, 0.21),
 			"glass": Color(0.22, 0.24, 0.26),
@@ -1859,14 +1863,14 @@ static func _db() -> Dictionary:
 			],
 			"wing": {"poly": [Vector2(0.55, -1.1), Vector2(10.25, -0.3), Vector2(10.25, 0.6), Vector2(0.55, 1.5)],
 					 "y": 0.44, "t_root": 0.20, "t_tip": 0.07},
-			"stab": {"poly": [Vector2(0.4, 4.3), Vector2(1.6, 4.8), Vector2(1.6, 5.4), Vector2(0.4, 5.6)],
-					 "y": 0.10, "t_root": 0.10, "t_tip": 0.05},
-			"fins": [{"x": 0.45, "cant": 36.0, "poly": [Vector2(4.0, 0.30), Vector2(5.4, 1.9), Vector2(5.9, 1.9), Vector2(5.9, 0.35)], "t": 0.11}],
+			"fins": [{"x": 0.22, "cant": 45.0, "poly": [Vector2(4.2, 0.18), Vector2(5.25, 1.8), Vector2(5.7, 1.8), Vector2(5.85, 0.20)], "t": 0.10}],
+			"vents": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(4.6, -0.12), Vector2(5.4, -1.0), Vector2(5.75, -1.0), Vector2(5.85, -0.12)], "t": 0.09}],
 			"canopy": {"z0": -4.9, "z1": -3.3, "w": 0.34, "h": 0.24, "y": 0.48},
+			"sensor": {"pos": Vector3(0.0, -0.88, -4.3), "r": 0.30},
 			"intakes": [],
 			"nozzles": [],
 			"nozzle_kind": "round",
-			"props": [{"pos": Vector3(0.0, 0.0, 6.05), "r": 0.84}],
+			"props": [{"pos": Vector3(0.0, 0.10, 6.15), "r": 0.84, "pusher": true}],
 		},
 	},
 	"shahed129": {
@@ -1901,6 +1905,7 @@ static func _db() -> Dictionary:
 			]},
 		],
 		"canopy_opens": false,
+		"unmanned": true,
 		"shape": {
 			"paint": Color(0.72, 0.72, 0.68), "dark": Color(0.18, 0.19, 0.19),
 			"glass": Color(0.22, 0.24, 0.26),
@@ -1920,10 +1925,11 @@ static func _db() -> Dictionary:
 			# twin booms, so a fin each side well outboard
 			"fins": [{"x": 1.95, "cant": 0.0, "poly": [Vector2(3.2, 0.32), Vector2(3.9, 1.5), Vector2(4.5, 1.5), Vector2(4.5, 0.36)], "t": 0.10}],
 			"canopy": {"z0": -4.0, "z1": -2.8, "w": 0.30, "h": 0.20, "y": 0.40},
+			"sensor": {"pos": Vector3(0.0, -0.74, -3.4), "r": 0.26},
 			"intakes": [],
 			"nozzles": [],
 			"nozzle_kind": "round",
-			"props": [{"pos": Vector3(0.0, 0.0, 4.75), "r": 0.72}],
+			"props": [{"pos": Vector3(0.0, 0.10, 4.85), "r": 0.72, "pusher": true}],
 		},
 	},
 	"orion": {
@@ -1960,6 +1966,7 @@ static func _db() -> Dictionary:
 			]},
 		],
 		"canopy_opens": false,
+		"unmanned": true,
 		"shape": {
 			"paint": Color(0.76, 0.77, 0.75), "dark": Color(0.18, 0.19, 0.20),
 			"glass": Color(0.22, 0.24, 0.26),
@@ -1974,14 +1981,13 @@ static func _db() -> Dictionary:
 			],
 			"wing": {"poly": [Vector2(0.50, -0.95), Vector2(8.15, -0.25), Vector2(8.15, 0.65), Vector2(0.50, 1.35)],
 					 "y": 0.40, "t_root": 0.18, "t_tip": 0.06},
-			"stab": {"poly": [Vector2(0.4, 3.7), Vector2(1.4, 4.1), Vector2(1.4, 4.7), Vector2(0.4, 4.8)],
-					 "y": 0.10, "t_root": 0.10, "t_tip": 0.05},
-			"fins": [{"x": 0.40, "cant": 34.0, "poly": [Vector2(3.3, 0.28), Vector2(4.4, 1.6), Vector2(4.8, 1.6), Vector2(4.8, 0.32)], "t": 0.10}],
+			"fins": [{"x": 0.20, "cant": 42.0, "poly": [Vector2(3.5, 0.16), Vector2(4.35, 1.55), Vector2(4.7, 1.55), Vector2(4.8, 0.18)], "t": 0.09}],
 			"canopy": {"z0": -4.2, "z1": -3.0, "w": 0.30, "h": 0.20, "y": 0.42},
+			"sensor": {"pos": Vector3(0.0, -0.76, -3.6), "r": 0.26},
 			"intakes": [],
 			"nozzles": [],
 			"nozzle_kind": "round",
-			"props": [{"pos": Vector3(0.0, 0.0, 5.05), "r": 0.74}],
+			"props": [{"pos": Vector3(0.0, 0.10, 5.0), "r": 0.74, "pusher": true}],
 		},
 	},
 	"bell206": {

@@ -1537,7 +1537,7 @@ impl Terra {
     #[func]
     fn road_ribbons_bucketed(&self, legs: PackedFloat32Array, cell: f64)
             -> Array<Variant> {
-        type Cells = index::Map<i64, (Vec<Vector3>, Vec<Vector3>)>;
+        type Cells = index::Map<i64, (Vec<Vector3>, Vec<Vector3>, Vec<Vector3>)>;
         let parts = raster::ribbon_parts(legs.as_slice());
         let cell = (cell as f32).max(1.0);
         // Sorted straight out of the per-leg ribbons, across every core.
@@ -1547,7 +1547,7 @@ impl Terra {
         // before any of them reaches a bucket. Each core sorts a run of legs
         // into a map of its own and the maps are merged in order afterwards, so
         // the answer does not depend on which core finished first.
-        let sort = |src: &[[f32; 3]], kerb: bool, b: &mut Cells| {
+        let sort = |src: &[[f32; 3]], which: u8, b: &mut Cells| {
             for tri in src.chunks_exact(3) {
                 let cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0;
                 let cz = (tri[0][2] + tri[1][2] + tri[2][2]) / 3.0;
@@ -1556,7 +1556,11 @@ impl Terra {
                 let key = index::key((cx / cell).floor() as i32,
                     (cz / cell).floor() as i32);
                 let e = b.entry(key).or_default();
-                let dst = if kerb { &mut e.1 } else { &mut e.0 };
+                let dst = match which {
+                    0 => &mut e.0,
+                    1 => &mut e.1,
+                    _ => &mut e.2,
+                };
                 for q in tri {
                     dst.push(Vector3::new(q[0], q[1], q[2]));
                 }
@@ -1567,32 +1571,35 @@ impl Terra {
             .map(|run| {
                 let mut b = Cells::default();
                 for r in run {
-                    sort(&r.surf, false, &mut b);
-                    sort(&r.kerb, true, &mut b);
+                    sort(&r.surf, 0, &mut b);
+                    sort(&r.kerb, 1, &mut b);
+                    sort(&r.wall, 2, &mut b);
                 }
                 b
             })
             .collect();
         let mut buckets = Cells::default();
         for run in runs {
-            for (k, (surf, kerb)) in run {
+            for (k, (surf, kerb, wall)) in run {
                 let e = buckets.entry(k).or_default();
                 e.0.extend_from_slice(&surf);
                 e.1.extend_from_slice(&kerb);
+                e.2.extend_from_slice(&wall);
             }
         }
-        // Comes back flat: cell x, cell z, surface, kerb, for each non-empty
+        // Comes back flat: cell x, cell z, surface, kerb, wall, for each non-empty
         // cell. In a settled order, because the meshes are named after the
         // cell and a harness finds them by name.
         let mut keys: Vec<i64> = buckets.keys().copied().collect();
         keys.sort_unstable();
         let mut out: Array<Variant> = Array::new();
         for k in keys {
-            let (surf, kerb) = &buckets[&k];
+            let (surf, kerb, wall) = &buckets[&k];
             out.push(&((k >> 32) as i32 as i64).to_variant());
             out.push(&((k & 0xffff_ffff) as u32 as i32 as i64).to_variant());
             out.push(&PackedVector3Array::from(surf.as_slice()).to_variant());
             out.push(&PackedVector3Array::from(kerb.as_slice()).to_variant());
+            out.push(&PackedVector3Array::from(wall.as_slice()).to_variant());
         }
         out
     }

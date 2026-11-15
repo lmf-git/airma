@@ -2467,7 +2467,8 @@ func explode(with_pilot := true) -> void:
 	wrecked = true
 	health = 0.0
 	wreck_visuals()
-	if not with_pilot:
+	# nobody aboard a drone to throw clear
+	if not with_pilot or bool(spec.get("unmanned", false)):
 		died.emit(self)
 		return
 	var rd := Ragdoll.new()

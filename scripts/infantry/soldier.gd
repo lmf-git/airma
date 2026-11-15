@@ -568,7 +568,7 @@ func _move(delta: float) -> void:
 	vel = flat
 	var was := global_position
 	var p: Vector3 = was + flat * delta
-	p.y = Sim.height_at(p.x, p.z)
+	p.y = Sim.drive_height(p.x, p.z, was.y)
 	if Obstacles.blocks(p, BODY_R) >= 0:
 		var try_x := Vector3(p.x, p.y, was.z)
 		var try_z := Vector3(was.x, p.y, p.z)

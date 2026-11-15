@@ -634,6 +634,334 @@ func _run_rocket_view(dir: String) -> void:
 ## on the map. --cqbfix=DIR, with --preset=cqb; pictures go in DIR.
 var _cqb_fix := ""
 
+## The highest drawn triangle over (x, z) among `meshes`, or -INF.
+func _drawn_top(meshes: Array, x: float, z: float) -> float:
+	var best := -INF
+	for mi in meshes:
+		var m := mi as MeshInstance3D
+		var ab: AABB = m.global_transform * m.get_aabb()
+		if x < ab.position.x or x > ab.end.x or z < ab.position.z or z > ab.end.z:
+			continue
+		for si in m.mesh.get_surface_count():
+			var arr: Array = m.mesh.surface_get_arrays(si)
+			var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+			var n: int = idx.size() if not idx.is_empty() else v.size()
+			var xf: Transform3D = m.global_transform
+			for t in range(0, n - 2, 3):
+				var a: Vector3 = xf * v[idx[t] if not idx.is_empty() else t]
+				var b: Vector3 = xf * v[idx[t + 1] if not idx.is_empty() else t + 1]
+				var c: Vector3 = xf * v[idx[t + 2] if not idx.is_empty() else t + 2]
+				var d := (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z)
+				if absf(d) < 1e-6:
+					continue
+				var l1 := ((b.z - c.z) * (x - c.x) + (c.x - b.x) * (z - c.z)) / d
+				var l2 := ((c.z - a.z) * (x - c.x) + (a.x - c.x) * (z - c.z)) / d
+				var l3 := 1.0 - l1 - l2
+				if l1 < -1e-4 or l2 < -1e-4 or l3 < -1e-4:
+					continue
+				best = maxf(best, a.y * l1 + b.y * l2 + c.y * l3)
+	return best
+
+func _run_ground_probe() -> void:
+	for i in 240:
+		await get_tree().physics_frame
+	var w: Walker = walker
+	var c: Vector3 = w.global_position
+	var terr: Array = []
+	var roads: Array = []
+	for n in get_tree().root.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if not mi.visible or mi.mesh == null:
+			continue
+		var nm := String(mi.name)
+		if nm.begins_with("Roads") or nm.begins_with("Kerbs"):
+			roads.append(mi)
+		elif nm.begins_with("C") and mi.get_parent() is Terrain:
+			terr.append(mi)
+	print("[ground] %d terrain chunks, %d road meshes in the scene; man at %s, standing %.2f over height_at" % [
+		terr.size(), roads.size(), str(c.round()), c.y - Sim.height_at(c.x, c.z)])
+	var worst_t := -INF
+	var worst_r := -INF
+	var sum_t := 0.0
+	var cnt := 0
+	var over_t := 0
+	var over_r := 0
+	var on_road := 0
+	for gx in range(-30, 31, 3):
+		for gz in range(-30, 31, 3):
+			var x: float = c.x + gx
+			var z: float = c.z + gz
+			var h: float = Sim.height_at(x, z)
+			var ht: float = _drawn_top(terr, x, z)
+			var hr: float = _drawn_top(roads, x, z)
+			if ht > -INF:
+				worst_t = maxf(worst_t, ht - h)
+				sum_t += ht - h
+				cnt += 1
+				if ht - h > 0.15:
+					over_t += 1
+			if hr > -INF:
+				on_road += 1
+				worst_r = maxf(worst_r, hr - h)
+				if hr - h > 0.15:
+					over_r += 1
+	print("[ground] terrain drawn over the ground: worst %+.2f m, mean %+.2f m, %d of %d points more than 15 cm up" % [
+		worst_t, sum_t / maxf(cnt, 1), over_t, cnt])
+	print("[ground] road drawn over the ground: worst %+.2f m, %d of %d road points more than 15 cm up" % [
+		worst_r, over_r, on_road])
+	# and every town's streets, not just this one
+	var streets: Array = scenery.get("_streets") if is_instance_valid(scenery) else []
+	var rw := -INF
+	var rn := 0
+	var rover := 0
+	var tw := -INF
+	var tover := 0
+	for k in mini(streets.size(), 1500):
+		var st: Array = streets[(k * 7919) % streets.size()]
+		var a: Vector2 = st[0]
+		var b: Vector2 = st[1]
+		var q: Vector2 = a.lerp(b, randf())
+		var h2: float = Sim.height_at(q.x, q.y)
+		var hr2: float = _drawn_top(roads, q.x, q.y)
+		if hr2 > -INF:
+			rn += 1
+			rw = maxf(rw, hr2 - h2)
+			if hr2 - h2 > 0.15:
+				rover += 1
+		var ht2: float = _drawn_top(terr, q.x, q.y)
+		if ht2 > -INF:
+			tw = maxf(tw, ht2 - h2)
+			if ht2 - h2 > 0.15:
+				tover += 1
+	print("[ground] across %d street points in every town: road worst %+.2f m (%d over 15 cm); terrain worst %+.2f m (%d over 15 cm)" % [
+		rn, rw, rover, tw, tover])
+	get_tree().quit()
+
+func _run_bridge_drive() -> void:
+	for i in 30:
+		await get_tree().physics_frame
+	var ok := 0
+	var tried := 0
+	for br in Sim.road_bridges:
+		var pts: PackedVector2Array = br["pts"]
+		var ys: PackedFloat32Array = br["ys"]
+		if pts.size() < 2:
+			continue
+		var a: Vector2 = pts[0]
+		var b: Vector2 = pts[pts.size() - 1]
+		var out_a: Vector2 = (a - pts[1]).normalized()
+		var out_b: Vector2 = (b - pts[pts.size() - 2]).normalized()
+		var start2: Vector2 = a + out_a * 45.0
+		var goal2: Vector2 = b + out_b * 300.0
+		var start := Vector3(start2.x, Sim.height_at(start2.x, start2.y), start2.y)
+		var head: float = atan2(out_a.x, out_a.y)          # facing back along -out
+		var t := _spawn_tank(start, head, 0, "humvee")
+		t.ai = true
+		t.ai_goal = Vector3(goal2.x, Sim.height_at(goal2.x, goal2.y), goal2.y)
+		tried += 1
+		var mid: Vector2 = pts[int(pts.size() / 2.0)]
+		var mid_deck: float = ys[int(ys.size() / 2.0)] - Sim.planet_drop(mid.x, mid.y)
+		var crossed := false
+		var fell := false
+		var worst := 0.0
+		for f in 60 * 90:
+			await get_tree().physics_frame
+			if not is_instance_valid(t):
+				break
+			var p: Vector3 = t.global_position
+			if f % 300 == 0:
+				print("[bridgedrive]   t=%ds at %s, %.0f m to go; speed %.1f throttle %.2f steer %+.2f brake %s; building %d; floor %.1f deck %.1f" % [
+					int(f / 60.0), str(p.round()), Vector2(p.x, p.z).distance_to(goal2),
+					t.speed, t.in_throttle, t.in_steer, str(t.in_brake),
+					Obstacles.hit(p, t.hull_radius()), Sim.height_at(p.x, p.z),
+					Sim.bridge_floor(p.x, p.z, p.y)])
+			var deck: float = Sim.bridge_floor(p.x, p.z, p.y)
+			var on_span: bool = Sim.height_at(p.x, p.z) < mid_deck - 4.0 \
+				and Vector2(p.x, p.z).distance_to(mid) < a.distance_to(b) * 0.5
+			if on_span:
+				if deck < -1e8 or p.y < deck - 1.5:
+					fell = true
+					break
+				worst = maxf(worst, absf(p.y - deck - t.rest_height()))
+			# across: at the far abutment, still up at the deck's level
+			if Vector2(p.x, p.z).distance_to(b) < 25.0:
+				crossed = true
+				break
+		print("[bridgedrive] bridge %s -> %s (%.0f m, ground under the middle %.0f m below the deck): %s, rode the deck within %.2f m" % [
+			str(a.round()), str(b.round()), a.distance_to(b),
+			mid_deck - Sim.height_at(mid.x, mid.y),
+			"FELL THROUGH" if fell else ("crossed" if crossed else "did not get across"), worst])
+		if crossed and not fell:
+			ok += 1
+		if is_instance_valid(t):
+			t.queue_free()
+	print("[bridgedrive] RESULT: %s — %d of %d crossed" % ["ok" if ok == tried else "FAILED", ok, tried])
+	get_tree().quit()
+
+func _run_bridge_probe() -> void:
+	for i in 30:
+		await get_tree().physics_frame
+	var ends: Array = []
+	for br in Sim.road_bridges:
+		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
+		if pts.size() < 2:
+			continue
+		for e in 2:
+			var a: Vector2 = pts[0] if e == 0 else pts[pts.size() - 1]
+			var inner: Vector2 = pts[1] if e == 0 else pts[pts.size() - 2]
+			var ya: float = ys[0] if e == 0 else ys[ys.size() - 1]
+			var out: Vector2 = (a - inner).normalized()
+			var side := Vector2(-out.y, out.x)
+			var hs: Array = []
+			var worst_g := 0.0
+			var worst_x := 0.0
+			var rough := 0.0
+			# along the road itself, not a straight line off the end of the deck:
+			# the surveyed line through this end, walked away from the span
+			var path := PackedVector2Array()
+			var lines: Array = Sim.road_lines()
+			for ln in lines:
+				var pl: PackedVector2Array = ln
+				for si in pl.size():
+					if pl[si].distance_to(a) < 0.5:
+						var stepdir: int = -1 if (si + 1 < pl.size() and pl[si + 1].distance_to(inner) < 0.5) else 1
+						var at_i: int = si
+						path.append(pl[si])
+						while path.size() < 40 and at_i + stepdir >= 0 and at_i + stepdir < pl.size():
+							at_i += stepdir
+							path.append(pl[at_i])
+						break
+				if path.size() > 0:
+					break
+			var walk: Array = []
+			if path.size() >= 2:
+				var acc := 0.0
+				for pi2 in path.size() - 1:
+					var p0: Vector2 = path[pi2]
+					var p1: Vector2 = path[pi2 + 1]
+					var seg: float = p0.distance_to(p1)
+					var d2 := 0.0
+					while d2 < seg and walk.size() < 151:
+						walk.append([p0.lerp(p1, d2 / maxf(seg, 0.001)), (p1 - p0).normalized()])
+						d2 += 2.0
+					acc += seg
+			else:
+				for k in 151:
+					walk.append([a + out * float(k) * 2.0, out])
+			for k in walk.size():
+				var q: Vector2 = walk[k][0]
+				side = Vector2(-(walk[k][1] as Vector2).y, (walk[k][1] as Vector2).x)
+				hs.append(Sim.height_at(q.x, q.y))
+				var l: Vector2 = q + side * 5.0
+				var r: Vector2 = q - side * 5.0
+				worst_x = maxf(worst_x, absf(Sim.height_at(l.x, l.y) - Sim.height_at(r.x, r.y)) / 10.0)
+			for k in range(5, hs.size()):
+				worst_g = maxf(worst_g, absf(float(hs[k]) - float(hs[k - 5])) / 10.0)
+			for k in range(1, hs.size() - 1):
+				rough = maxf(rough, absf(float(hs[k + 1]) - 2.0 * float(hs[k]) + float(hs[k - 1])))
+			var town: float = sqrt(Sim.pad_weight(a.x, a.y))
+			# the bank's sides: off the road either way, a little way out
+			var side_worst := 0.0
+			for along in [10.0, 40.0, 80.0]:
+				var c0: Vector2 = a + out * along
+				for sgn in [-1.0, 1.0]:
+					var prev: float = Sim.height_at(c0.x, c0.y)
+					for st in range(2, 46):
+						var q1: Vector2 = c0 + side * sgn * float(st) * 2.0
+						var hq: float = Sim.height_at(q1.x, q1.y)
+						if st >= 5:
+							side_worst = maxf(side_worst, absf(hq - prev) / 2.0)
+						prev = hq
+			ends.append({"at": a, "step": ya - float(hs[0]) - Sim.planet_drop(a.x, a.y), "grade": worst_g,
+				"cross": worst_x, "rough": rough, "town": town, "side": side_worst})
+	ends.sort_custom(func(x: Dictionary, y: Dictionary) -> bool:
+		return float(x["grade"]) > float(y["grade"]))
+	var steep := 0
+	for e2 in ends:
+		if float(e2["grade"]) > 0.15:
+			steep += 1
+	var walls := 0
+	var wall_tris := 0
+	if is_instance_valid(scenery):
+		for n in scenery.get_children():
+			if String(n.name).begins_with("Walls") and n is MeshInstance3D:
+				walls += 1
+				wall_tris += int(((n as MeshInstance3D).mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3.0)
+	print("[bridge] %d retaining wall meshes, %d triangles" % [walls, wall_tris])
+	print("[bridge] %d bridge ends; %d with ground steeper than 15%% within 300 m" % [ends.size(), steep])
+	for i in mini(ends.size(), 10):
+		var e3: Dictionary = ends[i]
+		print("[bridge]   at %s: deck %+.1f m over the ground at the abutment, grade %.0f%%, cross fall %.0f%%, bank sides up to %.0f%%, roughness %.2f m, town weight %.2f" % [
+			str((e3["at"] as Vector2).round()), float(e3["step"]), float(e3["grade"]) * 100.0,
+			float(e3["cross"]) * 100.0, float(e3["side"]) * 100.0, float(e3["rough"]), float(e3["town"])])
+	get_tree().quit()
+
+func _run_range_test() -> void:
+	for i in 120:
+		await get_tree().physics_frame
+	var g: Dictionary = Firearm.spec("dmr")
+	var eye: Vector3 = walker.global_position + Vector3(0, 1.5, 0)
+	var bad := 0
+	for t in firing_range.targets:
+		var rt: FiringRange.RangeTarget = t
+		var aim_at: Vector3 = rt.global_position + Vector3(0, FiringRange.RangeTarget.CENTRE_Y, 0)
+		for k in 10:
+			# held up for the drop, the way the walker lays a shot
+			var d: Vector3 = walker._lay(eye, aim_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
+			Firearm.fire(self, walker, 0, g, eye, d, 0.0)
+			for f in 3:
+				await get_tree().physics_frame
+		for f in 60:
+			await get_tree().physics_frame
+		var los: float = Firearm.sight_range(eye, (aim_at - eye).normalized(), eye.distance_to(aim_at) + 5.0)
+		print("[range] %3d m board: %d of 10 counted (line of sight clear to %.0f of %.0f m; ground at board %+.1f m vs line)" % [
+			int(rt.distance), rt.hits, los, eye.distance_to(aim_at),
+			Sim.height_at(rt.global_position.x, rt.global_position.z) - rt.global_position.y])
+		if rt.hits < 8:
+			bad += 1
+	print("[range] RESULT: %s" % ("ok" if bad == 0 else "FAILED — %d boards missed rounds" % bad))
+	get_tree().quit()
+
+func _run_sight_test() -> void:
+	for i in 90:
+		await get_tree().physics_frame
+	var w: Walker = walker
+	w.hold_ads = true
+	var worst := 0.0
+	for i in Firearm.KIT.size():
+		var g: Dictionary = Firearm.KIT[i]
+		w._take_up(i, false)
+		for f in 70:
+			await get_tree().physics_frame
+		var res: Array = []
+		for phase in ["still", "recoil"]:
+			if phase == "recoil":
+				w.body.kick(1.0)
+				var k: float = float(g["kick"])
+				w.pitch += k * 0.45
+				w._recoil = minf(w._recoil + k * 0.9, 0.12)
+				await get_tree().physics_frame
+				await get_tree().physics_frame
+			await get_tree().process_frame
+			var cam_xf: Transform3D = w.cam.global_transform
+			var gx: Transform3D = w.body.gun_node.global_transform
+			var look: Vector3 = -cam_xf.basis.z
+			var bore: Vector3 = -gx.basis.z
+			var ang: float = rad_to_deg(look.angle_to(bore)) * 60.0   # minutes of angle
+			# the sight line: `sight` above the bore, along it
+			var sp: Vector3 = gx * Vector3(0, float(g["sight"]), -0.05)
+			var rel: Vector3 = cam_xf.affine_inverse() * sp
+			res.append("%s %.0f MOA, sight %+.1f/%+.1f cm off the eye" % [phase, ang,
+				rel.x * 100.0, rel.y * 100.0])
+			if phase == "still":
+				worst = maxf(worst, ang)
+		print("[sight] %-10s %s" % [String(g["id"]), "; ".join(PackedStringArray(res))])
+		w._recoil = 0.0
+	print("[sight] worst at rest: %.0f MOA" % worst)
+	get_tree().quit()
+
 func _run_cqb_fix(dir: String) -> void:
 	_shot_frames = 1 << 30
 	for i in 60:
@@ -1938,6 +2266,21 @@ var _fleet_t := 0.0
 var _fleet_p0 := Vector3.ZERO
 var _aim_test := false
 var _aim_t := 0.0
+## Every weapon brought up to the eye: how far its sight line is off the line
+## the rounds are sent down. --preset=cqb:f16 --sighttest
+var _sight_test := false
+## How far the drawn ground -- terrain chunks and road ribbons -- stands above
+## the ground a man actually stands on, around where he is. --preset=cqb:f16 --groundprobe
+var _ground_probe := false
+## Ten aimed rounds at every board on the range, and how many it counted.
+## --preset=range:f16 --rangetest
+var _range_test := false
+## The ground at every bridge end, walked out along the road: how steep, how
+## rough and how far below the deck. --preset=free:f16 --bridgeprobe
+var _bridge_probe := false
+## An AI tank sent across every road bridge: does it ride the deck or fall
+## through it? --preset=free:f16 --bridgedrive
+var _bridge_drive := false
 var _seat_test := false
 var _seat_t := 0.0
 var _key_test := ""
@@ -7822,11 +8165,11 @@ func _tick_world(delta: float) -> void:
 		var cut: Array = Sim.native.road_ribbons_bucketed(legs2,
 			Scenery.ROAD_BUCKET)
 		var bucket_n := 0
-		for ci in range(0, cut.size(), 4):
+		for ci in range(0, cut.size(), 5):
 			bucket_n += int(((cut[ci + 2] as PackedVector3Array).size()
 				+ (cut[ci + 3] as PackedVector3Array).size()) / 3.0)
 		print("[roads] the ribbons are %d triangles whole and %d cut into %d buckets" % [
-			whole_n, bucket_n, int(cut.size() / 4.0)])
+			whole_n, bucket_n, int(cut.size() / 5.0)])
 		print("[roads] %d routes; the worst walks %.2fx the distance between its ends (from %s); %d walk more than twice it" % [
 			lp_lines.size(), lp_detour, str(lp_at.round()), lp_loops])
 		print("[roads] %d of %d bends turn back on themselves by more than 120 deg" % [
@@ -9758,6 +10101,26 @@ func _tick_world(delta: float) -> void:
 			walker.reloading = walker._reload_span * 0.55
 		if cv == "look":
 			walker.pitch = -0.9
+		if cv.begins_with("prone"):
+			walker.prone = true
+			walker.pitch = 0.0
+			if cv == "pronetp":
+				walker.third = true
+	if _sight_test and is_instance_valid(walker) and is_instance_valid(walker.body):
+		_sight_test = false
+		_run_sight_test()
+	if _ground_probe and is_instance_valid(walker):
+		_ground_probe = false
+		_run_ground_probe()
+	if _bridge_probe and running:
+		_bridge_probe = false
+		_run_bridge_probe()
+	if _bridge_drive and running:
+		_bridge_drive = false
+		_run_bridge_drive()
+	if _range_test and is_instance_valid(walker) and is_instance_valid(firing_range):
+		_range_test = false
+		_run_range_test()
 	if _aim_test and is_instance_valid(walker) and is_instance_valid(walker.body):
 		_aim_t += delta
 		if _aim_t > 2.0:
@@ -10181,7 +10544,7 @@ func _start(id: String, mission: String) -> void:
 	# which suits a gun or a launcher as well as it does a jet.
 	var keep := mission == "strike" or mission in ["ground", "arms"]
 	# "foot" is a choice in the modes that are fought over a town: no vehicle
-	_cqb_on_foot = id == "foot" or mission == "cqb"
+	_cqb_on_foot = id == "foot" or mission in ["cqb", "range"]
 	if id == "foot":
 		# whatever aeroplane was last looked at in the hangar says whose side
 		# this is, which is what the deploy screen offers vehicles from
@@ -10280,7 +10643,11 @@ func _start(id: String, mission: String) -> void:
 	map.aircraft = player
 	if "pod" in player:
 		player.pod = pod
-	base.watcher = player
+	for ab in bases:
+		if is_instance_valid(ab):
+			(ab as Airbase).watcher = player
+	if is_instance_valid(base):
+		base.watcher = player
 	_reset_interp.call_deferred(player)
 
 	var gear_h := 0.0
@@ -10338,7 +10705,7 @@ func _start(id: String, mission: String) -> void:
 				Sim.Ev.INFO)
 		"conquest", "rush", "warlords", "tdm", "ffa":
 			_setup_battle(mission)
-		"cqb", "ground", "arms":
+		"cqb", "ground", "arms", "range":
 			_setup_cqb(mission)
 		"carrier":
 			_setup_carrier_approach()
@@ -10378,7 +10745,8 @@ func _reset_interp(n: Node3D) -> void:
 # ------------------------------------------------------------- boarding
 ## Walk out, climb the ladder, strap in, canopy down. Any key skips it.
 func _begin_boarding(from_ladder := false) -> void:
-	if _skip_board or _auto != "":
+	# Nobody climbs into a drone: it is flown from a ground station.
+	if _skip_board or _auto != "" or bool(player.spec.get("unmanned", false)):
 		player.set_canopy(false, true)
 		return
 	boarding = true
@@ -10814,10 +11182,12 @@ func _setup_cqb(kind := "cqb") -> void:
 		var site: Dictionary = scenery.sites[clampi(CqbMatch.town, 0, scenery.sites.size() - 1)]
 		town = site["c"]
 		town_name = String(site.get("name", "town"))
-	Sim.report("the fight is in %s" % town_name, Sim.Ev.INFO)
+	if kind != "range":
+		Sim.report("the fight is in %s" % town_name, Sim.Ev.INFO)
 	cqb = CqbMatch.new()
 	cqb.name = "Cqb"
-	cqb.armour = kind != "cqb"
+	cqb.armour = kind not in ["cqb", "range"]
+	cqb.range_mode = kind == "range"
 	cqb.air = kind == "arms"
 	if is_instance_valid(scenery) and not scenery.sites.is_empty():
 		cqb.site = scenery.sites[clampi(CqbMatch.town, 0, scenery.sites.size() - 1)]
@@ -10839,10 +11209,12 @@ func _setup_cqb(kind := "cqb") -> void:
 	# it -- and comes back with the next mission.
 	_bounds_c = c3
 	_bounds_ground = BOUNDS_CQB if kind == "cqb" else BOUNDS_GROUND
+	if kind == "range":
+		_bounds_ground = BOUNDS_CQB + FiringRange.LANE_LEN + 450.0
 	_bounds_air = BOUNDS_AIR if kind == "arms" else 0.0
 	_oob_t = 0.0
 	_hide_far_scenery(c3, (_bounds_air + 10000.0) if kind == "arms" else (_bounds_ground + 1500.0))
-	if kind != "cqb":
+	if kind not in ["cqb", "range"]:
 		_cqb_armour(c3)
 	if kind == "arms":
 		_cqb_air(c3)
@@ -10870,6 +11242,9 @@ func _setup_cqb(kind := "cqb") -> void:
 		Sim.report("you are crewing the %s — the fight is up the street; U to get out and go on foot"
 			% mine.display_name(), Sim.Ev.INFO)
 		return
+	if kind == "range":
+		_setup_range(c3)
+		return
 	_spawn_walker(cqb.spawn_point(0, 0))
 	walker.yaw = 0.0                       # facing up the street, at them
 	cqb.set_player(walker)
@@ -10878,6 +11253,30 @@ func _setup_cqb(kind := "cqb") -> void:
 	_cqb_deploy(true)
 
 var _cqb_on_foot := false
+var firing_range: FiringRange = null
+
+## The range goes out from the edge of the town, along whichever bearing has
+## three hundred metres of open ground in front of it, and the man starts on
+## the line facing down it.
+func _setup_range(c3: Vector3) -> void:
+	if is_instance_valid(firing_range):
+		firing_range.queue_free()
+	var site: Array = FiringRange.site_near(c3)
+	var at: Vector3 = c3
+	var facing := Vector3.FORWARD
+	if not site.is_empty():
+		at = site[0]
+		facing = site[1]
+	firing_range = FiringRange.new()
+	firing_range.name = "FiringRange"
+	firing_range.setup(self, at, facing)
+	add_child(firing_range)
+	# the edges are round the range, not the town
+	_bounds_c = at + facing * FiringRange.LANE_LEN * 0.5
+	_spawn_walker(at - facing * 1.5)
+	walker.yaw = atan2(-facing.x, -facing.z)
+	cqb.set_player(walker)
+	_cqb_deploy(true)
 
 # ---------------------------------------------------------- town dressing
 ## What is standing in the streets of each town that has been visited, by its
@@ -13557,6 +13956,9 @@ func _do_aircraft_action(id: String) -> void:
 			player.toggle_gear()
 		"flaps":
 			player.flaps = 0.0 if player.flaps > 0.5 else 1.0
+		"rwy":
+			Airbase.cycle_pick(get_tree(), player.global_position)
+			player.say("landing aid: " + Airbase.pick_label(get_tree(), player.global_position))
 		"canopy":
 			player.set_canopy(not player.canopy_open)
 		"ramp":
@@ -14391,7 +14793,11 @@ func _board(jet: Node) -> void:
 	map.aircraft = player
 	if "pod" in player:
 		player.pod = pod
-	base.watcher = player
+	for ab in bases:
+		if is_instance_valid(ab):
+			(ab as Airbase).watcher = player
+	if is_instance_valid(base):
+		base.watcher = player
 	if audio:
 		audio.aircraft = player
 	if not player.died.is_connected(_on_player_died):
@@ -14453,6 +14859,9 @@ func _clear_mission() -> void:
 		map.pick_marks.clear()
 	# the next mission decides for itself whether the range is a safe one
 	Sim.no_air_threat = false
+	if is_instance_valid(firing_range):
+		firing_range.queue_free()
+	firing_range = null
 	on_foot = false
 	if is_instance_valid(walker):
 		walker.queue_free()
@@ -16899,6 +17308,16 @@ func _parse_cmdline() -> void:
 			_pod_test = true
 		elif a == "--aimtest":
 			_aim_test = true
+		elif a == "--sighttest":
+			_sight_test = true
+		elif a == "--groundprobe":
+			_ground_probe = true
+		elif a == "--rangetest":
+			_range_test = true
+		elif a == "--bridgeprobe":
+			_bridge_probe = true
+		elif a == "--bridgedrive":
+			_bridge_drive = true
 		elif a == "--seattest":
 			_seat_test = true
 		elif a.begins_with("--keytest="):

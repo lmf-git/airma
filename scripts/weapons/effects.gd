@@ -897,10 +897,32 @@ static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -
 ## is a string of small detonations. The flash, a fireball, and the dirty smoke
 ## that hangs afterwards -- built from the same cheap pieces a bomb burst uses,
 ## because a hundred rounds a second of these have to stay affordable.
-static func he_impact(world: Node, pos: Vector3, scale := 1.0) -> void:
+## `dmg` and `shooter`, when given, are the shell's own: a burst also catches
+## anything with a hull that it lands beside. Without that a cannon shell did
+## nothing at all to a vehicle unless it struck it squarely -- a GAU-8 burst
+## walked across a column a metre short of every tank left them all untouched.
+static func he_impact(world: Node, pos: Vector3, scale := 1.0, dmg := 0.0,
+		shooter: Node = null, team := -1) -> void:
 	if world == null or not is_instance_valid(world):
 		return
 	_blast_infantry(world, pos, 3.2 * scale)
+	if dmg > 0.0 and world.is_inside_tree():
+		var rv: float = 2.4 * scale
+		for n in world.get_tree().get_nodes_in_group("hittable"):
+			if not is_instance_valid(n) or n == shooter or not (n is Node3D) \
+					or n.is_in_group("infantry") or not n.has_method("take_hit"):
+				continue
+			if team >= 0 and ("team" in n) and int(n.team) == team:
+				continue
+			if n.has_method("is_alive") and not n.is_alive():
+				continue
+			var d: float = (n as Node3D).global_position.distance_to(pos)
+			if n.has_method("surface_gap"):
+				d = maxf(float(n.call("surface_gap", pos)), 0.0)
+			elif n.has_method("hit_radius"):
+				d = maxf(d - float(n.call("hit_radius")), 0.0)
+			if d < rv:
+				n.take_hit(dmg * 0.55 * (1.0 - d / rv), shooter if is_instance_valid(shooter) else null)
 	var f := Flash.new()
 	f.size = 0.85 * scale
 	f.dir = Vector3.UP
@@ -1591,7 +1613,7 @@ class Tracer extends Node3D:
 			# just short of the face, so the burst is on this side of it
 			var face: Vector3 = end - vel.normalized() * 0.08
 			if he > 0.0:
-				Effects.he_impact(get_tree().current_scene, face, he * 0.85)
+				Effects.he_impact(get_tree().current_scene, face, he * 0.85, dmg, shooter, team)
 			else:
 				Effects.bullet_impact(get_tree().current_scene, face, true)
 			queue_free()
@@ -1599,7 +1621,7 @@ class Tracer extends Node3D:
 		if dirt_t < 1.0 or end.y < Sim.height_at(end.x, end.z):
 			ended_at = end
 			if he > 0.0:
-				Effects.he_impact(get_tree().current_scene, end, he * 0.85)
+				Effects.he_impact(get_tree().current_scene, end, he * 0.85, dmg, shooter, team)
 			else:
 				Effects.dust(get_tree().current_scene, end, 0.5 if light else 1.6)
 			queue_free()
@@ -1701,7 +1723,9 @@ class Tracer extends Node3D:
 			elif heavy and best is Tank:
 				# half an inch of steel core does not stop on a scout car
 				best.take_hit(dmg * 0.3, shooter if is_instance_valid(shooter) else null)
-			if best.has_method("bullet_hit"):
+			# a range board is paper on a post, not a man
+			var flesh: bool = best.has_method("bullet_hit") and not best.is_in_group("range_target")
+			if flesh:
 				Effects.blood(world, where)
 			else:
 				Effects.bullet_impact(world, where, true)
@@ -1710,7 +1734,7 @@ class Tracer extends Node3D:
 					and not best.is_alive()
 				shooter.hit_confirm(best_k > 1.5, dead_now)
 			# through him and on, if it has it left to give
-			if best.has_method("bullet_hit") and pen >= MAN_COST:
+			if flesh and pen >= MAN_COST:
 				pen -= MAN_COST
 				dmg *= 0.7
 				_struck.append(best)

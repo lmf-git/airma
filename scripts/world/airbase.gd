@@ -34,6 +34,94 @@ static var _shared: Dictionary = {}
 ## own hangars and the menu reported each one as a kill.
 var team := 0
 
+func _enter_tree() -> void:
+	add_to_group("airbase")
+
+# ---------------------------------------------------------------- approaches
+## Which runway end the landing aid is set to: {"base", "end"}, `end` being 36
+## (landing toward local -z) or 18. Empty is AUTO -- the nearest field, and
+## whichever end of it the aeroplane is out beyond.
+static var pick: Dictionary = {}
+
+## How far out the landing aid starts answering, and how far the menu looks
+## for runways to offer.
+const AID_REACH := 18000.0
+const PICK_REACH := 40000.0
+
+## The aiming point for one end, in the field's frame.
+static func aim_for(end: int) -> Vector3:
+	return Vector3(0, 0, AIM_Z if end == 36 else -AIM_Z)
+
+## Every runway end within `reach` of `p`, nearest first.
+static func approaches(tree: SceneTree, p: Vector3, reach := PICK_REACH) -> Array:
+	var out: Array = []
+	for n in tree.get_nodes_in_group("airbase"):
+		var ab := n as Airbase
+		if ab == null or not is_instance_valid(ab):
+			continue
+		var l: Vector3 = ab.to_local(p)
+		for e in [36, 18]:
+			var a := aim_for(e)
+			var d := Vector2(l.x - a.x, l.z - a.z).length()
+			if d < reach:
+				out.append({"base": ab, "end": e, "d": d})
+	out.sort_custom(func(x: Dictionary, y: Dictionary) -> bool:
+		return float(x["d"]) < float(y["d"]))
+	return out
+
+## The approach the landing aid is flying: the one picked, while that field
+## still stands, or else the nearest field and the end the aeroplane is beyond.
+static func approach_for(tree: SceneTree, p: Vector3) -> Dictionary:
+	if not pick.is_empty() and is_instance_valid(pick.get("base")):
+		return pick
+	pick = {}
+	var best: Airbase = null
+	var bd := INF
+	for n in tree.get_nodes_in_group("airbase"):
+		var ab := n as Airbase
+		if ab == null or not is_instance_valid(ab):
+			continue
+		var d: float = ab.global_position.distance_to(p)
+		if d < bd:
+			bd = d
+			best = ab
+	if best == null:
+		return {}
+	return {"base": best, "end": 36 if best.to_local(p).z > 0.0 else 18}
+
+## AUTO, then each runway end in reach, nearest first, and round again.
+static func cycle_pick(tree: SceneTree, p: Vector3) -> void:
+	var list := approaches(tree, p)
+	var at := -1
+	for i in list.size():
+		if not pick.is_empty() and list[i]["base"] == pick.get("base") \
+				and int(list[i]["end"]) == int(pick.get("end", 0)):
+			at = i
+			break
+	var nxt := at + 1
+	pick = {} if nxt >= list.size() else {"base": list[nxt]["base"], "end": list[nxt]["end"]}
+
+## "HOME 03": whose field, and the runway number off the compass heading the
+## aeroplane lands on. The fields are not laid north-south any more, so 36 and
+## 18 were the right names only for the local frame.
+static func end_label(ab: Airbase, end: int) -> String:
+	var dir: Vector3 = ab.global_transform.basis * Vector3(0, 0, -1.0 if end == 36 else 1.0)
+	var hdg := fposmod(rad_to_deg(atan2(dir.x, -dir.z)), 360.0)
+	var num := int(roundf(hdg / 10.0))
+	if num <= 0:
+		num += 36
+	var who := String(ab.name).trim_prefix("Airbase").strip_edges().to_upper()
+	if ab.team == 0 or who == "":
+		who = "HOME" if ab.team == 0 else "FIELD"
+	return "%s %02d" % [who, num]
+
+## What the menu shows for the current setting.
+static func pick_label(tree: SceneTree, p: Vector3) -> String:
+	if not pick.is_empty() and is_instance_valid(pick.get("base")):
+		return end_label(pick["base"], int(pick["end"]))
+	var ap := approach_for(tree, p)
+	return "AUTO" if ap.is_empty() else "AUTO (%s)" % end_label(ap["base"], int(ap["end"]))
+
 func build() -> void:
 	_pavement()
 	_markings()
@@ -204,7 +292,9 @@ func _buildings() -> void:
 func _process(_dt: float) -> void:
 	if watcher == null or not is_instance_valid(watcher):
 		return
-	var p: Vector3 = watcher.global_position
+	# In the field's own frame. Taken in the world's, every PAPI on the planet
+	# was answering for the home runway at the origin.
+	var p: Vector3 = to_local(watcher.global_position)
 	var origin := Vector3(0, 0, AIM_Z)
 	var d := Vector2(p.x - origin.x, p.z - origin.z).length()
 	var ang := rad_to_deg(atan2(maxf(p.y, 0.0), maxf(d, 1.0)))

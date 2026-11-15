@@ -48,6 +48,19 @@ const DECK_CLEAR: f32 = 2.5;
 /// put on a bank, and how far clear of the ground it has to stay to qualify.
 const BRIDGE_GAP: f32 = 400.0;
 const BRIDGE_GAP_CLEAR: f32 = 6.0;
+/// Inside a town the road goes onto a deck once it is this far over the
+/// streets, rather than onto a bank. An embankment through a town either
+/// spreads across it -- burying the streets and the buildings beside them --
+/// or is walled in, and twenty metres of wall through a high street is not a
+/// road anybody builds. A viaduct leaves the town as it was underneath.
+const TOWN_FILL: f32 = 1.5;
+
+/// How much of a town the station stands in, 0 to 1.
+#[inline]
+fn town_at(x: f32, z: f32) -> f32 {
+    let w = crate::world::world();
+    crate::world::carve_built(w, 0.0, x, z, 0).1
+}
 
 /// A valley the road is carried across at the level of its rims, rather than
 /// taken down one side and up the other.
@@ -686,9 +699,11 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32],
         if a1 <= a0 {
             continue;
         }
+        let town: Vec<f32> = (a0..a1).map(|i| town_at(p[i].0, p[i].1)).collect();
         for i in a0..a1 {
             let over = y[i] - g[i];
-            flags[i] = if over > ROAD_FILL_MAX {
+            let fill_max = lerp(ROAD_FILL_MAX, TOWN_FILL, smoothstep(0.25, 0.6, town[i - a0]));
+            flags[i] = if over > fill_max {
                 F_BRIDGE
             } else if -over > ROAD_CUT_MAX {
                 F_TUNNEL
@@ -746,7 +761,10 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32],
             let mut total = 0.0f32;
             let mut wet = false;
             let mut vale = false;
+            // a raised road in a town is a viaduct however short it is
+            let mut in_town = false;
             for k in i0..=i1 {
+                in_town = in_town || (kind == F_BRIDGE && town[k - a0] > 0.5);
                 let over = (y[k] - g[k]).abs();
                 extreme = extreme.max(over);
                 total += over;
@@ -770,6 +788,7 @@ pub fn classify(p: &[(f32, f32)], y: &[f32], g: &[f32], starts: &[i32],
             let earned = run <= max_run
                 && (wet
                     || vale
+                    || in_town
                     || extreme >= always
                     || (run >= min_run && extreme >= min_deep && mean >= min_mean));
             if !earned {

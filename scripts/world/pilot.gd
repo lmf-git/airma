@@ -27,10 +27,62 @@ const HELMET := Color(0.80, 0.81, 0.83)
 const VISOR := Color(0.10, 0.09, 0.06)
 
 func _bit(size: Vector3, at: Vector3, col: Color) -> MeshInstance3D:
-	var st := MeshKit.begin()
-	MeshKit.box(st, size, at)
-	var mi := MeshKit.mi(MeshKit.finish(st, MeshKit.mat(col, 0.85, 0.0)), "Bit")
+	var key := "box%s" % str(size)
+	if not _meshes.has(key):
+		var bm := BoxMesh.new()
+		bm.size = size
+		_meshes[key] = bm
+	return _put(_meshes[key], at, col)
+
+# ------------------------------------------------------------------ shapes
+# Rounded parts rather than boxes: a limb is a capsule, a head is a ball, a
+# helmet is a dome. Every one of them is a shared resource, keyed on its size
+# and its colour, so a squad of two dozen men makes each mesh and each
+# material once -- the box figure built a fresh material for every part of
+# every man.
+static var _meshes: Dictionary = {}
+static var _mats: Dictionary = {}
+
+static func _mat(col: Color) -> StandardMaterial3D:
+	var k := col.to_html()
+	if not _mats.has(k):
+		_mats[k] = MeshKit.mat(col, 0.85, 0.0)
+	return _mats[k]
+
+func _put(m: Mesh, at: Vector3, col: Color, scl := Vector3.ONE, rot := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = "Bit"
+	mi.mesh = m
+	mi.material_override = _mat(col)
+	mi.position = at
+	mi.rotation = rot
+	mi.scale = scl
 	return mi
+
+## A capsule `len` long end to end, standing up its own Y.
+func _cap(r: float, length: float, at: Vector3, col: Color, scl := Vector3.ONE,
+		rot := Vector3.ZERO) -> MeshInstance3D:
+	var key := "cap%.3f_%.3f" % [r, length]
+	if not _meshes.has(key):
+		var cm := CapsuleMesh.new()
+		cm.radius = r
+		cm.height = maxf(length, r * 2.0 + 0.001)
+		cm.radial_segments = 10
+		cm.rings = 2
+		_meshes[key] = cm
+	return _put(_meshes[key], at, col, scl, rot)
+
+func _ball(r: float, at: Vector3, col: Color, scl := Vector3.ONE, dome := false) -> MeshInstance3D:
+	var key := "ball%.3f_%s" % [r, str(dome)]
+	if not _meshes.has(key):
+		var sm := SphereMesh.new()
+		sm.radius = r
+		sm.height = r * (1.0 if dome else 2.0)
+		sm.is_hemisphere = dome
+		sm.radial_segments = 14
+		sm.rings = 6 if dome else 8
+		_meshes[key] = sm
+	return _put(_meshes[key], at, col, scl)
 
 func _joint(parent: Node3D, at: Vector3, nm: String) -> Node3D:
 	var n := Node3D.new()
@@ -39,54 +91,79 @@ func _joint(parent: Node3D, at: Vector3, nm: String) -> Node3D:
 	parent.add_child(n)
 	return n
 
+const SKIN := Color(0.72, 0.58, 0.48)
+const GLOVE := Color(0.20, 0.20, 0.22)
+const BOOT := Color(0.12, 0.12, 0.13)
+
 ## `suit` and `helmet` are what he is wearing; `patch` is a flash on each
 ## shoulder, which is how you tell whose side a man is on across a street.
 func build(suit := SUIT, helmet := HELMET, patch := Color(0, 0, 0, 0)) -> void:
 	hips = _joint(self, Vector3(0, 0.92, 0), "Hips")
-	hips.add_child(_bit(Vector3(0.34, 0.22, 0.22), Vector3(0, 0.05, 0), suit))
+	# pelvis: a capsule lying across, flattened front to back
+	hips.add_child(_cap(0.12, 0.38, Vector3(0, 0.05, 0), suit, Vector3(1.0, 1.0, 0.78),
+		Vector3(0, 0, PI * 0.5)))
 
 	torso = _joint(hips, Vector3(0, 0.12, 0), "Torso")
-	torso.add_child(_bit(Vector3(0.40, 0.52, 0.24), Vector3(0, 0.26, 0), suit))
-	torso.add_child(_bit(Vector3(0.42, 0.16, 0.26), Vector3(0, 0.34, 0), HARNESS))
-	torso.add_child(_bit(Vector3(0.12, 0.34, 0.06), Vector3(0, 0.30, -0.13), HARNESS))
+	# chest and belly as one rounded trunk, broader than it is deep
+	torso.add_child(_cap(0.19, 0.58, Vector3(0, 0.27, 0), suit, Vector3(1.05, 1.0, 0.66)))
+	# plate carrier over it, and the strap down the back
+	torso.add_child(_cap(0.20, 0.34, Vector3(0, 0.31, 0), HARNESS, Vector3(1.06, 1.0, 0.74)))
+	torso.add_child(_bit(Vector3(0.12, 0.30, 0.05), Vector3(0, 0.30, 0.135), HARNESS))
+	# the neck, so the head is not sitting straight on the shoulders
+	torso.add_child(_cap(0.055, 0.14, Vector3(0, 0.55, 0), SKIN))
 
 	head = _joint(torso, Vector3(0, 0.56, 0), "Head")
-	head.add_child(_bit(Vector3(0.20, 0.22, 0.22), Vector3(0, 0.11, 0), Color(0.72, 0.58, 0.48)))
-	head.add_child(_bit(Vector3(0.26, 0.20, 0.27), Vector3(0, 0.16, 0), helmet))
-	head.add_child(_bit(Vector3(0.23, 0.10, 0.06), Vector3(0, 0.12, -0.13), VISOR))
-	head.add_child(_bit(Vector3(0.09, 0.10, 0.12), Vector3(-0.13, 0.06, -0.03), Color(0.2, 0.2, 0.2)))
+	head.add_child(_ball(0.105, Vector3(0, 0.115, -0.005), SKIN, Vector3(0.92, 1.08, 1.0)))
+	head.add_child(_ball(0.138, Vector3(0, 0.135, 0.008), helmet, Vector3(1.0, 0.95, 1.06), true))
+	head.add_child(_cap(0.032, 0.21, Vector3(0, 0.12, -0.098), VISOR, Vector3(1.0, 1.0, 0.7),
+		Vector3(0, 0, PI * 0.5)))
+	head.add_child(_cap(0.04, 0.10, Vector3(-0.125, 0.07, -0.02), Color(0.2, 0.2, 0.2)))
 	_head_meshes = head.get_children()
 
 	for s in [-1.0, 1.0]:
 		var sh := _joint(torso, Vector3(s * 0.25, 0.44, 0), "Shoulder")
-		sh.add_child(_bit(Vector3(0.11, 0.30, 0.12), Vector3(0, -0.15, 0), suit))
+		sh.add_child(_ball(0.072, Vector3(0, -0.01, 0), suit))
+		sh.add_child(_cap(0.058, 0.33, Vector3(0, -0.15, 0), suit))
 		if patch.a > 0.0:
-			var pm := _bit(Vector3(0.03, 0.11, 0.10), Vector3(s * 0.05, -0.09, 0), patch)
-			var lit := (pm.mesh as ArrayMesh).surface_get_material(0) as StandardMaterial3D
+			# its own material: the shared ones must not be lit up
+			var pm := MeshInstance3D.new()
+			var pbm := BoxMesh.new()
+			pbm.size = Vector3(0.03, 0.10, 0.09)
+			pm.mesh = pbm
+			var lit := MeshKit.mat(patch, 0.85, 0.0)
 			lit.emission_enabled = true
 			lit.emission = patch
 			lit.emission_energy_multiplier = 0.6
+			pm.material_override = lit
+			pm.position = Vector3(s * 0.055, -0.09, 0)
 			sh.add_child(pm)
 		var fo := _joint(sh, Vector3(0, -0.30, 0), "Elbow")
-		fo.add_child(_bit(Vector3(0.10, 0.28, 0.10), Vector3(0, -0.14, 0), suit))
-		fo.add_child(_bit(Vector3(0.10, 0.10, 0.10), Vector3(0, -0.30, 0), Color(0.20, 0.20, 0.22)))
+		fo.add_child(_ball(0.055, Vector3.ZERO, suit))
+		fo.add_child(_cap(0.050, 0.29, Vector3(0, -0.13, 0), suit))
+		var hand := _build_hand(fo, s)
 		if s < 0:
 			arm_l = sh
 			fore_l = fo
+			_hand_l = hand
 		else:
 			arm_r = sh
 			fore_r = fo
+			_hand_r = hand
 
 	for s in [-1.0, 1.0]:
 		var hp := _joint(hips, Vector3(s * 0.11, -0.04, 0), "Hip")
-		hp.add_child(_bit(Vector3(0.15, 0.44, 0.16), Vector3(0, -0.22, 0), suit))
+		hp.add_child(_cap(0.082, 0.48, Vector3(0, -0.21, 0), suit))
 		var kn := _joint(hp, Vector3(0, -0.44, 0), "Knee")
-		kn.add_child(_bit(Vector3(0.13, 0.42, 0.14), Vector3(0, -0.21, 0), suit))
+		kn.add_child(_ball(0.07, Vector3.ZERO, suit))
+		kn.add_child(_cap(0.066, 0.44, Vector3(0, -0.20, 0), suit))
 		# The boot hangs off an ankle of its own. Fixed to the shin it could
 		# only ever point where the shin pointed, so a planted foot stood on
 		# its toe whenever the knee was bent.
 		var an := _joint(kn, Vector3(0, -0.44, 0), "Ankle")
-		an.add_child(_bit(Vector3(0.14, 0.09, 0.28), Vector3(0, 0.0, -0.06), Color(0.12, 0.12, 0.13)))
+		an.add_child(_bit(Vector3(0.12, 0.035, 0.27), Vector3(0, -0.028, -0.06), BOOT))
+		an.add_child(_cap(0.058, 0.25, Vector3(0, 0.012, -0.065), BOOT,
+			Vector3(1.0, 1.0, 0.72), Vector3(PI * 0.5, 0, 0)))
+		an.add_child(_cap(0.062, 0.12, Vector3(0, 0.05, 0.0), BOOT))
 		if s < 0:
 			leg_l = hp
 			shin_l = kn
@@ -95,6 +172,142 @@ func build(suit := SUIT, helmet := HELMET, patch := Color(0, 0, 0, 0)) -> void:
 			leg_r = hp
 			shin_r = kn
 			foot_r = an
+
+# ------------------------------------------------------------------ hands
+# A hand is a wrist, a palm, four fingers of three joints and a thumb of two.
+# Holding something, the wrist is turned to it and each finger is curled round
+# it until it touches (see `_grip_fingers`); far from the camera the fingers
+# are put away and a mitt is shown instead, which is one part to draw instead
+# of fifteen.
+const FINGER_LEN := [0.040, 0.028, 0.022]
+const FINGER_AT := [-0.030, -0.010, 0.010, 0.030]
+const FINGER_R := 0.0095
+var _hand_l: Dictionary = {}
+var _hand_r: Dictionary = {}
+## Live fingers only near the camera.
+const FINGER_NEAR := 30.0
+
+func _build_hand(fo: Node3D, side: float) -> Dictionary:
+	var wrist := _joint(fo, Vector3(0, -0.275, 0), "Wrist")
+	var palm := _joint(wrist, Vector3(0, -0.05, 0), "Palm")
+	palm.add_child(_cap(0.022, 0.095, Vector3(0, -0.005, 0), GLOVE, Vector3(1.9, 1.0, 0.85)))
+	var fingers: Array = []
+	for fx in FINGER_AT:
+		var chain: Array = []
+		var parent: Node3D = palm
+		var at := Vector3(fx, -0.045, 0.0)
+		for k in FINGER_LEN.size():
+			var j := _joint(parent, at, "Finger")
+			var ln: float = FINGER_LEN[k] * (0.85 if absf(fx) > 0.02 else 1.0)
+			j.add_child(_cap(FINGER_R * (1.0 - 0.1 * k), ln + FINGER_R, Vector3(0, -ln * 0.5, 0), GLOVE))
+			chain.append(j)
+			parent = j
+			at = Vector3(0, -ln, 0)
+		fingers.append(chain)
+	# the thumb comes off the side of the palm toward the body's midline
+	var tside: float = -side
+	var t1 := _joint(palm, Vector3(tside * 0.040, -0.005, -0.012), "Thumb")
+	t1.rotation = Vector3(0.0, 0.0, tside * 0.75)
+	t1.add_child(_cap(0.011, 0.045, Vector3(0, -0.018, 0), GLOVE))
+	var t2 := _joint(t1, Vector3(0, -0.036, 0), "Thumb")
+	t2.add_child(_cap(0.010, 0.036, Vector3(0, -0.014, 0), GLOVE))
+	var mitt := _cap(0.03, 0.12, Vector3(0, -0.075, 0.0), GLOVE, Vector3(1.5, 1.0, 1.0))
+	mitt.visible = false
+	wrist.add_child(mitt)
+	return {"wrist": wrist, "palm": palm, "fingers": fingers, "thumb": [t1, t2],
+		"mitt": mitt, "side": side, "live": true}
+
+func _show_fingers(h: Dictionary, live: bool) -> void:
+	if bool(h["live"]) == live:
+		return
+	h["live"] = live
+	(h["palm"] as Node3D).visible = live
+	(h["mitt"] as Node3D).visible = not live
+
+## Turn the wrist to what the hand is holding and curl each finger round it.
+## `g` is the grip point, `axis` the line of the grip through it and `r` its
+## radius, all in world space; `palm_to` is roughly which way the palm faces.
+## The fingers are solved in the plane across the grip: a chain starting
+## beside it, laid along it and bent toward it a step at a time until the next
+## step would go into it -- which is the touch.
+func _grip_fingers(h: Dictionary, g: Vector3, axis: Vector3, r: float, palm_to: Vector3,
+		trigger: bool) -> void:
+	var wrist: Node3D = h["wrist"]
+	var fo: Node3D = wrist.get_parent()
+	var a: Vector3 = axis.normalized()
+	var fwd: Vector3 = -fo.global_transform.basis.y.normalized()
+	var d0: Vector3 = fwd - a * fwd.dot(a)
+	if d0.length() < 1e-3:
+		return
+	d0 = d0.normalized()
+	var n: Vector3 = a.cross(d0)
+	if n.dot(palm_to) < 0.0:
+		n = -n
+	# hand frame: fingers down -Y, palm toward +Z, curl about X
+	var yv: Vector3 = -d0
+	var xv: Vector3 = yv.cross(n).normalized()
+	var bw := Basis(xv, yv, n)
+	wrist.transform.basis = fo.global_transform.basis.orthonormalized().inverse() * bw
+	var rho: float = r + FINGER_R
+	# the knuckles beside the grip, on the palm's side of it
+	var root: Vector3 = g - n * rho
+	var palm_at: Vector3 = root - d0 * 0.045
+	(h["palm"] as Node3D).position = wrist.global_transform.affine_inverse() * palm_at
+	(h["palm"] as Node3D).basis = Basis()
+	var fingers: Array = h["fingers"]
+	for fi in fingers.size():
+		var chain: Array = fingers[fi]
+		var th: float
+		if trigger and fi == 0 and float(h["side"]) > 0.0:
+			# the index finger along the trigger, not round the grip
+			th = 0.30
+		elif fi == 0 and trigger:
+			th = _curl(rho, 0.85)
+		else:
+			th = _curl(rho, 1.0 - 0.08 * fi)
+		for k in chain.size():
+			(chain[k] as Node3D).rotation = Vector3(-th * (0.8 if k == 0 else 1.0), 0.0, 0.0)
+	var thumb: Array = h["thumb"]
+	(thumb[1] as Node3D).rotation = Vector3(-0.6, 0.0, 0.0)
+
+## How far each joint of a finger bends to close round a grip `rho` from the
+## knuckle line to its axis: stepped in until the chain would cut into it.
+## In the plane across the grip, the finger starts at the origin heading +x and
+## the grip's centre is at (0, rho).
+func _curl(rho: float, scale_len: float) -> float:
+	var best := 0.0
+	var th := 0.0
+	while th < 1.75:
+		th += 0.06
+		var p := Vector2.ZERO
+		var heading := 0.0
+		var inside := false
+		for k in FINGER_LEN.size():
+			heading += th * (0.8 if k == 0 else 1.0)
+			p += Vector2(cos(heading), sin(heading)) * float(FINGER_LEN[k]) * scale_len
+			if p.distance_to(Vector2(0.0, rho)) < rho - 0.003:
+				inside = true
+				break
+		if inside:
+			break
+		best = th
+	return best
+
+## Fingers loosely curled: nothing in the hand.
+func _relax_hand(h: Dictionary) -> void:
+	(h["wrist"] as Node3D).transform.basis = Basis()
+	(h["palm"] as Node3D).position = Vector3(0, -0.05, 0)
+	for chain in h["fingers"]:
+		for k in (chain as Array).size():
+			((chain as Array)[k] as Node3D).rotation = Vector3(-0.35, 0.0, 0.0)
+
+## Close to the camera the fingers are worked; further off they are a mitt.
+func _hands_near() -> bool:
+	var vp := get_viewport()
+	var cam: Camera3D = vp.get_camera_3d() if vp != null else null
+	if cam == null:
+		return true
+	return cam.global_position.distance_squared_to(global_position) < FINGER_NEAR * FINGER_NEAR
 
 ## Lowest foot in body space. Procedural poses swing the legs, so without this
 ## the figure hovers whenever neither leg is vertical.
@@ -840,6 +1053,9 @@ func _climb_limbs() -> void:
 
 ## Across the back, out of the way of both hands.
 func _sling_weapon() -> void:
+	if not _hand_r.is_empty():
+		_relax_hand(_hand_r)
+		_relax_hand(_hand_l)
 	var to_body := global_transform.affine_inverse()
 	var back: Transform3D = to_body * torso.global_transform
 	weapon_mount.transform = back * Transform3D(
@@ -941,10 +1157,14 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	# the weapon has weight: it trails the view as it turns
 	_sway = _sway.lerp(Vector2(clampf(in_turn.x, -6.0, 6.0), clampf(in_turn.y, -6.0, 6.0)),
 		_k(delta, 9.0))
+	# On the sights the weapon may move but not turn away from the eye: any
+	# rotation there points the sight picture somewhere other than where the
+	# rounds are going, which is the centre of the view.
+	var turn: float = loose * (1.0 - a)
 	off.x += _sway.x * 0.010 * loose
 	off.y += _sway.y * 0.008 * loose
-	yaw_r += _sway.x * 0.018 * loose
-	pitch_r -= _sway.y * 0.014 * loose
+	yaw_r += _sway.x * 0.018 * turn
+	pitch_r -= _sway.y * 0.014 * turn
 	roll_r += _sway.x * 0.020 * loose
 	# and it rides the stride
 	if moving and in_air == 0:
@@ -957,9 +1177,13 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	off.x += sin(_breath * 1.1) * 0.0014 * (1.0 - 0.5 * a)
 	# recoil: back into the shoulder, muzzle up
 	_kick = lerpf(_kick, 0.0, _k(delta, 15.0))
+	# Aimed, the climb is the view's (the owner lifts it with the recoil) and
+	# the weapon goes with it; the muzzle flipping on its own here put the
+	# sights a degree or more off the rounds through every burst -- six or
+	# seven on a pistol.
 	off.z += _kick * (0.030 if not hand else 0.022)
-	pitch_r += _kick * (0.035 if not hand else 0.16)
-	off.y += _kick * 0.004
+	pitch_r += _kick * (0.035 if not hand else 0.16) * (1.0 - a)
+	off.y += _kick * 0.004 * (1.0 - a)
 	# reloading: the weapon rolls over and tips up so the magazine well is
 	# where the other hand can get at it
 	if in_reload >= 0.0:
@@ -1039,6 +1263,35 @@ func _hold_weapon() -> void:
 		else:
 			grip = well.lerp(grip, smoothstep(0.72, 1.0, p))
 	_two_bone(arm_l, fore_l, grip, ARM_1, ARM_2, Vector3(-0.45, -1.0, 0.15))
+	_hands_on_weapon(wm, grip)
+
+## The fingers round the pistol grip and the fore-end, while the weapon is in
+## the hands and somebody is close enough to see them.
+func _hands_on_weapon(wm: Transform3D, grip_l_t: Vector3) -> void:
+	if _hand_r.is_empty():
+		return
+	var near: bool = _hands_near() and visible
+	_show_fingers(_hand_r, near)
+	_show_fingers(_hand_l, near)
+	if not near:
+		return
+	var wb: Basis = wm.basis.orthonormalized()
+	var hand_gun: bool = gun.get("hand", false)
+	# the pistol grip raked back a little, its line up and down the weapon
+	var grip_axis: Vector3 = wb * Vector3(0.0, -0.96, 0.27).normalized()
+	_grip_fingers(_hand_r, wm * Firearm.GRIP_R, grip_axis, 0.016, wb * Vector3(-1.0, 0.0, 0.0),
+		true)
+	if in_reload >= 0.0:
+		_relax_hand(_hand_l)
+		return
+	if hand_gun:
+		# the support hand cups the firing hand
+		_grip_fingers(_hand_l, wm * (Firearm.GRIP_R + Vector3(0.0, -0.01, 0.0)), grip_axis, 0.03,
+			wb * Vector3(1.0, 0.0, 0.0), false)
+		return
+	# under the fore-end, along the barrel
+	_grip_fingers(_hand_l, torso.global_transform * grip_l_t, wb * Vector3(0.0, 0.0, -1.0), 0.022,
+		wb * Vector3(0.0, 1.0, 0.0), false)
 
 ## Two bone IK with a pole. `root` and `mid` are a limb modelled down its own
 ## -Y; `target` is in the root's parent space; `pole` says which way the joint

@@ -8,7 +8,7 @@
 
 use crate::field::{climate, lerp, smoothstep, WATER_LEVEL};
 use crate::index::SegGrid;
-use crate::world::{base, carve_road, corridor, ground_at, world, Corridor, G_ALL,
+use crate::world::{base, carve_built, carve_road, corridor, ground_at, world, Corridor, G_ALL,
     ROAD_FILL_MAX};
 use rayon::prelude::*;
 
@@ -170,6 +170,9 @@ pub fn climate_map(n: usize, half: f32) -> Vec<u8> {
 pub struct Ribbon {
     pub surf: Vec<[f32; 3]>,
     pub kerb: Vec<[f32; 3]>,
+    /// Retaining walls: where a raised road runs through a town, the face at
+    /// the back of each footway down to the town's own ground.
+    pub wall: Vec<[f32; 3]>,
 }
 
 fn strip(out: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) {
@@ -182,7 +185,7 @@ fn strip(out: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32
 #[allow(clippy::too_many_arguments)]
 fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
         ya: f32, yb: f32, deck: bool) -> Ribbon {
-    let mut out = Ribbon { surf: Vec::new(), kerb: Vec::new() };
+    let mut out = Ribbon { surf: Vec::new(), kerb: Vec::new(), wall: Vec::new() };
     let dx = bx - ax;
     let dz = bz - az;
     let len = (dx * dx + dz * dz).sqrt();
@@ -199,11 +202,15 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
     let nz = dx / len;
     const OFF: [f32; 4] = [-1.55, -1.0, 1.0, 1.55];
     let mut prev = [[0.0f32; 3]; 4];
+    // the foot of the wall at each outer edge, or NaN where there is none
+    let mut prev_foot = [f32::NAN; 2];
+    let mut prev_raised = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let px = ax + dx * t;
         let pz = az + dz * t;
         let mut row = [[0.0f32; 3]; 4];
+        let mut raised = false;
         for (k, o) in OFF.iter().enumerate() {
             let qx = px + nx * half * o;
             let qz = pz + nz * half * o;
@@ -234,6 +241,12 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
                 }
             } else {
                 y = ground_at(w, c, qx, qz, G_ALL);
+                // A street that meets a raised road stops at its wall: drawn on
+                // the ground it went up and over the bank like a ramp.
+                let made = carve_built(w, base(qx, qz), qx, qz, G_ALL).0;
+                if (y - made).abs() > 0.8 {
+                    raised = true;
+                }
             }
             // Into the frame the ground is drawn in. Everything above is the
             // flat frame the corridor and the survey work in, and the terrain
@@ -242,20 +255,54 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
             // kilometres out stood eight metres clear of its own country and
             // of the bridge it was meant to run onto, and a kilometre clear a
             // hundred kilometres out.
-            row[k] = [qx, y + 0.16 - drop_at(qx, qz), qz];
+            // On the ground, near enough. It stood sixteen centimetres up and
+            // was then raised to the higher of its two edges, so on any camber
+            // the low side floated half a metre clear -- and everyone walking
+            // on it, who stands on the ground, was in it to the ankles. The
+            // material keeps it in front of the terrain now (a depth bias that
+            // grows with distance, see `Scenery._road_shader`), so it does not
+            // have to be lifted clear to win.
+            row[k] = [qx, y + 0.025 - drop_at(qx, qz), qz];
         }
-        // lift the surface to the highest of the two kerbs so it never sinks in
-        let top = row[1][1].max(row[2][1]);
-        row[1][1] = top;
-        row[2][1] = top;
-        row[0][1] = row[0][1].min(top) - 0.04;
-        row[3][1] = row[3][1].min(top) - 0.04;
-        if i > 0 {
+        // the kerbs tuck just under the carriageway edge, so no seam shows
+        row[0][1] = row[0][1].min(row[1][1]) - 0.02;
+        row[3][1] = row[3][1].min(row[2][1]) - 0.02;
+        // A wall at each outer edge where the road stands over a town's made
+        // ground: what is under it there is the town, not the bank.
+        let mut foot = [f32::NAN; 2];
+        for (fi, k) in [0usize, 3].iter().enumerate() {
+            let (qx, qz) = (row[*k][0], row[*k][2]);
+            let beyond = 1.2;
+            let ox = qx + (qx - px) / (half * 1.55) * beyond;
+            let oz = qz + (qz - pz) / (half * 1.55) * beyond;
+            let (made, town) = carve_built(w, base(ox, oz), ox, oz, G_ALL);
+            let made = made - drop_at(ox, oz);
+            if town > 0.3 && row[*k][1] - made > 0.8 {
+                foot[fi] = made - 0.4;
+            }
+        }
+        if i > 0 && !raised && !prev_raised {
             strip(&mut out.surf, prev[1], prev[2], row[2], row[1]);
             strip(&mut out.kerb, prev[0], prev[1], row[1], row[0]);
             strip(&mut out.kerb, prev[2], prev[3], row[3], row[2]);
         }
+        if i > 0 {
+            for (fi, k) in [0usize, 3].iter().enumerate() {
+                if prev_foot[fi].is_nan() || foot[fi].is_nan() {
+                    continue;
+                }
+                let a = prev[*k];
+                let b = row[*k];
+                let a0 = [a[0], prev_foot[fi], a[2]];
+                let b0 = [b[0], foot[fi], b[2]];
+                // both faces: it is seen from the street and from the road
+                strip(&mut out.wall, a, b, b0, a0);
+                strip(&mut out.wall, b, a, a0, b0);
+            }
+        }
         prev = row;
+        prev_foot = foot;
+        prev_raised = raised;
     }
     out
 }
@@ -298,10 +345,12 @@ pub fn ribbons(legs: &[f32]) -> Ribbon {
     let mut all = Ribbon {
         surf: Vec::with_capacity(ns),
         kerb: Vec::with_capacity(nk),
+        wall: Vec::new(),
     };
     for p in &parts {
         all.surf.extend_from_slice(&p.surf);
         all.kerb.extend_from_slice(&p.kerb);
+        all.wall.extend_from_slice(&p.wall);
     }
     all
 }
