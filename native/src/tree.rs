@@ -171,7 +171,7 @@ fn flat_gap(x0: f32, z0: f32, span: f32, ex: f32, ez: f32) -> (f32, f32) {
 
 /// The leaves that should exist for this eye position.
 pub fn wanted(eye: [f32; 3]) -> Vec<Leaf> {
-    let g = Ground::land();
+    let g = Ground::land().drawn();
     let mut stats_g = STATS.lock().unwrap();
     let table = stats_g.get_or_insert_with(Map::default);
     let was_g = WAS_SPLIT.lock().unwrap();
@@ -364,7 +364,7 @@ pub fn depth_at(x: f32, z: f32, eye: [f32; 3]) -> i32 {
     if !in_root(x, z) {
         return 0;
     }
-    let g = Ground::land();
+    let g = Ground::land().drawn();
     let mut stats_g = STATS.lock().unwrap();
     let table = stats_g.get_or_insert_with(Map::default);
     let was_g = WAS_SPLIT.lock().unwrap();
@@ -422,7 +422,7 @@ pub fn node_top(depth: i32, ix: i32, iz: i32) -> f32 {
     if let Some(v) = table.get(&k) {
         return v.1;
     }
-    let v = stats(&Ground::land(), depth, ix, iz);
+    let v = stats(&Ground::land().drawn(), depth, ix, iz);
     table.insert(k, v);
     v.1
 }

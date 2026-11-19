@@ -186,8 +186,26 @@ func flatten(at: Vector3, r: float) -> int:
 	return down.size()
 
 ## Is there room for something `r` across here, with space to walk round it?
-func _room(x: float, z: float, r: float) -> bool:
-	return Obstacles.hit(Vector3(x, _ground(x, z) + 1.0, z), r) < 0
+## Not on a ramp up to a road bridge, and not under a deck lower than `over`:
+## a bridge is not in the obstacle field, so a car was parked across the foot
+## of the ramp and a market stall stood up through the deck.
+func _room(x: float, z: float, r: float, over := ROOM_OVER) -> bool:
+	var g: float = _ground(x, z)
+	if Sim.bridge_headroom(x, z, r, g) < over:
+		return false
+	return Obstacles.hit(Vector3(x, g + 1.0, z), r) < 0
+
+## What a prop in the street needs over it: a bus, with a little to spare.
+const ROOM_OVER := 4.5
+## ...and a lot: a ruin is two storeys of wall.
+const LOT_OVER := 9.0
+## Nothing of a bridge anywhere a crane's jib swings, nor over its mast.
+const CRANE_REACH := 44.0
+
+## Can a crane stand here: thirty metres of mast and forty of jib, swinging,
+## with no road bridge anywhere under the sweep of it?
+func _crane_clear(at: Vector2) -> bool:
+	return Sim.bridge_headroom(at.x, at.y, CRANE_REACH) >= 40.0
 
 func _snap(v: float) -> float:
 	return snappedf(v - CELL * 0.5, CELL) + CELL * 0.5
@@ -221,13 +239,16 @@ func _masonry() -> Color:
 ## solid. `DEEP` of every base is underground, so a slope never shows a gap.
 const DEEP := 0.7
 
+## The room each kind of prop is given: its own size and space to walk round.
+const NEED := {"car": 3.4, "bus": 6.4, "container": 4.6, "stall": 2.6, "small": 1.6,
+	"tree": 1.6}
+
 func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 	# On a grid point of the route survey, always. Something lying between two
 	# of them is something the AI cannot see is there.
 	var x: float = centre.x + _snap(x_in - centre.x)
 	var z: float = centre.y + _snap(z_in - centre.y)
-	var need: float = {"car": 3.4, "bus": 6.4, "container": 4.6, "stall": 2.6, "small": 1.6,
-		"tree": 1.6}.get(kind, 2.5)
+	var need: float = NEED.get(kind, 2.5)
 	if not _room(x, z, need):
 		return false
 	var at := Vector3(x, _seat(x, z, need * 0.45), z)
@@ -448,6 +469,7 @@ func _ruin(cx: float, cz: float) -> void:
 	_ruin_wall(st, o, o, false, -e, 0.8, 2.9)
 	_ruin_wall(st, o, o, false, 3.2, e, 2.9)
 	stats["ruins"] = int(stats["ruins"]) + 1
+	ruins_at.append(o)
 
 func _ruin_wall(st: SurfaceTool, o: Vector3, base: Vector3, along_x: bool, from: float,
 		to: float, h: float) -> void:
@@ -729,6 +751,8 @@ func _crane(cx: float, cz: float) -> void:
 	crane_at = o + Vector3(0, h, 0)
 
 var crane_at := Vector3.INF
+## The middle of every ruin, at its foot.
+var ruins_at: Array = []
 ## [middle at the foot, along it, its length, out from the wall, height]
 var scaffolds: Array = []
 
@@ -909,7 +933,7 @@ func _build(at: Vector2, of_site: Dictionary) -> void:
 			# centred on a grid point, so the walls land on grid lines
 			var cx: float = centre.x + _snap(lx)
 			var cz: float = centre.y + _snap(lz)
-			if _room(cx, cz, 9.6):
+			if _room(cx, cz, 9.6, LOT_OVER):
 				empty.append(Vector2(cx, cz))
 			elif Obstacles.blocks(Vector3(cx, _ground(cx, cz) + 2.0, cz), 0.5) >= 0:
 				built.append(Vector2(cx, cz))
@@ -928,15 +952,18 @@ func _build(at: Vector2, of_site: Dictionary) -> void:
 		if not ok or placed.size() >= 5:
 			continue
 		placed.append(l)
-		if placed.size() == 2 or (placed.size() == 1 and empty.size() == 1):
+		# the second lot, or the next after it with room for the jib to swing
+		if crane_at == Vector3.INF and (placed.size() >= 2 or empty.size() == 1) \
+				and _crane_clear(l):
 			_crane((l as Vector2).x, (l as Vector2).y)
 		else:
 			_ruin((l as Vector2).x, (l as Vector2).y)
 		if not await _pause():
 			return
-	if crane_at == Vector3.INF and not placed.is_empty():
+	var street_site := Vector2(centre.x + _snap(20.0), centre.y + _snap(40.0))
+	if crane_at == Vector3.INF and not placed.is_empty() and _crane_clear(street_site):
 		# every lot went to a ruin: put the crane in the widest bit of street
-		_crane(centre.x + _snap(20.0), centre.y + _snap(40.0))
+		_crane(street_site.x, street_site.y)
 	var scaf := 0
 	for l2 in built:
 		if scaf >= 4:

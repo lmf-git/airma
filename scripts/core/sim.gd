@@ -1374,6 +1374,10 @@ func field_local(fd: Dictionary, x: float, z: float) -> Vector2:
 const G_ROADS := 1
 const G_FIELDS := 2
 const G_ALL := 3
+## The ground as the terrain mesh draws it, which differs from the ground as
+## things stand on it in one place: a walled ramp in a town, which is drawn as a
+## structure standing on the town's own ground. See `G_DRAWN` in world.rs.
+const G_DRAWN := 4
 
 ## What the finished ground includes at this point in the pipeline. The
 ## corridor is invisible while the network is being surveyed, and the
@@ -1408,6 +1412,15 @@ func height_at(x: float, z: float) -> float:
 			return _deck_top(native.ground_globe(x, z), x, z)
 		return _deck_top(native.ground_globe_flags(x, z, fl), x, z)
 	return _deck_top(native.ground(x, z, _ground_flags()), x, z) - planet_drop(x, z)
+
+## The ground as the terrain mesh draws it: `height_at` everywhere but inside a
+## walled ramp in a town, where the mesh shows the town's own ground and the
+## ramp is drawn as the structure standing on it. What something drawn down to
+## the ground -- an abutment, a wall -- has to reach.
+func drawn_height_at(x: float, z: float) -> float:
+	if globe:
+		return native.ground_globe_flags(x, z, G_ALL | G_DRAWN)
+	return native.ground(x, z, G_ALL | G_DRAWN) - planet_drop(x, z)
 
 ## Ground height in the flat frame -- the height a surveyor works in, taken from
 ## the local horizontal rather than from world level. On a sphere the two part
@@ -2233,10 +2246,58 @@ func _group_structures() -> void:
 			var rec := {"a": pl[i0], "b": pl[i1],
 				"ya": prof[i0], "yb": prof[i1], "pts": pts, "ys": ys}
 			if kind == F_BRIDGE:
+				# and the ramps up onto it, which belong to it as much as the
+				# deck does: see `bridge_headroom`
+				var ramps: Array = []
+				if pts.size() >= 2:
+					for r in [_ramp_from(li, i0, -1), _ramp_from(li, i1, 1)]:
+						if (r as PackedVector2Array).size() >= 2:
+							ramps.append(r)
+				rec["ramps"] = ramps
 				road_bridges.append(rec)
 			else:
 				road_tunnels.append(rec)
 			i0 = i1 + 1
+
+## How far out from a bridge's end its approach counts as part of it. While the
+## road stands more than this over the ground it was built on, it is the ramp
+## onto the deck -- a bank in the country, a walled ramp in a town -- and
+## nothing else belongs on it or across it.
+const RAMP_FILL := 1.0
+## ...and never more stations of it than this.
+const RAMP_STATIONS := 6
+
+## The ramp off one end of a bridge: the end station, then the stations walking
+## away from the deck (`step` is -1 or +1 along the line) for as long as the
+## made road is still up on its fill. Always at least the leg onto the deck.
+func _ramp_from(li: int, i: int, step: int) -> PackedVector2Array:
+	var pl: PackedVector2Array = _road_lines[li]
+	var prof: PackedFloat32Array = _road_prof[li]
+	var nat: PackedFloat32Array = _natural[li] if li < _natural.size() else prof
+	var flags: PackedByteArray = _road_struct[li]
+	var out := PackedVector2Array([pl[i]])
+	var k := i + step
+	while k >= 0 and k < pl.size() and out.size() <= RAMP_STATIONS:
+		if flags[k] != 0:
+			break                           # straight onto another structure
+		out.append(pl[k])
+		if prof[k] - nat[k] <= RAMP_FILL:
+			break
+		k += step
+	return out
+
+## Is this station the end of a bridge -- the abutment, where the deck takes
+## over from the ground? A run of one station is not a span at all and has no
+## deck drawn over it.
+func _bridge_end(li: int, k: int) -> bool:
+	if li >= _road_struct.size():
+		return false
+	var flags: PackedByteArray = _road_struct[li]
+	if k < 0 or k >= flags.size() or flags[k] != F_BRIDGE:
+		return false
+	var before := k > 0 and flags[k - 1] == F_BRIDGE
+	var after := k + 1 < flags.size() and flags[k + 1] == F_BRIDGE
+	return before != after
 
 # ---------------------------------------------------------- bridge decks
 ## The road bridges as something to stand on. A deck was drawn and nothing
@@ -2250,8 +2311,14 @@ const BRIDGE_LAP := 2.5             # the end panels reach this far past the sta
 ## How far above something a deck can be and still be stepped onto: anything
 ## further below it is underneath the bridge, not on it.
 const BRIDGE_STEP := 0.6
+## How deep the deck is: the box girder under the running surface, which is
+## what anything passing underneath has to clear.
+const BRIDGE_GIRDER := 1.9          # matches the girder `Scenery` draws
+## Half the width of a ramp onto a deck, out to the face of its retaining wall:
+## `RAMP_EDGE` in world.rs, which is where the made ground drops to the town.
+const RAMP_HALF := 13.0
 var _deck_src: Array = []
-var _deck_idx: Array = []           # {lo, hi, pts, ys}
+var _deck_idx: Array = []           # {lo, hi, pts, ys, ramps}
 
 func _index_bridge_decks() -> void:
 	_deck_src = road_bridges
@@ -2261,13 +2328,91 @@ func _index_bridge_decks() -> void:
 		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
 		if pts.size() < 2 or ys.size() != pts.size():
 			continue
+		var ramps: Array = br.get("ramps", [])
 		var lo := Vector2(INF, INF)
 		var hi := Vector2(-INF, -INF)
 		for q in pts:
 			lo = Vector2(minf(lo.x, q.x), minf(lo.y, q.y))
 			hi = Vector2(maxf(hi.x, q.x), maxf(hi.y, q.y))
 		var m := BRIDGE_HALF + BRIDGE_LAP + 1.0
-		_deck_idx.append({"lo": lo - Vector2(m, m), "hi": hi + Vector2(m, m), "pts": pts, "ys": ys})
+		lo -= Vector2(m, m)
+		hi += Vector2(m, m)
+		for r in ramps:
+			for q2 in (r as PackedVector2Array):
+				lo = Vector2(minf(lo.x, q2.x - RAMP_HALF), minf(lo.y, q2.y - RAMP_HALF))
+				hi = Vector2(maxf(hi.x, q2.x + RAMP_HALF), maxf(hi.y, q2.y + RAMP_HALF))
+		_deck_idx.append({"lo": lo, "hi": hi, "pts": pts, "ys": ys, "ramps": ramps})
+
+## Build the deck index now, on this thread, so that workers can read it. It is
+## otherwise built by whoever asks first, and two workers asking at once would
+## both be writing it.
+func index_bridges() -> void:
+	if not is_same(_deck_src, road_bridges):
+		_index_bridge_decks()
+
+## Could anything within `r` of the box from `lo` to `hi` be near a bridge? A
+## cheap first question for something with a lot of points to ask about -- a
+## street, a town's worth of lamp posts -- most of which are nowhere near one.
+func near_bridges(lo: Vector2, hi: Vector2, r: float) -> bool:
+	if road_bridges.is_empty():
+		return false
+	index_bridges()
+	for b in _deck_idx:
+		var blo: Vector2 = b["lo"]
+		var bhi: Vector2 = b["hi"]
+		if hi.x + r >= blo.x and lo.x - r <= bhi.x and hi.y + r >= blo.y and lo.y - r <= bhi.y:
+			return true
+	return false
+
+## How much room there is under the road bridges within `r` of (x, z): from the
+## ground to the underside of the lowest deck over that disc. INF where no deck
+## reaches, and 0 on a ramp up to one, which has no underneath -- it is a bank,
+## or in a town a walled ramp, and nothing stands on it or crosses it.
+##
+## Everything that puts something down near a road has to ask this as well as
+## the kerb test. A bridge is not in the road index, because it is not a road
+## on the ground, so the trees, the street furniture, the streets and the props
+## in a town's streets were all laid out as if the deck were not there: in the
+## carriageway of the approach, up through the deck, across the foot of the
+## ramp. `ground` is the height the thing stands at, when the caller has it.
+func bridge_headroom(x: float, z: float, r: float, ground := NAN) -> float:
+	if road_bridges.is_empty():
+		return INF
+	index_bridges()
+	var best := INF
+	var q := Vector2(x, z)
+	for b in _deck_idx:
+		var lo: Vector2 = b["lo"]
+		var hi: Vector2 = b["hi"]
+		if x < lo.x - r or x > hi.x + r or z < lo.y - r or z > hi.y + r:
+			continue
+		for rp in (b["ramps"] as Array):
+			var ramp: PackedVector2Array = rp
+			for i in ramp.size() - 1:
+				if _seg_dist(q, ramp[i], ramp[i + 1]) < RAMP_HALF + r:
+					return 0.0
+		var pts: PackedVector2Array = b["pts"]
+		var ys: PackedFloat32Array = b["ys"]
+		var last := pts.size() - 2
+		for i in pts.size() - 1:
+			var a: Vector2 = pts[i]
+			var c: Vector2 = pts[i + 1]
+			var run := a.distance_to(c)
+			if run < 0.5:
+				continue
+			var dir := (c - a) / run
+			var a2 := a - dir * BRIDGE_LAP if i == 0 else a
+			var c2 := c + dir * BRIDGE_LAP if i == last else c
+			var t: float = clampf((q - a2).dot(dir), 0.0, a2.distance_to(c2))
+			if q.distance_to(a2 + dir * t) > BRIDGE_HALF + r:
+				continue
+			if is_nan(ground):
+				ground = height_at(x, z)
+			var f: float = clampf((t - a.distance_to(a2)) / run, 0.0, 1.0)
+			var under: float = lerpf(ys[i], ys[i + 1], f) - planet_drop(x, z) \
+				- BRIDGE_GIRDER
+			best = minf(best, maxf(under - ground, 0.0))
+	return best
 
 ## The top of a road bridge's deck at (x, z), for something at height `y_ref`:
 ## -1e9 when there is no deck there, or when it is more than a step above.
@@ -2351,8 +2496,15 @@ func _index_corridor() -> void:
 			# mid air beyond it.
 			if _in_structure(li, i) and _in_structure(li, i + 1):
 				continue
+			# Which end of it is an abutment. Past that end is the first span,
+			# and the bank stops there instead of rounding off underneath it.
+			var ends := 0
+			if _bridge_end(li, i):
+				ends |= 1
+			if _bridge_end(li, i + 1):
+				ends |= 2
 			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1],
-				nat[i], nat[i + 1]])
+				nat[i], nat[i + 1], ends])
 	_push_corridor()
 
 ## Hand the corridor to the extension, which is where its index lives.
@@ -2369,6 +2521,7 @@ func _push_corridor() -> void:
 		flat.append(float(leg[3]))
 		flat.append(float(leg[4]))
 		flat.append(float(leg[5]))
+		flat.append(float(leg[6]) if leg.size() > 6 else 0.0)
 	native.set_corridor(flat)
 
 ## The land as it was before any road was built on it. The corridor is the only

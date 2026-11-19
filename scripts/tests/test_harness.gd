@@ -89,6 +89,7 @@ func tick_main(delta: float) -> bool:
 	ground_tests.tick_map_lock(delta)
 	ground_tests.tick_tel_range()
 	terrain_tests.tick_terrain()
+	terrain_tests.tick_prop_clear()
 	ground_tests.tick_fire_map(delta)
 	ground_tests.tick_rocket_view()
 	ground_tests.tick_moon()

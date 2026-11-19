@@ -143,6 +143,9 @@ pub struct Leg {
     pub yb: f32,
     pub na: f32,
     pub nb: f32,
+    /// Which ends are an abutment: 1 for `a`, 2 for `b`. Past one of those is
+    /// the first span of a bridge, not more road.
+    pub ends: u8,
 }
 
 #[derive(Default)]
@@ -199,13 +202,29 @@ pub fn publish_corridor(legs: Vec<Leg>) {
 /// Where a point falls on a leg: the distance to it and how far along it.
 #[inline]
 fn foot(l: &Leg, x: f32, z: f32) -> (f32, f32) {
+    let (d, t, _) = foot_past(l, x, z);
+    (d, t)
+}
+
+/// `foot`, and how many metres past an abutment end of the leg the point lies
+/// along it -- zero unless it is beyond an end flagged in `Leg::ends`.
+#[inline]
+fn foot_past(l: &Leg, x: f32, z: f32) -> (f32, f32, f32) {
     let abx = l.bx - l.ax;
     let abz = l.bz - l.az;
     let len2 = (abx * abx + abz * abz).max(0.001);
-    let t = (((x - l.ax) * abx + (z - l.az) * abz) / len2).clamp(0.0, 1.0);
+    let raw = ((x - l.ax) * abx + (z - l.az) * abz) / len2;
+    let t = raw.clamp(0.0, 1.0);
     let dx = x - (l.ax + abx * t);
     let dz = z - (l.az + abz * t);
-    ((dx * dx + dz * dz).sqrt(), t)
+    let past = if raw > 1.0 && l.ends & 2 != 0 {
+        (raw - 1.0) * len2.sqrt()
+    } else if raw < 0.0 && l.ends & 1 != 0 {
+        -raw * len2.sqrt()
+    } else {
+        0.0
+    };
+    ((dx * dx + dz * dz).sqrt(), t, past)
 }
 
 /// The made surface at a point: its height, how much of it applies here, and
@@ -225,15 +244,60 @@ const TOWN_SHOULDER: f32 = 1.0;
 /// wall stands at the back of the footway rather than the bank starting at the
 /// edge of the carriageway.
 const TOWN_TOP: f32 = 1.6;
+/// Out to the face of a ramp's retaining wall, from the centreline: the top
+/// carried flat, then the metre it drops to the town in. `Sim.RAMP_HALF`.
+pub const RAMP_EDGE: f32 = ROAD_HALF * TOWN_TOP + TOWN_SHOULDER;
+/// How walled a stretch has to be before it is a ramp: a structure, drawn as
+/// walls and a deck of road standing on the town's own ground, rather than a
+/// bank in the terrain. The terrain mesh is fifteen metres a cell, and a bank
+/// whose side drops three metres in one is drawn as a fifteen metre skirt of
+/// sloping ground sticking out from under whatever wall is put along its edge.
+pub const RAMP_WALLED: f32 = 0.5;
+/// Under the first span the bank does not round off at the level of the road,
+/// which buried the deck's girder in it for twenty metres: it falls away from
+/// below the girder, as a spill slope.
+const DECK_DEPTH: f32 = 2.3;
+const SPILL: f32 = 0.6;
+/// Half the deck's width: `Scenery.DECK_HALF`.
+const DECK_HALF: f32 = 8.5;
+/// How far under the deck a walled ramp's abutment reaches, and how far below
+/// the road it stands: `Scenery.ABUT_LEN`.
+pub const SHELF: f32 = 4.5;
+const SHELF_DROP: f32 = 0.3;
+
+/// Everything the corridor says about a point.
+#[derive(Clone, Copy, Default)]
+pub struct Made {
+    /// The made height.
+    pub y: f32,
+    /// How much of it applies, 1 on the carriageway falling to 0.
+    pub w: f32,
+    /// The ground it was cut from.
+    pub g: f32,
+    /// How much of the bank here is a retaining wall rather than a slope.
+    pub walled: f32,
+    /// Past an abutment, under the first span: how far the bank there may
+    /// only fill and never cut -- 1 under the deck, 0 off to the side of it.
+    pub spill: f32,
+    /// Past the end of a walled ramp, under the deck: the top of its abutment,
+    /// which is ground to stand on but not ramp to draw.
+    pub shelf: bool,
+}
 
 pub fn road_surface_in(c: &Corridor, x: f32, z: f32, town: f32) -> (f32, f32, f32) {
+    let m = road_made(c, x, z, town);
+    (m.y, m.w, m.g)
+}
+
+pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
+    let none = Made::default();
     if c.legs.is_empty() {
-        return (0.0, 0.0, 0.0);
+        return none;
     }
     let k = key((x / CORR_CELL).floor() as i32, (z / CORR_CELL).floor() as i32);
     let bucket = match c.grid.get(&k) {
         Some(b) => b,
-        None => return (0.0, 0.0, 0.0),
+        None => return none,
     };
     // Nearest first, then blend what agrees with it.
     //
@@ -246,13 +310,15 @@ pub fn road_surface_in(c: &Corridor, x: f32, z: f32, town: f32) -> (f32, f32, f3
     let mut best = 1e9f32;
     let mut near_y = 0.0f32;
     let mut near_g = 0.0f32;
+    let mut past = 0.0f32;
     for idx in bucket {
         let l = &c.legs[*idx as usize];
-        let (d, t) = foot(l, x, z);
+        let (d, t, p) = foot_past(l, x, z);
         if d < best {
             best = d;
             near_y = lerp(l.ya, l.yb, t);
             near_g = lerp(l.na, l.nb, t);
+            past = p;
         }
     }
     // The shoulder is as wide as the bank is high, four and a half times: a road
@@ -265,7 +331,55 @@ pub fn road_surface_in(c: &Corridor, x: f32, z: f32, town: f32) -> (f32, f32, f3
     let inner = lerp(ROAD_HALF, ROAD_HALF * TOWN_TOP, walled);
     let reach = inner + lerp(open, TOWN_SHOULDER, walled);
     if best > reach {
-        return (0.0, 0.0, 0.0);
+        return none;
+    }
+    let w = 1.0 - smoothstep(inner, reach, best);
+    // (a few centimetres of tolerance, so a point on the abutment's own line
+    // does not flicker between the two sides of it)
+    if past > 0.05 {
+        // Beyond the abutment. A walled ramp ends at its face, square, over
+        // the town; a bank in the country spills out under the first span
+        // from below the deck rather than carrying on at the level of it --
+        // under the deck only. Off to the side the bank rounds off as it
+        // always did: cut along the abutment's line, a broad bank's shoulders
+        // got a step a hundred metres long.
+        let lat = (best * best - past * past).max(0.0).sqrt();
+        if walled >= RAMP_WALLED {
+            if lat < RAMP_EDGE + 1.0 {
+                // A shelf a little under the deck for the first few metres --
+                // the top of the abutment, which `Scenery` draws -- so that
+                // the deck is what a wheel finds there. Ending in a cliff on
+                // the abutment's own line, a wheel just short of it took its
+                // normal across the drop and the suspension threw the hull on
+                // its back.
+                if past < SHELF {
+                    return Made {
+                        y: near_y - SHELF_DROP,
+                        w,
+                        g: near_g,
+                        walled,
+                        spill: 0.0,
+                        shelf: true,
+                    };
+                }
+                return none;
+            }
+        } else {
+            let under = 1.0 - smoothstep(DECK_HALF + 2.0, DECK_HALF + 25.0, lat);
+            if under > 0.0 {
+                return Made {
+                    // eased in over the first few metres rather than a step
+                    // at the abutment's line: this is ground people stand on
+                    y: near_y - (DECK_DEPTH * smoothstep(0.0, 6.0, past)
+                        + past * SPILL) * under,
+                    w,
+                    g: near_g,
+                    walled,
+                    spill: under,
+                    shelf: false,
+                };
+            }
+        }
     }
     let mut ysum = 0.0;
     let mut gsum = 0.0;
@@ -280,15 +394,15 @@ pub fn road_surface_in(c: &Corridor, x: f32, z: f32, town: f32) -> (f32, f32, f3
         if (y - near_y).abs() > AGREE {
             continue;                  // a different road, passing over or under
         }
-        let w = 1.0 / (d * d + 1.5);
-        ysum += y * w;
-        gsum += lerp(l.na, l.nb, t) * w;
-        wsum += w;
+        let wt = 1.0 / (d * d + 1.5);
+        ysum += y * wt;
+        gsum += lerp(l.na, l.nb, t) * wt;
+        wsum += wt;
     }
     if wsum <= 0.0 {
-        return (near_y, 1.0 - smoothstep(inner, reach, best), near_g);
+        return Made { y: near_y, w, g: near_g, walled, spill: 0.0, shelf: false };
     }
-    (ysum / wsum, 1.0 - smoothstep(inner, reach, best), gsum / wsum)
+    Made { y: ysum / wsum, w, g: gsum / wsum, walled, spill: 0.0, shelf: false }
 }
 
 // ------------------------------------------------------------------ decks
@@ -365,9 +479,19 @@ pub struct Ground {
     decks: Vec<Deck>,
     world: &'static World,
     corr: &'static Corridor,
+    /// What is asked for: `G_ALL`, or with `G_DRAWN` for what draws it.
+    flags: u32,
 }
 
 impl Ground {
+    /// The same ground, as the terrain mesh draws it: see `G_DRAWN`. Everything
+    /// that builds or measures the mesh asks this one, so the mesh, the
+    /// quadtree's idea of how far the mesh is off, and `surfaces_at` agree.
+    pub fn drawn(mut self) -> Ground {
+        self.flags |= G_DRAWN;
+        self
+    }
+
     /// The ground as anything standing on the world measures it -- the land,
     /// the works, and whatever is floating on it right now. This is what
     /// `Sim.height_at` answers.
@@ -390,15 +514,16 @@ impl Ground {
             decks: Vec::new(),
             world: world(),
             corr: corridor(),
+            flags: G_ALL,
         }
     }
 
     #[inline]
     pub fn at(&self, x: f32, z: f32) -> f32 {
         let h = if self.globe {
-            sphere::ground_world_y(&self.chart, x, z, G_ALL)
+            sphere::ground_world_y(&self.chart, x, z, self.flags)
         } else {
-            ground_at(self.world, self.corr, x, z, G_ALL)
+            ground_at(self.world, self.corr, x, z, self.flags)
         };
         if self.decks.is_empty() {
             return h;
@@ -466,9 +591,9 @@ impl Ground {
     #[inline]
     pub fn height(&self, x: f32, z: f32) -> f64 {
         let h = if self.globe {
-            sphere::ground_world_y(&self.chart, x, z, G_ALL) as f64
+            sphere::ground_world_y(&self.chart, x, z, self.flags) as f64
         } else {
-            ground_at(self.world, self.corr, x, z, G_ALL) as f64
+            ground_at(self.world, self.corr, x, z, self.flags) as f64
         };
         let h = match deck_height(&self.decks, x, z) {
             Some(d) if self.globe => h.max(d as f64 - self.fall(x, z)),
@@ -677,6 +802,13 @@ pub const G_ROADS: u32 = 1;
 pub const G_FIELDS: u32 = 2;
 /// Everything: what `Sim.height_at` asks for.
 pub const G_ALL: u32 = G_ROADS | G_FIELDS;
+/// The ground as the terrain mesh draws it rather than as anything stands on
+/// it. The two differ in one place: a walled ramp up to a bridge in a town,
+/// which things stand on as made ground and which is *drawn* as a structure --
+/// walls and the carriageway, in `raster.rs` -- standing on the town's own
+/// ground. Drawn as terrain, a three metre bank that drops in one metre came
+/// out of a fifteen metre mesh as a ragged skirt of sloping ground.
+pub const G_DRAWN: u32 = 4;
 
 /// The ground as the world has left it. The carrier decks are the one thing
 /// still applied on the far side of the boundary: they move every frame, and
@@ -751,7 +883,8 @@ pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
         // was drawn against the levelled apron and then imposed on the hillside
         // underneath it. Nothing is at risk on the runway itself -- the router
         // charges four thousand times the going rate to cross one.
-        return road_over_with(road_surface_in(c, x, z, pad_w), h, pad_w);
+        return road_over_with(&road_made(c, x, z, pad_w), h, pad_w,
+            flags & G_DRAWN != 0);
     }
     h
 }
@@ -764,11 +897,11 @@ pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
 /// to meet it -- and asking twice walks the corridor grid twice. Measured, that
 /// second walk was most of the 105 ms drawing every road on the map cost.
 pub fn carve_road(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
-        -> (f32, (f32, f32, f32)) {
+        -> (f32, Made) {
     let (h, pad_w) = carve_built(w, base, x, z, flags);
-    let rs = road_surface_in(c, x, z, pad_w);
+    let rs = road_made(c, x, z, pad_w);
     let h = if flags & G_ROADS != 0 {
-        road_over_with(rs, h, pad_w)
+        road_over_with(&rs, h, pad_w, flags & G_DRAWN != 0)
     } else {
         h
     };
@@ -811,9 +944,13 @@ pub fn carve_built(w: &World, base: f32, x: f32, z: f32, flags: u32) -> (f32, f3
 
 /// The earthworks: what the corridor does to the ground it passes over, with
 /// the made surface already in hand.
-fn road_over_with(rs: (f32, f32, f32), h: f32, pad_w: f32) -> f32 {
-    let (ry, rw, _) = rs;
+fn road_over_with(m: &Made, h: f32, pad_w: f32, drawn: bool) -> f32 {
+    let (ry, rw) = (m.y, m.w);
     if rw <= 0.0 {
+        return h;
+    }
+    // A ramp is drawn as a structure on the town's ground, not as terrain.
+    if drawn && m.walled >= RAMP_WALLED {
         return h;
     }
     // Eased out rather than switched off: a hard cut-off left a step down one
@@ -841,7 +978,9 @@ fn road_over_with(rs: (f32, f32, f32), h: f32, pad_w: f32) -> f32 {
         // several metres off its own surface, which tipped the carriageway
         // sideways and put a cliff along the centreline. Measured, an 18% cross
         // fall and a 174% gradient in the finished ground.
-        return lerp(h, ry, ww);
+        let made = lerp(h, ry, ww);
+        // under a span the spill only ever adds to the valley side
+        return lerp(made, made.max(h), m.spill);
     }
     h
 }

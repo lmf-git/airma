@@ -35,6 +35,8 @@ func parse_arg(a: String) -> bool:
 		_seam_test = true
 	elif a == "--biometest":
 		_biome_test = true
+	elif a == "--propclear":
+		_prop_clear = true
 	else:
 		return false
 	return true
@@ -109,6 +111,302 @@ func _terrain_stats(span: float, step: float, ring_a: int, ring_b: int) -> void:
 		sqrt(maxf(hs2 / lf - mean * mean, 0.0)),
 		int(100.0 * float(trench_a) / lf), float(ring_a) * step * 2.0 * 0.001,
 		int(100.0 * float(trench_b) / lf), float(ring_b) * step * 2.0 * 0.001])
+#endregion
+
+
+#region --propclear
+## Is anything standing where a road bridge is, or inside a building? What the
+## scenery put down, measured against the decks and the ramps up onto them --
+## as the bridge records give them, not as anything that placed a prop asked --
+## and against the town blocks: the trees, the street furniture, the streets as
+## drawn, the piers, and the props each bridged town's set puts in its streets.
+## --preset=free:f16 --propclear
+var _prop_clear := false
+
+func tick_prop_clear() -> void:
+	if _prop_clear and world.running:
+		_prop_clear = false
+		_run_prop_clear()
+
+## Every deck as [a, b, deck y at a, deck y at b] in the world frame, laps on,
+## and every ramp as a polyline.
+func _clear_parts() -> Array:
+	var decks: Array = []
+	var ramps: Array = []
+	for br in Sim.road_bridges:
+		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
+		if pts.size() < 2:
+			continue
+		for i in pts.size() - 1:
+			var a: Vector2 = pts[i]
+			var b: Vector2 = pts[i + 1]
+			var dir := (b - a).normalized()
+			if i == 0:
+				a -= dir * Sim.BRIDGE_LAP
+			if i == pts.size() - 2:
+				b += dir * Sim.BRIDGE_LAP
+			decks.append([a, b, ys[i] - Sim.planet_drop(a.x, a.y),
+				ys[i + 1] - Sim.planet_drop(b.x, b.y)])
+		for r in br.get("ramps", []):
+			ramps.append(r)
+	return [decks, ramps]
+
+## What is wrong with something of radius `r` and height `h` standing at `p`:
+## "deck" when it is under a deck with less room than it needs, "ramp" when it
+## is on a ramp, "" when it is clear of both.
+func _clear_verdict(parts: Array, p: Vector3, r: float, h: float) -> String:
+	var q := Vector2(p.x, p.z)
+	for rp in parts[1]:
+		var ramp: PackedVector2Array = rp
+		for i in ramp.size() - 1:
+			if Geometry2D.get_closest_point_to_segment(q, ramp[i], ramp[i + 1]) \
+					.distance_to(q) < Sim.RAMP_HALF + r:
+				return "ramp"
+	for d in parts[0]:
+		var a: Vector2 = d[0]
+		var b: Vector2 = d[1]
+		var on: Vector2 = Geometry2D.get_closest_point_to_segment(q, a, b)
+		if on.distance_to(q) > Sim.BRIDGE_HALF + r:
+			continue
+		var f: float = on.distance_to(a) / maxf(a.distance_to(b), 0.01)
+		var under: float = lerpf(float(d[2]), float(d[3]), f) - Sim.BRIDGE_GIRDER
+		if under - p.y < h:
+			return "deck"
+	return ""
+
+## Footprints of the town blocks, hashed on a coarse grid: cell -> [transform].
+func _block_hash() -> Dictionary:
+	var out := {}
+	for x in world.scenery.town_xforms:
+		var xf: Transform3D = x
+		var k := Vector2i(floori(xf.origin.x / 64.0), floori(xf.origin.z / 64.0))
+		if not out.has(k):
+			out[k] = []
+		out[k].append(xf)
+	return out
+
+## Is (x, z) inside a town block, widened by `m` metres?
+func _in_block(blocks: Dictionary, x: float, z: float, m: float) -> bool:
+	var k := Vector2i(floori(x / 64.0), floori(z / 64.0))
+	for dz in [-1, 0, 1]:
+		for dx in [-1, 0, 1]:
+			for xf in blocks.get(k + Vector2i(dx, dz), []):
+				var t: Transform3D = xf
+				var l: Vector3 = t.affine_inverse() * Vector3(x, t.origin.y, z)
+				if absf(l.x) < 0.5 + m / t.basis.x.length() \
+						and absf(l.z) < 0.5 + m / t.basis.z.length():
+					return true
+	return false
+
+func _run_prop_clear() -> void:
+	for i in 30:
+		await world.get_tree().physics_frame
+	var sc: Node = world.scenery
+	var parts := _clear_parts()
+	var blocks := _block_hash()
+	print("[propclear] %d decks' worth of spans, %d ramps, %d town blocks" % [
+		(parts[0] as Array).size(), (parts[1] as Array).size(), sc.town_xforms.size()])
+	# The country: what stands where, and how big it is. Heights and crowns are
+	# the meshes' own, at scale one.
+	var tall := {"tree": 8.3, "pine": 12.8, "rock": 3.0, "bush": 2.2}
+	var crown := {"tree": 3.6, "pine": 2.7, "rock": 2.6, "bush": 1.5}
+	var nat := {"deck": 0, "ramp": 0, "block": 0, "road": 0, "all": 0}
+	for n in sc.get_children():
+		if not (n is MultiMeshInstance3D):
+			continue
+		var kind: String = String(n.name).split("_")[0]
+		if not tall.has(kind):
+			continue
+		var mm: MultiMesh = (n as MultiMeshInstance3D).multimesh
+		for i in mm.instance_count:
+			var t: Transform3D = mm.get_instance_transform(i)
+			var s: float = t.basis.x.length()
+			nat["all"] += 1
+			var v := _clear_verdict(parts, t.origin, float(crown[kind]) * s,
+				float(tall[kind]) * t.basis.y.length())
+			if v != "":
+				nat[v] += 1
+			if _in_block(blocks, t.origin.x, t.origin.z, 0.5) \
+					or Obstacles.blocks(t.origin + Vector3(0, 0.9, 0), 0.4) >= 0:
+				nat["block"] += 1
+			if Sim.road_distance(t.origin.x, t.origin.z) < Sim.ROAD_HALF + 1.5:
+				nat["road"] += 1
+	print("[propclear] country scatter: %d placed; %d under a deck, %d on a ramp, %d inside a building or structure, %d in a carriageway" % [
+		nat["all"], nat["deck"], nat["ramp"], nat["block"], nat["road"]])
+	# The street furniture: lamps are the tallest of it, at five and a half metres.
+	var fur := {"deck": 0, "ramp": 0, "block": 0, "all": 0}
+	for f in sc._furniture:
+		for x in (f[1] as Array):
+			var o: Vector3 = (x as Transform3D).origin
+			fur["all"] += 1
+			var v2 := _clear_verdict(parts, o, 1.2, 6.0)
+			if v2 != "":
+				fur[v2] += 1
+			if _in_block(blocks, o.x, o.z, 0.6):
+				fur["block"] += 1
+	print("[propclear] street furniture: %d placed; %d under a deck, %d on a ramp, %d inside a town block" % [
+		fur["all"], fur["deck"], fur["ramp"], fur["block"]])
+	# The streets as drawn: a 5 m half-width with its kerbs out to 7.75, and a
+	# lorry's worth of headroom wanted over it.
+	var drawn: Array = sc.get("street_draw") if sc.get("street_draw") != null \
+		else sc._streets
+	var st_bad := 0
+	var st_n := 0
+	var st_hit := 0
+	for seg in drawn:
+		var a: Vector2 = seg[0]
+		var b: Vector2 = seg[1]
+		var steps: int = maxi(int(a.distance_to(b) / 3.0), 1)
+		var any := false
+		for k in steps + 1:
+			var q: Vector2 = a.lerp(b, float(k) / float(steps))
+			st_n += 1
+			var v3 := _clear_verdict(parts, Vector3(q.x, Sim.height_at(q.x, q.y), q.y),
+				7.75, 5.0)
+			if v3 != "":
+				st_bad += 1
+				any = true
+		if any:
+			st_hit += 1
+	print("[propclear] streets: %d legs drawn, %d of them run under a deck with less than 5 m or across a ramp (%d of %d points)" % [
+		drawn.size(), st_hit, st_bad, st_n])
+	# Piers standing in a road or a street.
+	var pier_bad := 0
+	var piers: Array = sc.get("pier_spots") if sc.get("pier_spots") != null else []
+	for pp in piers:
+		var pv: Vector3 = pp
+		if Sim.road_distance(pv.x, pv.z) < pv.y + 7.75:
+			pier_bad += 1
+	print("[propclear] piers: %d, %d standing in a road or street" % [piers.size(), pier_bad])
+	# And what a town's set puts in its streets, for every town a bridge runs
+	# through the middle of.
+	var ts_n := 0
+	var ts_bad := 0
+	var ts_towns := 0
+	var cranes := 0
+	for i in sc.sites.size():
+		var c: Vector2 = sc.sites[i]["c"]
+		var near := false
+		for d in parts[0]:
+			if Geometry2D.get_closest_point_to_segment(c, d[0], d[1]).distance_to(c) < 260.0:
+				near = true
+		for rp in parts[1]:
+			for q2 in (rp as PackedVector2Array):
+				if q2.distance_to(c) < 260.0:
+					near = true
+		if not near:
+			continue
+		var ts: TownSet = world.street_fight.town_set(i)
+		if ts == null:
+			continue
+		while ts.building:
+			await world.get_tree().process_frame
+		ts_towns += 1
+		for pr in ts.props:
+			ts_n += 1
+			var pos: Vector3 = pr[1]
+			var v4 := _clear_verdict(parts, pos, float(TownSet.NEED.get(String(pr[0]), 2.5)),
+				TownSet.ROOM_OVER)
+			if v4 != "":
+				ts_bad += 1
+				print("[propclear]   %s %s at %s: %s" % [String(sc.sites[i]["name"]),
+					String(pr[0]), str(pos.round()), v4])
+		for rn in ts.get("ruins_at") if ts.get("ruins_at") != null else []:
+			ts_n += 1
+			if _clear_verdict(parts, rn as Vector3, 7.0, 5.0) != "":
+				ts_bad += 1
+				print("[propclear]   %s ruin at %s" % [String(sc.sites[i]["name"]),
+					str((rn as Vector3).round())])
+		if ts.crane_at != Vector3.INF:
+			var foot := Vector3(ts.crane_at.x, Sim.height_at(ts.crane_at.x, ts.crane_at.z),
+				ts.crane_at.z)
+			if _clear_verdict(parts, foot, 42.0, 36.0) != "":
+				cranes += 1
+				print("[propclear]   %s crane at %s swings over a bridge" % [
+					String(sc.sites[i]["name"]), str(foot.round())])
+	print("[propclear] town sets: %d towns with a bridge through them, %d props of which %d are under a deck or on a ramp; %d cranes over a bridge" % [
+		ts_towns, ts_n, ts_bad, cranes])
+	# Inside a building, more widely: everything else the scenery stood on the
+	# ground, and every town set that is up, against the town blocks -- and the
+	# street furniture against the ruins a set built over it.
+	var inside := 0
+	for n2 in sc.get_children():
+		if not (n2 is MultiMeshInstance3D):
+			continue
+		var nm: String = String(n2.name)
+		if nm.begins_with("Town") or tall.has(nm.split("_")[0]):
+			continue
+		var mm2: MultiMesh = (n2 as MultiMeshInstance3D).multimesh
+		for i2 in mm2.instance_count:
+			var o2: Vector3 = mm2.get_instance_transform(i2).origin
+			if _in_block(blocks, o2.x, o2.z, 0.0):
+				inside += 1
+				if inside <= 12:
+					print("[propclear]   %s at %s stands inside a town block" % [nm, str(o2.round())])
+	var ts_inside := 0
+	var under_ruin := 0
+	for ch in world.get_children():
+		if not (ch is TownSet):
+			continue
+		var tset: TownSet = ch
+		for pr2 in tset.props:
+			var p2: Vector3 = pr2[1]
+			if _in_block(blocks, p2.x, p2.z, -0.3):
+				ts_inside += 1
+				print("[propclear]   %s %s at %s stands inside a town block" % [
+					tset.name, String(pr2[0]), str(p2.round())])
+			for rn2 in tset.ruins_at:
+				var rv: Vector3 = rn2
+				if absf(p2.x - rv.x) < 6.0 and absf(p2.z - rv.z) < 6.0:
+					ts_inside += 1
+					print("[propclear]   %s %s at %s stands inside a ruin" % [
+						tset.name, String(pr2[0]), str(p2.round())])
+		for f2 in sc._furniture:
+			for x2 in (f2[1] as Array):
+				var o3: Vector3 = (x2 as Transform3D).origin
+				for rn3 in tset.ruins_at:
+					var rv3: Vector3 = rn3
+					if absf(o3.x - rv3.x) < 6.6 and absf(o3.z - rv3.z) < 6.6:
+						under_ruin += 1
+				if tset.crane_at != Vector3.INF and absf(o3.x - tset.crane_at.x) < 3.0 \
+						and absf(o3.z - tset.crane_at.z) < 3.0:
+					under_ruin += 1
+	# The aerodromes' towers are drawn, not filed as obstacles: anything the
+	# scenery parked on an apron, against each tower's own box.
+	var towers: Array = []
+	for ab in world.get_children():
+		if not (ab is Airbase):
+			continue
+		for tw in ab.get_children():
+			if tw is MeshInstance3D and String(tw.name) == "Tower":
+				towers.append((tw as MeshInstance3D).global_transform \
+					* (tw as MeshInstance3D).get_aabb())
+	for n3 in sc.get_children():
+		if not (n3 is MultiMeshInstance3D):
+			continue
+		var mm3: MultiMesh = (n3 as MultiMeshInstance3D).multimesh
+		if mm3.mesh == null:
+			continue
+		var ab3: AABB = mm3.mesh.get_aabb()
+		for i3 in mm3.instance_count:
+			var box: AABB = mm3.get_instance_transform(i3) * ab3
+			for tb in towers:
+				var t2: AABB = tb
+				# on the ground plan only: the tower stands on the apron's level
+				if box.position.x < t2.end.x and box.end.x > t2.position.x \
+						and box.position.z < t2.end.z and box.end.z > t2.position.z:
+					inside += 1
+					print("[propclear]   %s at %s stands inside a control tower" % [
+						String(n3.name), str(box.get_center().round())])
+	print("[propclear] inside buildings: %d scenery pieces in a town block or a tower, %d town-set props in a block or a ruin, %d pieces of street furniture inside a ruin or under a crane" % [
+		inside, ts_inside, under_ruin])
+	var total: int = int(nat["deck"]) + int(nat["ramp"]) + int(nat["block"]) \
+		+ int(fur["deck"]) + int(fur["ramp"]) + int(fur["block"]) + st_hit + pier_bad \
+		+ ts_bad + cranes + inside + ts_inside + under_ruin
+	print("[propclear] RESULT: %s -- %d things in the way (trees on a carriageway, %d, not counted)" % [
+		"ok" if total == 0 else "FAILED", total, nat["road"]])
+	world.get_tree().quit()
 #endregion
 
 

@@ -8,8 +8,8 @@
 
 use crate::field::{climate, lerp, smoothstep, WATER_LEVEL};
 use crate::index::SegGrid;
-use crate::world::{base, carve_built, carve_road, corridor, ground_at, world, Corridor, G_ALL,
-    ROAD_FILL_MAX};
+use crate::world::{base, carve_built, carve_road, corridor, ground_at, road_made, world, Corridor,
+    World, G_ALL, G_DRAWN, RAMP_EDGE, RAMP_WALLED, ROAD_FILL_MAX};
 use rayon::prelude::*;
 
 // ------------------------------------------------------------- ground mask
@@ -179,6 +179,84 @@ fn strip(out: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32
     out.extend_from_slice(&[a, b, c, a, c, d]);
 }
 
+/// Both faces of a quad: these are seen from the street and from the road, and
+/// the material culls back faces.
+fn slab(out: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) {
+    strip(out, a, b, c, d);
+    strip(out, b, a, d, c);
+}
+
+/// Is the road at (x, z) up on a ramp -- a walled bank in a town, which the
+/// terrain mesh leaves out and this draws as a structure instead?
+fn ramp_at(w: &World, c: &Corridor, x: f32, z: f32) -> bool {
+    let pad = carve_built(w, base(x, z), x, z, G_ALL).1;
+    let m = road_made(c, x, z, pad);
+    m.w > 0.0 && m.walled >= RAMP_WALLED && !m.shelf
+}
+
+/// How far the ramp's wall stands up past the carriageway: a coping you would
+/// not drive off by accident.
+const UPSTAND: f32 = 0.45;
+
+/// One row of a ramp across the road: for each side, the top of the wall at
+/// the back of the footway and at its face, the foot of the face on the town's
+/// ground, and the foot of the upstand on the footway; and under the middle,
+/// the ground the whole thing stands on.
+struct RampRow {
+    side: [[[f32; 3]; 4]; 2],
+    road: [[f32; 3]; 4],
+    foot: f32,
+}
+
+fn ramp_row(w: &World, c: &Corridor, px: f32, pz: f32, nx: f32, nz: f32,
+        row: &[[f32; 3]; 4]) -> RampRow {
+    let mut side = [[[0.0f32; 3]; 4]; 2];
+    for (si, (k, edge, sgn)) in [(0usize, 1usize, -1.0f32), (3, 2, 1.0)].iter().enumerate() {
+        let top = row[*edge][1] + UPSTAND;
+        let ix = row[*k][0];
+        let iz = row[*k][2];
+        let ox = px + nx * RAMP_EDGE * sgn;
+        let oz = pz + nz * RAMP_EDGE * sgn;
+        // the town's own ground at the face: what the mesh draws there
+        let gy = ground_at(w, c, ox, oz, G_ALL | G_DRAWN) - drop_at(ox, oz) - 0.4;
+        side[si] = [
+            [ix, top, iz],
+            [ox, top, oz],
+            [ox, gy, oz],
+            [ix, row[*k][1] - 0.05, iz],
+        ];
+    }
+    let foot = ground_at(w, c, px, pz, G_ALL | G_DRAWN) - drop_at(px, pz) - 0.4;
+    RampRow { side, road: *row, foot }
+}
+
+/// The walls between two rows of a ramp: the face, the coping and the upstand.
+fn ramp_walls(out: &mut Vec<[f32; 3]>, a: &RampRow, b: &RampRow) {
+    for si in 0..2 {
+        let p = &a.side[si];
+        let q = &b.side[si];
+        slab(out, p[1], q[1], q[2], p[2]);         // the face, to the town
+        slab(out, p[0], q[0], q[1], p[1]);         // the coping
+        slab(out, p[0], q[0], q[3], p[3]);         // the upstand, to the road
+    }
+}
+
+/// Across the end of a ramp: the ends of both walls and the fill between them,
+/// from the carriageway down to the ground. At a bridge this is the face of
+/// the abutment; at the other end it is where the bank is low enough to be
+/// ground again.
+fn ramp_cap(out: &mut Vec<[f32; 3]>, r: &RampRow) {
+    for si in 0..2 {
+        let s = &r.side[si];
+        let foot = s[2][1];
+        slab(out, s[0], s[1], s[2], [s[0][0], foot, s[0][2]]);
+    }
+    let top = r.road.iter().map(|v| v[1]).fold(f32::INFINITY, f32::min) - 0.03;
+    let (a, b) = (r.road[0], r.road[3]);
+    slab(out, [a[0], top, a[2]], [b[0], top, b[2]], [b[0], r.foot, b[2]],
+        [a[0], r.foot, a[2]]);
+}
+
 /// One leg of road. `ya`/`yb` are the design height at its two ends, and
 /// `deck` says the leg is a bridge approach or a tunnel portal: it runs on the
 /// design surface alone, because that is what it has to meet.
@@ -202,9 +280,10 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
     let nz = dx / len;
     const OFF: [f32; 4] = [-1.55, -1.0, 1.0, 1.55];
     let mut prev = [[0.0f32; 3]; 4];
-    // the foot of the wall at each outer edge, or NaN where there is none
-    let mut prev_foot = [f32::NAN; 2];
+    // the ramp's walls at the last row, where it is one
+    let mut prev_ramp: Option<RampRow> = None;
     let mut prev_raised = false;
+    let (ux, uz) = (dx / len, dz / len);
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let px = ax + dx * t;
@@ -233,8 +312,8 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
                 // the design surface applied to the land, so working it out and
                 // then asking for it again separately is the same grid walked
                 // twice, and that was most of what this cost.
-                let (h, (ry, rw, rg)) =
-                    carve_road(w, c, base(qx, qz), qx, qz, G_ALL);
+                let (h, m) = carve_road(w, c, base(qx, qz), qx, qz, G_ALL);
+                let (ry, rw, rg) = (m.y, m.w, m.g);
                 y = h;
                 if rw > 0.35 && ry - rg <= ROAD_FILL_MAX * 1.25 {
                     y = y.max(ry);
@@ -267,41 +346,40 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
         // the kerbs tuck just under the carriageway edge, so no seam shows
         row[0][1] = row[0][1].min(row[1][1]) - 0.02;
         row[3][1] = row[3][1].min(row[2][1]) - 0.02;
-        // A wall at each outer edge where the road stands over a town's made
-        // ground: what is under it there is the town, not the bank.
-        let mut foot = [f32::NAN; 2];
-        for (fi, k) in [0usize, 3].iter().enumerate() {
-            let (qx, qz) = (row[*k][0], row[*k][2]);
-            let beyond = 1.2;
-            let ox = qx + (qx - px) / (half * 1.55) * beyond;
-            let oz = qz + (qz - pz) / (half * 1.55) * beyond;
-            let (made, town) = carve_built(w, base(ox, oz), ox, oz, G_ALL);
-            let made = made - drop_at(ox, oz);
-            if town > 0.3 && row[*k][1] - made > 0.8 {
-                foot[fi] = made - 0.4;
+        // A ramp, where the road stands over a town on a walled bank. The
+        // terrain mesh draws the town's own ground under it (see `G_DRAWN`),
+        // so the bank is drawn here, as what it is: a wall at the back of each
+        // footway down to the town, with a coping, and the ends closed.
+        //
+        // These used to be strips hung from the kerb edge to the made ground a
+        // metre beyond it, row by row and only where that drop passed 0.8 m --
+        // so they came and went along the ramp, leaned with whatever the next
+        // row found, and stood in front of a fifteen metre skirt of sloping
+        // terrain the mesh made of the bank behind them.
+        let ramp = if trunk && ramp_at(w, c, px, pz) {
+            Some(ramp_row(w, c, px, pz, nx, nz, &row))
+        } else {
+            None
+        };
+        if let Some(r) = &ramp {
+            if let Some(p) = &prev_ramp {
+                ramp_walls(&mut out.wall, p, r);
+            } else if i > 0 || !ramp_at(w, c, ax - ux * 3.0, az - uz * 3.0) {
+                ramp_cap(&mut out.wall, r);            // the ramp starts here
             }
+            if i == steps && !ramp_at(w, c, bx + ux * 3.0, bz + uz * 3.0) {
+                ramp_cap(&mut out.wall, r);            // and ends at the leg's end
+            }
+        } else if let Some(p) = &prev_ramp {
+            ramp_cap(&mut out.wall, p);
         }
         if i > 0 && !raised && !prev_raised {
             strip(&mut out.surf, prev[1], prev[2], row[2], row[1]);
             strip(&mut out.kerb, prev[0], prev[1], row[1], row[0]);
             strip(&mut out.kerb, prev[2], prev[3], row[3], row[2]);
         }
-        if i > 0 {
-            for (fi, k) in [0usize, 3].iter().enumerate() {
-                if prev_foot[fi].is_nan() || foot[fi].is_nan() {
-                    continue;
-                }
-                let a = prev[*k];
-                let b = row[*k];
-                let a0 = [a[0], prev_foot[fi], a[2]];
-                let b0 = [b[0], foot[fi], b[2]];
-                // both faces: it is seen from the street and from the road
-                strip(&mut out.wall, a, b, b0, a0);
-                strip(&mut out.wall, b, a, a0, b0);
-            }
-        }
         prev = row;
-        prev_foot = foot;
+        prev_ramp = ramp;
         prev_raised = raised;
     }
     out

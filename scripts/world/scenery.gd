@@ -822,6 +822,10 @@ func _redraw(mmi: MultiMeshInstance3D, i: int, t: Transform3D) -> void:
 ## around it, so a town in the desert does not get the same street trees as one
 ## in the pine forest, and the paint changes with the border.
 const PROP_FADE := 520.0
+## Room a piece of street furniture needs around and over it: a lamp post is the
+## tallest of them, at five and a half metres, and a kiosk the widest.
+const PROP_REACH := 1.5
+const PROP_HEADROOM := 6.5
 
 func _town_detail() -> void:
 	var made := 0
@@ -876,10 +880,21 @@ func _town_detail() -> void:
 					which.append(i)
 		var gys: PackedFloat32Array = Sim.native.surfaces_at(at,
 			Terrain.BASE_CELL)
+		# (only asked prop by prop of a town a bridge comes anywhere near)
+		var box_lo := Vector2(INF, INF)
+		var box_hi := Vector2(-INF, -INF)
+		for q0 in at:
+			box_lo = Vector2(minf(box_lo.x, q0.x), minf(box_lo.y, q0.y))
+			box_hi = Vector2(maxf(box_hi.x, q0.x), maxf(box_hi.y, q0.y))
+		var bridged: bool = Sim.near_bridges(box_lo, box_hi, PROP_REACH)
 		for k in at.size():
 			var q: Vector2 = at[k]
 			var gy: float = gys[k]
 			if gy < Sim.sea_at(q.x, q.y) + 1.0:
+				continue
+			# Not on a ramp up to a bridge, and not under a deck it would
+			# stand up through: the street it lines may go under one.
+			if bridged and Sim.bridge_headroom(q.x, q.y, PROP_REACH, gy) < PROP_HEADROOM:
 				continue
 			var xf := Transform3D(Basis(Vector3.UP, yaw[k]),
 				Vector3(q.x, gy, q.y))
@@ -1637,6 +1652,11 @@ var _scat_surf := PackedFloat32Array()
 static var _scat_clump := FastNoiseLite.new()
 
 const SCAT_TASKS := 24
+## How tall each kind of scatter stands and how far its crown spreads, at scale
+## one: the meshes below.
+const SCAT_TALL := {"tree": 8.3, "pine": 12.8, "rock": 3.0, "bush": 2.2}
+const SCAT_CROWN := {"tree": 3.6, "pine": 2.7, "rock": 2.6, "bush": 1.5}
+
 ## Per slice, so the total is a round 150,000 without an integer division that
 ## quietly loses the remainder.
 const SCAT_PER_TASK := 6250
@@ -1677,6 +1697,8 @@ func _scatter_nature() -> void:
 		# apiece and was the last thing the workers were crossing the boundary
 		# for
 		_scat_surf = Sim.native.surfaces_at(_scat_pts, Terrain.BASE_CELL)
+		# read by every worker, so built here first
+		Sim.index_bridges()
 		_scat_out = []
 		_scat_out.resize(SCAT_TASKS)
 		var gid := WorkerThreadPool.add_group_task(_scat_slice, SCAT_TASKS, -1, true,
@@ -1759,8 +1781,18 @@ func _scat_slice(t: int) -> void:
 		var options: Array = SCAT_SPECIES.get(biome, ["bush"])
 		var kind: String = options[rng.randi() % options.size()]
 		var sc := rng.randf_range(0.7, 1.7)
+		var sy: float = sc * rng.randf_range(0.8, 1.35)
+		# Clear of the road bridges: off the ramps, and under a deck only
+		# where the deck is well over the top of it -- a valley viaduct, not
+		# the low end of a town flyover.
+		if Sim.bridge_headroom(x, z, float(SCAT_CROWN.get(kind, 2.0)) * sc, y) \
+				< float(SCAT_TALL.get(kind, 3.0)) * sy + 1.0:
+			continue
+		# and not inside anything built: a barn, a hangar, a fuel tank
+		if Obstacles.blocks(Vector3(x, y + 0.5, z), 0.4) >= 0:
+			continue
 		var xf := Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(
-			Vector3(sc, sc * rng.randf_range(0.8, 1.35), sc)), Vector3(x, y - 0.4, z))
+			Vector3(sc, sy, sc)), Vector3(x, y - 0.4, z))
 		out.append(["%s_%d_%d" % [kind, int(floor(x / SCAT_CELL)),
 			int(floor(z / SCAT_CELL))], xf])
 	_scat_out[t] = out
@@ -1827,9 +1859,13 @@ func _home_base() -> void:
 	var wall := _wall_mesh()
 	var tx := []
 	var wx := []
+	# Three rows of three, north of the tower. They were 22 m apart from
+	# z = -560, and the third row came down at -604 -- inside the control
+	# tower, which stands at (150, -600) and is seventeen metres across at the
+	# cab: one lorry was parked in the ground floor of it.
 	for i in 9:
 		var px := 120.0 + float(i % 3) * 26.0
-		var pz := -560.0 - floorf(float(i) / 3.0) * 22.0
+		var pz := -548.0 - floorf(float(i) / 3.0) * 18.0
 		tx.append(Transform3D(Basis(Vector3.UP, deg_to_rad(90.0)), Vector3(px, 0, pz)))
 	for i in 12:
 		wx.append(Transform3D(Basis(Vector3.UP, 0.0), Vector3(60.0 + i * 16.0, 0, -690.0)))
@@ -1868,7 +1904,8 @@ func _build_roads() -> void:
 	# that then queued at it. The extension builds both vertex lists across
 	# every core and hands them back once.
 	var legs := PackedFloat32Array(Sim.road_draw)
-	for r in _streets:
+	street_draw = _streets_clear_of_bridges()
+	for r in street_draw:
 		var a: Vector2 = r[0]
 		var b: Vector2 = r[1]
 		legs.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y,
@@ -1930,6 +1967,51 @@ func _build_roads() -> void:
 	_stats["road_tris"] = tris
 	_stats["road_cells"] = cells
 
+## The streets as they are drawn: `_streets`, less wherever one runs into a
+## road bridge -- across the ramp up to it, or underneath the deck where there
+## is not the headroom for a lorry. With the room, a street goes under.
+var street_draw: Array = []
+## The headroom a street needs under a deck, girder to ground.
+const STREET_HEADROOM := 5.0
+## Half a street, kerbs and all: `ribbon` draws the kerb strip out to 1.55 of
+## its five metre half width.
+const STREET_REACH := 7.75
+
+func _streets_clear_of_bridges() -> Array:
+	var out: Array = []
+	if Sim.road_bridges.is_empty():
+		return _streets.duplicate()
+	const STEP := 3.0
+	for seg in _streets:
+		var a: Vector2 = seg[0]
+		var b: Vector2 = seg[1]
+		if not Sim.near_bridges(Vector2(minf(a.x, b.x), minf(a.y, b.y)),
+				Vector2(maxf(a.x, b.x), maxf(a.y, b.y)), STREET_REACH):
+			out.append(seg)
+			continue
+		var run := a.distance_to(b)
+		var n: int = maxi(int(ceil(run / STEP)), 1)
+		var from := -1
+		var cut := 0
+		for k in n + 1:
+			var q: Vector2 = a.lerp(b, float(k) / float(n))
+			var ok: bool = Sim.bridge_headroom(q.x, q.y, STREET_REACH) >= STREET_HEADROOM
+			if ok and from < 0:
+				from = k
+			elif not ok and from >= 0:
+				# the last clear point is where this piece stops
+				if k - 1 > from:
+					out.append([a.lerp(b, float(from) / float(n)),
+						a.lerp(b, float(k - 1) / float(n))])
+				from = -1
+			if not ok:
+				cut += 1
+		if from >= 0 and n > from:
+			out.append([a.lerp(b, float(from) / float(n)), b] if from > 0 else [a, b])
+		if cut > 0:
+			_stats["streets_cut"] = int(_stats.get("streets_cut", 0)) + 1
+	return out
+
 ## A road surface that wins against the ground it lies on without being lifted
 ## off it. Each vertex is pulled a fraction of its own distance toward the eye
 ## before projection: the picture is unchanged, only the depth moves, and by an
@@ -1972,6 +2054,11 @@ void fragment() {
 ## other, and disappeared into a hillside with no way in.
 const PIER_STEP := 90.0
 const DECK_HALF := 8.5
+## How far under the deck a walled ramp's abutment block reaches: `SHELF` in
+## world.rs, which is the ground it stands for.
+const ABUT_LEN := 4.5
+## Where every pier stands: x and z, and half its width in y.
+var pier_spots: Array = []
 
 func _build_structures() -> void:
 	var st := MeshKit.begin()
@@ -2047,10 +2134,38 @@ func _build_structures() -> void:
 				MeshKit.quad_n(st, e0, e1, i1, i0, Vector3.UP)
 			# An abutment under each end: the deck sits on a wall rather than
 			# stopping in the air, whatever the embankment managed to reach.
-			for endp in ([[a2, ya]] if i == 0 else []) + ([[b2, yb]] if i == last else []):
+			for endp in ([[a2, ya, pts[i], dir]] if i == 0 else []) \
+					+ ([[b2, yb, pts[i + 1], -dir]] if i == last else []):
 				var ep: Vector2 = endp[0]
 				var ey: float = endp[1]
-				var eg: float = Sim.height_at(ep.x, ep.y)
+				var station: Vector2 = endp[2]
+				var into: Vector2 = endp[3]
+				# A walled ramp in a town ends in a block under the first few
+				# metres of the deck, the ramp's full width: the ground there
+				# is a shelf just under the deck (see `SHELF` in world.rs),
+				# and drawn as nothing it was a slab of invisible ground.
+				var probe: Vector2 = station + into * 2.0
+				if Sim.height_at(probe.x, probe.y) - Sim.drawn_height_at(probe.x, probe.y) > 0.5:
+					var top: float = ey - 0.3
+					var foot := INF
+					for k2 in 3:
+						for sx2 in [-1.0, 0.0, 1.0]:
+							var fq: Vector2 = station + into * (ABUT_LEN * float(k2) * 0.5) \
+								+ Vector2(-into.y, into.x) * (Sim.RAMP_HALF * sx2)
+							foot = minf(foot, Sim.drawn_height_at(fq.x, fq.y))
+					var deep: float = top - foot + 0.5
+					var block := MeshKit.begin()
+					MeshKit.box(block, Vector3(Sim.RAMP_HALF * 2.0, deep, ABUT_LEN),
+						Vector3(0.0, -deep * 0.5, ABUT_LEN * 0.5))
+					var mi_block := MeshKit.mi(MeshKit.finish(block,
+						MeshKit.mat(Color(0.58, 0.57, 0.55), 0.92, 0.0)), "Abutment")
+					mi_block.position = Vector3(station.x, top, station.y)
+					mi_block.rotation.y = atan2(into.x, into.y)
+					add_child(mi_block)
+					continue
+				# Down to the ground as it is drawn, which under a ramp is not
+				# the ramp's own top.
+				var eg: float = Sim.drawn_height_at(ep.x, ep.y)
 				var tall: float = ey - 1.9 - eg
 				if tall > 0.5:
 					var wall := MeshKit.begin()
@@ -2061,13 +2176,19 @@ func _build_structures() -> void:
 					mi_wall.position = Vector3(ep.x, ey - 1.9, ep.y)
 					mi_wall.rotation.y = atan2(dir.x, dir.y)
 					add_child(mi_wall)
-			# and a pier every so often, down to whatever is underneath
+			# and a pier every so often, down to whatever is underneath -- but
+			# not into a road or a street passing under the deck: that pier
+			# waits for the next station, and the span is a little longer.
 			since += run
 			if since >= PIER_STEP:
-				since = 0.0
 				var g: float = Sim.height_at(b2.x, b2.y)
 				var clear: float = yb - 1.9 - g
-				if clear > 5.0:
+				var pw0: float = clampf(4.4 + clear * 0.035, 4.4, 14.0)
+				var in_road: bool = Sim.segments_indexed > 0 \
+					and Sim.road_distance(b2.x, b2.y) < pw0 * 0.5 + STREET_REACH + 1.0
+				if not in_road or since >= PIER_STEP * 2.2:
+					since = 0.0
+				if clear > 5.0 and not in_road:
 					piers += 1
 					# Thicker the taller it stands: a valley viaduct can be two
 					# hundred metres off the floor, and at the width of a
@@ -2075,6 +2196,7 @@ func _build_structures() -> void:
 					var pw: float = clampf(4.4 + clear * 0.035, 4.4, 14.0)
 					MeshKit.box(st, Vector3(pw, clear, pw),
 						Vector3(b2.x, g + clear * 0.5, b2.y))
+					pier_spots.append(Vector3(b2.x, pw * 0.5, b2.y))
 	var portals := 0
 	for tn in Sim.road_tunnels:
 		var tp: PackedVector2Array = tn.get("pts", PackedVector2Array())
@@ -2163,9 +2285,15 @@ func _off_the_road(q: Vector2, a: Vector2, b: Vector2) -> Vector2:
 			continue
 		if not Sim.clear_of_airfield(t.x, t.y) or _inside_town(t):
 			continue
-		if Sim.clear_of_roads(t.x, t.y, 12.0):
+		if _pylon_clear(t):
 			return t
 	return Vector2.INF
+
+## Can a pylon stand here, as far as the roads go: out of the carriageway, and
+## clear of a road bridge -- its ramps and anywhere under the deck. A bridge is
+## not in the road index, so the kerb test alone put towers up through decks.
+func _pylon_clear(q: Vector2) -> bool:
+	return Sim.clear_of_roads(q.x, q.y, 12.0) and Sim.bridge_headroom(q.x, q.y, 12.0) == INF
 
 ## Close a run of pylons off. A run of one carries no wire and is a tower
 ## standing on its own in a field, so it is dropped.
@@ -2230,7 +2358,7 @@ func _powerlines() -> void:
 				# thirty-four metres up; putting one in the carriageway is worse
 				# than putting a house there. Nudged aside rather than dropped,
 				# so the line still gets there.
-				if not Sim.clear_of_roads(q.x, q.y, 12.0):
+				if not _pylon_clear(q):
 					var moved := _off_the_road(q, a, b)
 					if moved == Vector2.INF:
 						_pylon_break(runs, pts)
@@ -2245,7 +2373,7 @@ func _powerlines() -> void:
 		if Sim.height_at(last.x, last.y) < Sim.sea_at(last.x, last.y) + 3.0:
 			_pylon_break(runs, pts)
 			pts = []
-		elif Sim.clear_of_roads(last.x, last.y, 12.0):
+		elif _pylon_clear(last):
 			pts.append(last)
 		else:
 			var shifted := _off_the_road(last, route[route.size() - 2], last)
@@ -2310,6 +2438,8 @@ func _comms_masts() -> void:
 		var y := Sim.height_at(q.x, q.y)
 		if y < Sim.sea_at(q.x, q.y) + 5.0 or not Sim.clear_of_airfield(q.x, q.y) or _inside_town(q):
 			continue
+		if not _pylon_clear(q):
+			continue
 		xf.append(Transform3D(Basis(), Vector3(q.x, y, q.y)))
 		var beacon := MeshInstance3D.new()
 		var sp := SphereMesh.new()
@@ -2368,6 +2498,8 @@ func _windfarm() -> void:
 		var y := Sim.height_at(q.x, q.y)
 		if y < Sim.sea_at(q.x, q.y) + 20.0 or not Sim.clear_of_airfield(q.x, q.y):
 			continue
+		if Sim.bridge_headroom(q.x, q.y, 45.0) < INF:
+			continue                        # a rotor sweeps forty metres
 		var t := Turbine.new()
 		t.build()
 		add_child(t)

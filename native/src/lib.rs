@@ -833,7 +833,7 @@ impl Terra {
         // Gathered once for the whole batch rather than once a chunk: it is a
         // lock and a list read, and three hundred threads taking it to learn
         // the same answer is contention for nothing.
-        let g = world::Ground::now();
+        let g = world::Ground::now().drawn();
         let built: Vec<chunk::Chunk> = src
             .par_chunks_exact(8)
             .map(|q| {
@@ -868,7 +868,7 @@ impl Terra {
             n.get(2).copied().unwrap_or(0),
             n.get(3).copied().unwrap_or(0),
         ];
-        let c = chunk::build(&world::Ground::now(), depth as i32, ix as i32,
+        let c = chunk::build(&world::Ground::now().drawn(), depth as i32, ix as i32,
             iz as i32, nbs, fine as u32);
         let mut out: Array<Variant> = Array::new();
         push_chunk(&mut out, &c);
@@ -1103,7 +1103,7 @@ impl Terra {
         // frame and leave every caller to take the drop off afterwards, which
         // is a footgun with two callers and would have been a bug with three:
         // the drop belongs under the interpolation, not over it.
-        let g = world::Ground::now();
+        let g = world::Ground::now().drawn();
         let cell = cell as f32;
         let src: Vec<Vector2> = pts.as_slice().to_vec();
         let out: Vec<f32> = src
@@ -1207,14 +1207,16 @@ impl Terra {
     }
 
     /// The corridor: every leg as (ax, az, bx, bz, made a, made b, natural a,
-    /// natural b). Stamped into a grid here, once, rather than walked per query.
+    /// natural b, which ends are an abutment). Stamped into a grid here, once,
+    /// rather than walked per query.
     #[func]
     fn set_corridor(&self, data: PackedFloat32Array) {
-        let mut legs = Vec::with_capacity(data.len() / 8);
-        for q in data.as_slice().chunks_exact(8) {
+        let mut legs = Vec::with_capacity(data.len() / 9);
+        for q in data.as_slice().chunks_exact(9) {
             legs.push(Leg {
                 ax: q[0], az: q[1], bx: q[2], bz: q[3],
                 ya: q[4], yb: q[5], na: q[6], nb: q[7],
+                ends: q[8] as u8,
             });
         }
         publish_corridor(legs);
