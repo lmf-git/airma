@@ -40,6 +40,7 @@ var _free := false
 var pod_slew := false
 var diag := false
 var clamped_frames := 0
+var _wcam_near_was := 0.0
 var weapon_cam: Node3D = null:   # ride a round in flight
 	set(v):
 		weapon_cam = v
@@ -175,6 +176,10 @@ func _carry(held: Vector3, axis: Vector3, target: Vector3, delta: float) -> Vect
 	return h.rotated(axis, ang * clampf(delta * 3.0 * w, 0.0, 1.0)).normalized()
 
 func _process(delta: float) -> void:
+	# In slow motion the camera keeps real time: riding a bullet at a twentieth
+	# of its speed, the easing on the boom would otherwise take minutes.
+	if Engine.time_scale < 0.5 and Engine.time_scale > 0.0:
+		delta = delta / Engine.time_scale
 	# Weapon cam: ride whatever was last let go, until it goes off.
 	#
 	# Asked of the ride, not of the round. A round that has gone off is a freed
@@ -192,6 +197,9 @@ func _process(delta: float) -> void:
 			if _wcam_far_was > 0.0:
 				far = _wcam_far_was
 				_wcam_far_was = 0.0
+			if _wcam_near_was > 0.0:
+				near = _wcam_near_was
+				_wcam_near_was = 0.0
 		else:
 			# The interpolated pose, not the raw one. A round is moved once per
 			# physics tick; its mesh is then interpolated to the render frame,
@@ -210,6 +218,10 @@ func _process(delta: float) -> void:
 				rs *= float(weapon_cam.call("ride_scale"))
 			if weapon_cam.has_method("ride_centre"):
 				wp = wxf * (weapon_cam.call("ride_centre") as Vector3)
+			# a bullet is ridden from the first frame at its own scale: eased in
+			# from a missile's boom it spent its whole flight twenty metres back
+			if rs < 0.05 and _wcam_prev != weapon_cam:
+				_ride_s = rs
 			_ride_s = lerpf(_ride_s, rs, clampf(delta * 2.0, 0.0, 1.0))
 			rs = _ride_s
 			var wv := Vector3.FORWARD
@@ -244,7 +256,10 @@ func _process(delta: float) -> void:
 			_wcam_side = _carry(_wcam_side, wdir, wdir.cross(u), delta)
 			var side := _wcam_side
 			var want := wp - wdir * 20.0 * rs + side * 7.5 * rs + u * 5.5 * rs
-			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 3.0)
+			# a bullet a metre and a half up rides at a few centimetres, so the
+			# floor that keeps a missile's boom out of the hillside is scaled
+			# to the ride rather than standing three metres over it
+			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + minf(3.0, 0.05 + rs * 40.0))
 			# Rigid on the round, eased on the boom. Lerping the world position
 			# toward a target doing six hundred metres a second leaves a steady
 			# state lag of v over the gain — about seventy metres — so the
@@ -267,6 +282,22 @@ func _process(delta: float) -> void:
 				# see where it is going.
 				_wcam_far_was = far
 				far = 240000.0
+
+			# A near plane in keeping with a ride a few centimetres off, held
+			# for the whole ride. Set once as it began, it was back at a
+			# quarter of a metre by the time the round was in the air -- and a
+			# rifle round ridden fifteen centimetres back was clipped out of
+			# its own picture; only a .50, ridden from further, showed.
+			# Not too near, though, and the far plane brought in to match: a
+			# couple of millimetres against the two hundred and forty
+			# kilometres a missile ride wants left the depth buffer nothing to
+			# work with and the whole picture washed out grey. A centimetre and
+			# eight kilometres is the range and then some.
+			if rs < 0.05:
+				if _wcam_near_was <= 0.0:
+					_wcam_near_was = near
+				near = 0.01
+				far = 8000.0
 			if _wcam_blend < 1.0:
 				_wcam_blend = minf(_wcam_blend + delta * 3.0, 1.0)
 				var e: float = _wcam_blend * _wcam_blend * (3.0 - 2.0 * _wcam_blend)

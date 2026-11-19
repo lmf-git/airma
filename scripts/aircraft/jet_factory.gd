@@ -47,7 +47,11 @@ static func build(spec: Dictionary) -> Dictionary:
 	for s in stations:
 		rings.append(MeshKit.ring(s[1], s[2], s[3], s[0], s[4], 12))
 	var unmanned: bool = bool(spec.get("unmanned", false))
-	if not unmanned:
+	# Only a fighter's hood sits in a trough cut in the spine. An airliner or
+	# a tanker has a flight deck inside the nose behind windows, and cut like a
+	# fighter its pilot sat on top of the fuselage with the whole nose in front
+	# of him, from the windscreen to the horizon.
+	if not unmanned and bool(spec.get("canopy_opens", true)):
 		_cut_cockpit(rings, cz_a, cz_b, float(cp0["y"]) - 0.62)
 	MeshKit.loft(st, rings, Vector3(0, 0, sections[int(sections.size() * 0.5)][0]))
 

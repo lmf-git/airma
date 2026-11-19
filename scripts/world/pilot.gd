@@ -183,6 +183,9 @@ const FINGER_LEN := [0.040, 0.028, 0.022]
 const FINGER_AT := [-0.030, -0.010, 0.010, 0.030]
 const FINGER_R := 0.0095
 var _hand_l: Dictionary = {}
+## Under a canopy: where each hand has hold of a riser, left then right, in
+## world space. Empty otherwise. The owner hangs the rigging off these.
+var risers: Array = []
 var _hand_r: Dictionary = {}
 ## Live fingers only near the camera.
 const FINGER_NEAR := 30.0
@@ -963,12 +966,22 @@ func animate(delta: float) -> void:
 		var to_t := torso.global_transform.affine_inverse()
 		var up: Vector3 = global_transform.basis.y
 		var rt: Vector3 = global_transform.basis.x
+		risers.clear()
 		for sgn in [-1.0, 1.0]:
 			var pull: float = clampf(in_lean * sgn, 0.0, 1.0)
 			var riser: Vector3 = global_transform.origin + up * (2.02 - pull * 0.22) \
 				+ rt * sgn * 0.27 - global_transform.basis.z * 0.02
 			_two_bone(arm_r if sgn > 0.0 else arm_l, fore_r if sgn > 0.0 else fore_l,
 				to_t * riser, ARM_1, ARM_2, Vector3(sgn * 0.9, -0.3, -0.5))
+			risers.append(riser)
+			# and the hand shut round the riser rather than open beside it
+			var h: Dictionary = _hand_r if sgn > 0.0 else _hand_l
+			if not h.is_empty():
+				var near: bool = _hands_near() and visible
+				_show_fingers(h, near)
+				if near:
+					_grip_fingers(h, riser, up, 0.012,
+						-rt * sgn - global_transform.basis.z * 0.4, false)
 		return
 	if in_action == "wall" or in_action == "ladder":
 		_sling_weapon()

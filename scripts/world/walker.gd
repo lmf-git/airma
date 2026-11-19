@@ -367,6 +367,56 @@ func set_chute(on: bool) -> void:
 		add_child(_canopy)
 	if _canopy != null:
 		_canopy.visible = on
+	if on and _rigging == null:
+		_rigging = MeshInstance3D.new()
+		_rigging.name = "Rigging"
+		_rigging.mesh = ImmediateMesh.new()
+		_rigging.top_level = true
+		_rigging.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var lm := StandardMaterial3D.new()
+		lm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		lm.albedo_color = Color(0.82, 0.80, 0.74)
+		_rigging.material_override = lm
+		add_child(_rigging)
+	if _rigging != null:
+		_rigging.visible = on
+		if not on:
+			(_rigging.mesh as ImmediateMesh).clear_surfaces()
+
+## The rigging under the canopy: the suspension lines fanned down from the
+## skirt to a riser each side, and the risers down through his hands to the
+## harness at his shoulders. The canopy hung over him with nothing joining the
+## two, so he was a man falling slowly under an orange dome.
+var _rigging: MeshInstance3D = null
+const RIG_LINES := 14
+func _rig_lines() -> void:
+	if not chute or _rigging == null or not is_instance_valid(_canopy) \
+			or body.risers.size() < 2:
+		return
+	_rigging.global_transform = Transform3D.IDENTITY
+	var im := _rigging.mesh as ImmediateMesh
+	im.clear_surfaces()
+	im.surface_begin(Mesh.PRIMITIVE_LINES)
+	var cxf: Transform3D = _canopy.global_transform
+	var up: Vector3 = global_transform.basis.y
+	for sgn in [-1.0, 1.0]:
+		var hand: Vector3 = body.risers[0 if sgn < 0.0 else 1]
+		# the confluence links, a hand's span over the grip
+		var link: Vector3 = hand + up * 0.45
+		var sh: Node3D = body.arm_l if sgn < 0.0 else body.arm_r
+		# riser: harness at the shoulder, up through the hand to the link
+		im.surface_add_vertex(sh.global_position)
+		im.surface_add_vertex(hand)
+		im.surface_add_vertex(hand)
+		im.surface_add_vertex(link)
+		# this side's half of the skirt
+		for i in RIG_LINES:
+			var a: float = PI * (float(i) + 0.5) / float(RIG_LINES)
+			# x across the canopy: the left lines go to the left riser
+			var rim := Vector3(sgn * sin(a) * 3.15, 0.0, cos(a) * 3.15)
+			im.surface_add_vertex(link)
+			im.surface_add_vertex(cxf * rim)
+	im.surface_end()
 
 func activate() -> void:
 	cam.current = true
@@ -1518,6 +1568,7 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	_pitch_was = pitch
 	body.position = Vector3.ZERO
 	body.animate(delta)
+	_rig_lines()
 	# the view goes down with the body: see `Pilot._prone_s`
 	_eye = lerpf(_eye, lerpf(EYE_CROUCH + 0.25 if crouching else EYE, 0.55,
 		body.prone_amount()), clampf(delta * 9.0, 0, 1))

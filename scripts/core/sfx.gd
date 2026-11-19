@@ -481,6 +481,8 @@ static func warm(ids: Array) -> void:
 static func play_ui(world: Node, id: String, db := 0.0, pitch := 1.0) -> void:
 	if world == null or not world.is_inside_tree():
 		return
+	if listen.is_valid():
+		listen.call("ui:" + id, Vector3.INF)
 	var p := AudioStreamPlayer.new()
 	p.stream = get_clip(id)
 	p.volume_db = db
@@ -491,9 +493,14 @@ static func play_ui(world: Node, id: String, db := 0.0, pitch := 1.0) -> void:
 	p.play()
 
 ## One-shot at a world position. Falls back to a 2D player when no scene is set.
+## A harness's ear on every positional sound: (id, where). Unset in play.
+static var listen: Callable = Callable()
+
 static func play_at(world: Node, id: String, pos: Vector3, db := 0.0, pitch := 1.0, dist := 900.0) -> void:
 	if world == null or not world.is_inside_tree():
 		return
+	if listen.is_valid():
+		listen.call(id, pos)
 	var p := AudioStreamPlayer3D.new()
 	p.stream = get_clip(id)
 	p.volume_db = db

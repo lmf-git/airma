@@ -303,6 +303,29 @@ const DRAG := {"carbine": 0.0011, "ak": 0.0012, "scar": 0.0008, "smg": 0.0018,
 	"pistol": 0.0022, "glock": 0.0022, "lmg": 0.0011, "gl": 0.0006, "fifty": 0.0004,
 	"aa20": 0.006}
 
+## What each weapon fires, for the range's ballistics page and the round the
+## bullet camera rides: the cartridge, the bullet's diameter and length in
+## metres, its weight in grains, and the colour of its jacket.
+const CAL := {
+	"carbine": {"name": "5.56x45 mm M855", "d": 0.0057, "len": 0.023, "gr": 62.0, "col": Color(0.78, 0.52, 0.28)},
+	"lmg": {"name": "5.56x45 mm M855", "d": 0.0057, "len": 0.023, "gr": 62.0, "col": Color(0.78, 0.52, 0.28)},
+	"smg": {"name": "4.6x30 mm", "d": 0.0046, "len": 0.018, "gr": 31.0, "col": Color(0.70, 0.70, 0.66)},
+	"ak": {"name": "5.45x39 mm 7N6", "d": 0.0056, "len": 0.025, "gr": 53.0, "col": Color(0.55, 0.62, 0.40)},
+	"scar": {"name": "7.62x51 mm M80", "d": 0.0078, "len": 0.029, "gr": 147.0, "col": Color(0.78, 0.52, 0.28)},
+	"dmr": {"name": "7.62x51 mm M118LR", "d": 0.0078, "len": 0.031, "gr": 175.0, "col": Color(0.78, 0.52, 0.28)},
+	"sniper": {"name": ".300 Win Mag 220 gr", "d": 0.0078, "len": 0.038, "gr": 220.0, "col": Color(0.80, 0.55, 0.30)},
+	"fifty": {"name": ".50 BMG M33", "d": 0.0130, "len": 0.058, "gr": 661.0, "col": Color(0.78, 0.52, 0.28)},
+	"pistol": {"name": "9x19 mm", "d": 0.0090, "len": 0.016, "gr": 124.0, "col": Color(0.78, 0.52, 0.28)},
+	"glock": {"name": "9x19 mm", "d": 0.0090, "len": 0.016, "gr": 124.0, "col": Color(0.78, 0.52, 0.28)},
+	"vector": {"name": ".45 ACP", "d": 0.0115, "len": 0.017, "gr": 230.0, "col": Color(0.78, 0.52, 0.28)},
+	"shotgun": {"name": "12 ga 00 buck pellet", "d": 0.0084, "len": 0.0084, "gr": 53.8, "col": Color(0.42, 0.42, 0.44), "ball": true},
+	"aa20": {"name": "12 ga 00 buck pellet", "d": 0.0084, "len": 0.0084, "gr": 53.8, "col": Color(0.42, 0.42, 0.44), "ball": true},
+}
+
+## The bullet's mass in kilograms.
+static func mass_of(id: String) -> float:
+	return float((CAL.get(id, CAL["carbine"]) as Dictionary)["gr"]) * 6.479891e-5
+
 static func drag_of(g: Dictionary) -> float:
 	return float(DRAG.get(String(g.get("id", "")), 0.0011))
 
@@ -379,7 +402,12 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		Effects.bullet(world, muzzle, d * float(g["muzzle"]) * randf_range(0.97, 1.03)
 			* (0.93 if quiet else 1.0),
 			shooter, float(g["dmg"]) * dmg_scale, team,
-			0.55 if n > 1 else 1.0, 0.45 if n > 1 else 1.4, drag_of(g), pen_of(g))
+			# Three and a half seconds of flight for a bullet: at 1.4 every rifle
+			# round in the game fell out of the sky at nine hundred metres
+			# whatever it was fired from, and the thousand metre board on the
+			# range could not be hit with a sniper rifle. A pellet keeps its
+			# short life -- it is a ball, and slow long before then.
+			0.55 if n > 1 else 1.0, 0.45 if n > 1 else 3.5, drag_of(g), pen_of(g))
 	if quiet:
 		# no flash to speak of, no crack, and nothing that carries
 		Effects.muzzle_flash(world, muzzle + dir * 0.05, dir, 0.045)
@@ -387,13 +415,16 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 			randf_range(0.92, 1.08) * (1.25 if g.get("hand", false) else 1.0), 70.0)
 		return
 	Effects.muzzle_flash(world, muzzle + dir * 0.12, dir, 0.16 if n == 1 else 0.24)
-	report(world, g, muzzle)
+	report(world, g, muzzle, shooter is Walker)
 
 ## What a shot sounds like from where the listener is. Near, it is the weapon;
 ## from a few streets off the crack has gone and the thump is all that is left.
-static func report(world: Node, g: Dictionary, at: Vector3) -> void:
+## `own` is his own shot: heard from where he is, not from the camera. With the
+## bullet camera three hundred metres down the range every shot he fired was
+## heard from there, as somebody else's rifle a long way off.
+static func report(world: Node, g: Dictionary, at: Vector3, own := false) -> void:
 	var ear := world.get_viewport().get_camera_3d()
-	var far: float = 0.0 if ear == null else ear.global_position.distance_to(at)
+	var far: float = 0.0 if (ear == null or own) else ear.global_position.distance_to(at)
 	var db: float = g["db"]
 	if far < 110.0:
 		Sfx.play_at(world, String(g["sound"]), at, db, randf_range(0.95, 1.06), 320.0)

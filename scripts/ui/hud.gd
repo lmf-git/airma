@@ -2637,6 +2637,17 @@ func _refresh_help() -> void:
 	elif sig == 8:
 		_card.show_keys(_tank_keys())
 	elif sig == 16:
-		_card.show_keys(_foot_keys())
+		var keys: Array = _foot_keys()
+		# on the range, its own keys first: the slow-motion bullet camera is
+		# the reason to be there and nothing on the card said how to get it
+		if mode != null and is_instance_valid(mode) and String(mode.get("mode")) == "range":
+			keys = [["FIRING RANGE", [
+				["Y", "slow-motion bullet camera: rides your next round to the board"],
+				["PgUp / PgDn", "slow-motion speed"],
+				["T", "trace lines: each round's flight, and its drop off the bore line"],
+				["BACKSPACE", "clear the boards and the traces"],
+				["F", "take a weapon off the rack behind the line"],
+			]]] + keys
+		_card.show_keys(keys)
 	else:
 		_card.show_keys(_air_keys())

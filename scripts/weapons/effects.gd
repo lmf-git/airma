@@ -127,8 +127,15 @@ static func vortex_particles(colour: Color, length := 3.0, amount := 48) -> GPUP
 static var round_watch := Callable()
 
 static func watch(shot: Node3D, shooter: Node) -> void:
+	# the range sees every round first, so it can mark it with what it is
+	# before the camera decides whether to ride it
+	if round_log.is_valid() and is_instance_valid(shot):
+		round_log.call(shot, shooter)
 	if round_watch.is_valid() and is_instance_valid(shot):
 		round_watch.call(shot, shooter)
+
+## The firing range's ear on every round fired: see `FiringRange`.
+static var round_log: Callable = Callable()
 
 static func tracer(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
 		team: int, he := 0.0) -> Tracer:
@@ -1364,6 +1371,67 @@ class Tracer extends Node3D:
 	## Where it stopped, whatever stopped it. For the harness, and for anything
 	## that wants to know where a round went in.
 	var ended_at := Vector3.INF
+	## What it is, when somebody needs to know: an entry of `Firearm.CAL`.
+	## Set on the range, where the bullet camera rides it and draws it.
+	var cal: Dictionary = {}
+	var _round: Node3D = null
+
+	## How close the bullet camera sits. A round is a couple of centimetres
+	## long: the boom built for a missile put it a pixel in the distance.
+	func ride_scale() -> float:
+		if cal.is_empty():
+			return 1.0
+		return float(cal["len"]) * 0.30
+
+	## The bullet itself, to its own calibre, for the camera riding it: the
+	## glowing streak a round is drawn as stood in front of the lens instead.
+	func show_round(on: bool) -> void:
+		if on and _round == null and not cal.is_empty():
+			_round = Node3D.new()
+			var d: float = float(cal["d"])
+			var ln: float = float(cal["len"])
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color = cal.get("col", Color(0.78, 0.52, 0.28))
+			mat.metallic = 0.85
+			mat.roughness = 0.28
+			if cal.get("ball", false):
+				var sm := SphereMesh.new()
+				sm.radius = d * 0.5
+				sm.height = d
+				sm.material = mat
+				var b := MeshInstance3D.new()
+				b.mesh = sm
+				_round.add_child(b)
+			else:
+				# a shank and an ogive, pointed down -Z the way it flies
+				var body := CylinderMesh.new()
+				body.top_radius = d * 0.5
+				body.bottom_radius = d * 0.5
+				body.height = ln * 0.55
+				body.radial_segments = 16
+				body.material = mat
+				var bm := MeshInstance3D.new()
+				bm.mesh = body
+				bm.rotation_degrees = Vector3(90, 0, 0)
+				bm.position = Vector3(0, 0, ln * 0.225)
+				_round.add_child(bm)
+				var nose := CylinderMesh.new()
+				nose.top_radius = d * 0.06
+				nose.bottom_radius = d * 0.5
+				nose.height = ln * 0.45
+				nose.radial_segments = 16
+				nose.material = mat
+				var nm := MeshInstance3D.new()
+				nm.mesh = nose
+				nm.rotation_degrees = Vector3(-90, 0, 0)
+				nm.position = Vector3(0, 0, -ln * 0.275)
+				_round.add_child(nm)
+			add_child(_round)
+		if _round != null:
+			_round.visible = on
+		for c in get_children():
+			if c != _round and c is MeshInstance3D:
+				(c as MeshInstance3D).visible = not on
 
 	## How far along a step the round meets the ground, as a fraction of it, or
 	## 2.0 if it does not.
@@ -1728,7 +1796,8 @@ class Tracer extends Node3D:
 			if flesh:
 				Effects.blood(world, where)
 			else:
-				Effects.bullet_impact(world, where, true)
+				# paper on a board takes a round with a thwack, not a ricochet
+				Effects.bullet_impact(world, where, not best.is_in_group("range_target"))
 			if is_instance_valid(shooter) and shooter.has_method("hit_confirm"):
 				var dead_now: bool = was_alive and best.has_method("is_alive") \
 					and not best.is_alive()
@@ -1765,7 +1834,10 @@ class Tracer extends Node3D:
 			return 1
 		if not _whizzed:
 			var eye := get_viewport().get_camera_3d()
-			if eye != null and is_instance_valid(shooter) \
+			# His own rounds never crack past him. Asked of the camera alone,
+			# the bullet camera -- which is nobody's -- had every follow-up
+			# round snap past the lens, and it was shooting from nowhere.
+			if eye != null and is_instance_valid(shooter) and not (shooter is Walker) \
 					and not shooter.is_ancestor_of(eye):
 				var c2: Vector3 = Geometry3D.get_closest_point_to_segment(
 					eye.global_position, from, stop)
