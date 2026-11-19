@@ -1840,13 +1840,21 @@ scripts/aircraft/   jet_spec.gd      the airframe database (all tuning lives her
 scripts/weapons/    weapon_spec.gd   store database and store meshes
                     missile.gd       separation, boost, PN guidance, fuse
                     effects.gd       tracers, explosions, smoke, embers
-scripts/world/      world.gd         main scene: env, missions, scoring, CLI
+scripts/world/      world.gd         main scene: env, missions, vehicles, input, CLI
+                    vision_fx.gd     underwater tint, night vision, sonar, nuke flash
+                    fleet_yard.gd    deep water, the carrier and the fleets
+                    country_bases.gd the other countries' airfields, satellites
+                    chart_follow.gd  rechart the world under a travelling player
                     terrain.gd       a quadtree of chunks over the whole world
                     airbase.gd       runway, markings, lighting, PAPI
                     scenery.gd       towns, military sites, scatter, home base
                     weather.gd       cloud deck and environment presets
                     pilot.gd         posable aircrew figure
                     ragdoll.gd       jointed rigid-body crew
+scripts/infantry/   street_fight.gd  the CQB match and firing range as the world runs them
+scripts/tests/      test_harness.gd  the --xxxtest flags: parsing and per-frame dispatch
+                    *_tests.gd       the tests themselves, one file per area
+                    dev_options.gd   --shot, --auto, --view and the other dev switches
 scripts/ai/         ai_plane.gd      patrol / engage / extend / defend
                     ground_target.gd hangars, radars, fuel, shooting SAM sites
 scripts/ui/         hud.gd           world-referenced HUD
