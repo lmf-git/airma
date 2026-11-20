@@ -57,8 +57,9 @@ func tick_before_sensors(delta: float) -> void:
 ## Called from `World._tick_world`.
 ## After the frame's input and modal state are worked out, before the
 ## hangar's session line.
-func tick_after_input(_delta: float) -> void:
+func tick_after_input(delta: float) -> void:
 	session_tests.tick_nettest()
+	session_tests.tick_holdnet(delta)
 
 
 ## Called from `World._tick_world`.
@@ -294,6 +295,10 @@ func tick_after_street(delta: float) -> void:
 	infantry_tests.tick_arms()
 	infantry_tests.tick_cqb_fix()
 	infantry_tests.tick_streak()
+	infantry_tests.tick_drop()
+	infantry_tests.tick_zero()
+	infantry_tests.tick_holdfire()
+	infantry_tests.tick_sentry()
 	infantry_tests.tick_ball()
 	flight_tests.tick_hf()
 	infantry_tests.tick_bounds()

@@ -564,7 +564,13 @@ func net_state(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, thr: float,
 ## hold owner is sent as a peer id so the passenger stays attached to the right
 ## aircraft on every machine instead of drifting in world space.
 @rpc("any_peer", "call_remote", "unreliable_ordered")
-func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int) -> void:
+func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int,
+		kit := "", pitch := 0.0, ads := 0.0) -> void:
+	# The host passes every man's position on to everyone -- him included.
+	# Taken as somebody else, it built a second copy of him a tick behind
+	# himself: two of him in the hold, on his own screen.
+	if id == my_id:
+		return
 	var g: Node3D = foot_ghosts.get(id)
 	if g == null or not is_instance_valid(g):
 		var pil := Pilot.new()
@@ -581,19 +587,92 @@ func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int) 
 		if carrier_jet and is_instance_valid(carrier_jet) and carrier_jet.has_hold():
 			want_parent = carrier_jet.hold_node()
 	if g.get_parent() != want_parent:
-		var keep := g.global_transform
 		g.get_parent().remove_child(g)
 		want_parent.add_child(g)
-		g.global_transform = keep
-	g.position = pos
-	g.rotation.y = yaw
-	if g is Pilot:
-		if crouch:
-			(g as Pilot).pose_crouch(0.0, false)
-		else:
-			(g as Pilot).pose_idle()
+	# Square to whatever he is standing in, every packet. Moved into the hold
+	# keeping his world orientation, he kept the bank the aircraft had at that
+	# moment, and only his heading was ever set again: he stood at an angle to
+	# the floor for the rest of the flight.
+	# Where he is goes in as a target, eased toward every frame (see
+	# `_tick_foot_ghosts`), and what he is doing -- the weapon in his hands,
+	# where he is looking, how far into the sights -- drives the same figure
+	# he is on his own screen. It was a mannequin stood in one pose: no
+	# weapon, never aiming, never firing.
+	if not g.has_meta("net_pos") or g.position.distance_to(pos) > 4.0:
+		g.transform = Transform3D(Basis(Vector3.UP, yaw), pos)
+	g.set_meta("net_pos", pos)
+	g.set_meta("net_yaw", yaw)
+	g.set_meta("net_crouch", crouch)
+	g.set_meta("net_pitch", pitch)
+	g.set_meta("net_ads", ads)
+	if g is Pilot and kit != "" and String(g.get_meta("net_kit", "")) != kit:
+		g.set_meta("net_kit", kit)
+		(g as Pilot).equip(Firearm.spec(kit))
 	if is_host:
-		rpc("net_foot", id, pos, yaw, crouch, in_hold_of)
+		rpc("net_foot", id, pos, yaw, crouch, in_hold_of, kit, pitch, ads)
+
+## Every remote man on foot, every frame: eased to where he was last said to
+## be, and animated -- walking, crouched, the weapon up and laid where he is
+## looking -- by the same rig his own machine draws him with.
+func _tick_foot_ghosts(delta: float) -> void:
+	for id in foot_ghosts:
+		var g: Variant = foot_ghosts[id]
+		if not is_instance_valid(g) or not (g is Pilot) or not (g as Node3D).has_meta("net_pos"):
+			continue
+		var pil := g as Pilot
+		var want: Vector3 = pil.get_meta("net_pos")
+		var was: Vector3 = pil.position
+		pil.position = was.lerp(want, clampf(delta * 14.0, 0.0, 1.0))
+		pil.rotation = Vector3(0.0, lerp_angle(pil.rotation.y, float(pil.get_meta("net_yaw")),
+			clampf(delta * 14.0, 0.0, 1.0)), 0.0)
+		# how he is moving, in his own frame: x to his right, y forward
+		var v: Vector3 = (pil.position - was) / maxf(delta, 0.0001)
+		var yw: float = pil.rotation.y
+		var right := Vector3(cos(yw), 0, -sin(yw))
+		var fwd := Vector3(-sin(yw), 0, -cos(yw))
+		pil.in_move = pil.in_move.lerp(Vector2(v.dot(right), v.dot(fwd)), clampf(delta * 8.0, 0.0, 1.0))
+		pil.in_crouch = bool(pil.get_meta("net_crouch"))
+		pil.in_pitch = float(pil.get_meta("net_pitch"))
+		pil.in_ads = float(pil.get_meta("net_ads"))
+		pil.in_ready = 1.0
+		# feet onto the ground only on the ground: in a hold the ground is a
+		# kilometre down, and the legs went looking for it
+		pil.in_foot_ik = pil.get_parent() == world
+		pil.animate(delta)
+
+## A man on foot here fired: tell everyone else, so they see and hear it.
+## `carrier_vel` is the speed of whatever he is riding in.
+func send_foot_shot(from: Vector3, dir: Vector3, kit: String, quiet: bool,
+		carrier_vel := Vector3.ZERO) -> void:
+	if not active:
+		return
+	if is_host:
+		rpc("net_foot_shot", my_id, from, dir, kit, quiet, carrier_vel)
+	else:
+		rpc_id(1, "net_foot_shot", my_id, from, dir, kit, quiet, carrier_vel)
+
+## The shot as seen from somewhere else: the flash at his muzzle, the report,
+## and a round down the line that hurts nothing -- the hit, if there is one,
+## comes over on its own (`net_hit`), from the machine that fired.
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func net_foot_shot(id: int, from: Vector3, dir: Vector3, kit: String, quiet: bool,
+		carrier_vel := Vector3.ZERO) -> void:
+	if id == my_id:
+		return
+	if is_host:
+		rpc("net_foot_shot", id, from, dir, kit, quiet, carrier_vel)
+	var g: Dictionary = Firearm.spec(kit)
+	var muzzle: Vector3 = from
+	var gh: Variant = foot_ghosts.get(id)
+	if is_instance_valid(gh) and (gh as Pilot).has_gun():
+		muzzle = (gh as Pilot).muzzle_pos()
+		(gh as Pilot).kick(float(g.get("kick", 0.01)) * 30.0)
+	Effects.muzzle_flash(world, muzzle + dir * 0.12, dir, 0.045 if quiet else 0.16)
+	if not quiet:
+		Firearm.report(world, g, muzzle)
+	# harmless, and stopped by the same hulls the real one is
+	Effects.bullet(world, muzzle, dir * float(g["muzzle"]) + carrier_vel,
+		null, 0.0, -1, 1.0, 3.5, Firearm.drag_of(g), 0.0)
 
 ## Only the host simulates the AI. Clients are told what exists and where it
 ## is, so every player in a co-op match is fighting the same aircraft rather
@@ -891,6 +970,8 @@ func _publish_ships() -> void:
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func net_vehicle(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, turret: float,
 		barrel: float, flags: int = 1) -> void:
+	if id == my_id:
+		return                 # our own, passed back to us by the host
 	var t: Tank = veh_ghosts.get(id)
 	if t == null or not is_instance_valid(t):
 		t = Tank.new()
@@ -1076,6 +1157,7 @@ func _physics_process(delta: float) -> void:
 	# survive the several early returns in it.
 	var _pn := Sim.prof_at()
 	_tick_net(delta)
+	_tick_foot_ghosts(delta)
 	Sim.prof_end(&"net.total", _pn)
 
 func _tick_net(delta: float) -> void:
@@ -1256,7 +1338,8 @@ func _send(_delta: float) -> void:
 				for pid in ghosts:
 					if ghosts[pid] == w.frame_owner:
 						host_id = pid
-			rpc("net_foot", my_id, w.position, w.yaw, w.crouching, host_id)
+			rpc("net_foot", my_id, w.position, w.yaw, w.crouching, host_id,
+				String(w.gun_spec().get("id", "")), w.pitch, w._ads)
 		return
 	var p = world.get("player")
 	if p == null or not is_instance_valid(p):

@@ -193,7 +193,16 @@ func _room(x: float, z: float, r: float, over := ROOM_OVER) -> bool:
 	var g: float = _ground(x, z)
 	if Sim.bridge_headroom(x, z, r, g) < over:
 		return false
+	# Not inside a ruin either. Its walls are obstacles but its floor is not,
+	# so something small enough to miss the walls was set down in a room.
+	for rn in ruins_at:
+		var o: Vector3 = rn
+		if absf(x - o.x) < RUIN_HALF and absf(z - o.z) < RUIN_HALF:
+			return false
 	return Obstacles.hit(Vector3(x, g + 1.0, z), r) < 0
+
+## Half a ruin across, out to the outside of its walls.
+const RUIN_HALF := 6.3
 
 ## What a prop in the street needs over it: a bus, with a little to spare.
 const ROOM_OVER := 4.5

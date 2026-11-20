@@ -23,7 +23,6 @@ const GRAV := 18.0
 const JUMP := 6.6
 const MAG := 30
 const BASE_FOV := 74.0
-const EYE_BACK := 0.27
 ## Shoulder width, near enough, for deciding what he fits through.
 const BODY_R := 0.42
 
@@ -61,6 +60,52 @@ var slot := 0
 var _rounds: Array = []
 var _spare: Array = []
 var grenades := 2
+## The sights' adjustment on each weapon, by kit index: elevation up and
+## windage right, in milliradians. A round leaves the bore so as to cross the
+## line of sight at the weapon's zero, and these move where it goes from there
+## -- a tenth of a mil a click on an optic, half a mil on irons.
+var elev_mil := {}
+var wind_mil := {}
+## For a harness: the zero to use instead of the weapon's own, in metres.
+var zero_override := -1.0
+## A ballistic vest's worth of protection left: half of every hit goes into it
+## instead of into him until it is used up. See `SupplyCrate`.
+var armour := 0.0
+
+## Where a weapon is sighted in: the range at which the round crosses the line
+## of sight. A battle zero for irons and dots, further out for a scope.
+func zero_of(g: Dictionary) -> float:
+	if zero_override > 0.0:
+		return zero_override
+	return float(g.get("zero", 300.0 if g.get("scope", false) else 100.0))
+
+## A bore direction moved by what is dialled on weapon `i`: elevation about
+## the line of sight's across axis, windage about up.
+func turrets(aim: Vector3, look: Vector3, i: int) -> Vector3:
+	var across: Vector3 = look.cross(Vector3.UP)
+	if across.length() > 0.01:
+		aim = aim.rotated(across.normalized(), float(elev_mil.get(i, 0.0)) * 0.001)
+	return aim.rotated(Vector3.UP, -float(wind_mil.get(i, 0.0)) * 0.001).normalized()
+
+## Where weapon `g` sends a round fired from `from` while the eye at `start`
+## looks along `look`: across the line of sight at its zero, then the turrets.
+func zeroed_aim(g: Dictionary, i: int, from: Vector3, start: Vector3, look: Vector3) -> Vector3:
+	var lay_at: Vector3 = start + look * zero_of(g)
+	var aim: Vector3 = _lay(from, lay_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
+	return turrets(aim, look, i)
+
+## The size of one click on this weapon's sights, in mils.
+func click_of(g: Dictionary) -> float:
+	return 0.1 if (g.get("scope", false) or g.get("dot", false)) else 0.5
+
+func _through_armour(amount: float) -> float:
+	if armour <= 0.0:
+		return amount
+	var taken: float = minf(amount * 0.5, armour)
+	armour -= taken
+	if armour <= 0.0:
+		Sim.report("vest spent", Sim.Ev.BAD)
+	return amount - taken
 ## Stun grenades, thrown with their own key: see `Firearm.Frag.flash`.
 var flashes := 2
 ## When he can see again, by the clock, and how long he was blinded for, for
@@ -137,6 +182,14 @@ const SEEK_CONE := 7.0
 var _tone_t := 0.0
 
 var cam: Camera3D
+## Where the view would be with nobody looking round: what the rounds, the
+## glasses and the throw go along. Holding ALT in third person swings the
+## camera round him (`_free_yaw`, `_free_pitch`) without turning him, so
+## shooting has to be taken from here and not from the camera.
+var _aim_xf := Transform3D.IDENTITY
+var _free_yaw := 0.0
+var _free_pitch := 0.0
+var _freeing := false
 var body: Pilot
 var weapon: Node3D
 var vel := Vector3.ZERO
@@ -195,8 +248,8 @@ func glass_range() -> float:
 	return _glass_rng
 
 func _range_glass() -> void:
-	var from: Vector3 = cam.global_position
-	var dir: Vector3 = -cam.global_transform.basis.z
+	var from: Vector3 = _aim_xf.origin
+	var dir: Vector3 = -_aim_xf.basis.z
 	var t := 4.0
 	_glass_rng = -1.0
 	while t < 12000.0:
@@ -425,8 +478,35 @@ func activate() -> void:
 func _unhandled_input(e: InputEvent) -> void:
 	if not cam.current or dead:
 		return
+	# On the sights the arrow keys are the turrets: up and down elevation,
+	# left and right windage, a click at a time.
+	if e is InputEventKey and (e as InputEventKey).pressed and _ads > 0.5 \
+			and not gun_spec().has("launcher"):
+		var kc: Key = (e as InputEventKey).keycode
+		var click: float = click_of(gun_spec())
+		var de := 0.0
+		var dw := 0.0
+		match kc:
+			KEY_UP:
+				de = click
+			KEY_DOWN:
+				de = -click
+			KEY_RIGHT:
+				dw = click
+			KEY_LEFT:
+				dw = -click
+		if de != 0.0 or dw != 0.0:
+			elev_mil[kit_idx] = clampf(float(elev_mil.get(kit_idx, 0.0)) + de, -20.0, 40.0)
+			wind_mil[kit_idx] = clampf(float(wind_mil.get(kit_idx, 0.0)) + dw, -20.0, 20.0)
+			Sfx.play_ui(get_tree().current_scene, "clink", -16.0, 1.6)
+			get_viewport().set_input_as_handled()
+			return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var mm := Sim.mouse_rel(e as InputEventMouseMotion)
+		if _freeing:
+			_free_yaw = clampf(_free_yaw - mm.x * 0.0042, -PI, PI)
+			_free_pitch = clampf(_free_pitch - mm.y * 0.0042, -1.1, 1.1)
+			return
 		# slower through the sights, in proportion to how far they magnify
 		var k: float = 0.0032 * lerpf(1.0, cam.fov / BASE_FOV, maxf(_ads, _bino))
 		yaw -= mm.x * k
@@ -439,13 +519,19 @@ func enter_frame(hold: Node3D, jet: Node) -> void:
 	var world_xf := global_transform
 	get_parent().remove_child(self)
 	hold.add_child(self)
-	global_transform = world_xf
+	# Where he was, but standing square to the floor: keeping his world
+	# orientation kept the bank the aircraft had as he stepped in, and with
+	# only his heading set from then on he leaned with it for the whole ride.
+	var local: Transform3D = hold.global_transform.affine_inverse() * world_xf
+	var face: Vector3 = -local.basis.z
+	var local_yaw: float = atan2(-face.x, -face.z) if Vector2(face.x, face.z).length() > 0.01 else 0.0
+	transform = Transform3D(Basis(Vector3.UP, local_yaw), local.origin)
 	frame = hold
 	frame_owner = jet
 	frame_half = hold.get_meta("half", Vector3(2.0, 2.2, 6.0))
 	vel = Vector3.ZERO
 	position.y = maxf(position.y, 0.0)
-	yaw = rotation.y
+	yaw = local_yaw
 	# riding something that is itself interpolated
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	Sim.report("aboard — walk aft off the ramp to jump", Sim.Ev.INFO)
@@ -467,8 +553,11 @@ func exit_frame(scene: Node) -> void:
 	var jump: bool = agl > 50.0
 	frame.remove_child(self)
 	scene.add_child(self)
-	global_transform = world_xf
-	yaw = rotation.y
+	# upright in the world again, facing the way he was
+	var face: Vector3 = -world_xf.basis.z
+	var wy: float = atan2(-face.x, -face.z) if Vector2(face.x, face.z).length() > 0.01 else yaw
+	global_transform = Transform3D(Basis(Vector3.UP, wy), world_xf.origin)
+	yaw = wy
 	vel = carry
 	frame = null
 	frame_owner = null
@@ -494,8 +583,18 @@ func _wish() -> Vector3:
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
 	var right := Vector3(cos(yaw), 0, -sin(yaw))
 	var wish := Vector3.ZERO
-	wish += fwd * (Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up"))
-	wish += right * (Sim.strength(&"roll_right") - Sim.strength(&"roll_left"))
+	var ahead: float = Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up")
+	var strafe: float = Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
+	# on the sights the arrows are the turrets, and only WASD walks
+	if _ads > 0.5:
+		ahead = float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S)) \
+			+ Input.get_joy_axis(0, JOY_AXIS_LEFT_Y) * -1.0
+		strafe = float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A)) \
+			+ Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
+		ahead = clampf(ahead if absf(ahead) > 0.15 else 0.0, -1.0, 1.0)
+		strafe = clampf(strafe if absf(strafe) > 0.15 else 0.0, -1.0, 1.0)
+	wish += fwd * ahead
+	wish += right * strafe
 	if wish.length() > 1.0:
 		wish = wish.normalized()
 	return wish
@@ -1090,6 +1189,10 @@ func _reach_for(delta: float) -> void:
 ## It is in his hand now. A weapon he already carries is ammunition for it;
 ## anything else replaces what he was holding, which goes on the road in turn.
 func _take(item: Node3D) -> void:
+	# a crate is helped from, not picked up
+	if item.has_method("resupply"):
+		item.call("resupply", self)
+		return
 	var world := get_tree().current_scene
 	var id: int = Firearm.index_of(String(item.get("kit")))
 	var g: Dictionary = Firearm.KIT[id]
@@ -1227,8 +1330,8 @@ func _fight(delta: float) -> void:
 	# what is under the crosshair and send it there. Fired parallel to the
 	# view instead, a rifle held beside the head puts every shot a hand's
 	# width off, and a camera over the shoulder puts them a pace off.
-	var look := -cam.global_transform.basis.z
-	var eye := cam.global_position
+	var look := -_aim_xf.basis.z
+	var eye := _aim_xf.origin
 	var skip: float = maxf((body.eye_pos() - eye).dot(look), 0.0) + 0.6
 	var start: Vector3 = eye + look * skip
 	# What is under the crosshair: the first wall, prop or piece of ground the
@@ -1257,7 +1360,21 @@ func _fight(delta: float) -> void:
 	var speed: float = float(g["muzzle"])
 	# rounds and the 40 mm fly the whole model; the AT4's motor holds it up
 	var air_k: float = Firearm.drag_of(g) if launcher != "rocket" else -1.0
-	var aim: Vector3 = _lay(from, mark, speed, fall, seen >= 599.0, air_k)
+	# A rifle is sighted in, not ranged. It used to be laid for the drop over
+	# however far it was to whatever was under the crosshair -- and people
+	# are not in that answer, only walls and ground: a man in a doorway with a
+	# wall three hundred metres behind him had every round laid for three
+	# hundred metres and sent over his head. Now the round crosses the line of
+	# sight at the weapon's zero, and the turrets move it from there: closer
+	# than the zero it is a touch high, further out it drops, and the drop is
+	# the shooter's to hold over or dial. Launchers range themselves.
+	var zeroed: bool = launcher == ""
+	var lay_at: Vector3 = mark
+	var sky: bool = seen >= 599.0
+	if zeroed:
+		lay_at = start + look * zero_of(g)
+		sky = false
+	var aim: Vector3 = _lay(from, lay_at, speed, fall, sky, air_k)
 	# a grenade launcher is laid well above the line of sight at range
 	var off_line: float = 0.0 if launcher == "gl" else 0.5
 	if mark.distance_to(from) < 1.6 or aim.dot(look) < off_line:
@@ -1269,7 +1386,9 @@ func _fight(delta: float) -> void:
 		# line of sight, which on the screen is clear all the way, instead of
 		# into the ground in front of him.
 		from = start
-		aim = _lay(start, mark, speed, fall, seen >= 599.0, air_k)
+		aim = _lay(start, lay_at, speed, fall, sky, air_k)
+	if zeroed:
+		aim = turrets(aim, look, kit_idx)
 	var quiet: bool = is_quiet()
 	if g.has("launcher"):
 		if String(g["launcher"]) == "sam":
@@ -1288,7 +1407,18 @@ func _fight(delta: float) -> void:
 		else:
 			Firearm.rocket(world, self, side, g, from, aim)
 	else:
-		Firearm.fire(world, self, side, g, from, aim, s, 1.0, quiet)
+		# Inside an aircraft the round has the aircraft's speed as well as its
+		# own. Where it goes from there -- out over the ramp, or into the
+		# inside of the fuselage -- is the round's business: `Effects.hull_hit`.
+		var carrier_vel := Vector3.ZERO
+		if frame != null and is_instance_valid(frame_owner):
+			carrier_vel = frame_owner.get_meta("net_vel") if frame_owner.has_meta("net_vel") \
+				else (frame_owner.get("linear_velocity") if "linear_velocity" in frame_owner else Vector3.ZERO)
+		Firearm.fire(world, self, side, g, from, aim, s, 1.0, quiet, carrier_vel)
+		# and on everyone else's screen: the flash, the report and the round
+		var nl: Variant = world.get("net") if world != null else null
+		if nl != null and is_instance_valid(nl) and (nl as NetLink).active:
+			(nl as NetLink).send_foot_shot(from, aim, String(g["id"]), quiet, carrier_vel)
 	if is_instance_valid(arena) and arena.has_method("heard"):
 		# a suppressed shot is heard by whoever is in the same yard, no further
 		arena.heard(from, side, 14.0 if quiet else 75.0)
@@ -1358,8 +1488,8 @@ func _seek(delta: float, g: Dictionary) -> void:
 		lock_target = null
 		lock_t = 0.0
 		return
-	var eye := cam.global_position
-	var look := -cam.global_transform.basis.z
+	var eye := _aim_xf.origin
+	var look := -_aim_xf.basis.z
 	var best: Node3D = null
 	var best_a := deg_to_rad(SEEK_CONE)
 	Sim.hit_scan()
@@ -1453,7 +1583,7 @@ func _throw() -> void:
 	else:
 		grenades -= 1
 	var world := get_tree().current_scene
-	var look := -cam.global_transform.basis.z
+	var look := -_aim_xf.basis.z
 	var f := Firearm.Frag.new()
 	if _throw_flash:
 		# a short fuse: it is meant to go off as it arrives, not after
@@ -1584,13 +1714,25 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 
 ## Where the camera is. `ref` is the frame the view angles are measured in:
 ## the world, or the hold of whatever he is riding in.
-func _view(_delta: float, ref: Basis) -> void:
+func _view(delta: float, ref: Basis) -> void:
 	# through the glasses there is no rifle in the way, and no shoulder either
 	var glass: bool = _bino > 0.5
 	body.visible = not scoped() and not glass
 	body.set_head_visible(third and not glass)
 	var up: Basis = ref * Basis(Vector3.UP, yaw)
 	var look: Basis = up * Basis(Vector3.RIGHT, pitch + _recoil)
+	# ALT in third person: the camera goes round him, he keeps facing where he
+	# was, and it swings back behind him when let go. Not through the sights,
+	# and not while a screen has the pointer.
+	_freeing = third and not glass and _ads < 0.5 and Sim.held(&"freelook") \
+		and not Sim.ui_pointer and not dead
+	if not _freeing:
+		var back_k: float = 1.0 - exp(-8.0 * delta)
+		_free_yaw = lerpf(_free_yaw, 0.0, back_k)
+		_free_pitch = lerpf(_free_pitch, 0.0, back_k)
+		if absf(_free_yaw) < 0.001 and absf(_free_pitch) < 0.001:
+			_free_yaw = 0.0
+			_free_pitch = 0.0
 	if third and not glass:
 		# Over the right shoulder, close enough to shoot from. A camera four
 		# metres back and centred looked at the back of his head: the thing
@@ -1598,23 +1740,39 @@ func _view(_delta: float, ref: Basis) -> void:
 		var pivot: Vector3 = global_position + ref * Vector3(0, _eye - 0.05, 0) \
 			+ up * Vector3(_lean * 0.35, 0, 0)
 		var boom := Vector3(0.62, 0.22, lerpf(2.6, 1.55, _ads))
-		var want: Vector3 = pivot + look * boom
-		# walls stop cameras too
-		var clear: float = Obstacles.segment(pivot, want)
-		if clear < 1.0:
-			want = pivot.lerp(want, maxf(clear - 0.12, 0.08))
-		if frame == null:
-			want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.25)
-		cam.global_transform = Transform3D(look, want)
+		_aim_xf = Transform3D(look, _boom_end(pivot, look * boom))
+		if _free_yaw == 0.0 and _free_pitch == 0.0:
+			cam.global_transform = _aim_xf
+		else:
+			# Round him rather than round the shoulder: a little further out
+			# and centred, so looking back shows him and not his ear.
+			var free_k: float = clampf((absf(_free_yaw) + absf(_free_pitch)) / 0.4, 0.0, 1.0)
+			var fpit: float = clampf(pitch + _free_pitch, -1.35, 1.35)
+			var fl: Basis = up * Basis(Vector3.UP, _free_yaw) * Basis(Vector3.RIGHT, fpit)
+			var fboom: Vector3 = boom.lerp(Vector3(0.0, 0.25, 2.9), free_k)
+			cam.global_transform = Transform3D(fl, _boom_end(pivot, fl * fboom))
 	else:
-		# One body, one animation set, both views: the eye is in the head.
-		# Set a hand's breadth back along the line of sight, though. The
-		# figure's arms are only so long, so the weapon sits closer to his
-		# face than a screen can show without it filling the bottom third;
-		# moving the eye straight back along its own axis keeps the sights on
-		# the line and puts the rifle at the distance it looks right at.
+		# One body, one animation set, both views: the eye is in the head,
+		# and only the head is hidden. The camera used to sit a hand's breadth
+		# back along the line of sight to make the rifle look far enough away,
+		# which put it inside the chest -- or behind the back looking down --
+		# and the butt of every long gun in the lens. The weapon is now placed
+		# out on the shoulder where it belongs (`Pilot.BUTT_ADS`), so the eye
+		# can be where the eye is.
 		var roll: Basis = look * Basis(Vector3.BACK, -_lean * 0.10)
-		cam.global_transform = Transform3D(roll, body.eye_pos() + look.z * EYE_BACK)
+		cam.global_transform = Transform3D(roll, body.eye_pos())
+		_aim_xf = cam.global_transform
+
+## Where a camera on the end of `arm` from `pivot` can actually go: walls stop
+## it, and so does the ground.
+func _boom_end(pivot: Vector3, arm: Vector3) -> Vector3:
+	var want: Vector3 = pivot + arm
+	var clear: float = Obstacles.segment(pivot, want)
+	if clear < 1.0:
+		want = pivot.lerp(want, maxf(clear - 0.12, 0.08))
+	if frame == null:
+		want.y = maxf(want.y, Sim.height_at(want.x, want.z) + 0.25)
+	return want
 
 func hit_radius() -> float:
 	return 0.9
@@ -1644,6 +1802,7 @@ func take_hit(amount: float, from: Node = null) -> void:
 	if dead or sheltered:
 		return
 	last_cause = KillFeed.weapon_of(from)
+	amount = _through_armour(amount)
 	health -= amount
 	_last_amount = amount
 	if amount >= 120.0:

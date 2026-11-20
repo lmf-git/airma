@@ -1413,10 +1413,9 @@ func height_at(x: float, z: float) -> float:
 		return _deck_top(native.ground_globe_flags(x, z, fl), x, z)
 	return _deck_top(native.ground(x, z, _ground_flags()), x, z) - planet_drop(x, z)
 
-## The ground as the terrain mesh draws it: `height_at` everywhere but inside a
-## walled ramp in a town, where the mesh shows the town's own ground and the
-## ramp is drawn as the structure standing on it. What something drawn down to
-## the ground -- an abutment, a wall -- has to reach.
+## The ground as the terrain mesh draws it, which is now `height_at` everywhere:
+## walled ramps in towns are drawn as terrain like any other bank. What
+## something drawn down to the ground -- an abutment, a wall -- has to reach.
 func drawn_height_at(x: float, z: float) -> float:
 	if globe:
 		return native.ground_globe_flags(x, z, G_ALL | G_DRAWN)
@@ -2314,9 +2313,9 @@ const BRIDGE_STEP := 0.6
 ## How deep the deck is: the box girder under the running surface, which is
 ## what anything passing underneath has to clear.
 const BRIDGE_GIRDER := 1.9          # matches the girder `Scenery` draws
-## Half the width of a ramp onto a deck, out to the face of its retaining wall:
-## `RAMP_EDGE` in world.rs, which is where the made ground drops to the town.
-const RAMP_HALF := 13.0
+## Half the width of a ramp onto a deck, out to the foot of its side slope:
+## `RAMP_EDGE` in world.rs, which is where the made ground meets the town.
+const RAMP_HALF := 20.0
 var _deck_src: Array = []
 var _deck_idx: Array = []           # {lo, hi, pts, ys, ramps}
 

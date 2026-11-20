@@ -160,27 +160,95 @@ func tick_cqb_support(delta: float) -> void:
 ## in batches by area, and a batch with nothing anywhere near the fight is a
 ## batch nobody in it can see. Hidden rather than freed, so the next mission
 ## has its country back without building it again.
+##
+## And the rest of the world with it: the airfields, the other towns' streets,
+## and every garrison vehicle, installation and ship -- hidden, and stopped,
+## since a tank three hundred kilometres away still thought, aimed and drove
+## every tick of a street fight. The terrain stays: it is already drawn coarser
+## the further off it is, and without it the town would stand on a plateau in
+## an empty sea.
 func _hide_far_scenery(c: Vector3, reach: float) -> void:
 	show_far_scenery()
-	if not is_instance_valid(world.scenery):
-		return
-	for n in world.scenery.find_children("*", "GeometryInstance3D", true, false):
-		var gi := n as GeometryInstance3D
-		if gi == null or not gi.visible:
+	var c2 := Vector2(c.x, c.z)
+	if is_instance_valid(world.scenery):
+		for n in world.scenery.find_children("*", "GeometryInstance3D", true, false):
+			var gi := n as GeometryInstance3D
+			if gi == null or not gi.visible:
+				continue
+			var wab: AABB = gi.global_transform * gi.get_aabb()
+			var near := Vector2(clampf(c.x, wab.position.x, wab.end.x),
+				clampf(c.z, wab.position.z, wab.end.z))
+			if near.distance_to(Vector2(c.x, c.z)) > reach:
+				gi.visible = false
+				_hidden_far.append(gi)
+	# airfields: a couple of kilometres of pavement, so by their middle with
+	# room for that
+	for ab in world.bases:
+		if not is_instance_valid(ab):
 			continue
-		var wab: AABB = gi.global_transform * gi.get_aabb()
-		var near := Vector2(clampf(c.x, wab.position.x, wab.end.x),
-			clampf(c.z, wab.position.z, wab.end.z))
-		if near.distance_to(Vector2(c.x, c.z)) > reach:
-			gi.visible = false
-			_hidden_far.append(gi)
+		if Vector2((ab as Node3D).global_position.x,
+				(ab as Node3D).global_position.z).distance_to(c2) > reach + 2500.0:
+			_park_far(ab as Node3D)
+	for k in _town_sets:
+		if not is_instance_valid(_town_sets[k]):
+			continue
+		var ts: Node3D = _town_sets[k]
+		if Vector2(ts.global_position.x, ts.global_position.z) \
+				.distance_to(c2) > reach + 600.0:
+			_park_far(ts)
+	for grp in ["vehicles", "ground_targets", "ships"]:
+		for n2 in world.get_tree().get_nodes_in_group(grp):
+			var nd := n2 as Node3D
+			if nd == null or nd == world.tank or world.parked.has(nd):
+				continue
+			if Vector2(nd.global_position.x, nd.global_position.z).distance_to(c2) > reach:
+				_park_far(nd)
+	print("[bounds] kept %.1f km round the fight: %d scenery batches hidden, %d airfields, towns, vehicles, installations and ships stood down" % [
+		reach * 0.001, _hidden_far.size(), _parked_far.size()])
 
+## Out of sight and out of the simulation until the next mission.
+func _park_far(n: Node3D) -> void:
+	if not n.visible and n.process_mode == Node.PROCESS_MODE_DISABLED:
+		return
+	_parked_far.append([n, n.visible, n.process_mode])
+	n.visible = false
+	n.process_mode = Node.PROCESS_MODE_DISABLED
+
+## What `_park_far` stopped: [node, was visible, process mode it had].
+var _parked_far: Array = []
+
+## How far past the edge of the fight the world is kept: a walk, or for
+## aircraft room to turn and come back in.
+const KEEP_FOOT := 1000.0
+const KEEP_AIR := 15000.0
+
+## A battle over the sectors: everything that matters is within reach of one
+## of them, and aircraft fly over all of it.
+func hide_beyond_sectors(layout: Array) -> void:
+	if layout.is_empty():
+		return
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for z in layout:
+		var p: Vector3 = z[0]
+		lo = Vector2(minf(lo.x, p.x), minf(lo.y, p.z))
+		hi = Vector2(maxf(hi.x, p.x), maxf(hi.y, p.z))
+	var mid: Vector2 = (lo + hi) * 0.5
+	var r: float = mid.distance_to(hi)
+	_hide_far_scenery(Vector3(mid.x, 0.0, mid.y), r + KEEP_AIR)
 
 func show_far_scenery() -> void:
 	for gi in _hidden_far:
 		if is_instance_valid(gi):
 			(gi as GeometryInstance3D).visible = true
 	_hidden_far.clear()
+	for e in _parked_far:
+		if not is_instance_valid(e[0]):
+			continue
+		var n: Node3D = e[0]
+		n.visible = bool(e[1])
+		n.process_mode = int(e[2]) as Node.ProcessMode
+	_parked_far.clear()
 
 
 ## Who is out of bounds, and for how long. Ten seconds to get back, and then
@@ -275,7 +343,7 @@ func setup_cqb(kind := "cqb") -> void:
 		_bounds_ground = BOUNDS_CQB + FiringRange.LANE_LEN + 450.0
 	_bounds_air = BOUNDS_AIR if kind == "arms" else 0.0
 	_oob_t = 0.0
-	_hide_far_scenery(c3, (_bounds_air + 10000.0) if kind == "arms" else (_bounds_ground + 1500.0))
+	_hide_far_scenery(c3, (_bounds_air + KEEP_AIR) if kind == "arms" else (_bounds_ground + KEEP_FOOT))
 	if kind not in ["cqb", "range"]:
 		_cqb_armour(c3)
 	if kind == "arms":

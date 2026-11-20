@@ -56,6 +56,11 @@ func parse_arg(a: String) -> bool:
 		_wreck_test = true
 	elif a == "--tankdrive":
 		_tank_test = true
+	elif a == "--wallram":
+		_ram_test = true
+	elif a.begins_with("--tankair"):
+		_air_test = true
+		_air_kind = a.substr(10) if a.length() > 10 else "m1a2"
 	else:
 		return false
 	return true
@@ -1932,11 +1937,195 @@ func tick_wreck(delta: float) -> void:
 #endregion
 
 
+#region --wallram
+## A tank driven flat out at a building, square on and then at a slant: how far
+## the hull's centreline gets inside the footprint, which should be nothing
+## more than the hull's own half-width past the wall line.
+var _ram_test := false
+var _ram_t := 0.0
+var _ram_box := -1
+var _ram_case := 0
+var _ram_deep := 0.0
+var _ram_top := 0.0
+var _ram_start := Transform3D.IDENTITY
+## The last is a hangar, which is kept outside `Obstacles`.
+const RAM_CASES := [0.0, 35.0, 70.0, 20.0]
+var _ram_hangar: GroundTarget = null
+var _ram_tank: Tank = null
+
+func _tick_ram(delta: float) -> void:
+	if not _ram_test:
+		return
+	if not is_instance_valid(_ram_tank):
+		for v in world.get_tree().get_nodes_in_group("vehicles"):
+			world._enter_tank(v as Tank)
+			if world.tank == null:
+				continue
+			_ram_tank = world.tank
+			_ram_tank.scripted = true
+			_ram_start = _ram_tank.global_transform
+			break
+		return
+	var t: Tank = _ram_tank
+	# the scenario's own armour is about; this is not a test of that
+	t.health = maxf(t.health, 1.0e6)
+	if not t.alive:
+		print("[ram] the tank was knocked out by %s; RESULT: inconclusive" % [t.last_cause])
+		_ram_test = false
+		world.get_tree().quit()
+		return
+	if _ram_box < 0:
+		# a building thirty metres ahead, turned by this case's angle
+		var fwd: Vector3 = -_ram_start.basis.z
+		fwd.y = 0.0
+		fwd = fwd.normalized()
+		var at: Vector3 = _ram_start.origin + fwd * 30.0
+		var yaw: float = atan2(fwd.x, fwd.z) + deg_to_rad(float(RAM_CASES[_ram_case]))
+		at.y = Sim.height_at(at.x, at.z) - 1.0
+		if _ram_case == RAM_CASES.size() - 1:
+			_ram_hangar = GroundTarget.new()
+			_ram_hangar.setup("hangar")
+			world.add_child(_ram_hangar)
+			_ram_hangar.global_transform = Transform3D(Basis(Vector3.UP, yaw), at + Vector3(0, 1.0, 0))
+			_ram_box = 0
+		else:
+			_ram_box = Obstacles.add_box(at, 9.0, 12.0, 6.0, yaw)
+		t.global_transform = _ram_start
+		t.linear_velocity = Vector3.ZERO
+		t.angular_velocity = Vector3.ZERO
+		_ram_t = 0.0
+		_ram_deep = 0.0
+		_ram_top = 0.0
+		return
+	_ram_t += delta
+	t.in_throttle = 1.0
+	t.in_steer = 0.0
+	t.in_brake = false
+	_ram_top = maxf(_ram_top, absf(t.speed))
+	var xf: Transform3D = t.global_transform
+	for lz in t._hull_z:
+		var p: Vector3 = xf * Vector3(0.0, 0.6, lz)
+		var inside: Vector3 = GroundTarget.push_out_any(p, 0.0) if is_instance_valid(_ram_hangar) \
+			else Obstacles.push_out(_ram_box, p, 0.0)
+		_ram_deep = maxf(_ram_deep, inside.length())
+	if _ram_t > 14.0:
+		print("[ram] %s %s at %2.0f deg: top %.1f km/h, centreline at most %.2f m inside (half-width %.2f), ends at %.1f km/h" % [
+			t.display_name(), "hangar" if is_instance_valid(_ram_hangar) else "building",
+			float(RAM_CASES[_ram_case]), _ram_top * 3.6, _ram_deep,
+			t.hull_radius(), absf(t.speed) * 3.6])
+		if is_instance_valid(_ram_hangar):
+			_ram_hangar.queue_free()
+			_ram_hangar = null
+		else:
+			Obstacles.remove(_ram_box)
+		_ram_box = -1
+		_ram_case += 1
+		if _ram_case >= RAM_CASES.size():
+			_ram_test = false
+			print("[ram] RESULT: %s" % "done")
+			world.get_tree().quit()
+#endregion
+
+#region --tankair
+## A garrison vehicle and a helicopter it ought to engage: hanging still low
+## over the field, hanging high and close, and crossing slowly. Whether the crew
+## takes it as its target, how many rounds go, and what they do to it.
+## --preset=ground:veh:m1a2 --tankair[=kind]
+var _air_test := false
+var _air_kind := "m1a2"
+var _air_tank: Tank = null
+var _air_heli: AIHeli = null
+var _air_case := 0
+var _air_t := 0.0
+var _air_shots := 0
+var _air_coax := 0
+var _air_locked := 0.0
+var _air_cd_was := 0.0
+var _air_coax_was := 0.0
+var _air_hp0 := 0.0
+## [range m, height above the tank m, crossing speed m/s]
+## The second is above a main battle tank's gun. The last is a jet running in
+## from two kilometres: taken while it is far enough off for the turret to stay
+## on it, which is also when a crew would have the time to.
+const AIR_CASES := [[700.0, 110.0, 0.0], [350.0, 230.0, 0.0], [800.0, 90.0, 25.0],
+	[1500.0, 250.0, 60.0], [400.0, 60.0, 230.0]]
+
+func _tick_air(delta: float) -> void:
+	if not _air_test:
+		return
+	if not is_instance_valid(_air_tank):
+		if not world.running:
+			return
+		# well away from everything else: its own garrison, our parked armour
+		var at: Vector3 = Vector3(9000.0, 0.0, 9000.0)
+		at.y = Sim.height_at(at.x, at.z) + 1.5
+		_air_tank = Tank.new()
+		_air_tank.setup(1, _air_kind)
+		world.add_child(_air_tank)
+		_air_tank.global_transform = Transform3D(Basis.IDENTITY, at)
+		_air_tank.health = 1.0e6
+		_air_tank.ai = true
+		_air_t = -3.0
+		return
+	if not is_instance_valid(_air_heli):
+		_air_heli = AIHeli.new()
+		_air_heli.setup("ah64")
+		_air_heli.team = 0
+		world.add_child(_air_heli)
+		_air_heli.freeze = true
+		_air_heli.set_physics_process(false)
+		_air_hp0 = _air_heli.health
+		_air_t = 0.0
+		_air_shots = 0
+		_air_coax = 0
+		_air_locked = 0.0
+		_place_air(0.0)
+		return
+	_air_t += delta
+	_place_air(_air_t)
+	var t: Tank = _air_tank
+	t.health = 1.0e6
+	if t._gun_cd > _air_cd_was + 0.01:
+		_air_shots += 1
+	if t._coax_cd > _air_coax_was + 0.01:
+		_air_coax += 1
+	_air_cd_was = t._gun_cd
+	_air_coax_was = t._coax_cd
+	if t._ai_target == _air_heli:
+		_air_locked += delta
+	if _air_t > 20.0 or (is_instance_valid(_air_heli) and _air_heli.health <= 0.0):
+		var c2: Array = AIR_CASES[_air_case]
+		var el: float = rad_to_deg(atan2(float(c2[1]), float(c2[0])))
+		print("[tankair] %s vs helicopter %4.0f m out, %3.0f m up (%2.0f deg), crossing %2.0f m/s: on it %4.1f of %4.1f s, %d rounds, %d coax bursts, %.0f damage" % [
+			t.display_name(), float(c2[0]), float(c2[1]), el, float(c2[2]), _air_locked, _air_t,
+			_air_shots, _air_coax, _air_hp0 - (_air_heli.health if is_instance_valid(_air_heli) else 0.0)])
+		if is_instance_valid(_air_heli):
+			_air_heli.queue_free()
+		_air_heli = null
+		_air_case += 1
+		if _air_case >= AIR_CASES.size():
+			_air_test = false
+			print("[tankair] RESULT: done")
+			world.get_tree().quit()
+
+func _place_air(t: float) -> void:
+	if not is_instance_valid(_air_heli) or not is_instance_valid(_air_tank):
+		return
+	var c: Array = AIR_CASES[_air_case]
+	var base: Vector3 = _air_tank.global_position
+	var p := base + Vector3(0.0, float(c[1]), -float(c[0]))
+	p.x += float(c[2]) * (t - 10.0)
+	_air_heli.global_transform = Transform3D(Basis.IDENTITY, p)
+	_air_heli.linear_velocity = Vector3(float(c[2]), 0.0, 0.0)
+#endregion
+
 #region --tankdrive
 var _tank_test := false
 var _tank_t := 0.0
 
 func tick_tank(delta: float) -> void:
+	_tick_ram(delta)
+	_tick_air(delta)
 	if _tank_test:
 		if world.tank == null and not world.parked.is_empty():
 			for v in world.get_tree().get_nodes_in_group("vehicles"):

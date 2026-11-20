@@ -1452,6 +1452,56 @@ func _town_build(buckets: Array) -> void:
 			_breakable[_breakable.size() - 1]["town_kind"] = i
 		town_xforms.append_array(lot)
 		_stats["buildings"] = int(_stats.get("buildings", 0)) + lot.size()
+		_foundations(lot)
+
+## A concrete foundation under every town block that the ground falls away
+## from. A block is set down by the ground at its middle; on a slope, or beside
+## the bank of a bridge ramp, one side of a twenty metre footprint then stood
+## clear of the ground with daylight under it. The foundation fills from the
+## lowest ground under the footprint up to a hand's breadth above the block's
+## own base, so the low side reads as a plinth and the high side buries it.
+const FOUNDATION_LIP := 0.25
+static var _found_mesh: ArrayMesh = null
+
+func _foundations(lot: Array) -> void:
+	if _found_mesh == null:
+		var st := MeshKit.begin()
+		MeshKit.box(st, Vector3(1.0, 1.0, 1.0), Vector3(0.0, 0.5, 0.0))
+		_found_mesh = MeshKit.finish(st, MeshKit.panelled(Color(0.47, 0.46, 0.43), 0.95, 0.0, 1.2))
+	var out: Array = []
+	for x in lot:
+		var xf: Transform3D = x
+		var sx: float = xf.basis.x.length() * 0.5
+		var sz: float = xf.basis.z.length() * 0.5
+		var bx: Vector3 = xf.basis.x.normalized()
+		var bz: Vector3 = xf.basis.z.normalized()
+		var base: float = xf.origin.y
+		var low := INF
+		for fx in [-1.0, -0.5, 0.0, 0.5, 1.0]:
+			for fz in [-1.0, -0.5, 0.0, 0.5, 1.0]:
+				var q: Vector3 = xf.origin + bx * sx * fx + bz * sz * fz
+				low = minf(low, Sim.height_at(q.x, q.z))
+		# the block's own walls go half a metre into the ground at its middle;
+		# only where the ground is lower than that is there anything to fill
+		if low > base - 0.05:
+			continue
+		var top: float = base + FOUNDATION_LIP
+		var bottom: float = low - 0.4
+		out.append(Transform3D(Basis(bx * sx * 2.06, Vector3.UP * (top - bottom), bz * sz * 2.06),
+			Vector3(xf.origin.x, bottom, xf.origin.z)))
+	if out.is_empty():
+		return
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "Foundations"
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _found_mesh
+	mm.instance_count = out.size()
+	for i in out.size():
+		mm.set_instance_transform(i, out[i])
+	mmi.multimesh = mm
+	add_child(mmi)
+	_stats["foundations"] = int(_stats.get("foundations", 0)) + out.size()
 
 ## What the three kinds of town block are faced in, for anything built to
 ## match one: see `_town_build`.

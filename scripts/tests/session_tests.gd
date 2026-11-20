@@ -29,6 +29,10 @@ func parse_arg(a: String) -> bool:
 		_spawn_test = true
 	elif a == "--factiontest":
 		_faction_test = true
+	elif a.begins_with("--holdnet="):
+		_hn_role = a.substr(10)
+	elif a.begins_with("--holdshots="):
+		_hn_shots = a.substr(12)
 	elif a == "--nettest":
 		_nettest = true
 	else:
@@ -605,6 +609,281 @@ func _run_faction_test() -> void:
 		else "FAILED — %d of %d countries are under water" % [wet, names.size()]))
 #endregion
 
+
+#region --holdnet
+## Two copies of the game on one machine, networked, watching the same thing:
+## a C-130 flown by the host, first straight and level and then in an orbit,
+## with the client's man on foot in its hold -- walking up and down it, then
+## standing still. Each window shows the hold from a camera fixed inside it,
+## with a chase view from outside in the corner, and each logs once a second
+## where the passenger is in the hold as that machine sees it. The client's
+## numbers are the man himself; the host's are his ghost. Put side by side
+## (tools/holdnet.sh does all of it) they say whether the two agree, how far
+## the ghost lags and jitters, and whether anyone falls out of the aircraft.
+##   --preset=free:c130 --holdnet=host|join [--holdshots=dir]
+var _hn_role := ""
+var _hn_shots := ""
+var _hn_t := -1.0
+var _hn_log := 0.0
+var _hn_shot := 0.0
+var _hn_boarded := false
+var _hn_cam_in: Camera3D = null
+var _hn_cam_out: Camera3D = null
+var _hn_view: SubViewport = null
+var _hn_prev := Vector3.INF
+var _hn_seen := 0.0
+## The carrier's step from one physics tick to the next, as this machine moves
+## it: how even it is says whether the hold -- and everyone in it -- is carried
+## smoothly or jerked along.
+var _hn_jet_prev := Vector3.INF
+var _hn_steps: Array = []
+var _hn_pf_prev := 0
+var _hn_had_peer := false
+var _hn_jit := 0.0
+var _hn_jn := 0
+## The host flies level for this long, then orbits.
+const HN_LEVEL := 30.0
+## The client walks up and down the hold this long after boarding, then stands.
+const HN_WALK := 40.0
+const HN_STAND := 20.0
+## Seconds since the client got aboard.
+var _hn_aboard := 0.0
+
+func _hn_phase() -> String:
+	if _hn_role == "host":
+		return "level" if _hn_t < HN_LEVEL else "orbit"
+	if not _hn_boarded:
+		return "not aboard"
+	return "walking" if _hn_aboard < HN_WALK else "standing still"
+
+func tick_holdnet(delta: float) -> void:
+	if _hn_role == "" or not world.running or world.net == null:
+		return
+	if _hn_t < 0.0:
+		_hn_t = 0.0
+		if _hn_role == "host":
+			world.net.host("c130")
+			_hn_fly_setup()
+		else:
+			world.net.join("127.0.0.1", "c130")
+		print("[holdnet] %s up" % _hn_role)
+		return
+	_hn_t += delta
+	var jet: Aircraft = _hn_jet()
+	if _hn_role == "host":
+		if is_instance_valid(world.player):
+			if _hn_t > HN_LEVEL and world.player.ap_mode != "loiter":
+				world.player.set_autopilot("loiter")
+	else:
+		# A joiner restarts into the host's mission, which takes the man it
+		# was given away with the old one: board (again) once that is done
+		# and the host's aeroplane has been heard from for a while.
+		if _hn_boarded and (not is_instance_valid(world.walker) or world.walker.frame == null):
+			_hn_boarded = false
+		if not _hn_boarded and is_instance_valid(jet) and jet.has_hold() and jet.has_meta("t_rx") \
+				and String(Sim.mission) == "free":
+			_hn_seen += delta
+			if _hn_seen > 3.0:
+				_hn_board(jet)
+		if _hn_boarded and is_instance_valid(world.walker):
+			_hn_aboard += delta
+			_hn_walk()
+	if is_instance_valid(jet) and jet.has_hold():
+		_hn_cameras(jet)
+	_hn_log += delta
+	if _hn_log >= 1.0:
+		_hn_log = 0.0
+		_hn_report(jet)
+	_hn_measure()
+	if is_instance_valid(jet):
+		var hp: Vector3 = jet.hold_node().global_position
+		# Per physics tick, which is when it moves: a screen frame covers one,
+		# two or three of those, and measured per frame that alone read as
+		# the aircraft lurching.
+		var pf: int = Engine.get_physics_frames()
+		if _hn_jet_prev != Vector3.INF and pf > _hn_pf_prev and _hn_t > 8.0:
+			_hn_steps.append(hp.distance_to(_hn_jet_prev) / float(pf - _hn_pf_prev))
+		_hn_jet_prev = hp
+		_hn_pf_prev = pf
+	if _hn_shots != "":
+		_hn_shot += delta
+		if _hn_shot >= 5.0:
+			_hn_shot = 0.0
+			var img: Image = world.get_viewport().get_texture().get_image()
+			img.save_png("%s/%s_%03d.png" % [_hn_shots, _hn_role, int(_hn_t)])
+	var finished: bool = _hn_aboard > HN_WALK + HN_STAND if _hn_role == "join" \
+		else (_hn_t > 240.0 or (_hn_had_peer and world.net.roster.size() <= 1))
+	if _hn_role == "host" and world.net.roster.size() > 1:
+		_hn_had_peer = true
+	if finished:
+		print("[holdnet] %s done: passenger jitter in the hold, frame to frame, mean %.3f m" % [
+			_hn_role, _hn_jit / maxf(float(_hn_jn), 1.0)])
+		# the carrier: each tick's step against its neighbours' average
+		var uneven := 0.0
+		var worst := 0.0
+		var n := 0
+		for i in range(2, _hn_steps.size() - 2):
+			var around: float = (float(_hn_steps[i - 2]) + float(_hn_steps[i - 1])
+				+ float(_hn_steps[i + 1]) + float(_hn_steps[i + 2])) * 0.25
+			if around < 0.01:
+				continue
+			var e: float = absf(float(_hn_steps[i]) - around) / around
+			uneven += e
+			worst = maxf(worst, e)
+			n += 1
+		print("[holdnet] %s done: the aircraft carrying him moves unevenly by %.0f%% a tick on average, %.0f%% at worst (%d ticks)" % [
+			_hn_role, uneven / maxf(float(n), 1.0) * 100.0, worst * 100.0, n])
+		world.net.leave()
+		world.get_tree().quit()
+
+## The transport everyone is in: the host's own, or the host's ghost.
+func _hn_jet() -> Aircraft:
+	if _hn_role == "host":
+		return world.player
+	for pid in world.net.ghosts:
+		var g: Variant = world.net.ghosts[pid]
+		if is_instance_valid(g) and (g as Aircraft).has_hold():
+			return g
+	return null
+
+## The host's C-130 up at a height and a speed to carry people, level.
+func _hn_fly_setup() -> void:
+	var p: Aircraft = world.player
+	if not is_instance_valid(p):
+		return
+	var at := Vector3(0.0, Sim.height_at(0.0, -6000.0) + 1500.0, -6000.0)
+	p.global_transform = Transform3D(Basis.IDENTITY, at)
+	p.linear_velocity = Vector3(0, 0, -105.0)
+	p.gear_down = false
+	p.gear_anim = 0.0
+	p.throttle = 0.7
+	p.power = 0.7
+	p.active = true
+	world._reset_interp.call_deferred(p)
+	p.set_autopilot("hold")
+
+## On the client: its own aeroplane out of the way, and its man into the hold
+## of the host's.
+func _hn_board(jet: Aircraft) -> void:
+	if is_instance_valid(world.player):
+		world.player.active = false
+		world.player.freeze = true
+		world.player.global_position += Vector3(0, -3000, 0)
+		world.player.visible = false
+	var hold: Node3D = jet.hold_node()
+	world._spawn_walker(hold.global_position)
+	world.walker.global_transform = hold.global_transform
+	world.walker.enter_frame(hold, jet)
+	world.walker.activate()
+	world.walker.yaw = 0.0          # facing up the hold
+	_hn_boarded = true
+	print("[holdnet] client: boarded the host's %s" % jet.name)
+
+## Up the hold and back for the first minute, then still.
+func _hn_walk() -> void:
+	var still: bool = _hn_aboard > HN_WALK
+	var fwd: bool = fmod(_hn_aboard, 8.0) < 4.0
+	Input.action_release(&"pitch_down")
+	Input.action_release(&"pitch_up")
+	if not still:
+		Input.action_press(&"pitch_down" if fwd else &"pitch_up", 0.5)
+		world.walker.hold_ads = false
+		return
+	# standing: on the sights, a round every two seconds up the hold, so the
+	# other machine has a man aiming and firing to show
+	world.walker.hold_ads = true
+	world.walker.yaw = 0.0
+	world.walker.pitch = -0.05
+	if fmod(_hn_aboard, 2.0) < 0.1:
+		Input.action_press(&"foot_fire")
+	else:
+		Input.action_release(&"foot_fire")
+
+## The view: from the back of the hold up it, with the outside in a corner.
+func _hn_cameras(jet: Aircraft) -> void:
+	var hold: Node3D = jet.hold_node()
+	if not is_instance_valid(_hn_cam_in):
+		_hn_cam_in = Camera3D.new()
+		_hn_cam_in.name = "HoldCam"
+		_hn_cam_in.near = 0.05
+		_hn_cam_in.fov = 80.0
+		hold.add_child(_hn_cam_in)
+		_hn_cam_in.position = Vector3(0.0, 1.9, 5.5)
+		_hn_cam_in.rotation_degrees = Vector3(-8.0, 0.0, 0.0)
+		var box := SubViewportContainer.new()
+		box.stretch = true
+		box.size = Vector2(420, 260)
+		box.position = Vector2(12, 12)
+		_hn_view = SubViewport.new()
+		_hn_view.world_3d = world.get_viewport().world_3d
+		_hn_view.size = Vector2i(420, 260)
+		box.add_child(_hn_view)
+		_hn_cam_out = Camera3D.new()
+		_hn_cam_out.far = 20000.0
+		_hn_view.add_child(_hn_cam_out)
+		var layer := CanvasLayer.new()
+		layer.layer = 50
+		layer.add_child(box)
+		world.add_child(layer)
+	# the host watches from the back of the hold; the client is the man, seen
+	# over his shoulder, since his own camera has to be the one in use for
+	# him to move at all
+	if _hn_role == "join" and is_instance_valid(world.walker):
+		world.walker.third = true
+		world.walker.cam.current = true
+	else:
+		_hn_cam_in.current = true
+	# outside, off the left quarter and a little above, looking at it
+	var xf: Transform3D = jet.get_global_transform_interpolated()
+	var eye: Vector3 = xf.origin + xf.basis * Vector3(-45.0, 12.0, 35.0)
+	_hn_cam_out.global_transform = Transform3D(Basis.IDENTITY, eye).looking_at(xf.origin, xf.basis.y)
+
+## Where the passenger is in the hold, as this machine has him.
+func _hn_passenger() -> Node3D:
+	if _hn_role == "join":
+		return world.walker if _hn_boarded and is_instance_valid(world.walker) else null
+	for pid in world.net.foot_ghosts:
+		var g: Variant = world.net.foot_ghosts[pid]
+		if is_instance_valid(g):
+			return g
+	return null
+
+func _hn_measure() -> void:
+	var p: Node3D = _hn_passenger()
+	if p == null:
+		_hn_prev = Vector3.INF
+		return
+	var jet: Aircraft = _hn_jet()
+	if not is_instance_valid(jet) or p.get_parent() != jet.hold_node():
+		return
+	# only while he stands still: walking moves him on purpose. The host
+	# does not know when that is; it takes the last stretch it saw him in
+	# without moving at all.
+	var standing: bool = _hn_aboard > HN_WALK + 2.0 if _hn_role == "join" \
+		else (_hn_prev != Vector3.INF and p.position.distance_to(_hn_prev) < 0.05)
+	if standing or _hn_prev == Vector3.INF:
+		if _hn_prev != Vector3.INF:
+			_hn_jit += p.position.distance_to(_hn_prev)
+			_hn_jn += 1
+		_hn_prev = p.position
+
+func _hn_report(jet: Aircraft) -> void:
+	var p: Node3D = _hn_passenger()
+	var in_hold := false
+	var local := Vector3.INF
+	var wp := Vector3.INF
+	if p != null:
+		wp = p.global_position
+		in_hold = is_instance_valid(jet) and p.get_parent() == jet.hold_node()
+		local = p.position if in_hold else (jet.hold_node().global_transform.affine_inverse() * wp
+			if is_instance_valid(jet) else Vector3.INF)
+	var spd: float = jet.linear_velocity.length() if is_instance_valid(jet) else 0.0
+	var bank: float = rad_to_deg(asin(clampf(-jet.global_transform.basis.x.y, -1.0, 1.0))) \
+		if is_instance_valid(jet) else 0.0
+	print("[holdnet] %s w=%d t=%5.1f %-22s jet %s %3.0f m/s bank %+4.0f | passenger %s in hold %s at %s" % [
+		_hn_role, int(Time.get_unix_time_from_system() * 1000.0), _hn_t, _hn_phase(), "up" if is_instance_valid(jet) else "--", spd, bank,
+		"seen" if p != null else "none", in_hold, str(local.snapped(Vector3.ONE * 0.01))])
+#endregion
 
 #region --nettest
 var _nettest := false

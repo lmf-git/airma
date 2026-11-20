@@ -1313,6 +1313,8 @@ func _setup_battle(id: String) -> void:
 	mode.start(id)
 	mode.finished.connect(_on_mode_finished)
 	hud.mode = mode
+	# the war is fought over the sectors; the rest of the world waits
+	street_fight.hide_beyond_sectors(mode._layout)
 	var wings: int = 3 if id in ["tdm", "ffa"] else 3
 	_spawn_threats(wings)
 	# Somebody on our side. Every battle mode put the player up alone against a

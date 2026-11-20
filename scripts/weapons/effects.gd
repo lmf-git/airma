@@ -181,6 +181,96 @@ static func mg_round(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: 
 ## drop, a streak you can see -- but drawn at the size of the thing, stopped by
 ## walls, and able to tell a head from a chest. `glow` is how much of it burns:
 ## not every round in a magazine is tracer.
+## Where along a segment a round first meets the skin of an aircraft that has
+## a hold, and which aircraft: [t from 0 to 1, aircraft], or [2.0, null].
+##
+## An aircraft with a hold is hollow. The hold is air, and so is the column
+## behind it while the ramp is down -- the way in and out. Everything else
+## inside the airframe's box is aircraft: the walls of the hold seen from
+## inside, the fuselage, the wings and the tail seen from out. So a round
+## fired in the hold leaves over the ramp or hits the aeroplane it is in, and
+## one fired from outside reaches the men in the hold only through the back.
+static func hull_hit(a: Vector3, b: Vector3) -> Array:
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return [2.0, null]
+	var best_t := 2.0
+	var best: Node = null
+	var mid: Vector3 = (a + b) * 0.5
+	var half_len: float = a.distance_to(b) * 0.5
+	for n in tree.get_nodes_in_group("holds"):
+		var ac := n as Aircraft
+		if ac == null or not is_instance_valid(ac) or not ac.alive:
+			continue
+		var bb: AABB = ac.bounds
+		var reach: float = bb.size.length() * 0.5 + half_len
+		if ac.global_position.distance_squared_to(mid) > reach * reach:
+			continue
+		var inv: Transform3D = ac.global_transform.affine_inverse()
+		var la: Vector3 = inv * a
+		var lb: Vector3 = inv * b
+		# walk it a quarter of a metre at a time for the first point that is
+		# aircraft: inside the airframe's box, or in the skin of the hold --
+		# which on some airframes runs past the box the model makes -- and
+		# not the air of the hold or of the open ramp behind it
+		var span: float = la.distance_to(lb)
+		var steps: int = maxi(int(ceil(span / 0.25)), 1)
+		for k in steps + 1:
+			var t: float = float(k) / float(steps)
+			if t >= best_t:
+				break
+			var lp: Vector3 = la.lerp(lb, t)
+			var wp: Vector3 = ac.global_transform * lp
+			if not bb.has_point(lp) and not _in_hold_skin(ac, wp):
+				continue
+			if _hold_air(ac, wp):
+				continue
+			best_t = t
+			best = ac
+			break
+	# whoever fired it: a man can put a round into the aircraft he is riding in
+	return [best_t, best]
+
+## Within the skin of the hold: its box, a little thicker than the air in it.
+const HOLD_SKIN := 0.35
+static func _in_hold_skin(ac: Aircraft, p: Vector3) -> bool:
+	var hold: Node3D = ac.hold_node()
+	if hold == null:
+		return false
+	var h: Vector3 = hold.get_meta("half", Vector3(2.0, 2.2, 6.0))
+	var lp: Vector3 = hold.global_transform.affine_inverse() * p
+	return absf(lp.x) <= h.x + HOLD_SKIN and lp.y >= -HOLD_SKIN and lp.y <= h.y + HOLD_SKIN \
+		and absf(lp.z) <= h.z + HOLD_SKIN
+
+## Is this point inside the hold of `ac`, or in the open column behind its
+## ramp while the ramp is down?
+static func _hold_air(ac: Aircraft, p: Vector3) -> bool:
+	var hold: Node3D = ac.hold_node()
+	if hold == null:
+		return false
+	var h: Vector3 = hold.get_meta("half", Vector3(2.0, 2.2, 6.0))
+	var lp: Vector3 = hold.global_transform.affine_inverse() * p
+	if absf(lp.x) > h.x or lp.y < 0.0 or lp.y > h.y:
+		return false
+	if lp.z >= -h.z and lp.z <= h.z:
+		return true
+	return lp.z > h.z and bool(ac.get("ramp_open"))
+
+## An EMP going off: a moment of blue-white over everything, and a crackle.
+static func emp_flash(world: Node, at: Vector3) -> void:
+	if world == null:
+		return
+	var light := OmniLight3D.new()
+	light.light_color = Color(0.7, 0.85, 1.0)
+	light.light_energy = 12.0
+	light.omni_range = 2500.0
+	world.add_child(light)
+	light.global_position = at + Vector3(0, 600, 0)
+	var tw := light.create_tween()
+	tw.tween_property(light, "light_energy", 0.0, 1.4)
+	tw.tween_callback(light.queue_free)
+	Sfx.play_at(world, "thump", at, -2.0, 0.5, 4000.0)
+
 static func bullet(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
 		team: int, glow := 1.0, life := 1.4, drag := 0.0011, pen := 0.0) -> Tracer:
 	var t := Tracer.new()
@@ -1749,7 +1839,10 @@ class Tracer extends Node3D:
 				if whose[i] == team or pos[i].distance_squared_to(step_mid) > near:
 					continue
 				var n: Variant = nodes[i]
-				if not is_instance_valid(n) or n == shooter or _struck.has(n):
+				if not is_instance_valid(n) or n == shooter or _struck.has(n) \
+						or (n is Aircraft and (n as Node).is_in_group("holds")):
+					# an aircraft with a hold is hollow: it is asked below, by
+					# its shape, rather than as a ball round its middle
 					continue
 				if n.has_method("is_alive") and not n.is_alive():
 					continue
@@ -1780,6 +1873,14 @@ class Tracer extends Node3D:
 						n.suppress(clampf(dmg / 110.0, 0.10, 0.6)
 							* (1.0 - 0.6 * miss / NEAR_MISS),
 							from if _born == Vector3.INF else _born)
+		# The airframes with someone inside them, by their shape: into the
+		# skin anywhere but through the open ramp is a hit on the aircraft --
+		# from outside, or from a man in its own hold.
+		var hh: Array = Effects.hull_hit(from, stop)
+		if hh[1] != null and float(hh[0]) < best_t:
+			best = hh[1]
+			best_t = float(hh[0])
+			best_k = 1.0
 		if best != null:
 			var where := from.lerp(stop, clampf(best_t, 0.0, 1.0))
 			ended_at = where

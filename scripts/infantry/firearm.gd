@@ -370,7 +370,7 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 ## the weapon is pointed; `spread` is how far it is allowed to wander from that.
 static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		muzzle: Vector3, dir: Vector3, spread: float, dmg_scale := 1.0,
-		quiet := false) -> void:
+		quiet := false, carrier_vel := Vector3.ZERO) -> void:
 	if world == null or not world.is_inside_tree():
 		return
 	var n: int = int(g["pellets"])
@@ -399,8 +399,10 @@ static func fire(world: Node, shooter: Node, team: int, g: Dictionary,
 		var a := randf() * TAU
 		var r: float = sqrt(randf()) * spread
 		var d: Vector3 = (basis * Vector3(cos(a) * r * fan.x, sin(a) * r * fan.y, -1.0)).normalized()
+		# fired from something moving -- an aircraft he is riding in -- the
+		# round has its speed as well as its own
 		Effects.bullet(world, muzzle, d * float(g["muzzle"]) * randf_range(0.97, 1.03)
-			* (0.93 if quiet else 1.0),
+			* (0.93 if quiet else 1.0) + carrier_vel,
 			shooter, float(g["dmg"]) * dmg_scale, team,
 			# Three and a half seconds of flight for a bullet: at 1.4 every rifle
 			# round in the game fell out of the sky at nine hundred metres
@@ -647,9 +649,9 @@ static func sight_range(from: Vector3, dir: Vector3, limit: float) -> float:
 		step = minf(step * 1.15, 12.0)
 	return d
 
-## Can one point see another: nothing built in the way.
+## Can one point see another: nothing built in the way, and no smoke.
 static func can_see(a: Vector3, b: Vector3) -> bool:
-	return Obstacles.segment(a, b) >= 1.0
+	return Obstacles.segment(a, b) >= 1.0 and not SmokeScreen.blocks(a, b)
 
 # ------------------------------------------------------------------ on the road
 ## A weapon somebody is no longer holding. It lies where it fell until someone

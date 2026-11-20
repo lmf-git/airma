@@ -26,6 +26,8 @@ const UNIFORM := {
 
 var team := 0
 var health := 100.0
+## Vest left, as `Walker.armour`.
+var armour := 0.0
 var alive := true
 var arena: Node = null
 var callsign := ""
@@ -171,10 +173,19 @@ static func chest_of(n: Node3D) -> Vector3:
 ## What the last thing to hurt him was, for the kill feed: see `KillFeed`.
 var last_cause := ""
 
+## Full magazine again, from a supply drop.
+func rearm() -> void:
+	if not gun.is_empty():
+		_rounds = int(gun["mag"])
+
 func take_hit(amount: float, from: Node = null) -> void:
 	if not alive:
 		return
 	last_cause = KillFeed.weapon_of(from)
+	if armour > 0.0:
+		var taken: float = minf(amount * 0.5, armour)
+		armour -= taken
+		amount -= taken
 	health -= amount
 	_last_amount = amount
 	if amount >= 120.0:
@@ -354,7 +365,7 @@ func _sense() -> void:
 	var facing := Vector3(-sin(yaw), 0.0, -cos(yaw))
 	var best: Node3D = null
 	var best_d := SEE
-	for n in arena.enemies_of(team):
+	for n in arena.targets_of(team):
 		if not is_instance_valid(n) or not n.is_alive():
 			continue
 		var at: Vector3 = chest_of(n)
@@ -701,6 +712,10 @@ func _shoot(delta: float) -> void:
 	# which is the moment you have to get behind something.
 	var err: float = 0.0095 / skill
 	err *= 1.0 + d / 80.0
+	# his sight dead under an EMP: shooting over the irons he has left, or
+	# along the barrel
+	if float(CqbMatch.emp_t.get(team, 0.0)) > 0.0:
+		err *= 2.6
 	if vel.length() > 1.0:
 		err *= 1.6
 	if "vel" in target and (target.vel as Vector3).length() > 3.0:

@@ -85,7 +85,11 @@ func start(id: String) -> void:
 			kill_goal = 12 if mode == "ffa" else 20
 		"cqb", "ground", "arms":
 			kill_goal = CqbMatch.kill_goal
-			Sim.no_air_threat = mode != "arms"
+			# On foot in a town the only thing overhead is a kill streak, and
+			# that is not there to be shot at. A fight between vehicles is
+			# another matter: a helicopter hanging over it is fair game for
+			# any gun that will reach it.
+			Sim.no_air_threat = mode == "cqb"
 		"range":
 			# nobody to beat: it runs until you leave it
 			kill_goal = 1 << 30

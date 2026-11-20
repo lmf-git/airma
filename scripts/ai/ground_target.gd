@@ -17,6 +17,65 @@ func setup(k: String) -> void:
 		"manpads": 26.0}.get(k, 100.0)
 	_build()
 
+## Everything standing, for vehicles to keep out of. These are not in
+## `Obstacles`: a box round a SAM site there would stop the rounds aimed at it
+## short of its hit sphere and hide it from whoever is looking for it.
+static var standing: Array = []
+
+## Half its footprint across and along, and its height, in its own frame:
+## what a vehicle has to keep out of. Zero for a team on foot.
+func footprint() -> Vector3:
+	match kind:
+		"hangar":
+			return Vector3(13.0, 10.0, 14.0)
+		"fuel":
+			return Vector3(7.0, 9.0, 7.0)
+		"radar":
+			return Vector3(2.2, 3.0, 3.2)
+		"manpads":
+			return Vector3.ZERO
+	return Vector3(3.2, 4.8, 4.2)
+
+func _enter_tree() -> void:
+	if not standing.has(self):
+		standing.append(self)
+
+func _exit_tree() -> void:
+	standing.erase(self)
+
+## The shortest move across the ground that takes a circle of radius `r` at
+## `p` out of whatever installation it is inside. Zero if it is in none.
+static func push_out_any(p: Vector3, r: float) -> Vector3:
+	var best := Vector3.ZERO
+	for t in standing:
+		var g := t as GroundTarget
+		if g == null or not g.alive:
+			continue
+		var f: Vector3 = g.footprint()
+		if f.x <= 0.0:
+			continue
+		var gx: Transform3D = g.global_transform
+		var d: Vector3 = p - gx.origin
+		var reach: float = maxf(f.x, f.z) * 1.5 + r
+		if d.x * d.x + d.z * d.z > reach * reach:
+			continue
+		if d.y < -r or d.y > f.y + r:
+			continue
+		var bx: Vector3 = gx.basis.x.normalized()
+		var bz: Vector3 = gx.basis.z.normalized()
+		var lx: float = d.dot(bx)
+		var lz: float = d.dot(bz)
+		var px: float = f.x + r - absf(lx)
+		var pz: float = f.z + r - absf(lz)
+		if px <= 0.0 or pz <= 0.0:
+			continue
+		var m: Vector3 = bx * (signf(lx) if lx != 0.0 else 1.0) * px if px < pz \
+			else bz * (signf(lz) if lz != 0.0 else 1.0) * pz
+		m.y = 0.0
+		if m.length_squared() > best.length_squared():
+			best = m
+	return best
+
 func hit_radius() -> float:
 	# Three men and a tube is not a battery: it is a much smaller thing to hit
 	# and a much harder one to see.

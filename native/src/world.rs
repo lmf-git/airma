@@ -233,26 +233,24 @@ pub fn road_surface(c: &Corridor, x: f32, z: f32) -> (f32, f32, f32) {
     road_surface_in(c, x, z, 0.0)
 }
 
-/// In a town the bank is not graded out. Spread over the made ground at four
-/// and a half to one, a bridge approach in the middle of a town buried its
-/// streets and the buildings beside them under a hundred metres of slope; there
-/// it stands on a retaining wall a few metres outside the carriageway instead,
-/// which is what a raised road through a town is. `town` is how much town
-/// platform applies at the point, 0 to 1.
-const TOWN_SHOULDER: f32 = 1.0;
+/// In a town the bank is graded out more steeply than in the country. Spread
+/// over the made ground at four and a half to one, a bridge approach in the
+/// middle of a town buried its streets and the buildings beside them under a
+/// hundred metres of slope. Two and a half to one is still a bank a man can
+/// walk up -- it used to be a retaining wall a metre outside the footway,
+/// which drawn as terrain on a fifteen metre mesh looked like a gentle bank
+/// and was a cliff he went straight up. (Measured from the natural ground,
+/// which a town may have levelled lower, so it gets a few metres whatever the
+/// fill says.) `town` is how much town platform applies at the point, 0 to 1.
+const TOWN_BATTER: f32 = 2.5;
+const TOWN_SHOULDER_MIN: f32 = 4.0;
+const TOWN_SHOULDER_MAX: f32 = 8.0;
 /// ...and the top is carried flat out past the kerbs before it drops, so the
-/// wall stands at the back of the footway rather than the bank starting at the
-/// edge of the carriageway.
+/// bank starts at the back of the footway rather than at the carriageway edge.
 const TOWN_TOP: f32 = 1.6;
-/// Out to the face of a ramp's retaining wall, from the centreline: the top
-/// carried flat, then the metre it drops to the town in. `Sim.RAMP_HALF`.
-pub const RAMP_EDGE: f32 = ROAD_HALF * TOWN_TOP + TOWN_SHOULDER;
-/// How walled a stretch has to be before it is a ramp: a structure, drawn as
-/// walls and a deck of road standing on the town's own ground, rather than a
-/// bank in the terrain. The terrain mesh is fifteen metres a cell, and a bank
-/// whose side drops three metres in one is drawn as a fifteen metre skirt of
-/// sloping ground sticking out from under whatever wall is put along its edge.
-pub const RAMP_WALLED: f32 = 0.5;
+// Out to the foot of a ramp's side slope at its widest, from the centreline,
+// is ROAD_HALF * TOWN_TOP + TOWN_SHOULDER_MAX = 20 m: `Sim.RAMP_HALF`, which
+// keeps streets and props off it.
 /// Under the first span the bank does not round off at the level of the road,
 /// which buried the deck's girder in it for twenty metres: it falls away from
 /// below the girder, as a spill slope.
@@ -260,11 +258,6 @@ const DECK_DEPTH: f32 = 2.3;
 const SPILL: f32 = 0.6;
 /// Half the deck's width: `Scenery.DECK_HALF`.
 const DECK_HALF: f32 = 8.5;
-/// How far under the deck a walled ramp's abutment reaches, and how far below
-/// the road it stands: `Scenery.ABUT_LEN`.
-pub const SHELF: f32 = 4.5;
-const SHELF_DROP: f32 = 0.3;
-
 /// Everything the corridor says about a point.
 #[derive(Clone, Copy, Default)]
 pub struct Made {
@@ -274,14 +267,12 @@ pub struct Made {
     pub w: f32,
     /// The ground it was cut from.
     pub g: f32,
-    /// How much of the bank here is a retaining wall rather than a slope.
+    /// How much of this is a ramp up to a bridge through a town: raised on
+    /// fill over ground the town has levelled. 0 for a road at street level.
     pub walled: f32,
     /// Past an abutment, under the first span: how far the bank there may
     /// only fill and never cut -- 1 under the deck, 0 off to the side of it.
     pub spill: f32,
-    /// Past the end of a walled ramp, under the deck: the top of its abutment,
-    /// which is ground to stand on but not ramp to draw.
-    pub shelf: bool,
 }
 
 pub fn road_surface_in(c: &Corridor, x: f32, z: f32, town: f32) -> (f32, f32, f32) {
@@ -329,7 +320,8 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
     // shoulder, which the town platform overrides anyway
     let walled = town.clamp(0.0, 1.0) * smoothstep(1.0, 3.0, fill);
     let inner = lerp(ROAD_HALF, ROAD_HALF * TOWN_TOP, walled);
-    let reach = inner + lerp(open, TOWN_SHOULDER, walled);
+    let town_side = (fill * TOWN_BATTER).clamp(TOWN_SHOULDER_MIN, TOWN_SHOULDER_MAX);
+    let reach = inner + lerp(open, town_side, walled);
     if best > reach {
         return none;
     }
@@ -337,34 +329,16 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
     // (a few centimetres of tolerance, so a point on the abutment's own line
     // does not flicker between the two sides of it)
     if past > 0.05 {
-        // Beyond the abutment. A walled ramp ends at its face, square, over
-        // the town; a bank in the country spills out under the first span
-        // from below the deck rather than carrying on at the level of it --
-        // under the deck only. Off to the side the bank rounds off as it
-        // always did: cut along the abutment's line, a broad bank's shoulders
-        // got a step a hundred metres long.
+        // Beyond the abutment the bank spills out under the first span from
+        // below the deck rather than carrying on at the level of it -- under
+        // the deck only. Off to the side it rounds off as it always did: cut
+        // along the abutment's line, a broad bank's shoulders got a step a
+        // hundred metres long. A ramp through a town does the same; it used
+        // to end square on a shelf and drop sheer to the street, which the
+        // fifteen metre mesh drew as a slope that whatever walked onto it fell
+        // through.
         let lat = (best * best - past * past).max(0.0).sqrt();
-        if walled >= RAMP_WALLED {
-            if lat < RAMP_EDGE + 1.0 {
-                // A shelf a little under the deck for the first few metres --
-                // the top of the abutment, which `Scenery` draws -- so that
-                // the deck is what a wheel finds there. Ending in a cliff on
-                // the abutment's own line, a wheel just short of it took its
-                // normal across the drop and the suspension threw the hull on
-                // its back.
-                if past < SHELF {
-                    return Made {
-                        y: near_y - SHELF_DROP,
-                        w,
-                        g: near_g,
-                        walled,
-                        spill: 0.0,
-                        shelf: true,
-                    };
-                }
-                return none;
-            }
-        } else {
+        {
             let under = 1.0 - smoothstep(DECK_HALF + 2.0, DECK_HALF + 25.0, lat);
             if under > 0.0 {
                 return Made {
@@ -376,7 +350,6 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
                     g: near_g,
                     walled,
                     spill: under,
-                    shelf: false,
                 };
             }
         }
@@ -400,9 +373,9 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
         wsum += wt;
     }
     if wsum <= 0.0 {
-        return Made { y: near_y, w, g: near_g, walled, spill: 0.0, shelf: false };
+        return Made { y: near_y, w, g: near_g, walled, spill: 0.0 };
     }
-    Made { y: ysum / wsum, w, g: gsum / wsum, walled, spill: 0.0, shelf: false }
+    Made { y: ysum / wsum, w, g: gsum / wsum, walled, spill: 0.0 }
 }
 
 // ------------------------------------------------------------------ decks
@@ -803,11 +776,10 @@ pub const G_FIELDS: u32 = 2;
 /// Everything: what `Sim.height_at` asks for.
 pub const G_ALL: u32 = G_ROADS | G_FIELDS;
 /// The ground as the terrain mesh draws it rather than as anything stands on
-/// it. The two differ in one place: a walled ramp up to a bridge in a town,
-/// which things stand on as made ground and which is *drawn* as a structure --
-/// walls and the carriageway, in `raster.rs` -- standing on the town's own
-/// ground. Drawn as terrain, a three metre bank that drops in one metre came
-/// out of a fifteen metre mesh as a ragged skirt of sloping ground.
+/// it. These no longer differ anywhere: a walled ramp up to a town bridge used
+/// to be left out of the mesh and drawn as walls on the town's ground, which
+/// put an enclosure at the foot of every one with the road surface out of
+/// sight. Kept so the callers that ask for it still say what they mean.
 pub const G_DRAWN: u32 = 4;
 
 /// The ground as the world has left it. The carrier decks are the one thing
@@ -883,8 +855,7 @@ pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
         // was drawn against the levelled apron and then imposed on the hillside
         // underneath it. Nothing is at risk on the runway itself -- the router
         // charges four thousand times the going rate to cross one.
-        return road_over_with(&road_made(c, x, z, pad_w), h, pad_w,
-            flags & G_DRAWN != 0);
+        return road_over_with(&road_made(c, x, z, pad_w), h, pad_w);
     }
     h
 }
@@ -901,7 +872,7 @@ pub fn carve_road(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32
     let (h, pad_w) = carve_built(w, base, x, z, flags);
     let rs = road_made(c, x, z, pad_w);
     let h = if flags & G_ROADS != 0 {
-        road_over_with(&rs, h, pad_w, flags & G_DRAWN != 0)
+        road_over_with(&rs, h, pad_w)
     } else {
         h
     };
@@ -944,15 +915,14 @@ pub fn carve_built(w: &World, base: f32, x: f32, z: f32, flags: u32) -> (f32, f3
 
 /// The earthworks: what the corridor does to the ground it passes over, with
 /// the made surface already in hand.
-fn road_over_with(m: &Made, h: f32, pad_w: f32, drawn: bool) -> f32 {
+fn road_over_with(m: &Made, h: f32, pad_w: f32) -> f32 {
     let (ry, rw) = (m.y, m.w);
     if rw <= 0.0 {
         return h;
     }
-    // A ramp is drawn as a structure on the town's ground, not as terrain.
-    if drawn && m.walled >= RAMP_WALLED {
-        return h;
-    }
+    // A walled ramp in a town is drawn as terrain too, the same as it is
+    // walked on. It was left out of the mesh and drawn as a structure on the
+    // town's own ground, which never matched what a wheel stood on.
     // Eased out rather than switched off: a hard cut-off left a step down one
     // side of the carriageway wherever the earthworks reached their limit.
     let mut carry = 1.0 - smoothstep(ROAD_FILL_MAX, ROAD_FILL_MAX * 2.2, ry - h);
@@ -961,7 +931,13 @@ fn road_over_with(m: &Made, h: f32, pad_w: f32, drawn: bool) -> f32 {
     // ground rather than in a cutting of its own -- but only a road that is
     // near the level of it. One carried up on a bank to a bridge still has to
     // be graded down to the town, or it stands in the streets as a wall.
-    let raised = smoothstep(2.0, 6.0, ry - h);
+    //
+    // A ramp up to a bridge through a town is graded out like one in the
+    // country, though, however low: kept to its carriageway it fell straight to
+    // the street on both sides, and a man walking onto the side of one went up
+    // a cliff the mesh drew as a gentle bank. Only a ramp -- every other street
+    // keeps to the town's ground, or the buildings stand clear of it.
+    let raised = smoothstep(2.0, 6.0, ry - h).max(m.walled);
     carry *= 1.0 - pad_w * (1.0 - raised);
     // The carriageway itself is always levelled; only the grading out to
     // either side of it eases off.

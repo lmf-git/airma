@@ -1021,6 +1021,16 @@ func _draw_on_foot() -> void:
 			14, RED, HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
 	_txt(Vector2(vp.x - 330.0, vp.y - 32.0), "GRENADES %d   FLASH %d" % [w.grenades, w.flashes], 14,
 		Color(0.75, 0.8, 0.85), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+	# the sights: where it is zeroed and what is dialled on, always while on
+	# them, and otherwise only once something has been dialled
+	if not g.has("launcher"):
+		var el: float = float(w.elev_mil.get(w.kit_idx, 0.0))
+		var wd: float = float(w.wind_mil.get(w.kit_idx, 0.0))
+		if w._ads > 0.5 or el != 0.0 or wd != 0.0:
+			_txt(Vector2(vp.x - 330.0, vp.y - 138.0), "ZERO %d m   ELEV %+.1f   WIND %s%.1f mil   ↑↓←→" % [
+				int(w.zero_of(g)), el, "R " if wd > 0.0 else ("L " if wd < 0.0 else ""), absf(wd)],
+				13, AMBER if (el != 0.0 or wd != 0.0) else Color(0.75, 0.8, 0.85),
+				HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
 	# the rack: which number is which
 	for i in w.slots.size():
 		var on: bool = i == w.slot
@@ -1034,6 +1044,8 @@ func _draw_on_foot() -> void:
 	_box(Rect2(26, vp.y - 74.0, hb, 12), hcol, 1.2)
 	draw_rect(Rect2(27, vp.y - 73.0, (hb - 2.0) * frac, 10), hcol)
 	_txt(Vector2(26, vp.y - 82.0), "HEALTH %d" % int(maxf(w.health, 0.0)), 14, hcol)
+	if w.armour > 0.0:
+		_txt(Vector2(130, vp.y - 82.0), "VEST %d" % int(w.armour), 14, Color(0.55, 0.78, 1.0))
 	# wind: only worth drawing when some of it has been spent
 	if w.stamina < 0.995:
 		draw_rect(Rect2(27, vp.y - 59.0, (hb - 2.0) * w.stamina, 3),
@@ -1176,10 +1188,20 @@ class CqbMap extends Control:
 			var sw: float = fmod(Time.get_ticks_msec() * 0.001, 2.0) / 2.0
 			draw_line(Vector2(size.x * sw, 0.0), Vector2(size.x * sw, size.y),
 				Color(1, 0.3, 0.2, 0.35), 2.0)
-		for d in state.get("dots_w", []):
-			var p: Vector2 = mid + ((d[0] as Vector2) - me) * ppm
-			if frame.has_point(p):
-				draw_circle(p, 3.2, BLUE if int(d[1]) == 0 else RED)
+		# their counter-UAV: the picture is noise and nobody is on it
+		if float(state.get("jammed", 0.0)) > 0.0:
+			var rng := RandomNumberGenerator.new()
+			rng.seed = int(float(Time.get_ticks_msec()) / 80.0)
+			for _i in 260:
+				var q := Vector2(rng.randf() * size.x, rng.randf() * size.y)
+				draw_rect(Rect2(q, Vector2(3, 2)), Color(0.8, 0.85, 0.8, rng.randf_range(0.15, 0.6)))
+			draw_string(ThemeDB.fallback_font, Vector2(8, 16), "JAMMED",
+				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 12, Color(1.0, 0.4, 0.3))
+		else:
+			for d in state.get("dots_w", []):
+				var p: Vector2 = mid + ((d[0] as Vector2) - me) * ppm
+				if frame.has_point(p):
+					draw_circle(p, 3.2, BLUE if int(d[1]) == 0 else RED)
 		var yaw: float = state.get("yaw", 0.0)
 		var fw := Vector2(-sin(yaw), -cos(yaw))
 		var rt := Vector2(-fw.y, fw.x)

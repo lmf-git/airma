@@ -105,12 +105,16 @@ func build(suit := SUIT, helmet := HELMET, patch := Color(0, 0, 0, 0)) -> void:
 
 	torso = _joint(hips, Vector3(0, 0.12, 0), "Torso")
 	# chest and belly as one rounded trunk, broader than it is deep
-	torso.add_child(_cap(0.19, 0.58, Vector3(0, 0.27, 0), suit, Vector3(1.05, 1.0, 0.66)))
+	# Its top at the shoulder line, not a hand above it: the trunk came up to
+	# the chin, and in first person it was the first thing under the eye --
+	# ten centimetres off, filling the view whenever he looked down.
+	torso.add_child(_cap(0.19, 0.50, Vector3(0, 0.23, 0), suit, Vector3(1.05, 1.0, 0.66)))
 	# plate carrier over it, and the strap down the back
-	torso.add_child(_cap(0.20, 0.34, Vector3(0, 0.31, 0), HARNESS, Vector3(1.06, 1.0, 0.74)))
+	torso.add_child(_cap(0.20, 0.30, Vector3(0, 0.27, 0), HARNESS, Vector3(1.06, 1.0, 0.74)))
 	torso.add_child(_bit(Vector3(0.12, 0.30, 0.05), Vector3(0, 0.30, 0.135), HARNESS))
 	# the neck, so the head is not sitting straight on the shoulders
-	torso.add_child(_cap(0.055, 0.14, Vector3(0, 0.55, 0), SKIN))
+	var neck := _cap(0.055, 0.14, Vector3(0, 0.55, 0), SKIN)
+	torso.add_child(neck)
 
 	head = _joint(torso, Vector3(0, 0.56, 0), "Head")
 	head.add_child(_ball(0.105, Vector3(0, 0.115, -0.005), SKIN, Vector3(0.92, 1.08, 1.0)))
@@ -119,6 +123,8 @@ func build(suit := SUIT, helmet := HELMET, patch := Color(0, 0, 0, 0)) -> void:
 		Vector3(0, 0, PI * 0.5)))
 	head.add_child(_cap(0.04, 0.10, Vector3(-0.125, 0.07, -0.02), Color(0.2, 0.2, 0.2)))
 	_head_meshes = head.get_children()
+	# the neck goes with the head: in first person the eye is just above it
+	_head_meshes.append(neck)
 
 	for s in [-1.0, 1.0]:
 		var sh := _joint(torso, Vector3(s * 0.25, 0.44, 0), "Shoulder")
@@ -326,18 +332,13 @@ func lowest_foot() -> float:
 		lo = minf(lo, local.y - 0.045)
 	return 0.0 if lo > 8.0 else lo
 
-## Hide just the head so the same body and animation can be used in first person.
+## Hide just the head (and neck) so the same body and animation can be used in
+## first person. The chest, arms and legs stay: the eye is in the head, clear of
+## them, so looking down shows your own body and the weapon sits on it.
 func set_head_visible(v: bool) -> void:
 	for m in _head_meshes:
 		if is_instance_valid(m):
 			m.visible = v
-	# The chest and hips are what the first-person camera sits inside; the
-	# arms and legs are separate joints and stay.
-	for j in [torso, hips]:
-		if is_instance_valid(j):
-			for m in j.get_children():
-				if m is MeshInstance3D:
-					m.visible = v
 
 # --------------------------------------------------------------------------
 func pose_idle() -> void:
@@ -671,9 +672,33 @@ var _sway := Vector2.ZERO
 var _breath := 0.0
 var _blend: Dictionary = {}
 var _step_sign := 1.0
-var _eye_s := Vector3(0.0, 1.74, -0.07)
+var _eye_s := Vector3(0.0, 1.73, EYE_FWD)
 var _climb_ph := 0.0
 var _pull := Vector3.ZERO
+## How much of the view's pitch the chest takes. Looking down he bends at the
+## waist as well as the neck: with the chest held up, a rifle pointed at his
+## feet pivoted about the eye and its butt swung up over his shoulder and out
+## through his back.
+func _chest_follow(look: float) -> float:
+	return 0.30 if look >= 0.0 else lerpf(0.30, 0.60, clampf(-look / 1.2, 0.0, 1.0))
+
+## The chest the weapon is kept clear of, smoothed: see `_place_weapon`.
+var _chest_s := Transform3D()
+## How far the support hand has come back along the fore-end to reach it.
+var _grip_slide := 0.0
+const GRIP_SLIDE_MAX := 0.20
+## Where the butt of a stocked weapon sits, along the line of sight from the
+## eye (negative is ahead of it): at the hip, and shouldered.
+const BUTT_HIP := -0.01
+const BUTT_ADS := 0.01
+## How far forward of the middle of him the eye is, standing. It was 7 cm:
+## the head sat square over a chest that is 25 cm through, so in first person
+## the eye was over the middle of the plate carrier, the chest filled the
+## bottom of the view and the shoulders came up round the camera. A man
+## looking down his sights has his head forward of his chest.
+const EYE_FWD := -0.16
+## ...and further at a run, where the whole of him leans into it.
+const EYE_RUN := 0.12
 var _sh_r := Vector3.INF
 var _sh_l := Vector3.INF
 
@@ -719,11 +744,15 @@ func _eye_target() -> Vector3:
 	# over, up and down for something: there the body really is leading
 	if in_action in ["vault", "climb", "wall", "ladder", "grab"]:
 		return global_transform.affine_inverse() * (head.global_transform * EYE_AT)
-	var e := Vector3(0.0, 1.74, -0.07)
+	var e := Vector3(0.0, 1.73, EYE_FWD)
 	if in_action == "slide":
-		e = Vector3(0.0, 0.80, 0.02)
+		e = Vector3(0.0, 0.80, -0.05)
 	elif in_crouch:
-		e = Vector3(0.0, 1.34, -0.13)
+		e = Vector3(0.0, 1.34, EYE_FWD - 0.06)
+	else:
+		# (not on the sights: the eye is where the weapon is placed from)
+		e.z -= EYE_RUN * clampf((in_move.length() - 3.0) / 4.0, 0.0, 1.0) \
+			* (1.0 - clampf(in_ads, 0.0, 1.0))
 	# the eye goes down with the body, not ahead of it
 	e = e.lerp(Vector3(0.0, 0.46, -0.10), prone_amount())
 	e.x += in_lean * 0.26
@@ -931,7 +960,7 @@ func animate(delta: float) -> void:
 		hips.position = Vector3(in_lean * 0.13, HIP_Y + _pelvis, 0.0).lerp(
 			Vector3(0.0, 0.20, 0.55), ps_l)
 		torso.transform.basis = Basis(Vector3.UP, (-_hips_yaw + blade) * up) \
-			* Basis(Vector3.RIGHT, lerpf(look * 0.30, clampf(look, -0.2, 0.5) * 0.5, ps_l)) \
+			* Basis(Vector3.RIGHT, lerpf(look * _chest_follow(look), clampf(look, -0.2, 0.5) * 0.5, ps_l)) \
 			* torso.transform.basis
 		var head_up := Quaternion(Basis(Vector3.UP, -blade) * Basis(Vector3.RIGHT, look * 0.42))
 		head.quaternion = head_up.slerp(head.quaternion, ps_l)
@@ -942,7 +971,7 @@ func animate(delta: float) -> void:
 			* Basis(Vector3.BACK, -in_lean * 0.22) * hips.transform.basis
 		hips.position = Vector3(in_lean * 0.13, HIP_Y, 0.0)
 		torso.transform.basis = Basis(Vector3.UP, -_hips_yaw + blade) \
-			* Basis(Vector3.RIGHT, look * 0.30) * torso.transform.basis
+			* Basis(Vector3.RIGHT, look * _chest_follow(look)) * torso.transform.basis
 		head.transform.basis = Basis(Vector3.UP, -blade) * Basis(Vector3.RIGHT, look * 0.42)
 		_plant_feet(delta)
 	if in_action == "slide":
@@ -1153,6 +1182,15 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	var sight: float = gun.get("sight", 0.08)
 	var hip := Vector3(0.09, -0.15, -0.36) if hand else Vector3(0.125, -0.150, -0.25)
 	var ads := Vector3(0.0, -sight, -0.40) if hand else Vector3(0.0, -sight, -0.235)
+	# A long gun with a stock is placed by its butt, not by its receiver: the
+	# butt goes into the pocket of the shoulder, at the front of the chest, and
+	# the rest of the weapon is wherever that puts it. Placed a fixed distance
+	# ahead of the eye, every stock longer than a carbine's went through the
+	# shoulder and out of the back, and in first person ended in the lens.
+	var butt: float = (0.09 + float(gun.get("stock", 0.0))) if not hand else 0.0
+	if float(gun.get("stock", 0.0)) > 0.0:
+		hip.z = BUTT_HIP - butt
+		ads.z = BUTT_ADS - butt
 	var low := Vector3(0.10, -0.42, -0.22) if hand else Vector3(0.03, -0.37, -0.20)
 	# propped on the elbows: the weapon is up at the eye, not down at a
 	# hip he is lying on, or the muzzle is in the dirt
@@ -1220,7 +1258,14 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	off += Vector3(-0.02, -0.10, 0.10) * bl
 	pitch_r += 1.15 * bl
 
-	var aim := Basis(Vector3.BACK, -in_lean * 0.10) * Basis(Vector3.RIGHT, look)
+	# Carried low at a run it is held across the body, not pointed where he is
+	# looking: tipping it with the view swung the butt up over the shoulder and
+	# through his back whenever he looked down mid-sprint.
+	# Off the sights it follows the view down only so far: a rifle held at the
+	# hip and pointed at his boots has its butt behind his shoulder.
+	var held: float = lerpf(maxf(look, -0.75), look, a)
+	var aim := Basis(Vector3.BACK, -in_lean * 0.10) \
+		* Basis(Vector3.RIGHT, held * lerpf(0.25, 1.0, r))
 	var wb: Basis = aim * Basis(Vector3.UP, yaw_r) * Basis(Vector3.RIGHT, pitch_r) \
 		* Basis(Vector3.BACK, roll_r)
 	var at: Vector3 = eye + aim * off
@@ -1244,14 +1289,80 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	if v.length() > reach:
 		pull = v.normalized() * (v.length() - reach)
 	var sh_l: Vector3 = _sh_l
+	# The support hand comes back along the fore-end before the weapon comes
+	# back toward the body: pulling the weapon in put the butt into the chest.
+	_grip_slide = 0.0
 	var v2: Vector3 = at - pull + wb * _grip_l() - sh_l
+	if v2.length() > reach and not hand:
+		var along: Vector3 = wb * Vector3.BACK
+		var need: float = v2.length() - reach
+		# how far back along the weapon closes that gap, roughly
+		var k: float = maxf(-v2.normalized().dot(along), 0.35)
+		_grip_slide = minf(need / k, GRIP_SLIDE_MAX)
+		v2 = at - pull + wb * _grip_l() - sh_l
 	if v2.length() > reach and in_reload < 0.0:
 		pull += v2.normalized() * (v2.length() - reach) * 0.85
 	_pull = pull
-	weapon_mount.transform = Transform3D(wb, at - _pull)
+	var placed: Vector3 = at - _pull
+	if not hand and float(gun.get("stock", 0.0)) > 0.0:
+		# Against where the chest is on average, not where this instant of
+		# the stride has put it: measured against the swaying chest, the
+		# weapon was shoved along its line and back with every step, and on
+		# the sights it pumped toward the eye and away by ten centimetres.
+		var chest_now: Transform3D = inv * torso.global_transform
+		if _chest_s == Transform3D():
+			_chest_s = chest_now
+		else:
+			var kc: float = _k(delta, 1.5)
+			_chest_s = Transform3D(
+				_chest_s.basis.orthonormalized().slerp(chest_now.basis.orthonormalized(), kc),
+				_chest_s.origin.lerp(chest_now.origin, kc))
+		placed += _clear_of_chest(_chest_s, placed, wb, butt)
+	weapon_mount.transform = Transform3D(wb, placed)
+
+## Out of the chest. Whatever the pose has done -- carried low across him at a
+## run, the view tipped down so the weapon swings in under the chin, the chest
+## leaning into a stride, the arms too short and pulling it in -- the stock
+## does not go into the body: the weapon slides forward along its own line
+## until it is clear, which moves it without pointing it anywhere else.
+## How far forward along its own line the weapon has to go, from `at` with
+## basis `wb` (both in the body's frame), for no point of its stock to be inside
+## the chest. `chest` is the torso joint in the body's frame.
+## The trunk and the plate carrier, as a box in the torso's frame: across, up
+## from the joint, and how far in front of it the front of the chest is.
+const CHEST_HALF := 0.22
+const CHEST_TOP := 0.52
+const CHEST_FRONT := -0.155
+func _clear_of_chest(chest: Transform3D, at: Vector3, wb: Basis, butt: float) -> Vector3:
+	var to_t: Transform3D = chest.affine_inverse()
+	var fwd: Vector3 = (wb * Vector3.FORWARD).normalized()
+	# the chest's own forward, in the body's frame: what "in front" means
+	var out_t: Vector3 = (to_t.basis * fwd)
+	var gain: float = -out_t.z
+	# How far in, with soft edges. A box with hard sides made the answer jump:
+	# a point of the stock just off the side of the chest counted for nothing,
+	# the push for some other point brought it round in front, and the next
+	# frame it counted in full -- the weapon pumped toward the eye and away.
+	var need := 0.0
+	for f in [0.0, 0.25, 0.5, 0.75, 1.0]:
+		var q: Vector3 = to_t * (at + wb * Vector3(0.0, -0.03, butt * f))
+		# full strength anywhere over the chest, fading only outside it
+		var wx: float = 1.0 - smoothstep(CHEST_HALF, CHEST_HALF + 0.10, absf(q.x))
+		var wy: float = smoothstep(-0.20, -0.10, q.y) \
+			* (1.0 - smoothstep(CHEST_TOP, CHEST_TOP + 0.10, q.y))
+		need = maxf(need, (q.z - CHEST_FRONT) * wx * wy)
+	if need <= 0.0:
+		return Vector3.ZERO
+	# Along its own line while that line has some way out of the chest in it.
+	# Pointed at the ground across him -- carried at a run and looking down --
+	# it has next to none, and the weapon is not being aimed anyway: it comes
+	# straight out from the chest instead. Blended, not switched.
+	var t: float = smoothstep(0.2, 0.45, gain)
+	return fwd * (need / maxf(gain, 0.2)) * t \
+		+ chest.basis.orthonormalized() * Vector3(0.0, 0.0, -need) * (1.0 - t)
 
 func _grip_l() -> Vector3:
-	return gun.get("grip_l", Vector3(0.0, -0.05, -0.22))
+	return gun.get("grip_l", Vector3(0.0, -0.05, -0.22)) + Vector3(0.0, 0.0, _grip_slide)
 
 ## Both hands onto it. The support hand leaves the fore-end during a reload and
 ## goes to the magazine, to the pouch on his belt, and back.

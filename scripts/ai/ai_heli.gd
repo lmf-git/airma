@@ -11,6 +11,13 @@ var station_alt := 260.0
 var _phase := 0.0
 var _state_t := 0.0
 var _fire_wait := 8.0
+## Flying as a kill streak over a street fight: the arena whose men it hunts as
+## well as everything on the radar picture, and how long it has left on station
+## before it turns for home and is gone.
+var arena: Node = null
+var patrol_t := -1.0
+var _leaving := false
+var _burst_t := 0.0
 
 func _ready() -> void:
 	add_to_group("hittable")
@@ -31,6 +38,18 @@ func hit_radius() -> float:
 
 func _pilot(delta: float) -> void:
 	_state_t += delta
+	if patrol_t >= 0.0 and not _leaving:
+		patrol_t -= delta
+		if patrol_t <= 0.0:
+			_leaving = true
+			Sim.report("%s off station" % name, Sim.Ev.INFO)
+	if _leaving:
+		# away, low and fast, and gone once it is out of everyone's sight
+		var out: Vector3 = global_position + (global_position - home).normalized() * 3000.0
+		_fly(out, Sim.height_at(out.x, out.z) + 200.0, 70.0, delta)
+		if global_position.distance_to(home) > 4000.0:
+			queue_free()
+		return
 	_phase += delta * 0.12
 	var foe := _find_enemy()
 	target = foe
@@ -52,10 +71,12 @@ func _pilot(delta: float) -> void:
 		ENGAGE:
 			if foe:
 				goal = foe.global_position
-				want_alt = maxf(Sim.height_at(goal.x, goal.z) + 160.0,
+				want_alt = maxf(Sim.height_at(goal.x, goal.z) + (90.0 if foe is Soldier else 160.0),
 					foe.global_position.y - 120.0)
 				var d := global_position.distance_to(foe.global_position)
-				want_speed = 0.0 if d < 1600.0 else 48.0
+				# a man is worked from closer in than a vehicle, with the chin gun
+				var stand: float = 700.0 if foe is Soldier else 1600.0
+				want_speed = 0.0 if d < stand else 48.0
 				_shoot(foe, delta)
 		BREAK:
 			dispense_all()
@@ -113,6 +134,15 @@ func _find_enemy() -> Node3D:
 func _scan_enemy() -> Node3D:
 	var best: Node3D = null
 	var bd := 1e9
+	# over a street fight it hunts the men in it as well, any it can see
+	if arena != null and is_instance_valid(arena):
+		for n in arena.enemies_of(team):
+			if not is_instance_valid(n) or not n.is_alive():
+				continue
+			var d0: float = global_position.distance_to(n.global_position)
+			if d0 < bd and Firearm.can_see(global_position, Soldier.chest_of(n)):
+				bd = d0
+				best = n
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or n == self:
 			continue
@@ -152,6 +182,17 @@ func _fly(goal: Vector3, want_alt: float, want_speed: float, _delta: float) -> v
 
 func _shoot(foe: Node3D, delta: float) -> void:
 	_fire_wait -= delta
+	# A man: the chin gun laid on him -- a burst, a pause -- as long as he is
+	# somewhere the turret will reach. Waiting for the nose to come within
+	# five degrees of a man under a hovering helicopter, it never fired.
+	if foe is Soldier:
+		gun_aim = Soldier.chest_of(foe) + Vector3(randfn(0.0, 0.6), 0.0, randfn(0.0, 0.6))
+		var dm: float = global_position.distance_to(foe.global_position)
+		_burst_t += delta
+		if dm < 1100.0 and fmod(_burst_t, 2.2) < 0.8:
+			fire_gun(get_tree().current_scene)
+		return
+	gun_aim = Vector3.INF
 	var rel: Vector3 = foe.global_position - global_position
 	var d := rel.length()
 	var ang := rad_to_deg((-global_transform.basis.z).angle_to(rel))

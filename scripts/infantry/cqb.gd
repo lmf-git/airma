@@ -83,12 +83,26 @@ var _rng := RandomNumberGenerator.new()
 const STREAK_POOL := [
 	{"id": "uav", "name": "UAV", "at": 3,
 		"note": "Every hostile on your map for thirty seconds."},
+	{"id": "smoke", "name": "SMOKE BARRAGE", "at": 3,
+		"note": "A thick line of smoke across a spot you pick on the map, for most of a minute. Nobody sees through it."},
+	{"id": "cuav", "name": "COUNTER-UAV", "at": 4,
+		"note": "Scrambles the other side's map and keeps anything of theirs out of the air for forty-five seconds."},
+	{"id": "supply", "name": "SUPPLY DROP", "at": 4,
+		"note": "A crate on a parachute at your mark: every magazine, both grenades and your health back, for you and your side."},
+	{"id": "sentry", "name": "SENTRY TURRET", "at": 5,
+		"note": "A machine gun on a tripod, set down where you stand facing the way you look. It holds that street until it is knocked out or out of ammunition."},
+	{"id": "vest", "name": "BALLISTIC VEST DROP", "at": 5,
+		"note": "A crate of plate carriers at your mark: half of every hit is taken by the vest until it is spent."},
 	{"id": "mortar", "name": "MORTAR BARRAGE", "at": 4,
 		"note": "Ten rounds walked over a spot you pick on the map."},
 	{"id": "strike", "name": "AIRSTRIKE", "at": 5,
 		"note": "A stick of seven along the line to your mark."},
+	{"id": "swarm", "name": "SWITCHBLADE SWARM", "at": 6,
+		"note": "Four small kamikaze drones climb out over you, each finds one of theirs it can see in the open, and dives on him."},
 	{"id": "strafe", "name": "A-10 GUN RUN", "at": 6,
 		"note": "Two points on the map set a line; a pair of A-10s come down it with their guns."},
+	{"id": "heli", "name": "ATTACK HELICOPTER", "at": 7,
+		"note": "A gunship patrols over the town on its own for most of a minute and hunts whoever of theirs it can see, while you keep fighting."},
 	{"id": "gunship", "name": "AC-130 GUNNER", "at": 7,
 		"note": "You on the guns of a gunship over the town."},
 	{"id": "carpet", "name": "B-2 CARPET BOMB", "at": 8,
@@ -99,6 +113,12 @@ const STREAK_POOL := [
 		"note": "Launched at a spot you pick on the map. It flies itself in, then you steer it down from above the target with every hostile marked."},
 	{"id": "tacnuke", "name": "TACTICAL NUKE", "at": 20,
 		"note": "A small warhead on a spot you pick. Nothing within eighty metres lives and nothing there is left standing — you included."},
+	{"id": "emp", "name": "EMP STRIKE", "at": 11,
+		"note": "Their electronics die: every sentry and drone of theirs is knocked out, their sights go dark and nothing of theirs gets into the air for a minute."},
+	{"id": "armour", "name": "ARMOUR DROP", "at": 14,
+		"note": "A tank comes down under parachutes on a spot you pick on the map. Walk up to it and press U: it is yours until it is knocked out."},
+	{"id": "wp", "name": "WHITE PHOSPHORUS", "at": 15,
+		"note": "Two points on the map set a line; a hundred metres of it burns for twenty-five seconds and chokes with smoke. It burns anyone in it, yours included."},
 	{"id": "stratnuke", "name": "STRATEGIC NUKE", "at": 30,
 		"note": "The town, everything in it and the match. Twenty seconds' warning and nowhere to go."},
 ]
@@ -121,7 +141,19 @@ static func chosen_streaks() -> Array:
 const UAV_TIME := 30.0
 var streak := 0
 var bank := {"uav": 0, "mortar": 0, "strike": 0, "strafe": 0, "gunship": 0, "carpet": 0,
-	"missile": 0, "cruise": 0, "tacnuke": 0, "stratnuke": 0}
+	"missile": 0, "cruise": 0, "tacnuke": 0, "stratnuke": 0, "smoke": 0, "cuav": 0,
+	"supply": 0, "vest": 0, "sentry": 0, "emp": 0, "wp": 0, "swarm": 0, "heli": 0, "armour": 0}
+## Seconds each side's air is jammed for by the other's COUNTER-UAV: no map
+## picture and nothing of theirs called into the air. By team.
+static var jammed := {0: 0.0, 1: 0.0}
+## Seconds each side's electronics are dead for under the other's EMP: their
+## optics are dark (they shoot over iron sights, or none) and their air is
+## jammed with it. By team.
+static var emp_t := {0: 0.0, 1: 0.0}
+const EMP_TIME := 60.0
+const JAM_TIME := 45.0
+## What a counter-UAV keeps on the ground.
+const AIR_STREAKS := ["uav", "strike", "strafe", "gunship", "carpet", "cruise", "swarm", "heli", "armour"]
 ## The cruise missile in the air, if there is one.
 var _cruise: CruiseMissile = null
 ## Warheads on their way: [seconds left, where, lethal radius, strategic].
@@ -130,6 +162,15 @@ const TAC_LETHAL := 80.0
 const STRAT_LETHAL := 1500.0
 ## The drone a UAV streak puts up, while it is up.
 var _uav: UavDrone = null
+## The first end of a white phosphorus strip, between its two picks.
+var _wp_from := Vector3.INF
+const WP_MAX := 100.0
+## How long the attack helicopter stays over the town.
+const HELI_TIME := 55.0
+## The first end of a smoke screen's line, between its two picks.
+var _smoke_from := Vector3.INF
+## The longest screen one barrage lays.
+const SMOKE_MAX := 120.0
 ## The first end of a carpet's line, while the map waits for the second.
 var _carpet_from := Vector3.INF
 ## Where a gun run's line starts, between its two picks.
@@ -426,6 +467,16 @@ func find_cover(from: Vector3, threat: Vector3) -> Vector3:
 # -------------------------------------------------------------------- the men
 func enemies_of(team: int) -> Array:
 	return _teams[1 - team]
+
+## What a man of `team` can see and shoot at: the other side's men, and
+## anything of theirs put down that fights -- a sentry gun. Kept apart from
+## the men's own list, which is what is counted and scored.
+func targets_of(team: int) -> Array:
+	var out: Array = (_teams[1 - team] as Array).duplicate()
+	for n in get_tree().get_nodes_in_group("sentries"):
+		if is_instance_valid(n) and int(n.get("team")) != team and n.is_alive():
+			out.append(n)
+	return out
 
 func friends_of(team: int) -> Array:
 	return _teams[team]
@@ -909,6 +960,10 @@ func _support(delta: float) -> void:
 				rv.queue_free()
 			_nuke(nk[1], float(nk[2]), bool(nk[3]))
 	_nukes = still
+	for tm in jammed:
+		jammed[tm] = maxf(float(jammed[tm]) - delta, 0.0)
+	for tm in emp_t:
+		emp_t[tm] = maxf(float(emp_t[tm]) - delta, 0.0)
 	_plan_tick(delta)
 	if _picking and world.get("map") != null and is_instance_valid(world.map) \
 			and not world.map.pick_cb.is_valid():
@@ -916,6 +971,10 @@ func _support(delta: float) -> void:
 	if is_instance_valid(player) and player.is_alive() and not away:
 		for k in chosen_streaks():
 			if int(bank[k["id"]]) > 0 and Sim.tapped(StringName("weapon_%d" % int(k["key"]))):
+				if AIR_STREAKS.has(String(k["id"])) and float(jammed[0]) > 0.0:
+					Sim.report("jammed — nothing goes up for another %d seconds" % int(float(jammed[0])),
+						Sim.Ev.BAD)
+					continue
 				if _call(String(k["id"])):
 					bank[k["id"]] = int(bank[k["id"]]) - 1
 	var keep: Array = []
@@ -1039,6 +1098,189 @@ func inbound() -> Array:
 
 func _call(id: String) -> bool:
 	match id:
+		"armour":
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				world.map.pick("ARMOUR DROP", func(p: Vector3): _picked("armour", p))
+			return false
+		"armour_at":
+			if not world.has_method("_spawn_tank"):
+				return false
+			var kind := "m1a2"
+			for k in Tank.KINDS:
+				var kd: Dictionary = Tank.KINDS[k]
+				if String(kd.get("class", "")) == "mbt" and String(kd.get("faction", "")) == Sim.home_faction:
+					kind = k
+					break
+			var at: Vector3 = Vector3(_pick_at.x, _ground(_pick_at.x, _pick_at.z), _pick_at.z)
+			var tk: Tank = world._spawn_tank(at, player.yaw, 0, kind)
+			if not is_instance_valid(tk):
+				return false
+			var vd := VehicleDrop.new()
+			vd.vehicle = tk
+			world.add_child(vd)
+			_pick_node = vd
+			Sim.report("armour inbound — a %s under canopies, about %d seconds" % [
+				tk.display_name(), int(VehicleDrop.FROM / VehicleDrop.SINK)], Sim.Ev.GOOD)
+			return true
+		"heli":
+			var nato_h: bool = ["usa", "uk", "france"].has(Sim.home_faction)
+			var h := AIHeli.new()
+			h.setup("ah64" if nato_h else "mi28")
+			h.team = 0
+			h.name = "Gunship"
+			h.arena = self
+			h.patrol_t = HELI_TIME
+			var c3 := Vector3(centre.x, _ground(centre.x, centre.y), centre.y)
+			h.home = c3
+			h.station_alt = 140.0
+			world.add_child(h)
+			# in from behind him, already at height
+			var back := Vector3(sin(player.yaw), 0.0, cos(player.yaw))
+			h.global_transform = Transform3D(Basis(Vector3.UP, player.yaw),
+				c3 + back * 1500.0 + Vector3(0, 220.0, 0))
+			h.linear_velocity = -back * 40.0
+			Sim.report("gunship on station for %d seconds — it hunts on its own" % int(HELI_TIME), Sim.Ev.GOOD)
+			return true
+		"swarm":
+			var c: Vector3 = player.global_position
+			for i in 4:
+				var sb := Switchblade.new()
+				sb.team = 0
+				sb.arena = self
+				sb.owner_node = player
+				sb.centre = c
+				sb.slot = i
+				world.add_child(sb)
+				sb.global_position = c + Vector3(cos(TAU * i / 4.0) * 1.5, 1.6, sin(TAU * i / 4.0) * 1.5)
+			Sim.report("switchblades up — four, and each will find its own man", Sim.Ev.GOOD)
+			return true
+		"wp":
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				_wp_from = Vector3.INF
+				world.map.pick("WHITE PHOSPHORUS — click where the strip STARTS", func(p: Vector3):
+					_wp_from = p
+					world.map.pick("WHITE PHOSPHORUS — click where it ENDS",
+						func(q: Vector3): _picked("wp", q)))
+			return false
+		"wp_at":
+			var ns := NapalmStrike.new()
+			var a: Vector3 = _wp_from if _wp_from != Vector3.INF else _pick_at
+			var run: Vector3 = _pick_at - a
+			run.y = 0.0
+			if run.length() < 3.0:
+				# one click: across his line to it, sixty metres
+				var look := Vector3(_pick_at.x - player.global_position.x, 0.0,
+					_pick_at.z - player.global_position.z).normalized()
+				var across: Vector3 = look.cross(Vector3.UP).normalized()
+				a = _pick_at - across * 30.0
+				run = across * 60.0
+			ns.from = Vector3(a.x, _ground(a.x, a.z), a.z)
+			var b: Vector3 = a + run.normalized() * minf(run.length(), WP_MAX)
+			ns.to = Vector3(b.x, _ground(b.x, b.z), b.z)
+			ns.owner_node = player
+			world.add_child(ns)
+			_pick_node = ns
+			_wp_from = Vector3.INF
+			Sim.report("white phosphorus inbound — five seconds, keep out of it", Sim.Ev.GOOD)
+			return true
+		"emp":
+			emp_t[1] = EMP_TIME
+			jammed[1] = maxf(float(jammed[1]), EMP_TIME)
+			var killed := 0
+			# everything of theirs that runs on electricity and is out there
+			for grp in ["sentries", "drones"]:
+				for n in get_tree().get_nodes_in_group(grp):
+					if not is_instance_valid(n) or int(n.get("team")) == 0:
+						continue
+					if n.has_method("take_hit"):
+						n.take_hit(100000.0, player)
+					else:
+						(n as Node).queue_free()
+					killed += 1
+			Effects.emp_flash(world, player.global_position)
+			Sim.report("EMP — their sights and electronics are dead for a minute%s" % (
+				"; %d of their systems knocked out" % killed if killed > 0 else ""), Sim.Ev.GOOD)
+			return true
+		"sentry":
+			if not is_instance_valid(player) or not player.on_floor:
+				Sim.report("set it down on solid ground", Sim.Ev.BAD)
+				return false
+			var fwd := Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
+			var at: Vector3 = player.global_position + fwd * 1.4
+			at.y = _ground(at.x, at.z)
+			if Obstacles.blocks(at + Vector3(0, 0.5, 0), 0.4) >= 0:
+				Sim.report("no room to set it down here", Sim.Ev.BAD)
+				return false
+			var st := SentryTurret.new()
+			st.team = 0
+			st.arena = self
+			st.owner_node = player
+			st.facing = player.yaw
+			world.add_child(st)
+			st.global_position = at
+			Sim.report("sentry up — it watches %d degrees either side of where you faced" % int(rad_to_deg(SentryTurret.ARC)),
+				Sim.Ev.GOOD)
+			return true
+		"cuav":
+			jammed[1] = JAM_TIME
+			# whatever of theirs is already up comes down
+			for n in get_tree().get_nodes_in_group("hittable"):
+				if n is UavDrone and int(n.get("team")) == 1:
+					(n as Node).queue_free()
+			Sim.report("counter-UAV up — their map is noise and their air is grounded for %d seconds"
+				% int(JAM_TIME), Sim.Ev.GOOD)
+			return true
+		"smoke":
+			# two picks, like the carpet: where the screen starts and ends
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				_smoke_from = Vector3.INF
+				world.map.pick("SMOKE — click where the screen STARTS", func(p: Vector3):
+					_smoke_from = p
+					world.map.pick("SMOKE — click where it ENDS",
+						func(q: Vector3): _picked("smoke", q)))
+			return false
+		"supply", "vest":
+			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
+				_picking = true
+				var title: String = {"supply": "SUPPLY DROP", "vest": "BALLISTIC VEST DROP"}[id]
+				world.map.pick(title, func(p: Vector3): _picked(id, p))
+			return false
+		"smoke_at":
+			# Along the line he drew, up to a hundred and twenty metres of it.
+			# Without a first point (a single click) it is laid across his
+			# line to the mark, sixty metres wide, screening it from beyond.
+			var sm := SmokeScreen.new()
+			if _smoke_from != Vector3.INF and _smoke_from.distance_to(_pick_at) > 3.0:
+				var run: Vector3 = _pick_at - _smoke_from
+				run.y = 0.0
+				sm.from = _smoke_from
+				sm.to = _smoke_from + run.normalized() * minf(run.length(), SMOKE_MAX)
+			else:
+				var look := Vector3(_pick_at.x - player.global_position.x, 0.0,
+					_pick_at.z - player.global_position.z)
+				look = look.normalized() if look.length() > 2.0 else Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
+				var across: Vector3 = look.cross(Vector3.UP).normalized()
+				sm.from = _pick_at - across * 30.0
+				sm.to = _pick_at + across * 30.0
+			_smoke_from = Vector3.INF
+			world.add_child(sm)
+			_pick_node = sm
+			Sim.report("smoke on the way — the first rounds land in four seconds", Sim.Ev.GOOD)
+			return true
+		"supply_at", "vest_at":
+			var cr := SupplyCrate.new()
+			cr.kind = "supply" if id == "supply_at" else "vest"
+			cr.team = 0
+			cr.target = Vector3(_pick_at.x, _ground(_pick_at.x, _pick_at.z), _pick_at.z)
+			world.add_child(cr)
+			_pick_node = cr
+			Sim.report("%s inbound — under a parachute, about %d seconds" % [
+				"supply drop" if cr.kind == "supply" else "vest drop",
+				int(SupplyCrate.FALL_FROM / SupplyCrate.FALL_SPEED)], Sim.Ev.GOOD)
+			return true
 		"uav":
 			uav_t = UAV_TIME
 			# A drone, in the sky, where it can be seen and shot at: the map
@@ -2487,6 +2729,8 @@ func hud_state() -> Dictionary:
 	return {"kills": kills, "deaths": deaths, "headshots": headshots,
 		"blue": (_teams[0] as Array).size(), "red": (_teams[1] as Array).size(),
 		"streak": streak, "bank": bank, "streaks": chosen_streaks(), "uav": uav_t,
+		"jammed": float(jammed[0]),
+		"emp": float(emp_t[0]),
 		"map": map_tex, "dots": dots, "dots_w": dots_w,
 		"area": Rect2(_corner, Vector2(HALF * 2.0, HALF * 2.0)),
 		"me_w": Vector2(player.global_position.x, player.global_position.z)

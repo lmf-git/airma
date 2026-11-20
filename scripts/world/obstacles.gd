@@ -328,6 +328,9 @@ static var _light := {}
 static func set_light(id: int) -> void:
 	_light[id] = true
 
+static func is_light(id: int) -> bool:
+	return _light.has(id)
+
 static var seg_id := -1
 static var seg_exit := 1.0
 static var seg_soft := false
@@ -660,6 +663,31 @@ static func lift(id: int, dy: float) -> void:
 static func top_of(id: int) -> float:
 	var b := id * STRIDE
 	return _ent[b + 1] + _ent[b + 4]
+
+## The shortest move across the ground that takes a circle of radius `r` at
+## `p` clear of box `id`: out through whichever face of the footprint is
+## nearest, not away from its middle. Away from the middle is the wrong way for
+## anything long -- along the wall of a terrace rather than out of it. Zero if
+## the circle is already clear.
+static func push_out(id: int, p: Vector3, r: float) -> Vector3:
+	var b := id * STRIDE
+	var c: float = _ent[b + 6]
+	var s: float = _ent[b + 7]
+	var dx: float = p.x - _ent[b]
+	var dz: float = p.z - _ent[b + 2]
+	var lx: float = dx * c + dz * s
+	var lz: float = -dx * s + dz * c
+	var px: float = _ent[b + 3] + r - absf(lx)
+	var pz: float = _ent[b + 5] + r - absf(lz)
+	if px <= 0.0 or pz <= 0.0:
+		return Vector3.ZERO
+	var mx := 0.0
+	var mz := 0.0
+	if px < pz:
+		mx = (signf(lx) if lx != 0.0 else 1.0) * px
+	else:
+		mz = (signf(lz) if lz != 0.0 else 1.0) * pz
+	return Vector3(mx * c - mz * s, 0.0, mx * s + mz * c)
 
 static func centre_of(id: int) -> Vector3:
 	var b := id * STRIDE

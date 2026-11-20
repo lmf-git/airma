@@ -276,6 +276,9 @@ func _buildings() -> void:
 			MeshKit.mat(Color(0.20, 0.28, 0.32), 0.15, 0.8))
 	add_child(MeshKit.mi(_shared["tower"], "Tower"))
 	add_child(MeshKit.mi(_shared["glass"], "TowerGlass"))
+	# Something to hit. The scenery clears `Obstacles` when it builds, which
+	# is after the fields are laid out, so this waits for that.
+	_tower_box.call_deferred()
 	for i in 4:
 		var t := GroundTarget.new()
 		t.team = team
@@ -288,6 +291,15 @@ func _buildings() -> void:
 		# the base's own side: at home the target cycler skips them, but they
 		# still burn; on someone else's field they are theirs to lose
 		add_child(t)
+
+var _tower_id := -1
+
+func _tower_box() -> void:
+	if not is_inside_tree():
+		return
+	var gx := global_transform
+	var foot: Vector3 = gx * Vector3(150.0, 0.0, -600.0)
+	_tower_id = Obstacles.add_box(foot, 8.5, 33.0, 8.5, atan2(-gx.basis.x.z, gx.basis.x.x))
 
 func _process(_dt: float) -> void:
 	if watcher == null or not is_instance_valid(watcher):

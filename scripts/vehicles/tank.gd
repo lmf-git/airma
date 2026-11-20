@@ -969,6 +969,10 @@ func _ai_think(delta: float) -> void:
 				if flying and not _air_def \
 						and pos[i].y - Sim.height_at(pos[i].x, pos[i].z) > 900.0:
 					continue
+				# ...nor one the gun cannot be laid on, or the turret not follow
+				if flying and not _air_def \
+						and not can_engage_air(pos[i], (n as Aircraft).linear_velocity):
+					continue
 				# A gun crew cannot shoot what a building is standing in front
 				# of. Asked last, and only of something already in reach: it is
 				# the one expensive question here, and asked of every contact
@@ -1052,6 +1056,44 @@ func _ai_think(delta: float) -> void:
 	if has_coax() and off < maxf(fine, 0.03) \
 			and global_position.distance_to(_ai_target.global_position) < 1400.0:
 		fire_coax(get_tree().current_scene)
+
+## How high the gun will go.
+func max_elevation() -> float:
+	match vclass():
+		"mbt":
+			return deg_to_rad(20.0)
+		"lav":
+			return deg_to_rad(58.0)       # a ring mount will point at aircraft
+		"spaag":
+			return deg_to_rad(85.0)       # very nearly straight up
+		"ifv":
+			return deg_to_rad(55.0)       # an autocannon can reach a helicopter
+		"sam":
+			return deg_to_rad(80.0)       # a launch rail, not a sight
+	return deg_to_rad(70.0)
+
+## The turret's own slew rate, radians a second (see `_tick_tank_p`).
+const TRAVERSE := 0.9
+
+## Can this crew actually engage that aircraft: low enough for the gun to
+## elevate to, and crossing slowly enough for the turret to stay on it. A tank
+## locked onto a helicopter thirty degrees up that its gun could not reach, or
+## a fast jet the turret could never catch, and sat with its barrel at the
+## stops shooting nothing -- while the slow helicopter it could have hit was
+## never chosen, because something else was nearer.
+func can_engage_air(at: Vector3, vel: Vector3) -> bool:
+	var from: Vector3 = global_position + global_transform.basis.y * 2.2
+	var to: Vector3 = at - from
+	var d: float = to.length()
+	if d < 1.0:
+		return false
+	var up: Vector3 = global_transform.basis.y.normalized()
+	var el: float = asin(clampf(to.dot(up) / d, -1.0, 1.0))
+	if el > max_elevation() - deg_to_rad(2.0):
+		return false
+	# how fast the line of sight is swinging: the part of its velocity across it
+	var across: Vector3 = vel - to * (vel.dot(to) / (d * d))
+	return across.length() / d < TRAVERSE * 0.6
 
 ## How far the turret ring still is from the bearing it was given, in radians.
 func lay_yaw_error() -> float:
@@ -1357,16 +1399,8 @@ func _tick_tank_p(delta: float) -> void:
 		_mantlet.rotation.x = _erect * top_angle
 	else:
 		var yaw_err := wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI)
-		_turret.rotation.y += clampf(yaw_err, -0.9 * delta, 0.9 * delta)
-		var max_el: float = deg_to_rad(70.0) if vclass() != "mbt" else deg_to_rad(20.0)
-		if vclass() == "lav":
-			max_el = deg_to_rad(58.0)     # a ring mount will point at aircraft
-		elif vclass() == "spaag":
-			max_el = deg_to_rad(85.0)     # very nearly straight up
-		elif vclass() == "ifv":
-			max_el = deg_to_rad(55.0)     # an autocannon can reach a helicopter
-		elif vclass() == "sam":
-			max_el = deg_to_rad(80.0)     # a launch rail, not a sight
+		_turret.rotation.y += clampf(yaw_err, -TRAVERSE * delta, TRAVERSE * delta)
+		var max_el: float = max_elevation()
 		_mantlet.rotation.x = lerp_angle(_mantlet.rotation.x,
 			clampf(turret_pitch, deg_to_rad(-9.0), max_el), clampf(delta * 2.2, 0, 1))
 	# The steered axle follows the wheel, not the stick: a road wheel takes about
@@ -1450,6 +1484,49 @@ static func ground_pose(at: Vector3, yaw: float, lift: float) -> Transform3D:
 	return Transform3D(frame,
 		Vector3(at.x, Sim.height_at(at.x, at.z) + lift, at.z))
 
+## Where down the hull's length the obstacle circles go, in body space: from
+## the rearmost road wheel to the foremost, plus a little for the bow and the
+## stern, no more than a circle's width apart.
+var _hull_z := PackedFloat32Array()
+var _hull_for := -1
+
+func _hull_samples() -> void:
+	if _hull_for == _w_lp.size() and not _hull_z.is_empty():
+		return
+	_hull_for = _w_lp.size()
+	var lo := -2.6
+	var hi := 2.6
+	if not _w_lp.is_empty():
+		lo = 1e9
+		hi = -1e9
+		for w in _w_lp:
+			lo = minf(lo, w.z)
+			hi = maxf(hi, w.z)
+		lo -= 0.7
+		hi += 0.7
+	var r: float = hull_radius()
+	# the end circles sit a radius in from the ends, so they reach the ends
+	var a: float = lo + r * 0.8
+	var b: float = hi - r * 0.8
+	_hull_z = PackedFloat32Array()
+	if b <= a:
+		_hull_z.append((lo + hi) * 0.5)
+		return
+	var n: int = maxi(int(ceil((b - a) / r)), 1)
+	for i in n + 1:
+		_hull_z.append(lerpf(a, b, float(i) / float(n)))
+
+## What it goes straight over rather than stopping at: a garden wall, a board
+## fence, a hedge, a sign. A building or a container stops it. A free-standing
+## wall four metres long and waist-to-head high had a tank stopped dead in the
+## street.
+func _flattens(id: int) -> bool:
+	if Obstacles.is_light(id):
+		return true
+	var h: Vector2 = Obstacles.half_of(id)
+	var tall: float = Obstacles.top_of(id) - Obstacles.centre_of(id).y
+	return minf(h.x, h.y) < 0.45 and tall < 3.2 or h.x * h.y < 1.0 and tall < 3.2
+
 func hull_radius() -> float:
 	return 1.15 if vclass() == "lav" else HULL_R
 
@@ -1494,23 +1571,56 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 	# What gives way first. Thirty tonnes at a walking pace goes through a
 	# garden wall, over a parked car and through a lamp post without noticing;
 	# only what is built to stay -- a building, a container -- stops it.
+	#
+	# The hull is a row of circles down its length, not one round its middle:
+	# a single circle of its half-width let the front three metres of a tank
+	# into a wall before anything was touched, and a launcher twice that.
+	_hull_samples()
+	var r_hull: float = hull_radius()
 	if absf(speed) > 1.2 and alive:
-		var broke: int = TownSet.crush(xf.origin, hull_radius(), state.linear_velocity)
-		if Scenery.current != null and is_instance_valid(Scenery.current):
-			broke += Scenery.current.knock(xf.origin, hull_radius() * 0.8, state.linear_velocity)
+		var broke := 0
+		for lz in _hull_z:
+			var sp: Vector3 = xf * Vector3(0.0, 0.0, lz)
+			broke += TownSet.crush(sp, r_hull, state.linear_velocity)
+			if Scenery.current != null and is_instance_valid(Scenery.current):
+				broke += Scenery.current.knock(sp, r_hull * 0.8, state.linear_velocity)
 		if broke > 0:
 			state.linear_velocity *= 0.93
-	var struck := Obstacles.hit(xf.origin, hull_radius())
-	if struck >= 0:
-		var out := xf.origin - Obstacles.centre_of(struck)
-		out.y = 0.0
-		if out.length_squared() < 0.01:
-			out = fwd * -1.0
-		out = out.normalized()
-		state.transform.origin += out * 0.35
-		var into: float = state.linear_velocity.dot(out)
+	# Out through the nearest face, all of the way in one step. Taken back a
+	# third of a metre a tick from the building's middle, a tank at road speed
+	# was going in faster than it was being taken out, and a long wall sent it
+	# sideways along itself rather than back off it.
+	var moved := Vector3.ZERO
+	var normal := Vector3.ZERO
+	for _pass in 3:
+		var worst := Vector3.ZERO
+		for lz in _hull_z:
+			var sp: Vector3 = xf * Vector3(0.0, 0.0, lz) + moved
+			# up off the ground a little: a kerb is not a wall
+			sp += xf.basis.y * 0.6
+			var id: int = Obstacles.hit(sp, r_hull)
+			if id >= 0 and _flattens(id):
+				id = -1
+			if id >= 0:
+				var push: Vector3 = Obstacles.push_out(id, sp, r_hull)
+				if push.length_squared() > worst.length_squared():
+					worst = push
+			# hangars, fuel tanks and missile sites, which are kept apart
+			var push_t: Vector3 = GroundTarget.push_out_any(sp, r_hull)
+			if push_t.length_squared() > worst.length_squared():
+				worst = push_t
+		if worst == Vector3.ZERO:
+			break
+		moved += worst
+		normal += worst.normalized()
+	if moved != Vector3.ZERO:
+		state.transform.origin += moved
+		normal = normal.normalized()
+		var into: float = state.linear_velocity.dot(normal)
 		if into < 0.0:
-			state.linear_velocity -= out * into
+			state.linear_velocity -= normal * into
+		# and it does not spin itself further into the wall
+		state.angular_velocity *= Vector3(1.0, 0.6, 1.0)
 
 	var contacts := 0
 	var k: float = mass * 9.81 * 2.6 / _travel

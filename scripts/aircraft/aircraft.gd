@@ -180,6 +180,9 @@ func setup(id: String) -> void:
 						st["weapon"] = "cbu97"
 	_model = JetFactory.build(spec)
 	add_child(_model["root"])
+	# rounds treat a hold as a hollow in the airframe: see `Effects.hull_hit`
+	if _model.has("hold"):
+		add_to_group("holds")
 	# A flying wing has no tailplane: it controls in pitch on the elevons along
 	# its own trailing edge. Reaching for stabs[0] on one threw before the
 	# stores were read, which left the aeroplane with no weapons at all.
@@ -1953,6 +1956,10 @@ func gun_muzzle() -> Vector3:
 		break
 	return _muzzle_local
 
+## Where an AI gunner has laid a helicopter's chin gun, or INF: the same as the
+## player's sensor holding a point, for the crew with no sensor page.
+var gun_aim := Vector3.INF
+
 func fire_gun(world: Node) -> bool:
 	if ammo <= 0 or gun_cd > 0.0 or not alive:
 		return false
@@ -1973,19 +1980,20 @@ func fire_gun(world: Node) -> bool:
 	# sight looks. With the sensor up and holding something, the rounds go
 	# there -- raised for the drop over the distance -- as long as it is
 	# somewhere the mount can reach: not up through the disc, and not behind.
-	if bool(spec.get("rotary", false)) and "pod" in self:
-		var sight: Variant = get("pod")
-		if sight != null and is_instance_valid(sight) and bool(sight.get("active")) \
-				and sight.get("platform") == self:
-			var mark: Vector3 = sight.call("aim_point")
-			if mark != Vector3.INF:
-				var to: Vector3 = mark - muzzle
-				var tof: float = to.length() / maxf(v, 1.0)
-				to += Vector3.UP * 4.9 * tof * tof - linear_velocity * tof
-				var want: Vector3 = to.normalized()
-				var b := global_transform.basis.orthonormalized()
-				if want.dot(-b.z) > -0.35 and want.dot(b.y) < 0.2:
-					dir = want
+	if bool(spec.get("rotary", false)) and ("pod" in self or gun_aim != Vector3.INF):
+		var sight: Variant = get("pod") if "pod" in self else null
+		var mark: Vector3 = gun_aim
+		if mark == Vector3.INF and sight != null and is_instance_valid(sight) \
+				and bool(sight.get("active")) and sight.get("platform") == self:
+			mark = sight.call("aim_point")
+		if mark != Vector3.INF:
+			var to: Vector3 = mark - muzzle
+			var tof: float = to.length() / maxf(v, 1.0)
+			to += Vector3.UP * 4.9 * tof * tof - linear_velocity * tof
+			var want: Vector3 = to.normalized()
+			var b := global_transform.basis.orthonormalized()
+			if want.dot(-b.z) > -0.35 and want.dot(b.y) < 0.2:
+				dir = want
 	Effects.tracer(world, muzzle, dir * v + linear_velocity, self, g["damage"] * float(per),
 		team, float(g.get("he", 0.0)))
 	Effects.muzzle_flash(world, muzzle, dir, 1.1)
