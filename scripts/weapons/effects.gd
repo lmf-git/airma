@@ -256,20 +256,82 @@ static func _hold_air(ac: Aircraft, p: Vector3) -> bool:
 		return true
 	return lp.z > h.z and bool(ac.get("ramp_open"))
 
-## An EMP going off: a moment of blue-white over everything, and a crackle.
+## An EMP going off: a shell of blue-white light racing out across the town
+## from overhead, the sky lit with it for a moment, the screen going to static
+## and a crackle.
 static func emp_flash(world: Node, at: Vector3) -> void:
-	if world == null:
+	if world == null or not world.is_inside_tree():
 		return
+	var burst: Vector3 = at + Vector3(0, 120, 0)
+	# the shell: an unshaded sphere, added light, swelling and thinning out
+	var shell := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	sm.radial_segments = 32
+	sm.rings = 16
+	shell.mesh = sm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.albedo_color = Color(0.55, 0.75, 1.0, 0.85)
+	shell.material_override = mat
+	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	world.add_child(shell)
+	shell.global_position = burst
+	shell.scale = Vector3.ONE * 5.0
+	var tw := shell.create_tween().set_parallel(true)
+	tw.tween_property(shell, "scale", Vector3.ONE * 900.0, 1.6).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 1.6)
+	tw.chain().tween_callback(shell.queue_free)
+	# the sky lit with it
 	var light := OmniLight3D.new()
 	light.light_color = Color(0.7, 0.85, 1.0)
-	light.light_energy = 12.0
-	light.omni_range = 2500.0
+	light.light_energy = 16.0
+	light.omni_range = 3000.0
 	world.add_child(light)
-	light.global_position = at + Vector3(0, 600, 0)
-	var tw := light.create_tween()
-	tw.tween_property(light, "light_energy", 0.0, 1.4)
-	tw.tween_callback(light.queue_free)
-	Sfx.play_at(world, "thump", at, -2.0, 0.5, 4000.0)
+	light.global_position = burst
+	var tl := light.create_tween()
+	tl.tween_property(light, "light_energy", 0.0, 1.2)
+	tl.tween_callback(light.queue_free)
+	# and the screen: a flash and then static, thinning out
+	var layer := CanvasLayer.new()
+	layer.layer = 90
+	var flash := ColorRect.new()
+	flash.color = Color(0.75, 0.88, 1.0, 0.75)
+	flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(flash)
+	var noise := _EmpStatic.new()
+	noise.set_anchors_preset(Control.PRESET_FULL_RECT)
+	noise.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(noise)
+	world.add_child(layer)
+	var tf := flash.create_tween()
+	tf.tween_property(flash, "color:a", 0.0, 0.5)
+	var tn := noise.create_tween()
+	tn.tween_property(noise, "strength", 0.0, 2.2)
+	tn.tween_callback(layer.queue_free)
+	Sfx.play_at(world, "thump", at, 0.0, 0.45, 4000.0)
+	Sfx.play_at(world, "ricochet", at, -6.0, 0.6, 4000.0)
+
+## The static over the screen after an EMP: specks that thin out.
+class _EmpStatic extends Control:
+	var strength := 1.0
+	func _process(_d: float) -> void:
+		queue_redraw()
+	func _draw() -> void:
+		var n: int = int(500.0 * strength)
+		for i in n:
+			var q := Vector2(randf() * size.x, randf() * size.y)
+			draw_rect(Rect2(q, Vector2(randf_range(2.0, 6.0), 2.0)),
+				Color(0.85, 0.92, 1.0, randf_range(0.2, 0.7) * strength))
+		if strength > 0.3 and randf() < 0.5:
+			var y: float = randf() * size.y
+			draw_rect(Rect2(0.0, y, size.x, randf_range(1.0, 4.0)),
+				Color(0.8, 0.9, 1.0, 0.35 * strength))
 
 static func bullet(world: Node, pos: Vector3, vel: Vector3, owner: Node, dmg: float,
 		team: int, glow := 1.0, life := 1.4, drag := 0.0011, pen := 0.0) -> Tracer:

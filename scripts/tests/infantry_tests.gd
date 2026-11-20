@@ -20,6 +20,8 @@ func parse_arg(a: String) -> bool:
 		_zoom_test = true
 	elif a == "--armstest":
 		_arms_test = true
+	elif a == "--steadytest":
+		_steady_test = true
 	elif a == "--sentrytest":
 		_sentry_test = true
 	elif a == "--holdfire":
@@ -898,6 +900,88 @@ func _run_arms_test() -> void:
 #endregion
 
 
+#region --steadytest
+## How far the sights wander: a sniper rifle on its scope standing, holding a
+## breath, lying down (rested) -- and fire select: a burst is three rounds a
+## pull. --preset=range:f16 --steadytest
+var _steady_test := false
+
+func tick_steady() -> void:
+	if _steady_test and is_instance_valid(world.walker):
+		_steady_test = false
+		_run_steady_test()
+
+func _wander(w: Walker, secs: float) -> float:
+	var lo := Vector2(INF, INF)
+	var hi := Vector2(-INF, -INF)
+	for i in int(Engine.physics_ticks_per_second * secs):
+		await world.get_tree().physics_frame
+		lo = Vector2(minf(lo.x, w.sway.x), minf(lo.y, w.sway.y))
+		hi = Vector2(maxf(hi.x, w.sway.x), maxf(hi.y, w.sway.y))
+	return (hi - lo).length() * 1000.0     # mils, peak to peak
+
+func _run_steady_test() -> void:
+	for i in 120:
+		await world.get_tree().physics_frame
+	var w: Walker = world.walker
+	var bad: Array = []
+	var sn: int = Firearm.index_of("sniper")
+	w.slots[0] = sn
+	w._rounds[sn] = 5
+	w._take_up(sn)
+	w.hold_ads = true
+	for i in 90:
+		await world.get_tree().physics_frame
+	var stand: float = await _wander(w, 4.0)
+	Input.action_press(&"throttle_up")
+	for i in 20:
+		await world.get_tree().physics_frame
+	var held: float = await _wander(w, 2.5)
+	Input.action_release(&"throttle_up")
+	for i in Engine.physics_ticks_per_second * 6:
+		await world.get_tree().physics_frame
+	w.stance = 2                  # lying down, the way the Z key puts him
+	for i in Engine.physics_ticks_per_second * 2:
+		await world.get_tree().physics_frame
+	var lying: float = await _wander(w, 4.0)
+	print("[steady] sniper on the scope, wander peak to peak: standing %.1f mil, holding breath %.1f, prone and rested (%s) %.1f" % [
+		stand, held, "rested" if w.mounted else "NOT rested", lying])
+	if not (held < stand * 0.4 and lying < stand * 0.4 and w.mounted):
+		bad.append("steadying or resting does not steady it")
+	w.stance = 0
+	w.hold_ads = false
+	# fire select on the carbine
+	var cb: int = Firearm.index_of("carbine")
+	w.slots[0] = cb
+	w._rounds[cb] = 30
+	w._spare[cb] = 90
+	w._take_up(cb)
+	for i in 60:
+		await world.get_tree().physics_frame
+	w.fire_mode[cb] = "burst"
+	var a0: int = w.ammo
+	Input.action_press(&"foot_fire")
+	await world.get_tree().physics_frame
+	await world.get_tree().physics_frame
+	Input.action_release(&"foot_fire")
+	for i in Engine.physics_ticks_per_second:
+		await world.get_tree().physics_frame
+	var burst: int = a0 - w.ammo
+	w.fire_mode[cb] = "semi"
+	a0 = w.ammo
+	Input.action_press(&"foot_fire")
+	for i in Engine.physics_ticks_per_second:
+		await world.get_tree().physics_frame
+	Input.action_release(&"foot_fire")
+	var semi: int = a0 - w.ammo
+	print("[steady] carbine: modes %s; a pull on BURST fired %d, a held trigger on SEMI fired %d" % [
+		str(Walker.modes_of(w.gun_spec())), burst, semi])
+	if burst != 3 or semi != 1:
+		bad.append("fire select is wrong")
+	print("[steady] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
+	world.get_tree().quit()
+#endregion
+
 #region --sentrytest
 ## A sentry set down facing the other side's start, left to it for forty
 ## seconds: what it fired, what it hit, and whether they fought back.
@@ -1230,7 +1314,21 @@ func tick_drop() -> void:
 		_drop_test = false
 		_run_drop_test()
 
+## Every label the map has been given while the test ran.
+var _drop_seen: Dictionary = {}
+
+func _drop_watch() -> void:
+	while _drop_seen.get("_on", false):
+		if is_instance_valid(world.cqb):
+			for it in world.cqb.inbound():
+				var k: String = String((it as Dictionary).get("kind", "")) + ":" \
+					+ String((it as Dictionary).get("label", "")).get_slice("  ", 0)
+				_drop_seen[k] = true
+		await world.get_tree().create_timer(0.25).timeout
+
 func _run_drop_test() -> void:
+	_drop_seen = {"_on": true}
+	_drop_watch()
 	for i in 20:
 		await world.get_tree().physics_frame
 	var bad: Array = []
@@ -1242,6 +1340,28 @@ func _run_drop_test() -> void:
 		await world.get_tree().physics_frame
 	var cq: CqbMatch = world.cqb
 	var w: Walker = world.walker
+	# a picture of the street first: the nearest building with a ground floor
+	if _drop_shot != "":
+		var best_c := Vector3.INF
+		for k in world.street_fight._town_sets:
+			var ts: TownSet = world.street_fight._town_sets[k]
+			if not is_instance_valid(ts):
+				continue
+			for hv in ts._hollowed:
+				var hc: Vector3 = hv[3]
+				if best_c == Vector3.INF or hc.distance_to(w.global_position) < best_c.distance_to(w.global_position):
+					best_c = hc
+		if best_c != Vector3.INF:
+			var to_b: Vector3 = best_c - w.global_position
+			w.yaw = atan2(-to_b.x, -to_b.z)
+			w.pitch = 0.05
+			if is_instance_valid(world.hud):
+				world.hud.show_help = false
+			for i in Engine.physics_ticks_per_second:
+				await world.get_tree().physics_frame
+			await RenderingServer.frame_post_draw
+			world.get_viewport().get_texture().get_image().save_png(_drop_shot.replace(".png", "_street.png"))
+			print("[drop] picture of the street, %.0f m to a building with a ground floor" % to_b.length())
 	var fwd := Vector3(-sin(w.yaw), 0.0, -cos(w.yaw))
 	var here: Vector3 = w.global_position
 	# smoke 25 m ahead, across the line of sight
@@ -1251,7 +1371,12 @@ func _run_drop_test() -> void:
 	var eye: Vector3 = here + Vector3(0, 1.6, 0)
 	var beyond: Vector3 = here + fwd * 45.0 + Vector3(0, 1.6, 0)
 	var clear_before: bool = not SmokeScreen.blocks(eye, beyond)
-	for i in Engine.physics_ticks_per_second * 8:
+	# it comes by air now: the run in, the canisters down, the banks up
+	for i in Engine.physics_ticks_per_second * 40:
+		await world.get_tree().physics_frame
+		if SmokeScreen.clouds.size() >= 6 and SmokeScreen.blocks(eye, beyond):
+			break
+	for i in Engine.physics_ticks_per_second * 3:
 		await world.get_tree().physics_frame
 	var blind: bool = SmokeScreen.blocks(eye, beyond)
 	# a picture of it, when one is asked for: what the man sees of the screen
@@ -1345,6 +1470,10 @@ func _run_drop_test() -> void:
 	cq.bank["emp"] = 1
 	var emp_ok: bool = cq._call("emp")
 	await world.get_tree().physics_frame
+	if _drop_shot != "":
+		await world.get_tree().create_timer(0.35).timeout
+		await RenderingServer.frame_post_draw
+		world.get_viewport().get_texture().get_image().save_png(_drop_shot.replace(".png", "_emp.png"))
 	print("[drop] EMP: called %s; their sentry %s; their sights dark for %.0f s, air jammed %.0f s" % [
 		emp_ok, "knocked out" if not foe_st.alive else "STILL UP", float(CqbMatch.emp_t[1]),
 		float(CqbMatch.jammed[1])])
@@ -1366,7 +1495,9 @@ func _run_drop_test() -> void:
 		cq._wp_from = burn_at - Vector3(20, 0, 0)
 		cq._picked("wp", burn_at + Vector3(20, 0, 0))
 		victim.set_process(false)
-		for i in Engine.physics_ticks_per_second * 9:
+		for i in Engine.physics_ticks_per_second * 35:
+			if not is_instance_valid(victim) or not victim.alive:
+				break
 			await world.get_tree().physics_frame
 			if is_instance_valid(victim):
 				victim.global_position = burn_at       # he stays in it
@@ -1402,7 +1533,8 @@ func _run_drop_test() -> void:
 	var sw_ok: bool = cq._call("swarm")
 	var down := 0
 	var took := 0.0
-	for i in Engine.physics_ticks_per_second * 30:
+	# the transport has to get here first
+	for i in Engine.physics_ticks_per_second * 60:
 		await world.get_tree().physics_frame
 		took += 1.0 / Engine.physics_ticks_per_second
 		down = 0
@@ -1477,6 +1609,100 @@ func _run_drop_test() -> void:
 		if landed_t != null else "nothing landed"])
 	if landed_t == null:
 		bad.append("the armour never came down")
+	# dogs, on two of theirs held where they stand -- with the gunship sent
+	# home first, or it may be the gunship that gets them
+	for n in world.get_tree().get_nodes_in_group("hittable"):
+		if n is AIHeli and (n as AIHeli).arena == cq:
+			(n as Node).queue_free()
+	await world.get_tree().physics_frame
+	var marks3: Array = []
+	for sd in cq.soldiers:
+		if marks3.size() >= 2:
+			break
+		if is_instance_valid(sd) and (sd as Soldier).team == 1 and (sd as Soldier).alive:
+			var q3: Vector3 = w.global_position + Vector3(25.0 + marks3.size() * 15.0, 0.0, 10.0)
+			q3.y = Sim.height_at(q3.x, q3.z)
+			if Obstacles.blocks(q3 + Vector3(0, 0.5, 0), 0.5) >= 0:
+				continue
+			sd.set_process(false)
+			sd.set_physics_process(false)
+			marks3.append([sd, q3])
+	cq.bank["dogs"] = 1
+	var dg_ok: bool = cq._call("dogs")
+	var bit := 0
+	var took3 := 0.0
+	for i in Engine.physics_ticks_per_second * 30:
+		await world.get_tree().physics_frame
+		took3 += 1.0 / Engine.physics_ticks_per_second
+		bit = 0
+		for m in marks3:
+			if is_instance_valid(m[0]) and (m[0] as Soldier).alive:
+				(m[0] as Node3D).global_position = m[1]
+			else:
+				bit += 1
+		if bit == marks3.size():
+			break
+	print("[drop] attack dogs: called %s; %d of %d men down after %.0f s" % [dg_ok, bit, marks3.size(), took3])
+	if marks3.size() > 0 and bit == 0:
+		bad.append("the dogs got nobody")
+	for n in world.find_children("*", "AttackDog", true, false):
+		n.queue_free()
+	# juggernaut: the suit and the minigun
+	cq.bank["jugg"] = 1
+	w.armour = 0.0
+	w.health = 100.0
+	var jg_ok: bool = cq._call("jugg")
+	var jh0: float = w.health
+	w.take_hit(100.0, null)
+	print("[drop] juggernaut: suited %s, holding the %s with %d rounds; a 100 hit took %.0f health, %.0f armour left" % [
+		jg_ok, String(w.gun_spec()["name"]), w.ammo, jh0 - w.health, w.armour])
+	if not jg_ok or String(w.gun_spec()["id"]) != "minigun" or absf((jh0 - w.health) - 20.0) > 0.5:
+		bad.append("the juggernaut suit is not right")
+	w.health = 100.0
+	# the chopper gunner: on the guns, circling low, and the 30 mm on a man
+	cq.bank["chopper"] = 1
+	var ch_ok: bool = cq._call("chopper")
+	var ch: Aircraft = world._cqb_gunship
+	for i in Engine.physics_ticks_per_second * 20:
+		await world.get_tree().physics_frame
+	var c2 := Vector2(cq.centre.x, cq.centre.y)
+	var agl := -1.0
+	var rad := -1.0
+	if is_instance_valid(ch):
+		agl = ch.global_position.y - Sim.height_at(ch.global_position.x, ch.global_position.z)
+		rad = Vector2(ch.global_position.x, ch.global_position.z).distance_to(c2)
+	print("[drop] chopper gunner: called %s, gunning %s; after 20 s %.0f m up, %.0f m out from the town's middle" % [
+		ch_ok, world.gunning, agl, rad])
+	if not ch_ok or not world.gunning or agl < 120.0 or agl > 400.0 or rad > 900.0:
+		bad.append("the chopper gunner is not on station")
+	var mark_man: Soldier = null
+	for sd in cq.soldiers:
+		if is_instance_valid(sd) and (sd as Soldier).team == 1 and (sd as Soldier).alive:
+			mark_man = sd
+			break
+	if is_instance_valid(ch) and mark_man != null:
+		var spot: Vector3 = Vector3(cq.centre.x, 0.0, cq.centre.y)
+		spot.y = Sim.height_at(spot.x, spot.z)
+		mark_man.set_process(false)
+		mark_man.set_physics_process(false)
+		ch.set_weapon(1)
+		var shots := 0
+		for i in Engine.physics_ticks_per_second * 8:
+			await world.get_tree().physics_frame
+			if not is_instance_valid(mark_man) or not mark_man.alive:
+				break
+			mark_man.global_position = spot
+			if ch.fire_gunship(world, Soldier.chest_of(mark_man)):
+				shots += 1
+		var dead: bool = not is_instance_valid(mark_man) or not mark_man.alive
+		print("[drop] chopper gunner: %d %s at a man in the street, he is %s" % [
+			shots, String(ch.gunship_gun().get("name", "rounds")), "dead" if dead else "still up"])
+		if not dead:
+			bad.append("the chopper gunner could not kill a man in the open")
+	_drop_seen.erase("_on")
+	var seen: Array = _drop_seen.keys()
+	seen.sort()
+	print("[drop] on the map along the way: %s" % ", ".join(PackedStringArray(seen)))
 	print("[drop] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
 	world.get_tree().quit()
 #endregion
@@ -2808,6 +3034,8 @@ func _run_sight_test() -> void:
 	var w: Walker = world.walker
 	w.hold_ads = true
 	var worst := 0.0
+	var pitch_worst := 0.0
+	var near_worst := INF
 	for i in Firearm.KIT.size():
 		var g: Dictionary = Firearm.KIT[i]
 		w._take_up(i, false)
@@ -2837,7 +3065,30 @@ func _run_sight_test() -> void:
 				worst = maxf(worst, ang)
 		print("[sight] %-10s %s" % [String(g["id"]), "; ".join(PackedStringArray(res))])
 		w._recoil = 0.0
-	print("[sight] worst at rest: %.0f MOA" % worst)
+		# and with the view up and down: the arms are only so long, and the
+		# weapon must stay on the line of sight and clear of the lens
+		var pres: Array = []
+		for pv in [0.9, 0.5, -0.5, -0.9]:
+			w.pitch = pv
+			for f in 50:
+				await world.get_tree().physics_frame
+			await world.get_tree().process_frame
+			var cx: Transform3D = w.cam.global_transform
+			var gx2: Transform3D = w.body.gun_node.global_transform
+			var sp2: Vector3 = cx.affine_inverse() * (gx2 * Vector3(0, float(g["sight"]), -0.05))
+			var near := INF
+			for mi in w.body.gun_node.find_children("*", "MeshInstance3D", true, false):
+				var m := mi as MeshInstance3D
+				var ab: AABB = m.get_aabb()
+				for c in 8:
+					var q: Vector3 = cx.affine_inverse() * (m.global_transform * ab.get_endpoint(c))
+					near = minf(near, -q.z)
+			pres.append("%+.1f: off %+.1f/%+.1f cm, nearest %.0f cm" % [pv, sp2.x * 100.0, sp2.y * 100.0, near * 100.0])
+			pitch_worst = maxf(pitch_worst, Vector2(sp2.x, sp2.y).length())
+			near_worst = minf(near_worst, near)
+		w.pitch = 0.0
+		print("[sight]            pitched %s" % "; ".join(PackedStringArray(pres)))
+	print("[sight] worst at rest: %.0f MOA; worst off the eye pitched %.1f cm; nearest to the lens %.0f cm" % [worst, pitch_worst * 100.0, near_worst * 100.0])
 	world.get_tree().quit()
 #endregion
 

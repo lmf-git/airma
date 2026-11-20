@@ -338,6 +338,30 @@ func _auto_pilot(_delta: float) -> void:
 		in_yaw = 0.0
 		wheel_brake = true
 		return
+	if auto == "orbit":
+		_orbit_fly()
+		return
+	if auto == "depart":
+		# away from where it was working, climbing, and gone once well off
+		if _depart_from == Vector3.INF:
+			_depart_from = global_position
+			_depart_dir = -global_transform.basis.z
+			_depart_dir.y = 0.0
+			_depart_dir = _depart_dir.normalized() if _depart_dir.length() > 0.1 else Vector3.FORWARD
+		var goal: Vector3 = global_position + _depart_dir * 500.0
+		var bh := global_transform.basis
+		var hdg := atan2(-bh.z.x, bh.z.z)
+		in_yaw = clampf(wrapf(atan2(goal.x - global_position.x, -(goal.z - global_position.z)) - hdg,
+			-PI, PI) * 1.4, -1.0, 1.0)
+		var dep_pitch := asin(clampf(-bh.z.y, -1.0, 1.0))
+		in_pitch = clampf((-clampf((60.0 - linear_velocity.dot(-bh.z)) * 0.01, -0.2, 0.3)
+			- dep_pitch) * 2.4, -1.0, 1.0)
+		var dep_bank := atan2(-bh.x.y, bh.y.y)
+		in_roll = clampf(-dep_bank * 2.2, -1.0, 1.0)
+		throttle = clampf(0.6 + (6.0 - linear_velocity.y) * 0.05, 0.0, 1.0)
+		if global_position.distance_to(_depart_from) > 4000.0:
+			queue_free()
+		return
 	var want_alt: float = _hover_alt
 	var err: float = want_alt - global_position.y
 	var want_vs: float = clampf(err * 0.35, -6.0, 8.0)
@@ -349,6 +373,81 @@ func _auto_pilot(_delta: float) -> void:
 	in_pitch = clampf(-pitch_att * 2.2 + (_hover_speed - linear_velocity.dot(-b.z)) * 0.03,
 		-1.0, 1.0)
 	in_yaw = 0.0
+
+## The gunner's orbit: a slow left-hand circle round the mark at a height a
+## door gun reaches from, the open door looking in. The fixed wing has one of
+## its own (`PlayerJet`); a helicopter can do it far tighter and lower.
+var orbit_alt := 250.0
+var _depart_from := Vector3.INF
+var _depart_dir := Vector3.FORWARD
+var orbit_speed := 30.0
+var orbit_centre := Vector3.INF
+const ORBIT_R := 350.0
+
+func _orbit_fly() -> void:
+	var c: Vector3 = orbit_centre
+	if "pod" in self:
+		var sight: Variant = get("pod")
+		if sight != null and is_instance_valid(sight) and bool(sight.get("active")) \
+				and int(sight.get("mode")) != SensorPod.SLEW:
+			var m: Vector3 = sight.call("aim_point")
+			if m != Vector3.INF:
+				c = m
+	if c == Vector3.INF:
+		c = global_position + global_transform.basis.x * -ORBIT_R
+		orbit_centre = c
+	if bool(spec.get("nose_in", false)):
+		_orbit_nose_in(c)
+		return
+	# a point a little way round the circle, anticlockwise seen from above,
+	# so the centre is on the left
+	var rel := Vector3(global_position.x - c.x, 0.0, global_position.z - c.z)
+	var ang: float = atan2(rel.z, rel.x)
+	var ahead: float = ang - 0.35
+	var goal := Vector3(c.x + cos(ahead) * ORBIT_R, 0.0, c.z + sin(ahead) * ORBIT_R)
+	var b := global_transform.basis
+	var to := goal - global_position
+	var bearing := atan2(to.x, -to.z)
+	var hdg := atan2(-b.z.x, b.z.z)
+	in_yaw = clampf(wrapf(bearing - hdg, -PI, PI) * 1.4, -1.0, 1.0)
+	var fwd_speed := linear_velocity.dot(-b.z)
+	var want_att := clampf((orbit_speed - fwd_speed) * 0.010, -0.22, 0.30)
+	var pitch_att := asin(clampf(-b.z.y, -1.0, 1.0))
+	in_pitch = clampf((-want_att - pitch_att) * 2.4, -1.0, 1.0)
+	var bank := atan2(-b.x.y, b.y.y)
+	in_roll = clampf(-bank * 2.2 - linear_velocity.dot(b.x) * 0.03, -1.0, 1.0)
+	var want_y: float = Sim.height_at(global_position.x, global_position.z) + orbit_alt
+	var want_vs := clampf((want_y - global_position.y) * 0.30, -8.0, 10.0)
+	throttle = clampf(0.52 + (want_vs - linear_velocity.y) * 0.055, 0.0, 1.0)
+	wheel_brake = false
+
+## Round the mark side-on with the nose held on it: forward-firing weapons --
+## a chin gun, rocket pods -- want the mark ahead, not off a door. The tail
+## rotor points the nose, the cyclic sideways carries it round, and fore and
+## aft holds the range.
+func _orbit_nose_in(c: Vector3) -> void:
+	var b := global_transform.basis
+	var to := Vector3(c.x - global_position.x, 0.0, c.z - global_position.z)
+	var dist: float = to.length()
+	var bearing := atan2(to.x, -to.z)
+	var hdg := atan2(-b.z.x, b.z.z)
+	in_yaw = clampf(wrapf(bearing - hdg, -PI, PI) * 1.6, -1.0, 1.0)
+	var v_fwd: float = linear_velocity.dot(-b.z)
+	var v_right: float = linear_velocity.dot(b.x)
+	# fore and aft: in if the circle is too wide, back if it is too tight
+	var want_fwd: float = clampf((dist - ORBIT_R) * 0.08, -12.0, 12.0)
+	var want_att := clampf((want_fwd - v_fwd) * 0.012, -0.22, 0.25)
+	var pitch_att := asin(clampf(-b.z.y, -1.0, 1.0))
+	in_pitch = clampf((-want_att - pitch_att) * 2.4, -1.0, 1.0)
+	# sideways round the circle, to the right with the mark ahead -- which is
+	# anticlockwise seen from above
+	var bank := atan2(-b.x.y, b.y.y)
+	var want_bank: float = clampf((orbit_speed - v_right) * 0.012, -0.30, 0.30)
+	in_roll = clampf((want_bank - bank) * 2.2, -1.0, 1.0)
+	var want_y: float = Sim.height_at(global_position.x, global_position.z) + orbit_alt
+	var want_vs := clampf((want_y - global_position.y) * 0.30, -8.0, 10.0)
+	throttle = clampf(0.52 + (want_vs - linear_velocity.y) * 0.055, 0.0, 1.0)
+	wheel_brake = false
 
 var _hover_alt := 120.0
 var _hover_speed := 0.0

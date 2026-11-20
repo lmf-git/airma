@@ -8,8 +8,7 @@
 
 use crate::field::{climate, lerp, smoothstep, WATER_LEVEL};
 use crate::index::SegGrid;
-use crate::world::{base, carve_built, carve_road, corridor, ground_at, world, Corridor, G_ALL,
-    ROAD_FILL_MAX};
+use crate::world::{base, carve_built, corridor, ground_at, world, Corridor, Ground, G_ALL};
 use rayon::prelude::*;
 
 // ------------------------------------------------------------- ground mask
@@ -179,12 +178,48 @@ fn strip(out: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32
     out.extend_from_slice(&[a, b, c, a, c, d]);
 }
 
+/// The terrain mesh's cell at its finest: `Terrain.BASE_CELL`.
+const MESH_CELL: f32 = 15.0;
+/// How far back from a bridge or a portal the road leaves the ground and
+/// follows its design height to meet the structure.
+const MEET: f32 = 12.0;
+
+/// The ground as the terrain mesh draws it at its finest, in the frame the
+/// game measures heights in -- drop and all, on the planet or the flat world:
+/// the cell's two triangles, split as the chunks split them. Exactly the sum
+/// `surfaces_at` does. (In the mesh's own frame it came out a planet's drop
+/// low on the globe, where the field already carries the curve: every road
+/// eighteen metres under the ground fifteen kilometres out.)
+fn mesh_y(g: &Ground, x: f32, z: f32) -> f32 {
+    let x0 = (x / MESH_CELL).floor() * MESH_CELL;
+    let z0 = (z / MESH_CELL).floor() * MESH_CELL;
+    let tx = (x - x0) / MESH_CELL;
+    let tz = (z - z0) / MESH_CELL;
+    let h00 = g.world_y(x0, z0);
+    let h10 = g.world_y(x0 + MESH_CELL, z0);
+    let h11 = g.world_y(x0 + MESH_CELL, z0 + MESH_CELL);
+    let h01 = g.world_y(x0, z0 + MESH_CELL);
+    if tz <= tx {
+        h00 + (h10 - h00) * tx + (h11 - h10) * tz
+    } else {
+        h00 + (h11 - h01) * tx + (h01 - h00) * tz
+    }
+}
+
 /// One leg of road. `ya`/`yb` are the design height at its two ends, and
-/// `deck` says the leg is a bridge approach or a tunnel portal: it runs on the
-/// design surface alone, because that is what it has to meet.
+/// `deck` says which end, if either, is a bridge or a tunnel portal: 1 for `a`,
+/// 2 for `b`, 0 for neither.
+///
+/// It is laid on the ground as the terrain mesh draws it, not on the ground
+/// itself. The mesh is the ground sampled every fifteen metres and drawn flat
+/// between; a road on the true ground ran under the mesh wherever the ground
+/// bent between two samples -- in every cutting, and up every ramp -- and on
+/// a bank it hung over it with its sides open. On the mesh it is on what is
+/// drawn and on what a man stands on. Only the last few metres to a structure
+/// leave it, for the design height the deck or the portal is built to.
 #[allow(clippy::too_many_arguments)]
 fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
-        ya: f32, yb: f32, deck: bool) -> Ribbon {
+        ya: f32, yb: f32, deck: u8) -> Ribbon {
     let mut out = Ribbon { surf: Vec::new(), kerb: Vec::new(), wall: Vec::new() };
     let dx = bx - ax;
     let dz = bz - az;
@@ -197,83 +232,68 @@ fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
     // network into thousands of short segments, and a floor of two steps gave
     // every fifteen metre piece four rows of samples it had no detail to fill.
     let trunk = half > 6.0;
-    let steps = ((len / if trunk { 11.0 } else { 17.0 }).round() as i32).max(1);
+    // Close enough together that the terrain's own bends, every fifteen
+    // metres, fall between them by no more than the material's depth bias:
+    // at eleven metres along and one span across fifteen metres of
+    // carriageway, any rise in the ground between the edges came up through
+    // the middle of the road.
+    let steps = ((len / if trunk { 7.5 } else { 10.0 }).round() as i32).max(1);
     let nx = -dz / len;
     let nz = dx / len;
-    const OFF: [f32; 4] = [-1.55, -1.0, 1.0, 1.55];
-    let mut prev = [[0.0f32; 3]; 4];
+    // kerb, the carriageway in four spans, kerb
+    const OFF: [f32; 7] = [-1.55, -1.0, -0.5, 0.0, 0.5, 1.0, 1.55];
+    const N: usize = OFF.len();
+    let mut prev = [[0.0f32; 3]; N];
     let mut prev_raised = false;
+    let g = Ground::land().drawn();
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let px = ax + dx * t;
         let pz = az + dz * t;
-        let mut row = [[0.0f32; 3]; 4];
+        let mut row = [[0.0f32; 3]; N];
         let mut raised = false;
         for (k, o) in OFF.iter().enumerate() {
             let qx = px + nx * half * o;
             let qz = pz + nz * half * o;
-            let mut y;
-            if deck {
-                // The approach to a structure. Drawn on the ground, the
-                // carriageway stopped at the abutment and started again on the
-                // far side, with the deck floating clear of both; the alignment
-                // is continuous whatever the country under it does, so this is
-                // the one stretch that follows it and nothing else.
-                y = lerp(ya, yb, t);
-            } else if trunk {
-                // A trunk road on an embankment rides on the design surface,
-                // not on whatever is underneath it -- but only as far as the
-                // ground was actually raised to meet it. Drawn on the design
-                // whatever the fill limit did, the carriageway hung in the air
-                // over an untouched hillside.
-                //
-                // Both out of one walk of the corridor: the ground here *is*
-                // the design surface applied to the land, so working it out and
-                // then asking for it again separately is the same grid walked
-                // twice, and that was most of what this cost.
-                let (h, m) = carve_road(w, c, base(qx, qz), qx, qz, G_ALL);
-                let (ry, rw, rg) = (m.y, m.w, m.g);
-                y = h;
-                if rw > 0.35 && ry - rg <= ROAD_FILL_MAX * 1.25 {
-                    y = y.max(ry);
-                }
-            } else {
-                y = ground_at(w, c, qx, qz, G_ALL);
+            let mut y = mesh_y(&g, qx, qz);
+            if deck != 0 {
+                // the last few metres to the structure: onto its design height
+                let from_end = if deck == 1 { t * len } else { (1.0 - t) * len };
+                let k = 1.0 - smoothstep(0.0, MEET, from_end);
+                // the design height is in the flat frame: dropped to meet it
+                // -- but never under the ground that is drawn: where the hill
+                // stands above the deck the road stays on it, or the grass
+                // closed over the last metres of carriageway
+                y = y.max(lerp(y, lerp(ya, yb, t) - drop_at(qx, qz), k));
+            } else if !trunk {
                 // A street that meets a raised road stops at its wall: drawn on
                 // the ground it went up and over the bank like a ramp.
                 let made = carve_built(w, base(qx, qz), qx, qz, G_ALL).0;
-                if (y - made).abs() > 0.8 {
+                if (ground_at(w, c, qx, qz, G_ALL) - made).abs() > 0.8 {
                     raised = true;
                 }
             }
-            // Into the frame the ground is drawn in. Everything above is the
-            // flat frame the corridor and the survey work in, and the terrain
-            // mesh, the viaduct decks and `Sim.height_at` all have the fall of
-            // the planet taken off -- the ribbons did not, so a road ten
-            // kilometres out stood eight metres clear of its own country and
-            // of the bridge it was meant to run onto, and a kilometre clear a
-            // hundred kilometres out.
-            // On the ground, near enough. It stood sixteen centimetres up and
-            // was then raised to the higher of its two edges, so on any camber
-            // the low side floated half a metre clear -- and everyone walking
-            // on it, who stands on the ground, was in it to the ankles. The
-            // material keeps it in front of the terrain now (a depth bias that
-            // grows with distance, see `Scenery._road_shader`), so it does not
-            // have to be lifted clear to win.
-            row[k] = [qx, y + 0.025 - drop_at(qx, qz), qz];
+            // Already in the frame the ground is drawn in, fall of the planet
+            // and all (see `mesh_y`); only the design height near a structure
+            // had it taken off above. On the ground, near enough: the material
+            // keeps it in front of the terrain (a depth bias that grows with
+            // distance, see `Scenery._road_shader`), so it is not lifted clear.
+            row[k] = [qx, y + 0.025, qz];
         }
         // the kerbs tuck just under the carriageway edge, so no seam shows
         row[0][1] = row[0][1].min(row[1][1]) - 0.02;
-        row[3][1] = row[3][1].min(row[2][1]) - 0.02;
+        row[N - 1][1] = row[N - 1][1].min(row[N - 2][1]) - 0.02;
         // A ramp up to a bridge in a town is terrain, like the bank out in the
         // country: drawn as walls standing on the town's own ground, with the
         // carriageway on top, it read as a walled enclosure at the foot of
         // every town bridge -- walls with nothing behind them to hit, and a
         // road surface that was not where the ground under a wheel was.
         if i > 0 && !raised && !prev_raised {
-            strip(&mut out.surf, prev[1], prev[2], row[2], row[1]);
+            for k in 1..N - 2 {
+                strip(&mut out.surf, prev[k], prev[k + 1], row[k + 1], row[k]);
+            }
             strip(&mut out.kerb, prev[0], prev[1], row[1], row[0]);
-            strip(&mut out.kerb, prev[2], prev[3], row[3], row[2]);
+            strip(&mut out.kerb, prev[N - 2], prev[N - 1], row[N - 1], row[N - 2]);
         }
         prev = row;
         prev_raised = raised;
@@ -305,7 +325,7 @@ pub fn drop_at(x: f32, z: f32) -> f32 {
 pub fn ribbon_parts(legs: &[f32]) -> Vec<Ribbon> {
     let c = corridor();
     legs.par_chunks_exact(8)
-        .map(|q| ribbon(c, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7] > 0.5))
+        .map(|q| ribbon(c, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7].round() as u8))
         .collect()
 }
 

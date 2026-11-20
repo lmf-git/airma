@@ -51,18 +51,16 @@ static func blocks(a: Vector3, b: Vector3) -> bool:
 
 func _ready() -> void:
 	if _mat == null:
-		# Nearly opaque, and writing depth. Blended at three quarters with no
-		# depth of its own, it let the buildings behind show through, and the
-		# overlapping balls sorted against one another wrongly from frame to
-		# frame -- inside faces drawn over outside ones. The pre-pass gives
-		# each ball a proper depth, so the nearest smoke is what is seen.
+		# Opaque. Drawn as see-through, even nearly so, it went into the
+		# transparent pass -- after the atmosphere -- and the haze of the air
+		# was laid over it, so at any distance the screen read as a faint
+		# smudge you could see the street through. Solid, it is drawn with
+		# the buildings and the air lies over it the way it lies over them.
+		# Lit by the sky as everything else is it came out blue; smoke is
+		# the colour of smoke whatever is over it, so it carries its own light.
 		_mat = StandardMaterial3D.new()
-		# Lit by the sky as everything else is it came out blue; smoke is the
-		# colour of smoke whatever is over it, so it carries its own light and
-		# only a touch of the sun's.
 		_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
-		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS
-		_mat.albedo_color = Color(0.62, 0.62, 0.60, 0.96)
+		_mat.albedo_color = Color(0.62, 0.62, 0.60)
 		_mat.emission_enabled = true
 		_mat.emission = Color(0.42, 0.42, 0.41)
 		_mat.cull_mode = BaseMaterial3D.CULL_BACK
@@ -95,11 +93,8 @@ func _process(delta: float) -> void:
 		(b[4] as Array)[1] = r * 0.85 * (1.0 - thin)
 		var node: Node3D = b[0]
 		if is_instance_valid(node):
-			node.scale = Vector3.ONE * r / RADIUS
-			for c in node.get_children():
-				var mi := c as MeshInstance3D
-				if mi != null:
-					mi.transparency = thin
+			# thinning, it shrinks away rather than fading: see `_mat`
+			node.scale = Vector3.ONE * maxf(r / RADIUS * (1.0 - thin * 0.95), 0.001)
 		if thin < 1.0:
 			done = false
 	if done:

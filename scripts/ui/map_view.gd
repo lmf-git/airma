@@ -1010,6 +1010,24 @@ func _draw_inbound(org: Vector2, ppm: float) -> void:
 				draw_circle(q, 1.6, gc)
 				if lab != "":
 					_label(q + Vector2(9.0, -6.0), lab, gc, 12)
+			"area":
+				# a strip of ground: smoke laid along a line, or burning
+				var tint: Color = d.get("tint", Color(0.8, 0.8, 0.8))
+				var f0: Vector3 = d["from"]
+				var f1: Vector3 = d["to"]
+				var p0 := _w2s(Vector2(f0.x, f0.z), org, ppm)
+				var p1 := _w2s(Vector2(f1.x, f1.z), org, ppm)
+				var wpx: float = maxf(12.0 * ppm, 4.0)
+				draw_line(p0, p1, Color(tint.r, tint.g, tint.b, 0.35), wpx)
+				if p0.distance_to(p1) < 1.0:
+					draw_circle(p0, wpx * 0.5, Color(tint.r, tint.g, tint.b, 0.35))
+				_label(q + Vector2(8.0, -wpx * 0.5 - 4.0), lab, tint, 12)
+			"unit":
+				var uc := Color(0.5, 0.9, 1.0)
+				draw_circle(q, 3.0, uc)
+				draw_arc(q, 5.0, 0.0, TAU, 12, uc, 1.0)
+				if lab != "":
+					_label(q + Vector2(7.0, -5.0), lab, uc, 11)
 			"mark":
 				var mc := Color(1.0, 0.7, 0.3, blink)
 				draw_arc(q, maxf(float(d["r"]) * ppm, 6.0), 0.0, TAU, 24, mc, 1.6)

@@ -1410,8 +1410,8 @@ var _cqb_tel: Tank = null
 var _cqb_tel_t := 0.0
 
 ## Kept here for the scripts that reach it by name: see `StreetFight.cqb_gunship`.
-func cqb_gunship(centre: Vector3) -> bool:
-	return street_fight.cqb_gunship(centre)
+func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
+	return street_fight.cqb_gunship(centre, kind)
 
 
 ## Kept here for the scripts that reach it by name: see `StreetFight.cqb_fire_mission`.
@@ -1983,7 +1983,11 @@ func toggle_gunner() -> void:
 	if gunning:
 		_pre_gun_auto = player.auto
 		player.auto = "orbit"
-		if "orbit_alt" in player:
+		if "orbit_alt" in player and player is PlayerHeli:
+			# a helicopter's is height above the ground, and low
+			player.orbit_alt = float(player.spec.get("orbit_agl", 250.0))
+			player.orbit_speed = float(player.spec.get("orbit_speed", 30.0))
+		elif "orbit_alt" in player:
 			player.orbit_alt = maxf(player.global_position.y, 1200.0)
 			# Slow, the way a gunship works. Kept at the entry speed -- usually
 			# a hundred and forty-odd metres a second -- the circle round the

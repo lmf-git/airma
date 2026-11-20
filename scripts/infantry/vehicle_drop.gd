@@ -53,6 +53,8 @@ func _physics_process(delta: float) -> void:
 func _land() -> void:
 	_down = true
 	vehicle.freeze = false
+	# his, for as long as it lasts: the map keeps it marked
+	vehicle.set_meta("dropped", true)
 	Effects.dust(get_tree().current_scene, vehicle.global_position + Vector3(0, 0.5, 0), 6.0)
 	Sfx.play_at(get_tree().current_scene, "thump", vehicle.global_position, -2.0, 0.6, 400.0)
 	Sim.report("%s is down — walk up to it and press U to board" % vehicle.display_name(),

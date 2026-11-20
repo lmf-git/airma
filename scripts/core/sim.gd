@@ -1744,7 +1744,8 @@ func _survey_roads() -> void:
 			# continuous, rather than on the ground, which is not.
 			road_draw.append_array(PackedFloat32Array([
 				pl[i].x, pl[i].y, pl[i + 1].x, pl[i + 1].y, ROAD_HALF,
-				pf[i], pf[i + 1], 1.0 if (sa or sb) else 0.0]))
+				# which end is the structure: 1 the first, 2 the second
+				pf[i], pf[i + 1], 1.0 if sa else (2.0 if sb else 0.0)]))
 	road_draw = _one_carriageway(road_draw)
 	if debug_roads:
 		print("[survey] %d lines, %d stations, worst neighbour disagreement %.1f m"
@@ -3502,6 +3503,8 @@ func _setup_input() -> void:
 	# also the bomb bay -- so every bundle of chaff opened the bay doors.
 	_add(&"flare",        [_key(KEY_C), _btn(JOY_BUTTON_DPAD_UP)])
 	_add(&"chaff",        [_key(KEY_V), _btn(JOY_BUTTON_DPAD_DOWN)])
+	# on foot the same key: chaff is an aircraft's, fire select a rifle's
+	_add(&"fire_mode",    [_key(KEY_V), _btn(JOY_BUTTON_DPAD_DOWN)])
 	_add(&"mouse_fly",    [_key(KEY_SEMICOLON)])
 	_add(&"map",          [_key(KEY_M), _key(KEY_F1)])
 	# Not backslash: `cycle_weapon` is already there, and `tapped` erases the

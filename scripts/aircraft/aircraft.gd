@@ -1812,8 +1812,16 @@ func battery_need(aim: Vector3) -> Vector2:
 func lay_battery(aim: Vector3) -> bool:
 	return aim_battery(battery_lead(aim, _port_centre()))
 
+## Where a gun fires from: its own ports if it names them (a helicopter's
+## chin gun and its rocket pods are not in the same place), else the
+## aircraft's.
+func _ports_of(g: Dictionary) -> Array:
+	if g.has("ports"):
+		return g["ports"]
+	return spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
+
 func _port_centre() -> Vector3:
-	var ports: Array = spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
+	var ports: Array = _ports_of(gunship_gun())
 	var c := Vector3.ZERO
 	for q in ports:
 		c += q as Vector3
@@ -1856,12 +1864,15 @@ func _battery() -> Node3D:
 func _bore(node: Node3D) -> Vector3:
 	return (node.global_transform.basis * Vector3(-1.0, 0.0, 0.0)).normalized()
 
+## The mark a gunship's rockets home on: one, moved to wherever the gunner fires.
+var _gun_spot: Node3D = null
+
 func fire_gunship(world: Node, aim: Vector3) -> bool:
 	var g := gunship_gun()
 	var gid := String(g.get("id", ""))
 	if g.is_empty() or float(battery_cd.get(gid, 0.0)) > 0.0 or not alive:
 		return false
-	var ports: Array = spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
+	var ports: Array = _ports_of(g)
 	var pick: int = randi() % ports.size()
 	var muzzle: Vector3 = global_transform * (ports[pick] as Vector3)
 	# laid on where the round will meet the mark, from the barrel that fires it
@@ -1900,6 +1911,25 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	var r: float = sqrt(randf()) * sp
 	var bb := Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT)
 	dir = (bb * Vector3(cos(a) * r, sin(a) * r, -1.0)).normalized()
+	# A rocket from the pods is a rocket: the same round the aircraft fires off
+	# its rails, motor, smoke and all, homing on the gunner's mark the way an
+	# Apache's are laid by its sight. It was a shell with a rocket's damage --
+	# a tracer -- which neither looked nor flew like one.
+	if g.has("missile"):
+		if not is_instance_valid(_gun_spot):
+			_gun_spot = DesignatedSpot.new()
+			_gun_spot.team = team
+			world.add_child(_gun_spot)
+		_gun_spot.global_position = aim
+		_gun_spot.set("_life", 140.0)
+		var m := Missile.new()
+		m.laser_guided = true
+		var xf_m := Transform3D(Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT), muzzle)
+		m.launch(String(g["missile"]), xf_m, linear_velocity, self, _gun_spot)
+		world.add_child(m)
+		store_released.emit(m)
+		Sfx.play_at(world, "launch", muzzle, -3.0, randf_range(0.92, 1.06))
+		return true
 	var shell := Shell.new()
 	shell.vel = dir * float(g["muzzle"]) + linear_velocity
 	# laid by `battery_lead`, which allows for gravity and not for the air:

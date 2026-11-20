@@ -41,10 +41,48 @@ func _init(w: World) -> void:
 
 
 func parse_arg(a: String) -> bool:
+	if a.begins_with("--watchdog="):
+		_watchdog_s = float(a.substr(11))
+		return true
 	for s in suites:
 		if s.parse_arg(a):
+			_arm_watchdog()
 			return true
 	return false
+
+
+## Wall-clock seconds a command-line test run gets before it is stopped:
+## `--watchdog=N`, 0 for never.
+##
+## Every test quits when it finishes, but one that never starts -- waiting on
+## a walker that a preset never makes, or on a condition that never comes --
+## sat there for good, and a run without `--quit-after` was left behind for
+## days. Wall time, not frames, and it runs through pauses and slow motion:
+## the deploy screen pauses the tree and the range camera slows time down.
+var _watchdog_s := 600.0
+var _watchdog_armed := false
+
+func _arm_watchdog() -> void:
+	if _watchdog_armed:
+		return
+	_watchdog_armed = true
+	# after the rest of the arguments, so --watchdog= anywhere on the line counts
+	_start_watchdog.call_deferred()
+
+func _start_watchdog() -> void:
+	var args: PackedStringArray = OS.get_cmdline_args() + OS.get_cmdline_user_args()
+	for a in args:
+		# a run that says when to stop has said it
+		if a.begins_with("--quit-after") or a.begins_with("--runfor="):
+			return
+	if _watchdog_s <= 0.0:
+		return
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+	tree.create_timer(_watchdog_s, true, false, true).timeout.connect(func() -> void:
+		printerr("[watchdog] no result after %.0f s of wall time: the test never finished -- stopping it" % _watchdog_s)
+		tree.quit(2))
 
 
 ## Called from `World._tick_world`.
@@ -299,6 +337,7 @@ func tick_after_street(delta: float) -> void:
 	infantry_tests.tick_zero()
 	infantry_tests.tick_holdfire()
 	infantry_tests.tick_sentry()
+	infantry_tests.tick_steady()
 	infantry_tests.tick_ball()
 	flight_tests.tick_hf()
 	infantry_tests.tick_bounds()

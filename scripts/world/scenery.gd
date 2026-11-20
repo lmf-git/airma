@@ -1988,7 +1988,11 @@ func _build_roads() -> void:
 	# trade.
 	var kerb_mat := _road_shader(Color(0.34, 0.32, 0.28), 0.98)
 	var road_mat := _road_shader(Color(0.105, 0.105, 0.115), 0.94)
-	var wall_mat := _road_shader(Color(0.50, 0.49, 0.46), 0.95)
+	# The skirts down the sides of a road on a bank (see `ribbon` in
+	# raster.rs): earth, and drawn where they are -- not pulled toward the
+	# eye like the carriageway, or the buried part of one would show through
+	# the bank it is buried in.
+	var wall_mat := MeshKit.mat(Color(0.30, 0.31, 0.24), 0.97, 0.0)
 	var cells := 0
 	for i in range(0, out.size(), 5):
 		var cx: int = int(out[i])
@@ -1996,8 +2000,7 @@ func _build_roads() -> void:
 		var surf: PackedVector3Array = out[i + 2]
 		var kerb: PackedVector3Array = out[i + 3]
 		var wall: PackedVector3Array = out[i + 4]
-		# retaining walls where a raised road crosses a town: few, and upright,
-		# so they get real normals
+		# the skirts down a raised road's sides: upright, so real normals
 		if not wall.is_empty():
 			var wm := MeshKit.mi(_faced_mesh(wall, wall_mat), "Walls %d,%d" % [cx, cz])
 			wm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
@@ -2075,12 +2078,18 @@ static func _road_shader(col: Color, rough: float) -> ShaderMaterial:
 		_road_sh = Shader.new()
 		_road_sh.code = """
 shader_type spatial;
-render_mode cull_back;
+render_mode cull_disabled;
 uniform vec3 albedo : source_color;
 uniform float roughness = 0.94;
 void vertex() {
 	vec4 v = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
-	v.xyz *= 0.9988;
+	// Toward the eye by a share of the distance. The terrain is drawn coarser
+	// the further off it is, and its error grows with the distance: held to a
+	// fixed twelfth of a percent the road lost to it nearly everywhere -- it
+	// was drawn, under the grass, and the roads looked missing up to every
+	// bridge and across every town.
+	float d = length(v.xyz);
+	v.xyz -= v.xyz / max(d, 0.001) * clamp(d * 0.005, 0.10, 3.0);
 	POSITION = PROJECTION_MATRIX * v;
 }
 void fragment() {

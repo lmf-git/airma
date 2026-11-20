@@ -203,6 +203,8 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 		"lmg":
 			k.mats["mag"] = MeshKit.mat(OD, 0.9, 0.0)
 			_saw(k, g)
+		"minigun":
+			_minigun(k, g)
 		"sniper":
 			k.mats["furn"] = MeshKit.mat(COYOTE, 0.8, 0.03)
 			_m2010(k, g)
@@ -539,6 +541,24 @@ static func _aa20(k: Kit, g: Dictionary) -> void:
 		circ.append(Vector2(mz + cos(a) * rr, -0.066 - rr + sin(a) * rr))
 	slab(k.at("mag"), circ, 0.034)
 	sights(k, g, -0.32, 0.046)
+
+## Six barrels round a spindle, the motor and the feed behind them, a carry
+## handle over the top and a spade grip under -- the juggernaut's gun.
+static func _minigun(k: Kit, g: Dictionary) -> void:
+	var m := k.at("metal")
+	var d := k.at("dark")
+	var ln: float = g["len"]
+	for i in 6:
+		var a: float = TAU * float(i) / 6.0
+		tube(m, 0.011, 0.011, -0.10, -ln, Vector3(cos(a) * 0.032, 0.004 + sin(a) * 0.032, 0), 6)
+	tube(d, 0.050, 0.050, -0.06, -0.14, Vector3(0, 0.004, 0), 10)        # the clamp
+	tube(d, 0.046, 0.046, -ln + 0.06, -ln + 0.02, Vector3(0, 0.004, 0), 10)
+	blk(d, Vector3(0.10, 0.11, 0.20), Vector3(0, 0.004, 0.04))            # housing
+	blk(m, Vector3(0.06, 0.07, 0.10), Vector3(0, -0.02, 0.17))            # motor
+	blk(d, Vector3(0.08, 0.10, 0.16), Vector3(-0.09, -0.02, 0.04))        # feed chute
+	blk(m, Vector3(0.02, 0.10, 0.02), Vector3(0, 0.08, -0.05))            # handle
+	blk(m, Vector3(0.02, 0.10, 0.02), Vector3(0, 0.08, 0.10))
+	blk(m, Vector3(0.02, 0.02, 0.17), Vector3(0, 0.13, 0.025))
 
 static func _saw(k: Kit, g: Dictionary) -> void:
 	var m := k.at("metal")

@@ -43,17 +43,33 @@ func _init(w: World) -> void:
 ## same battery and the same station a man in the hold would take -- it is
 ## simply already in its orbit when he gets there, and it goes home when the
 ## time is up.
-func cqb_gunship(centre: Vector3) -> bool:
+## `kind` "ac130" is the AC-130 high over the town; "chopper" is the CHOPPER
+## GUNNER, an Apache in a low, tight orbit with the gunner on its door gun.
+func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 	if is_instance_valid(world._cqb_gunship) or not is_instance_valid(world.walker) or not world.on_foot:
 		return false
-	var j := PlayerJet.new()
-	j.setup("ac130")
+	var j: Aircraft
+	if kind == "chopper":
+		var h := PlayerHeli.new()
+		h.setup("ah64g")
+		h.orbit_centre = centre
+		j = h
+		j.name = "Gunner Six"
+	else:
+		j = PlayerJet.new()
+		(j as PlayerJet).setup("ac130")
+		j.name = "Spooky"
 	j.team = 0
-	j.name = "Spooky"
 	world.add_child(j)
-	# Northbound with the town off the port wing, which is where the guns are.
-	j.global_transform = Transform3D(Basis(), centre + Vector3(3000.0, 1500.0, 0.0))
-	j.linear_velocity = Vector3(0, 0, -105.0)
+	if kind == "chopper":
+		# already on the circle, low, the nose on the town
+		j.global_transform = Transform3D(Basis(Vector3.UP, PI * 0.5),
+			centre + Vector3(PlayerHeli.ORBIT_R, 230.0, 0.0))
+		j.linear_velocity = Vector3.ZERO
+	else:
+		# Northbound with the town off the port wing, which is where the guns are.
+		j.global_transform = Transform3D(Basis(), centre + Vector3(3000.0, 1500.0, 0.0))
+		j.linear_velocity = Vector3(0, 0, -105.0)
 	j.gear_down = false
 	j.gear_anim = 0.0
 	j.throttle = 0.6
@@ -74,8 +90,8 @@ func cqb_gunship(centre: Vector3) -> bool:
 	ears.name = "GunnerEars"
 	j.add_child(ears)
 	ears.make_current()
-	Sim.report("AC-130 on station for %d seconds — you have the guns" % int(CQB_GUNSHIP_TIME),
-		Sim.Ev.GOOD)
+	Sim.report("%s on station for %d seconds — you have the guns" % [
+		"Chopper gunner" if kind == "chopper" else "AC-130", int(CQB_GUNSHIP_TIME)], Sim.Ev.GOOD)
 	return true
 
 
@@ -92,7 +108,13 @@ func _cqb_gunship_done() -> void:
 		var ears := world._cqb_gunship.get_node_or_null("GunnerEars") as AudioListener3D
 		if ears != null:
 			ears.clear_current()
-		world._cqb_gunship.queue_free()
+		# Off station: it flies away and is gone once it is well off, rather
+		# than vanishing from over the town between one frame and the next.
+		var gs: Aircraft = world._cqb_gunship
+		if "auto" in gs:
+			gs.set("auto", "depart")
+		else:
+			gs.queue_free()
 	world._cqb_gunship = null
 	world._cqb_gun_t = 0.0
 	if is_instance_valid(world.cqb):
@@ -189,12 +211,16 @@ func _hide_far_scenery(c: Vector3, reach: float) -> void:
 		if Vector2((ab as Node3D).global_position.x,
 				(ab as Node3D).global_position.z).distance_to(c2) > reach + 2500.0:
 			_park_far(ab as Node3D)
+	# By the town each set is built round. The set's own node stands at the
+	# origin with everything in it placed in the world, so measured by that
+	# the town being fought over was always "far away" -- and its props and
+	# the ground floors of its buildings were hidden while their walls stayed
+	# solid: invisible cover, and every hollowed building floating.
 	for k in _town_sets:
 		if not is_instance_valid(_town_sets[k]):
 			continue
-		var ts: Node3D = _town_sets[k]
-		if Vector2(ts.global_position.x, ts.global_position.z) \
-				.distance_to(c2) > reach + 600.0:
+		var ts: TownSet = _town_sets[k]
+		if ts.centre.distance_to(c2) > reach + 600.0:
 			_park_far(ts)
 	for grp in ["vehicles", "ground_targets", "ships"]:
 		for n2 in world.get_tree().get_nodes_in_group(grp):

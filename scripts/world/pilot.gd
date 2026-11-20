@@ -46,7 +46,18 @@ static var _mats: Dictionary = {}
 static func _mat(col: Color) -> StandardMaterial3D:
 	var k := col.to_html()
 	if not _mats.has(k):
-		_mats[k] = MeshKit.mat(col, 0.85, 0.0)
+		var m := MeshKit.mat(col, 0.85, 0.0)
+		# Whatever of him comes right up to the lens thins out instead of
+		# filling it: looking down in first person the shoulders and the top of
+		# the chest were twenty centimetres off the eye, and the view was the
+		# inside of a sleeve. Further off he is solid -- he is not hidden, and
+		# nobody else is ever that close to him. Not the hands, which are on
+		# the weapon under the eye and are meant to be seen.
+		if col != GLOVE:
+			m.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_DITHER
+			m.distance_fade_min_distance = 0.22
+			m.distance_fade_max_distance = 0.48
+		_mats[k] = m
 	return _mats[k]
 
 func _put(m: Mesh, at: Vector3, col: Color, scl := Vector3.ONE, rot := Vector3.ZERO) -> MeshInstance3D:
@@ -679,8 +690,14 @@ var _pull := Vector3.ZERO
 ## waist as well as the neck: with the chest held up, a rifle pointed at his
 ## feet pivoted about the eye and its butt swung up over his shoulder and out
 ## through his back.
+## Looking up, likewise: he leans back into it and the shoulders come up with
+## the sights. Held at a third of the view, the shoulders stayed below a rifle
+## pointed at the sky, the arms could not reach it, and it was pulled down to
+## them -- off the line of sight and back into the lens.
 func _chest_follow(look: float) -> float:
-	return 0.30 if look >= 0.0 else lerpf(0.30, 0.60, clampf(-look / 1.2, 0.0, 1.0))
+	if look >= 0.0:
+		return lerpf(0.30, 0.62, clampf(look / 1.0, 0.0, 1.0))
+	return lerpf(0.30, 0.60, clampf(-look / 1.2, 0.0, 1.0))
 
 ## The chest the weapon is kept clear of, smoothed: see `_place_weapon`.
 var _chest_s := Transform3D()
@@ -696,7 +713,7 @@ const BUTT_ADS := 0.01
 ## the eye was over the middle of the plate carrier, the chest filled the
 ## bottom of the view and the shoulders came up round the camera. A man
 ## looking down his sights has his head forward of his chest.
-const EYE_FWD := -0.16
+const EYE_FWD := -0.19
 ## ...and further at a run, where the whole of him leans into it.
 const EYE_RUN := 0.12
 var _sh_r := Vector3.INF
@@ -716,6 +733,42 @@ func equip(g: Dictionary, quiet := false) -> void:
 	muzzle = gun_node.get_node("Muzzle") as Node3D
 	_mag = gun_node.get_node("Mag") as Node3D
 	_draw = 1.0
+	_rear_high = _rear_at_eye(gun_node, float(g.get("sight", 0.08)))
+
+## How far back, in the weapon's own frame, the rearmost part of it reaches
+## that is up at the height of the sight line and close to it side to side --
+## what would be in the eye if the weapon came back far enough. A rifle's stock
+## runs back under the cheek, well below the line, and does not count; an SMG's
+## receiver is up level with its sight, and when the butt went into the
+## shoulder that receiver went past the eye: the camera was inside it, its sides
+## faced away and were not drawn, and what was left was a sight on a mount with
+## nothing under it.
+static func _rear_at_eye(root: Node3D, sight: float) -> float:
+	var rear := -INF
+	var stack: Array = [[root, Transform3D()]]
+	while not stack.is_empty():
+		var it: Array = stack.pop_back()
+		var n: Node = it[0]
+		var xf: Transform3D = it[1]
+		for c in n.get_children():
+			if not (c is Node3D):
+				continue
+			var cx: Transform3D = xf * (c as Node3D).transform
+			stack.append([c, cx])
+			if c is MeshInstance3D and (c as MeshInstance3D).mesh != null:
+				var m: Mesh = (c as MeshInstance3D).mesh
+				for si in m.get_surface_count():
+					var vs: PackedVector3Array = m.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+					for v in vs:
+						var q: Vector3 = cx * v
+						if q.y > sight - 0.045 and absf(q.x) < 0.05:
+							rear = maxf(rear, q.z)
+	return rear
+
+## See `_rear_at_eye`; -INF for a weapon with nothing up there.
+var _rear_high := -INF
+## How far in front of the eye the nearest of that has to stay.
+const EYE_RELIEF := 0.05
 
 func has_gun() -> bool:
 	return is_instance_valid(gun_node)
@@ -1191,6 +1244,10 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	if float(gun.get("stock", 0.0)) > 0.0:
 		hip.z = BUTT_HIP - butt
 		ads.z = BUTT_ADS - butt
+	# and on the sights, nothing that is at the height of the eye comes back
+	# into it: the weapon goes forward, along the line, until it is clear
+	if _rear_high > -INF:
+		ads.z = minf(ads.z, -EYE_RELIEF - _rear_high)
 	var low := Vector3(0.10, -0.42, -0.22) if hand else Vector3(0.03, -0.37, -0.20)
 	# propped on the elbows: the weapon is up at the eye, not down at a
 	# hip he is lying on, or the muzzle is in the dirt
@@ -1302,6 +1359,11 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 		v2 = at - pull + wb * _grip_l() - sh_l
 	if v2.length() > reach and in_reload < 0.0:
 		pull += v2.normalized() * (v2.length() - reach) * 0.85
+	# On the sights the weapon stays on the line of sight whatever the arms
+	# would like: pulled toward the shoulders it went off the eye by five or
+	# six centimetres looking up, and back toward the lens. The hands stretch
+	# the last bit instead.
+	pull *= 1.0 - a
 	_pull = pull
 	var placed: Vector3 = at - _pull
 	if not hand and float(gun.get("stock", 0.0)) > 0.0:

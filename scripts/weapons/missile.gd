@@ -1700,6 +1700,10 @@ func _hit(what: Node, miss := 0.0) -> void:
 		KillFeed.cause = ""
 	if shooter and shooter.has_method("on_weapon_hit"):
 		shooter.on_weapon_hit(what, wid)
+	# Arrived on a mark rather than on a thing -- a designation, a laser
+	# spot -- it is the ground it has gone off on, and whatever is round it.
+	if what is Aircraft.DesignatedSpot or what.is_in_group("laser_spots"):
+		_ground_burst(global_position)
 	_die(true)
 
 ## Warhead going off against the ground or a structure: everything inside the
@@ -1716,6 +1720,15 @@ func _ground_burst(at: Vector3) -> void:
 			KillFeed.cause = "missile"
 			n.take_hit(float(ws["damage"]) * clampf(1.0 - d / r, 0.2, 1.0), _from_who())
 			KillFeed.cause = ""
+	# and the men standing in it: they are not on the radar picture, and a
+	# rocket that went off at a man's feet left him standing
+	var was_credit: Node = Effects.credit
+	Effects.credit = _from_who()
+	KillFeed.cause = "missile"
+	Effects._blast_infantry(get_tree().current_scene, at,
+		maxf(float(ws.get("lethal", 9.0)), 6.0))
+	KillFeed.cause = ""
+	Effects.credit = was_credit
 	var scn = get_tree().current_scene.get("scenery")
 	if scn != null and is_instance_valid(scn) and scn.has_method("damage_area"):
 		var flat: int = scn.damage_area(at, r * 0.8)

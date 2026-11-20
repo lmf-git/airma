@@ -1006,9 +1006,23 @@ func _draw_on_foot() -> void:
 	# what is in the hands, bottom right where the weapon is
 	var rel: bool = w.reloading > 0.0
 	var low: bool = w.ammo <= maxi(int(float(g["mag"]) * 0.2), 1)
+	var modes: Array = Walker.modes_of(g)
 	_txt(Vector2(vp.x - 330.0, vp.y - 118.0), String(g["name"])
-		+ ("  · SUPPRESSED" if w.is_quiet() else ""), 15,
+		+ ("  · SUPPRESSED" if w.is_quiet() else "")
+		+ ("  · %s (V)" % w.mode_now().to_upper() if modes.size() > 1 else ""), 15,
 		Color(0.85, 0.92, 1.0), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
+	# rested, and the breath he is holding
+	if w._ads > 0.5:
+		var cx: float = vp.x * 0.5
+		var cy: float = vp.y * 0.5 + 70.0
+		if w.mounted:
+			_txt(Vector2(cx - 60.0, cy), "RESTED", 12, Color(0.6, 0.9, 0.6),
+				HORIZONTAL_ALIGNMENT_CENTER, 120.0)
+		if w.breath < 0.999 or w.steadying:
+			var bw := 90.0
+			var col: Color = RED if w._gasp else (Color(0.85, 0.92, 1.0) if w.steadying else Color(0.6, 0.65, 0.7))
+			draw_rect(Rect2(cx - bw * 0.5, cy + 16.0, bw * w.breath, 3.0), col)
+			_box(Rect2(cx - bw * 0.5, cy + 16.0, bw, 3.0), col, 1.0)
 	_txt(Vector2(vp.x - 330.0, vp.y - 78.0), "%d" % w.ammo, 40,
 		RED if (low or rel) else WHITE, HORIZONTAL_ALIGNMENT_RIGHT, 220.0)
 	_txt(Vector2(vp.x - 104.0, vp.y - 78.0), "/ %d" % w.spare, 20,

@@ -71,6 +71,11 @@ var zero_override := -1.0
 ## A ballistic vest's worth of protection left: half of every hit goes into it
 ## instead of into him until it is used up. See `SupplyCrate`.
 var armour := 0.0
+## How much of each hit the armour takes: half for a vest, most of it for the
+## juggernaut's suit.
+var armour_k := 0.5
+## In the JUGGERNAUT suit: no sprinting, slower everywhere, the minigun.
+var juggernaut := false
 
 ## Where a weapon is sighted in: the range at which the round crosses the line
 ## of sight. A battle zero for irons and dots, further out for a scope.
@@ -98,13 +103,118 @@ func zeroed_aim(g: Dictionary, i: int, from: Vector3, start: Vector3, look: Vect
 func click_of(g: Dictionary) -> float:
 	return 0.1 if (g.get("scope", false) or g.get("dot", false)) else 0.5
 
+## Into the JUGGERNAUT suit: the plate, and the minigun in his hands in place of
+## his long gun.
+const JUGG_ARMOUR := 500.0
+func suit_up() -> void:
+	juggernaut = true
+	armour = JUGG_ARMOUR
+	armour_k = 0.8
+	var mg: int = Firearm.index_of("minigun")
+	_rounds[kit_idx] = ammo
+	_spare[kit_idx] = spare
+	var into: int = 0
+	for i in slots.size():
+		if not bool(Firearm.KIT[int(slots[i])].get("hand", false)):
+			into = i
+			break
+	slots[into] = mg
+	slot = into
+	_rounds[mg] = int(Firearm.KIT[mg]["mag"])
+	_spare[mg] = 0
+	_take_up(mg)
+
+## The modes a weapon's selector has, best first.
+static func modes_of(g: Dictionary) -> Array:
+	if g.has("modes"):
+		return g["modes"]
+	if not bool(g.get("auto", false)) or g.has("launcher"):
+		return ["semi"]
+	match String(g.get("id", "")):
+		"lmg", "minigun", "aa20":
+			return ["auto"]
+		"glock":
+			return ["auto", "semi"]
+	return ["auto", "burst", "semi"]
+
+func mode_now() -> String:
+	var m: Array = modes_of(gun_spec())
+	var cur := String(fire_mode.get(kit_idx, m[0]))
+	return cur if m.has(cur) else String(m[0])
+
+## How far the sights wander at rest with this weapon, in radians: a long
+## scoped rifle most, a pistol held out at arm's length next, a carbine least.
+static func sway_of(g: Dictionary) -> float:
+	if g.has("sway"):
+		return float(g["sway"])
+	if g.get("scope", false):
+		return 0.0060
+	if g.get("hand", false):
+		return 0.0035
+	if g.has("launcher"):
+		return 0.0040
+	return 0.0025
+
+const BREATH_HOLD := 4.0       # seconds of it
+const BREATH_BACK := 5.0       # seconds to get it all back
+
+## A tick of the sights wandering, of holding a breath, and of whether the
+## weapon is rested on something.
+func _steady(delta: float) -> void:
+	var g: Dictionary = gun_spec()
+	mounted = _rested(g)
+	steadying = _ads > 0.5 and Sim.held(&"throttle_up") and not _gasp and breath > 0.0
+	if steadying:
+		breath = maxf(breath - delta / BREATH_HOLD, 0.0)
+		if breath <= 0.0:
+			_gasp = true
+	else:
+		breath = minf(breath + delta / BREATH_BACK, 1.0)
+		if _gasp and breath > 0.35:
+			_gasp = false
+	var amp: float = sway_of(g)
+	amp *= 0.45 if prone else (0.7 if crouching else 1.0)
+	# out of wind, and under fire, it wanders more
+	amp *= 1.0 + (1.0 - stamina) * 1.6 + suppression * 1.5
+	if _gasp:
+		amp *= 1.8
+	if mounted:
+		amp *= 0.15
+	if steadying:
+		amp *= 0.12
+	# only on the sights: from the hip the spread is the wander
+	amp *= clampf(_ads, 0.0, 1.0)
+	_sway_t += delta
+	var t: float = _sway_t
+	var want := Vector2(sin(t * 0.83) * 0.85 + sin(t * 2.17 + 1.3) * 0.30,
+		sin(t * 1.21 + 0.7) * 0.65 + sin(t * 3.05) * 0.22) * amp
+	sway = sway.lerp(want, clampf(delta * 6.0, 0.0, 1.0))
+
+## Whether the weapon is resting on something: lying down with a long gun,
+## or on the sights with a ledge, a sill or a wall top just under the
+## fore-end -- the right height to put it on.
+func _rested(g: Dictionary) -> bool:
+	if g.get("hand", false) or g.has("launcher") or _ads < 0.5:
+		return false
+	if prone:
+		return true
+	var fwd := Vector3(-sin(yaw), 0.0, -cos(yaw))
+	var eye: Vector3 = body.eye_pos()
+	for reach in [0.45, 0.65]:
+		var fore: Vector3 = eye + fwd * float(reach) + Vector3(0.0, -0.16, 0.0)
+		var top: float = Obstacles.top_at(fore.x, fore.z)
+		var gap: float = fore.y - top
+		if gap > -0.08 and gap < 0.22:
+			return true
+	return false
+
 func _through_armour(amount: float) -> float:
 	if armour <= 0.0:
 		return amount
-	var taken: float = minf(amount * 0.5, armour)
+	var taken: float = minf(amount * armour_k, armour)
 	armour -= taken
 	if armour <= 0.0:
-		Sim.report("vest spent", Sim.Ev.BAD)
+		Sim.report("armour spent" if juggernaut else "vest spent", Sim.Ev.BAD)
 	return amount - taken
 ## Stun grenades, thrown with their own key: see `Firearm.Frag.flash`.
 var flashes := 2
@@ -268,6 +378,20 @@ var _eye := EYE
 var _shot_cd := 0.0
 var _recoil := 0.0
 var _bloom := 0.0
+## The sights wandering on their own -- heartbeat, breathing, arms that are
+## not a tripod -- as an offset on where he is looking, yaw and pitch.
+var sway := Vector2.ZERO
+var _sway_t := 0.0
+## Holding his breath to steady it: how much breath is left, 0 to 1, and
+## whether he has run out and is shaking until he has some back.
+var breath := 1.0
+var _gasp := false
+var steadying := false
+## The weapon rested on something -- a sill, a wall top, the ground prone.
+var mounted := false
+## Fire select, by kit index: "auto", "burst" or "semi".
+var fire_mode := {}
+var _burst_left := 0
 var _fall_peak := 0.0
 var _trigger_was := false
 var _queued := 0.0
@@ -355,7 +479,11 @@ func _ready() -> void:
 	_take_up(int(slots[0]), false)
 	cam = Camera3D.new()
 	cam.far = 45000.0
-	cam.near = 0.03
+	# A centimetre. On the sights the receiver and the stock run back under
+	# the eye to the cheek, and at three the near plane sliced them open: a
+	# hard-edged hole in the bottom of every sight picture, worst on the short
+	# guns. The depth buffer is reversed, so the far ground does not pay for it.
+	cam.near = 0.01
 	cam.fov = BASE_FOV
 	cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	add_child(cam)
@@ -658,15 +786,20 @@ func _tick_walk_p(delta: float) -> void:
 		_winded = true
 	elif stamina > 0.3:
 		_winded = false
+	# (on the sights SHIFT is holding his breath, not running)
 	_sprint = Sim.held(&"throttle_up") and not crouching and on_floor and not _winded \
 		and wish.dot(fwd) > 0.5 and not Sim.held(&"ads") and not _trigger() \
-		and _grab_t < 0.0
+		and _grab_t < 0.0 and _ads < 0.5 and not hold_ads and not ads_latched
 	stamina = clampf(stamina + delta * (-1.0 / 8.0 if _sprint else
 		(1.0 / 4.5 if wish.length() < 0.1 else 1.0 / 7.0)), 0.0, 1.0)
 	_sprint_s = lerpf(_sprint_s, 1.0 if _sprint else 0.0, clampf(delta * 6.0, 0.0, 1.0))
 	var g: Dictionary = gun_spec()
+	if juggernaut:
+		_sprint = false           # a hundredweight of plate does not sprint
 	var speed: float = CROUCH if crouching else (RUN if _sprint else WALK)
 	speed *= float(g["move"]) * lerpf(1.0, 0.62, _ads)
+	if juggernaut:
+		speed *= 0.75
 	if prone:
 		speed = 0.95
 	# getting down or getting up, he is not also going anywhere
@@ -763,8 +896,14 @@ func _tick_walk_p(delta: float) -> void:
 	# A roof is a floor. `top_at` only answers for a point actually over a
 	# footprint, and you cannot walk into the side of one, so this only ever
 	# catches you coming down onto it.
-	var ground := maxf(Sim.height_at(global_position.x, global_position.z),
-		Obstacles.floor_under(global_position.x, global_position.z, global_position.y))
+	# On the ground as it is drawn, not as it is sampled: see
+	# `Terrain.drawn_ground`. The roads are laid on the same drawn ground, so
+	# on a road he is on the road.
+	var gx: float = global_position.x
+	var gz: float = global_position.z
+	var drawn: float = Terrain.drawn_ground(gx, gz,
+		cam.global_position if is_instance_valid(cam) else global_position)
+	var ground := maxf(drawn, Obstacles.floor_under(gx, gz, global_position.y))
 	if global_position.y <= ground:
 		global_position.y = ground
 		if not on_floor and _fall_peak < -13.0 and not chute:
@@ -1283,6 +1422,16 @@ func _fight(delta: float) -> void:
 		# the first pull puts the glasses down; it takes a second to shoot
 		binos = false
 		_ui_click = true
+	_steady(delta)
+	# the selector
+	if Sim.tapped(&"fire_mode"):
+		var ms: Array = modes_of(g)
+		if ms.size() > 1:
+			var nxt: String = String(ms[(ms.find(mode_now()) + 1) % ms.size()])
+			fire_mode[kit_idx] = nxt
+			_burst_left = 0
+			Sfx.play_ui(world, "clink", -12.0, 1.3)
+			Sim.report("%s — %s" % [String(g["name"]), nxt.to_upper()], Sim.Ev.INFO)
 	var pulled: bool = _trigger() and _block < 0.4
 	var edge: bool = pulled and not _trigger_was
 	_trigger_was = pulled
@@ -1310,12 +1459,25 @@ func _fight(delta: float) -> void:
 	if edge:
 		_queued = 0.12
 	_seek(delta, g)
-	var want: bool = pulled if g["auto"] else _queued > 0.0
+	var mode: String = mode_now()
+	if edge and mode == "burst":
+		_burst_left = 3
+	var want: bool
+	match mode:
+		"auto":
+			want = pulled
+		"burst":
+			want = _burst_left > 0
+		_:
+			want = _queued > 0.0
 	if not want or _shot_cd > 0.0 or body._ready_s < 0.75:
 		return
 	_queued = 0.0
+	if _burst_left > 0:
+		_burst_left -= 1
 	if ammo <= 0:
-		if edge or not g["auto"]:
+		_burst_left = 0
+		if edge or mode != "auto":
 			Sfx.play_ui(world, "dry", -6.0)
 		if spare > 0:
 			_begin_reload(g)
@@ -1426,9 +1588,12 @@ func _fight(delta: float) -> void:
 	# down yourself, and it never climbs quite straight.
 	var k: float = float(g["kick"]) * (1.0 - 0.35 * _ads) \
 		* (0.55 if prone else (0.8 if crouching else 1.0))
+	# rested on something, the something takes most of it
+	if mounted:
+		k *= 0.45
 	pitch = minf(pitch + k * 0.45, 1.35)
 	_recoil = minf(_recoil + k * 0.9, 0.12)
-	yaw += randf_range(-1.0, 1.0) * float(g["side"]) * (1.0 - 0.3 * _ads)
+	yaw += randf_range(-1.0, 1.0) * float(g["side"]) * (1.0 - 0.3 * _ads) * (0.4 if mounted else 1.0)
 	_bloom = minf(_bloom + float(g["hip"]) * 0.22, float(g["hip"]) * 1.6)
 	body.kick(clampf(float(g["kick"]) * 34.0, 0.3, 1.5))
 	# Working the action between shots: a pump, a bolt, or nothing -- a drum
@@ -1719,8 +1884,8 @@ func _view(delta: float, ref: Basis) -> void:
 	var glass: bool = _bino > 0.5
 	body.visible = not scoped() and not glass
 	body.set_head_visible(third and not glass)
-	var up: Basis = ref * Basis(Vector3.UP, yaw)
-	var look: Basis = up * Basis(Vector3.RIGHT, pitch + _recoil)
+	var up: Basis = ref * Basis(Vector3.UP, yaw + sway.x)
+	var look: Basis = up * Basis(Vector3.RIGHT, pitch + _recoil + sway.y)
 	# ALT in third person: the camera goes round him, he keeps facing where he
 	# was, and it swings back behind him when let go. Not through the sights,
 	# and not while a screen has the pointer.

@@ -860,24 +860,6 @@ pub fn carve(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
     h
 }
 
-/// The carving and the made surface it laid, together.
-///
-/// `carve` works the road surface out to apply the earthworks and then throws
-/// it away. The ribbon that *draws* the carriageway wants both -- the finished
-/// ground to lie on and the design surface to ride when the ground was raised
-/// to meet it -- and asking twice walks the corridor grid twice. Measured, that
-/// second walk was most of the 105 ms drawing every road on the map cost.
-pub fn carve_road(w: &World, c: &Corridor, base: f32, x: f32, z: f32, flags: u32)
-        -> (f32, Made) {
-    let (h, pad_w) = carve_built(w, base, x, z, flags);
-    let rs = road_made(c, x, z, pad_w);
-    let h = if flags & G_ROADS != 0 {
-        road_over_with(&rs, h, pad_w)
-    } else {
-        h
-    };
-    (h, rs)
-}
 
 /// What has been built here, before any road: the town platforms and the
 /// aerodromes, and how much town platform applies -- which the road needs,

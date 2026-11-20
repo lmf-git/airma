@@ -56,7 +56,28 @@ static var _table: Dictionary = {}
 static func get_spec(id: String) -> Dictionary:
 	if _table.is_empty():
 		_table = _db()
+		_table["ah64g"] = _door_gunship(_table["ah64"])
 	return _table.get(id, _table["f22"])
+
+## The CHOPPER GUNNER's aircraft: an Apache in a gunship's orbit, the gunner on
+## its own weapons -- the 30 mm chin gun and the Hydra pods -- laid from the
+## sight, low and close.
+static func _door_gunship(base: Dictionary) -> Dictionary:
+	var s: Dictionary = base.duplicate(true)
+	s["name"] = "AH-64 gunship"
+	s["gunship"] = true
+	s["orbit_agl"] = 230.0
+	s["orbit_speed"] = 22.0
+	s["nose_in"] = true
+	var chin: Vector3 = (base["gun"] as Dictionary).get("pos", Vector3(0.0, -1.05, -3.6))
+	s["guns"] = [
+		{"id": "m230", "name": "30 mm M230 chin gun", "rpm": 625.0, "damage": 70.0,
+		 "blast": 3.5, "frag": 6.0, "muzzle": 805.0, "spread": 0.004, "ports": [chin]},
+		{"id": "hydra", "name": "70 mm Hydra rockets", "rpm": 150.0, "damage": 220.0,
+		 "blast": 8.0, "frag": 14.0, "muzzle": 300.0, "spread": 0.004, "missile": "hydra",
+		 "ports": [Vector3(-1.95, -0.42, 0.6), Vector3(1.95, -0.42, 0.6)]},
+	]
+	return s
 
 static func _db() -> Dictionary:
 	return {

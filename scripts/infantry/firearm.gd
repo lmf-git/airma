@@ -131,6 +131,16 @@ const KIT := [
 		"len": 0.46, "stock": 0.24, "mag_len": 0.10, "sight": 0.088, "dot": true,
 		"drum": true,
 		"grip_l": Vector3(0.0, -0.05, -0.27), "move": 0.93, "reach": 13.0},
+	# The JUGGERNAUT's gun, from the kill streak and nowhere else: six barrels,
+	# a motor and a belt from the pack on his back. Not a weapon to aim so
+	# much as to point, and there is no reloading it.
+	{"id": "minigun", "name": "M134 MINIGUN", "mag": 500, "spare": 0, "cd": 0.025,
+		"auto": true, "dmg": 24.0, "muzzle": 853.0, "pellets": 1,
+		"hip": 0.030, "ads": 0.012, "fov": 58.0, "reload": 9.0, "kick": 0.004,
+		"side": 0.009, "sound": "carbine", "db": 3.0, "work": "bolt",
+		"len": 0.70, "stock": 0.0, "mag_len": 0.0, "sight": 0.12, "dot": false,
+		"box": true, "streak": true,
+		"grip_l": Vector3(0.0, 0.10, -0.20), "move": 0.80, "reach": 40.0},
 ]
 
 ## The loadouts a man can deploy with. Each is a starting point: the gunsmith

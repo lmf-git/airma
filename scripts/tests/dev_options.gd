@@ -46,7 +46,8 @@ func parse_arg(a: String) -> bool:
 		CqbMatch.quiet = true
 		CqbMatch.plain = true
 	elif a.begins_with("--cqbview="):
-		# with --preset=cqb --shot=: fp, ads, tp, tpads, reload, dmr, pistol, run
+		# with --preset=cqb --shot=: fp, ads, adsup, adsdown, ads_<kit id>, look,
+		# tp, tpads, reload, dmr, pistol, run
 		world.street_fight._cqb_view = a.substr(10)
 	elif a.begins_with("--gtest="):
 		world.veil.debug_strain = float(a.substr(8))
@@ -202,6 +203,12 @@ var _look_cam: Camera3D = null
 func tick_look_from() -> void:
 	if _look_from != Vector3.INF and world.running:
 		if _look_cam == null:
+			# a height below -5000 is a height above the ground there instead:
+			# -10000 + metres. For pictures of somewhere whose height is not known.
+			if _look_from.y < -5000.0:
+				_look_from.y = Sim.height_at(_look_from.x, _look_from.z) + (_look_from.y + 10000.0)
+			if _look_at.y < -5000.0:
+				_look_at.y = Sim.height_at(_look_at.x, _look_at.z) + (_look_at.y + 10000.0)
 			_look_cam = Camera3D.new()
 			_look_cam.fov = 60.0
 			world.add_child(_look_cam)
@@ -233,11 +240,16 @@ func tick_cqb_view() -> void:
 		# pose the player for a photograph
 		var cv := world.street_fight._cqb_view
 		world.walker.third = cv.begins_with("tp")
-		world.walker.hold_ads = cv in ["ads", "tpads", "dmr"]
+		world.walker.hold_ads = cv in ["ads", "tpads", "dmr", "adsup", "adsdown"] \
+			or cv.begins_with("ads_")
 		var want_kit: int = Firearm.index_of("dmr" if cv == "dmr" else ("pistol" if cv == "pistol"
 			else ("shotgun" if cv == "shotgun" else "carbine")))
+		# ads_<id>: on the sights of any weapon in the kit
+		if cv.begins_with("ads_"):
+			want_kit = Firearm.index_of(cv.substr(4))
 		if world.walker.kit_idx != want_kit:
-			if cv != "fp" and cv != "tp" and cv != "ads" and cv != "tpads" and cv != "reload":
+			if cv != "fp" and cv != "tp" and cv != "ads" and cv != "tpads" and cv != "reload" \
+					and cv != "adsup" and cv != "adsdown":
 				world.walker.slots[world.walker.slot] = want_kit
 				world.walker.rearm()
 			world.walker._take_up(want_kit, false)
@@ -246,8 +258,10 @@ func tick_cqb_view() -> void:
 			world.walker._begin_reload(world.walker.gun_spec())
 		if cv == "reload" and world.walker.reloading < world.walker._reload_span * 0.55:
 			world.walker.reloading = world.walker._reload_span * 0.55
-		if cv == "look":
+		if cv == "look" or cv == "adsdown":
 			world.walker.pitch = -0.9
+		if cv == "adsup":
+			world.walker.pitch = 0.9
 		if cv.ends_with("chute") and not world.walker.chute:
 			world.walker.global_position += Vector3(0, 150.0, 0)
 			world.walker.on_floor = false

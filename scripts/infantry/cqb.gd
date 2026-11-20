@@ -97,6 +97,8 @@ const STREAK_POOL := [
 		"note": "Ten rounds walked over a spot you pick on the map."},
 	{"id": "strike", "name": "AIRSTRIKE", "at": 5,
 		"note": "A stick of seven along the line to your mark."},
+	{"id": "dogs", "name": "ATTACK DOGS", "at": 6,
+		"note": "Three military working dogs run the streets and the buildings for the nearest of theirs: the way to get somebody out of a room the air cannot see into."},
 	{"id": "swarm", "name": "SWITCHBLADE SWARM", "at": 6,
 		"note": "Four small kamikaze drones climb out over you, each finds one of theirs it can see in the open, and dives on him."},
 	{"id": "strafe", "name": "A-10 GUN RUN", "at": 6,
@@ -115,8 +117,12 @@ const STREAK_POOL := [
 		"note": "A small warhead on a spot you pick. Nothing within eighty metres lives and nothing there is left standing — you included."},
 	{"id": "emp", "name": "EMP STRIKE", "at": 11,
 		"note": "Their electronics die: every sentry and drone of theirs is knocked out, their sights go dark and nothing of theirs gets into the air for a minute."},
+	{"id": "chopper", "name": "CHOPPER GUNNER", "at": 12,
+		"note": "You on the door gun of a helicopter circling low over the town: closer, faster and more exposed than the AC-130."},
 	{"id": "armour", "name": "ARMOUR DROP", "at": 14,
 		"note": "A tank comes down under parachutes on a spot you pick on the map. Walk up to it and press U: it is yours until it is knocked out."},
+	{"id": "jugg", "name": "JUGGERNAUT", "at": 16,
+		"note": "Into a suit of heavy armour with a minigun: it takes most of every hit, but you cannot sprint and you move slowly."},
 	{"id": "wp", "name": "WHITE PHOSPHORUS", "at": 15,
 		"note": "Two points on the map set a line; a hundred metres of it burns for twenty-five seconds and chokes with smoke. It burns anyone in it, yours included."},
 	{"id": "stratnuke", "name": "STRATEGIC NUKE", "at": 30,
@@ -142,7 +148,7 @@ const UAV_TIME := 30.0
 var streak := 0
 var bank := {"uav": 0, "mortar": 0, "strike": 0, "strafe": 0, "gunship": 0, "carpet": 0,
 	"missile": 0, "cruise": 0, "tacnuke": 0, "stratnuke": 0, "smoke": 0, "cuav": 0,
-	"supply": 0, "vest": 0, "sentry": 0, "emp": 0, "wp": 0, "swarm": 0, "heli": 0, "armour": 0}
+	"supply": 0, "vest": 0, "sentry": 0, "emp": 0, "wp": 0, "swarm": 0, "heli": 0, "armour": 0, "chopper": 0, "dogs": 0, "jugg": 0}
 ## Seconds each side's air is jammed for by the other's COUNTER-UAV: no map
 ## picture and nothing of theirs called into the air. By team.
 static var jammed := {0: 0.0, 1: 0.0}
@@ -153,7 +159,7 @@ static var emp_t := {0: 0.0, 1: 0.0}
 const EMP_TIME := 60.0
 const JAM_TIME := 45.0
 ## What a counter-UAV keeps on the ground.
-const AIR_STREAKS := ["uav", "strike", "strafe", "gunship", "carpet", "cruise", "swarm", "heli", "armour"]
+const AIR_STREAKS := ["uav", "strike", "strafe", "gunship", "carpet", "cruise", "swarm", "heli", "armour", "chopper"]
 ## The cruise missile in the air, if there is one.
 var _cruise: CruiseMissile = null
 ## Warheads on their way: [seconds left, where, lethal radius, strategic].
@@ -162,6 +168,30 @@ const TAC_LETHAL := 80.0
 const STRAT_LETHAL := 1500.0
 ## The drone a UAV streak puts up, while it is up.
 var _uav: UavDrone = null
+## A low pass down a line letting canisters go every `step` metres: smoke or
+## white phosphorus, instead of bombs. The run is a `CarpetRun`, so the map
+## has the aircraft coming in and the canisters falling.
+func _payload_run(what: String, a: Vector3, b: Vector3, label: String, step: float) -> CarpetRun:
+	var nato: bool = ["usa", "uk", "france"].has(Sim.home_faction)
+	var r := CarpetRun.new()
+	r.arena = self
+	r.payload = what
+	r.spec_id = "a10" if nato else "su35"
+	r.label = label
+	r.speed = 140.0
+	r.height = 90.0
+	r.spacing = step
+	r.longest = maxf(a.distance_to(b), 10.0)
+	r.run_in = 2600.0
+	r.cluster = false
+	r.load_weapon = "gbu32"
+	r.min_bombs = 2
+	r.max_bombs = 24
+	r.from = Vector3(a.x, _ground(a.x, a.z), a.z)
+	r.to = Vector3(b.x, _ground(b.x, b.z), b.z)
+	world.add_child(r)
+	return r
+
 ## The first end of a white phosphorus strip, between its two picks.
 var _wp_from := Vector3.INF
 const WP_MAX := 100.0
@@ -600,12 +630,17 @@ func _on_died(who: Soldier, killer: Node, head: bool) -> void:
 ## driver, and the player as YOU.
 func _feed(killer: Node, victim: String, victim_team: int, weapon: String,
 		head := false) -> void:
-	var by: Node = killer
+	# Either of them may be gone by now -- the man who fired the round dead
+	# before it landed, the player's walker freed when he climbed into
+	# something -- and a freed object handed to a typed parameter is an error
+	# before the function can look at it.
+	var me: Node = player if is_instance_valid(player) else null
+	var by: Node = killer if is_instance_valid(killer) else null
 	if by is Tank and is_instance_valid(world) and world.get("tank") == by:
-		by = player
-	var kname: String = KillFeed.name_of(by, player)
+		by = me
+	var kname: String = KillFeed.name_of(by, me)
 	var kteam: int = KillFeed.team_of(by)
-	if by == player and is_instance_valid(player):
+	if by != null and by == me:
 		kteam = 0
 	if kname == victim:
 		kname = ""
@@ -1050,6 +1085,12 @@ func inbound() -> Array:
 			out.append({"kind": "missile", "at": _warhead_at(nk),
 				"head": (nk[1] as Vector3) - (nk[4] as Vector3),
 				"from": nk[4], "to": nk[1], "label": "WARHEAD", "eta": float(nk[0])})
+	# armour he had dropped, where it is now
+	for v in get_tree().get_nodes_in_group("vehicles"):
+		var tv := v as Tank
+		if tv != null and tv.alive and tv.team == 0 and tv.has_meta("dropped"):
+			out.append({"kind": "mark", "at": tv.global_position, "r": 6.0,
+				"label": "YOUR %s" % tv.display_name().to_upper()})
 	for n2 in world.get_children():
 		if n2 is CarpetRun and is_instance_valid(n2):
 			var cr := n2 as CarpetRun
@@ -1063,6 +1104,45 @@ func inbound() -> Array:
 				"eta": gr2.until_fire()})
 		elif n2 is CarpetBomb and is_instance_valid(n2):
 			out.append({"kind": "falling", "at": (n2 as Node3D).global_position})
+		# what this side has put on the ground and in the air besides
+		elif n2 is SmokeScreen and is_instance_valid(n2):
+			var ss := n2 as SmokeScreen
+			out.append({"kind": "area", "at": ss.from.lerp(ss.to, 0.5), "from": ss.from,
+				"to": ss.to, "label": "SMOKE", "tint": Color(0.75, 0.78, 0.8)})
+		elif n2 is NapalmStrike and is_instance_valid(n2):
+			var ns2 := n2 as NapalmStrike
+			out.append({"kind": "area", "at": ns2.from.lerp(ns2.to, 0.5), "from": ns2.from,
+				"to": ns2.to, "label": "BURNING", "tint": Color(1.0, 0.45, 0.15)})
+		elif n2 is SupplyCrate and is_instance_valid(n2):
+			var sc2 := n2 as SupplyCrate
+			var falling: bool = not sc2.is_in_group("pickups")
+			out.append({"kind": "mark", "at": sc2.target, "r": 4.0,
+				"label": ("SUPPLY" if sc2.kind == "supply" else "VESTS") + (
+					"  %ds" % int(ceil((sc2.global_position.y - sc2.target.y) / SupplyCrate.FALL_SPEED))
+					if falling else "")})
+		elif n2 is VehicleDrop and is_instance_valid(n2) and is_instance_valid((n2 as VehicleDrop).vehicle):
+			var vt: Tank = (n2 as VehicleDrop).vehicle
+			out.append({"kind": "mark", "at": vt.global_position, "r": 6.0,
+				"label": "%s  %ds" % [vt.display_name().to_upper(),
+					int(ceil((vt.global_position.y - (n2 as VehicleDrop)._ground) / VehicleDrop.SINK))]})
+		elif n2 is SentryTurret and is_instance_valid(n2) and (n2 as SentryTurret).team == 0 \
+				and (n2 as SentryTurret).alive:
+			out.append({"kind": "gun", "at": (n2 as Node3D).global_position,
+				"label": "SENTRY %d" % (n2 as SentryTurret).rounds})
+		elif n2 is Switchblade and is_instance_valid(n2) and (n2 as Switchblade).team == 0:
+			var swd := n2 as Switchblade
+			var st_d: Dictionary = {"kind": "drone", "at": swd.global_position, "head": swd.vel,
+				"label": "SWITCHBLADE"}
+			if is_instance_valid(swd._target):
+				st_d["to"] = swd._target.global_position
+			out.append(st_d)
+		elif n2 is AttackDog and is_instance_valid(n2) and (n2 as AttackDog).alive \
+				and (n2 as AttackDog).team == 0:
+			out.append({"kind": "unit", "at": (n2 as Node3D).global_position, "label": "K9"})
+		elif n2 is AIHeli and is_instance_valid(n2) and (n2 as AIHeli).arena == self:
+			out.append({"kind": "plane", "at": (n2 as Node3D).global_position,
+				"head": (n2 as AIHeli).linear_velocity, "label": "GUNSHIP",
+				"eta": maxf((n2 as AIHeli).patrol_t, 0.0)})
 	if is_instance_valid(_cruise):
 		var v: Vector3 = _cruise.vel
 		out.append({"kind": "missile", "at": _cruise.global_position, "head": v,
@@ -1142,18 +1222,51 @@ func _call(id: String) -> bool:
 			h.linear_velocity = -back * 40.0
 			Sim.report("gunship on station for %d seconds — it hunts on its own" % int(HELI_TIME), Sim.Ev.GOOD)
 			return true
+		"jugg":
+			if not is_instance_valid(player) or player.juggernaut:
+				return false
+			player.suit_up()
+			Sim.report("juggernaut — %d of armour and a minigun; no sprinting" % int(Walker.JUGG_ARMOUR),
+				Sim.Ev.GOOD)
+			return true
+		"dogs":
+			var dc: Vector3 = player.global_position
+			for i in 3:
+				var dg := AttackDog.new()
+				dg.team = 0
+				dg.arena = self
+				dg.owner_node = player
+				dg.slot = i
+				world.add_child(dg)
+				var off := Vector3(cos(TAU * i / 3.0) * 1.2, 0.0, sin(TAU * i / 3.0) * 1.2)
+				dg.global_position = Vector3(dc.x + off.x, _ground(dc.x + off.x, dc.z + off.z), dc.z + off.z)
+			Sim.report("dogs loose — three of them, after the nearest of theirs", Sim.Ev.GOOD)
+			return true
 		"swarm":
+			# A transport over him, and four off its ramp as it passes.
 			var c: Vector3 = player.global_position
-			for i in 4:
-				var sb := Switchblade.new()
-				sb.team = 0
-				sb.arena = self
-				sb.owner_node = player
-				sb.centre = c
-				sb.slot = i
-				world.add_child(sb)
-				sb.global_position = c + Vector3(cos(TAU * i / 4.0) * 1.5, 1.6, sin(TAU * i / 4.0) * 1.5)
-			Sim.report("switchblades up — four, and each will find its own man", Sim.Ev.GOOD)
+			var fwd_s := Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
+			var run := CarpetRun.new()
+			run.arena = self
+			run.payload = "drones"
+			run.drone_centre = c
+			run.spec_id = "c130"
+			run.label = "SWITCHBLADES"
+			run.speed = 120.0
+			run.height = 320.0
+			run.spacing = 25.0
+			run.longest = 75.0
+			run.run_in = 3000.0
+			run.cluster = false
+			run.min_bombs = 4
+			run.max_bombs = 4
+			var sa: Vector3 = c - fwd_s * 40.0
+			var sb2: Vector3 = c + fwd_s * 35.0
+			run.from = Vector3(sa.x, _ground(sa.x, sa.z), sa.z)
+			run.to = Vector3(sb2.x, _ground(sb2.x, sb2.z), sb2.z)
+			world.add_child(run)
+			Sim.report("switchblades inbound — a transport over you in about %d seconds, four off the ramp" % int(run.eta),
+				Sim.Ev.GOOD)
 			return true
 		"wp":
 			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
@@ -1165,25 +1278,22 @@ func _call(id: String) -> bool:
 						func(q: Vector3): _picked("wp", q)))
 			return false
 		"wp_at":
-			var ns := NapalmStrike.new()
 			var a: Vector3 = _wp_from if _wp_from != Vector3.INF else _pick_at
 			var run: Vector3 = _pick_at - a
 			run.y = 0.0
 			if run.length() < 3.0:
 				# one click: across his line to it, sixty metres
-				var look := Vector3(_pick_at.x - player.global_position.x, 0.0,
+				var look2 := Vector3(_pick_at.x - player.global_position.x, 0.0,
 					_pick_at.z - player.global_position.z).normalized()
-				var across: Vector3 = look.cross(Vector3.UP).normalized()
-				a = _pick_at - across * 30.0
-				run = across * 60.0
-			ns.from = Vector3(a.x, _ground(a.x, a.z), a.z)
-			var b: Vector3 = a + run.normalized() * minf(run.length(), WP_MAX)
-			ns.to = Vector3(b.x, _ground(b.x, b.z), b.z)
-			ns.owner_node = player
-			world.add_child(ns)
-			_pick_node = ns
+				var across2: Vector3 = look2.cross(Vector3.UP).normalized()
+				a = _pick_at - across2 * 30.0
+				run = across2 * 60.0
+			var bw: Vector3 = a + run.normalized() * minf(run.length(), WP_MAX)
+			var wr := _payload_run("wp", a, bw, "WHITE PHOSPHORUS", NapalmStrike.STEP)
+			_pick_node = wr
 			_wp_from = Vector3.INF
-			Sim.report("white phosphorus inbound — five seconds, keep out of it", Sim.Ev.GOOD)
+			Sim.report("white phosphorus run inbound — about %d seconds, keep out of the line" % int(wr.eta),
+				Sim.Ev.GOOD)
 			return true
 		"emp":
 			emp_t[1] = EMP_TIME
@@ -1249,26 +1359,26 @@ func _call(id: String) -> bool:
 				world.map.pick(title, func(p: Vector3): _picked(id, p))
 			return false
 		"smoke_at":
-			# Along the line he drew, up to a hundred and twenty metres of it.
-			# Without a first point (a single click) it is laid across his
-			# line to the mark, sixty metres wide, screening it from beyond.
-			var sm := SmokeScreen.new()
-			if _smoke_from != Vector3.INF and _smoke_from.distance_to(_pick_at) > 3.0:
-				var run: Vector3 = _pick_at - _smoke_from
-				run.y = 0.0
-				sm.from = _smoke_from
-				sm.to = _smoke_from + run.normalized() * minf(run.length(), SMOKE_MAX)
-			else:
+			# Laid by an aircraft down the line he drew: a canister every few
+			# metres, each a bank of smoke where it lands. A single click lays
+			# it across his line to the mark, sixty metres wide.
+			var sa: Vector3 = _smoke_from
+			var sb: Vector3 = _pick_at
+			if sa == Vector3.INF or sa.distance_to(sb) < 3.0:
 				var look := Vector3(_pick_at.x - player.global_position.x, 0.0,
 					_pick_at.z - player.global_position.z)
 				look = look.normalized() if look.length() > 2.0 else Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
 				var across: Vector3 = look.cross(Vector3.UP).normalized()
-				sm.from = _pick_at - across * 30.0
-				sm.to = _pick_at + across * 30.0
+				sa = _pick_at - across * 30.0
+				sb = _pick_at + across * 30.0
+			var run_s: Vector3 = sb - sa
+			run_s.y = 0.0
+			sb = sa + run_s.normalized() * minf(run_s.length(), SMOKE_MAX)
+			var sr := _payload_run("smoke", sa, sb, "SMOKE", SmokeScreen.SPACING)
+			_pick_node = sr
 			_smoke_from = Vector3.INF
-			world.add_child(sm)
-			_pick_node = sm
-			Sim.report("smoke on the way — the first rounds land in four seconds", Sim.Ev.GOOD)
+			Sim.report("smoke run inbound — canisters down your line in about %d seconds" % int(sr.eta),
+				Sim.Ev.GOOD)
 			return true
 		"supply_at", "vest_at":
 			var cr := SupplyCrate.new()
@@ -1431,6 +1541,11 @@ func _call(id: String) -> bool:
 					_ground(centre.x, centre.y), centre.y)):
 				return true
 			return false
+		"chopper":
+			if world.has_method("cqb_gunship") and world.cqb_gunship(Vector3(centre.x,
+					_ground(centre.x, centre.y), centre.y), "chopper"):
+				return true
+			return false
 		"missile":
 			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
 				_picking = true
@@ -1502,6 +1617,11 @@ class CarpetRun extends Node3D:
 	## of bombs (see `_call("strike_at")`). One run, so the release is worked
 	## out the same way for both and the bombs land on the line either way.
 	var spec_id := "b2"
+	## What each canister is: "" a bomb, "smoke" a smoke bank where it lands,
+	## "wp" white phosphorus burning where it lands, "drones" a switchblade
+	## off the ramp -- which circles over `drone_centre` looking.
+	var payload := ""
+	var drone_centre := Vector3.ZERO
 	var speed := 230.0
 	var height := 1100.0
 	## Between canisters. Each one opens over the line and covers sixty metres
@@ -1547,7 +1667,7 @@ class CarpetRun extends Node3D:
 		var flown := 0.0
 		var t := 0.0
 		while p.y > base and t < 60.0:
-			v = Ballistics.step(p, v, CarpetBomb.DRAG, 1.0 / 120.0, flown)
+			v = Ballistics.step(p, v, CarpetBomb.drag_for(payload), 1.0 / 120.0, flown)
 			p += v / 120.0
 			flown += v.length() / 120.0
 			t += 1.0 / 120.0
@@ -1597,10 +1717,25 @@ class CarpetRun extends Node3D:
 		global_position = _start + _dir * _along
 		while not _drops.is_empty() and _along >= float(_drops[0]):
 			_drops.pop_front()
+			if payload == "drones":
+				# out of the back over the ramp, one after another; each is
+				# its own from there on
+				var sw := Switchblade.new()
+				sw.team = 0
+				sw.arena = arena
+				sw.owner_node = arena.player if is_instance_valid(arena) else null
+				sw.centre = drone_centre
+				sw.slot = _dropped
+				get_parent().add_child(sw)
+				sw.global_position = global_transform * Vector3(0.0, -2.0, 14.0)
+				sw.vel = _dir * speed * 0.35 + Vector3(0, -6.0, 0)
+				_dropped += 1
+				continue
 			var b := CarpetBomb.new()
 			b.arena = arena
 			b.vel = _dir * speed
 			b.cluster = cluster
+			b.payload = payload
 			get_parent().add_child(b)
 			# every other bomb off the wingman, from where he actually is
 			var off := Vector3(0.0, -3.0, 0.0)
@@ -2296,6 +2431,13 @@ class CarpetBomb extends Node3D:
 	## fast like a missile. The run works its release point out with this same
 	## figure, so the carpet still lands where it was drawn.
 	const DRAG := 0.0015
+	## A canister on a drogue -- smoke, white phosphorus -- braked to come
+	## down nearly straight. Thrown off a low pass at bomb drag they flew on
+	## for hundreds of metres at a shallow slant, and all of them went into
+	## the first wall along the run instead of onto their stretch of street.
+	const RETARDED := 0.03
+	static func drag_for(payload_kind: String) -> float:
+		return DRAG if payload_kind == "" else RETARDED
 	## The short streak a bomblet trails: one mesh and one material for all of
 	## them. The canisters trail nothing -- a long white line behind a falling
 	## bomb is what made a stick of them read as rockets.
@@ -2315,6 +2457,8 @@ class CarpetBomb extends Node3D:
 	var arena: CqbMatch = null
 	var vel := Vector3.ZERO
 	var cluster := false
+	## See `CarpetRun.payload`.
+	var payload := ""
 	## A bomblet out of a canister rather than a bomb.
 	var bomblet := false
 	var _flown := 0.0
@@ -2351,7 +2495,7 @@ class CarpetBomb extends Node3D:
 		add_child(trail)
 
 	func _physics_process(delta: float) -> void:
-		vel = Ballistics.step(global_position, vel, DRAG, delta, _flown)
+		vel = Ballistics.step(global_position, vel, drag_for(payload), delta, _flown)
 		var nxt: Vector3 = global_position + vel * delta
 		_flown += vel.length() * delta
 		var floor_y: float = maxf(Sim.height_at(nxt.x, nxt.z), Obstacles.top_at(nxt.x, nxt.z))
@@ -2373,6 +2517,24 @@ class CarpetBomb extends Node3D:
 				get_parent().add_child(c)
 				c.place(nxt)
 			Effects.dust(get_tree().current_scene, nxt, 4.0)
+			queue_free()
+			return
+		if nxt.y <= floor_y and payload != "":
+			var hit := Vector3(nxt.x, floor_y, nxt.z)
+			var world0 := get_tree().current_scene
+			if payload == "smoke":
+				var sm := SmokeScreen.new()
+				sm.from = hit
+				sm.to = hit
+				sm.delay = 0.0
+				world0.add_child(sm)
+			else:
+				var ns := NapalmStrike.new()
+				ns.from = hit
+				ns.to = hit
+				ns.delay = 0.0
+				ns.owner_node = arena.player if is_instance_valid(arena) else null
+				world0.add_child(ns)
 			queue_free()
 			return
 		if nxt.y <= floor_y:

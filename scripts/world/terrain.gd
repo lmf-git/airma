@@ -743,6 +743,26 @@ static func in_root(x: float, z: float) -> bool:
 ## What depth the tree draws a point at, by descent from the root. Zero when the
 ## point is outside the root entirely. The harness's second opinion about every
 ## neighbour lookup the walk makes.
+## The ground where it is drawn, at a point, for a viewer at `eye`: the terrain
+## mesh's own triangle there, at whatever detail the mesh has there now.
+##
+## `Sim.height_at` is the ground everything is computed from, and the mesh is
+## that ground sampled every so many metres and drawn flat between. Where the
+## ground bends between two samples -- the bank of a bridge ramp, a cutting --
+## the two part company, and a man stood on the true ground sank into the
+## grass he could see, or hung over it. Whoever is seen standing on the
+## ground stands on this.
+static func drawn_ground(x: float, z: float, eye: Vector3) -> float:
+	# a carrier's deck is not terrain: on one, the deck
+	if Sim.globe or not in_root(x, z) or (not Sim.decks.is_empty() and Sim.deck_height(x, z) > -1e8):
+		return Sim.height_at(x, z)
+	var depth: int = Sim.native.terrain_depth_at(x, z, eye)
+	if depth <= 0:
+		return Sim.height_at(x, z)
+	var cell: float = ROOT_SPAN / (pow(2.0, float(depth)) * float(CELLS))
+	var got: PackedFloat32Array = Sim.native.surfaces_at(PackedVector2Array([Vector2(x, z)]), cell)
+	return got[0] if got.size() > 0 else Sim.height_at(x, z)
+
 func depth_at(x: float, z: float, eye: Vector3) -> int:
 	return Sim.native.terrain_depth_at(x, z, eye)
 

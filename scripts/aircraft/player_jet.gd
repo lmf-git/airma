@@ -18,6 +18,9 @@ var hover_alt := 900.0     # height the scripted hover holds
 var _dash_alt := 1000.0
 var bank_deg := 0.0
 var orbit_alt := 2500.0
+## Leaving: where it started from, and how far off it is taken away.
+var _depart_from := Vector3.INF
+const DEPART_GONE := 4000.0
 var orbit_speed := 120.0
 
 func _ready() -> void:
@@ -335,6 +338,18 @@ func _auto_pilot(delta: float) -> void:
 	_auto_t += delta
 	var _kias := ias * 1.94384
 	match auto:
+		"depart":
+			# done: wings level, climbing away, and gone once it is well off
+			if _depart_from == Vector3.INF:
+				_depart_from = global_position
+			var bd := global_transform.basis
+			var bank_d := atan2(-bd.x.y, bd.y.y)
+			in_roll = clampf(-bank_d * 1.6 - angular_velocity.dot(-bd.z) * 0.9, -1.0, 1.0)
+			in_yaw = 0.0
+			in_pitch = clampf((8.0 - linear_velocity.y) * 0.05 + 0.08, -0.3, 0.5)
+			throttle = 1.0
+			if global_position.distance_to(_depart_from) > DEPART_GONE:
+				queue_free()
 		"takeoff":
 			throttle = 1.0
 			wheel_brake = _auto_t < 1.0

@@ -62,7 +62,7 @@ func resupply(who: Node) -> void:
 func _give(who: Node) -> void:
 	if kind == "vest":
 		if "armour" in who:
-			who.set("armour", VEST)
+			who.set("armour", maxf(float(who.get("armour")), VEST))
 		if who.has_method("rearm") and who is Walker:
 			Sim.report("ballistic vest on — it takes half of every hit until it is spent",
 				Sim.Ev.GOOD)
