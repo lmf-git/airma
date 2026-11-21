@@ -43,6 +43,16 @@ func parse_arg(a: String) -> bool:
 		_hn_shots = a.substr(12)
 	elif a == "--nettest":
 		_nettest = true
+	elif a == "--redeploytest":
+		_rd_test = true
+	elif a.begins_with("--lobbytest="):
+		_lb_role = a.substr(12)
+	elif a.begins_with("--mpside="):
+		_mp_side = int(a.substr(9))
+	elif a.begins_with("--mphostside="):
+		_mp_hostside = int(a.substr(13))
+	elif a.begins_with("--mpflip="):
+		_mp_flip = float(a.substr(9))
 	elif a.begins_with("--mptest="):
 		# two copies: --mptest=host, then --mptest=join on the same machine
 		_mp_role = a.substr(9)
@@ -968,6 +978,14 @@ func tick_nettest() -> void:
 ## running and what it has been sent.
 ##   --preset=ground:foot --mptest=host     then     --preset=ground:foot --mptest=join
 var _mp_role := ""
+## The client's side: 0 BLUE with the host, 1 RED against it.
+var _mp_side := 0
+var _mp_hostside := 0
+## Seconds into the session at which the client changes side, or -1.
+var _mp_flip := -1.0
+var _mp_cqb_t := 0.0
+var _mp_act := 0
+var _mp_ammo0 := 0
 var _mp_t := 0.0
 var _mp_said := 0.0
 var _mp_step := 0
@@ -980,13 +998,15 @@ func tick_mptest(delta: float) -> void:
 	if _mp_role == "host" and _mp_step == 0 and world.running:
 		_mp_step = 1
 		world.net.host("f16")
+		world.net.set_side(_mp_hostside)
 		world.net.running_mission = String(world.menu.mission_id) if world.menu != null else "ground"
 		world.net.running_mission = "ground"
 		print("[mp] host: hosting, running ground")
 	elif _mp_role == "join" and _mp_step == 0 and world.running:
 		_mp_step = 1
+		world.net.set_side(_mp_side)
 		world.net.join("127.0.0.1", "f16")
-		print("[mp] join: joining")
+		print("[mp] join: joining as %s" % ("RED" if _mp_side == 1 else "BLUE"))
 	if _mp_role == "host":
 		var peers: int = world.net.roster.size()
 		if _mp_step == 1 and peers > 1:
@@ -1020,9 +1040,16 @@ func tick_mptest(delta: float) -> void:
 				men = world.cqb.soldiers.size()
 			if is_instance_valid(world.mode):
 				kills = "%d:%d" % [int(world.mode.kills.get(0, 0)), int(world.mode.kills.get(1, 0))]
-			print("[mp] host t=%.0f gen=%d mission=%s peers=%d men=%d units=%d net_men=%d kills=%s launches_sent=%d" % [
+			var gjet := "-"
+			for gid in world.net.ghosts:
+				var gg: Variant = world.net.ghosts[gid]
+				if is_instance_valid(gg):
+					gjet = "%s%s" % [String((gg as Node).get_meta("jet", "?")),
+						" seen" if (gg as Node3D).visible else " hidden"]
+			print("[mp] host t=%.0f gen=%d mission=%s peers=%d men=%d units=%d net_men=%d kills=%s launches_sent=%d drawn=%d their_aircraft=%s" % [
 				_mp_t, world.net.match_gen, String(Sim.mission), peers, men, world.net.units.size(),
-				world.get_tree().get_nodes_in_group("net_men").size(), kills, world.net.launches_sent])
+				world.get_tree().get_nodes_in_group("net_men").size(), kills, world.net.launches_sent,
+				world.net.launches_drawn, gjet])
 		return
 	# the client
 	if _mp_t - _mp_said > 3.0:
@@ -1040,10 +1067,64 @@ func tick_mptest(delta: float) -> void:
 		if is_instance_valid(world.cqb):
 			mine = world.cqb.kills
 		var hp: float = world.walker.health if is_instance_valid(world.walker) else -1.0
+		# which end of town he is at, and who is on whose side here
+		if is_instance_valid(world.cqb) and is_instance_valid(world.walker):
+			var by_team := {0: 0, 1: 0}
+			for k2 in world.net.units:
+				var u3: Variant = world.net.units[k2]
+				if is_instance_valid(u3) and u3 is Soldier:
+					by_team[(u3 as Soldier).team] = int(by_team[(u3 as Soldier).team]) + 1
+			print("[mp] join sides: me at %+.0f m north-south of the middle; host's men here: %d ours, %d theirs; zones %s" % [
+				world.walker.global_position.z - world.cqb.centre.y, int(by_team[0]), int(by_team[1]),
+				str(world.get_tree().get_nodes_in_group("zones").map(func(z): return int(z.owner_team)))])
 		print("[mp] join t=%.0f gen=%d mission=%s units=%s ai=%d my_kills=%d match_kills=%s mirror=%s vehicle_rounds=%s launches_drawn=%d missiles=%d hp=%.0f" % [
 			_mp_t, world.net.match_gen, String(Sim.mission), str(kinds), world.net.ai_ghosts.size(),
 			mine, kills, str(NetLink.mirroring()), str(world.net.vehicle_rounds_drawn), world.net.launches_drawn,
 			world.get_tree().get_nodes_in_group("missiles").size(), hp])
+	if _mp_flip > 0.0 and _mp_t > _mp_flip:
+		_mp_flip = -1.0
+		world.net.set_side(1 - world.net.abs_side)
+		if is_instance_valid(world.walker) and is_instance_valid(world.cqb):
+			world.walker.global_position = world.cqb.spawn_point(0, 0)
+		print("[mp] join: switched to %s (frame side %d)" % ["RED" if world.net.abs_side == 1 else "BLUE",
+			world.net.side])
+	# In the street fight: everything a man can send over -- a grenade, a
+	# flashbang, a rocket off the shoulder -- then a strike and the chopper
+	# gunner, once each, for the host to say it saw.
+	if world.net.match_gen >= 4 and String(Sim.mission) == "cqb" and is_instance_valid(world.walker) \
+			and is_instance_valid(world.cqb):
+		_mp_cqb_t += delta
+		var w: Walker = world.walker
+		if _mp_act == 0 and _mp_cqb_t > 2.0:
+			_mp_act = 1
+			w._throw_flash = false
+			w._throw()
+			w._throw_flash = true
+			w._throw()
+			Firearm.rocket(world, w, w.side, Firearm.spec("law"), w.global_position + Vector3(0, 1.6, 0),
+				Vector3(0, 0.05, -1).normalized())
+			print("[mp] join: threw a grenade and a flashbang, fired a rocket")
+		elif _mp_act == 1 and _mp_cqb_t > 4.0:
+			_mp_act = 2
+			world.cqb.bank["strike"] = 1
+			var c := Vector3(world.cqb.centre.x, 0.0, world.cqb.centre.y - 40.0)
+			world.cqb._picked("strike", c)
+			print("[mp] join: called an airstrike")
+		elif _mp_act == 3 and _mp_cqb_t > 9.0:
+			_mp_act = 4
+			_mp_ammo0 = w.ammo
+			Sim.menu_open = false
+			Input.action_press(&"foot_fire")
+			print("[mp] join: trigger down")
+		elif _mp_act == 4 and _mp_cqb_t > 11.0:
+			_mp_act = 5
+			Input.action_release(&"foot_fire")
+			print("[mp] join: trigger up, %d rounds fired" % (_mp_ammo0 - w.ammo))
+		elif _mp_act == 2 and _mp_cqb_t > 6.0:
+			_mp_act = 3
+			world.cqb.bank["chopper"] = 1
+			var ok: bool = world.cqb._call("chopper")
+			print("[mp] join: called the chopper gunner: %s" % str(ok))
 	# a burst into the nearest of the host's men every second
 	_mp_shot += delta
 	if _mp_shot > 1.0 and is_instance_valid(world.cqb) and is_instance_valid(world.walker):
@@ -1056,4 +1137,189 @@ func tick_mptest(delta: float) -> void:
 				break
 	if _mp_t > 175.0:
 		world.get_tree().quit()
+#endregion
+
+
+#region --lobbytest
+## The session as a player makes it: HOST and JOIN from the hangar, the host
+## presses LAUNCH, and each end says, every few seconds, whether it can see
+## the other -- the ghost of his aircraft or the figure of his man on foot,
+## where, and whether it is drawn.
+##   --lobbytest=host     then     --lobbytest=join   (no preset: from the hangar)
+## Add --lobbymode=MODE:VEHICLE for what the host launches (default cqb:foot).
+var _lb_role := ""
+var _lb_t := 0.0
+var _lb_said := 0.0
+var _lb_step := 0
+var _lb_mode := "cqb:foot"
+var _lb_launched := -1.0
+
+func tick_lobby(delta: float) -> void:
+	if _lb_role == "" or world.net == null or world.booting:
+		return
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--lobbymode="):
+			_lb_mode = a.substr(12)
+	_lb_t += delta
+	if _lb_step == 0 and _lb_t > 2.0:
+		_lb_step = 1
+		if _lb_role == "host":
+			world._host_game(String(world.menu.jet_id), "")
+			print("[lobby] host: HOST pressed; running=%s" % str(world.running))
+		else:
+			world._join_game(String(world.menu.jet_id), "127.0.0.1")
+			print("[lobby] join: JOIN pressed; running=%s" % str(world.running))
+	if _lb_role == "host" and _lb_step == 1 and world.net.roster.size() > 1 and _lb_t > 8.0:
+		_lb_step = 2
+		var parts := _lb_mode.split(":")
+		print("[lobby] host: LAUNCH %s" % _lb_mode)
+		_lb_launched = _lb_t
+		world._start(parts[1] if parts.size() > 1 else "f16", parts[0])
+	if _lb_role == "join" and _lb_launched < 0.0 and world.running:
+		_lb_launched = _lb_t
+	if _lb_t - _lb_said < 3.0:
+		return
+	_lb_said = _lb_t
+	var me: Node3D = null
+	if world.on_foot and is_instance_valid(world.walker):
+		me = world.walker
+	elif is_instance_valid(world.tank):
+		me = world.tank
+	elif is_instance_valid(world.player):
+		me = world.player
+	var seen: Array = []
+	for pid in world.net.ghosts:
+		var g: Variant = world.net.ghosts[pid]
+		if is_instance_valid(g):
+			seen.append("jet%d=%s vis=%s in_tree=%s %s" % [pid, String((g as Node).get_meta("jet", "?")),
+				str((g as Node3D).visible),
+				str((g as Node).is_inside_tree()),
+				"%.0fm" % (g as Node3D).global_position.distance_to(me.global_position) if me != null else "-"])
+	for pid2 in world.net.foot_ghosts:
+		var f: Variant = world.net.foot_ghosts[pid2]
+		if is_instance_valid(f):
+			seen.append("man%d vis=%s %s" % [pid2, str((f as Node3D).visible),
+				"%.0fm" % (f as Node3D).global_position.distance_to(me.global_position) if me != null else "-"])
+	for pid3 in world.net.veh_ghosts:
+		var v: Variant = world.net.veh_ghosts[pid3]
+		if is_instance_valid(v):
+			seen.append("veh%d vis=%s" % [pid3, str((v as Node3D).visible)])
+	print("[lobby] %s t=%.0f running=%s mission=%s gen=%d roster=%d me=%s on_foot=%s tx=%d rx=%d sees: %s" % [
+		_lb_role, _lb_t, str(world.running), String(Sim.mission), world.net.match_gen,
+		world.net.roster.size(), str(me.global_position.round()) if me != null else "-",
+		str(world.on_foot), world.net.tx, world.net.rx, ", ".join(PackedStringArray(seen))])
+	if _lb_launched > 0.0 and _lb_t - _lb_launched > 40.0:
+		world.get_tree().quit()
+	if _lb_t > 400.0:
+		world.get_tree().quit()
+#endregion
+
+
+#region --redeploytest
+## As a joiner in a runway start: get out with U, get killed on foot, come back
+## in a tank, lose it, come back on foot, then in an aeroplane -- each step
+## said, and each checked. With --lobbytest=join and the host on takeoff.
+var _rd_test := false
+var _rd_step := 0
+var _rd_t := 0.0
+var _rd_bad: Array = []
+
+func tick_redeploy(delta: float) -> void:
+	if not _rd_test or not world.running or world.net == null or world.net.match_gen == 0:
+		return
+	_rd_t += delta
+	match _rd_step:
+		0:
+			if _rd_t < 4.0:
+				return
+			if world.boarding:
+				world._end_boarding()
+			var p: Aircraft = world.player
+			p.linear_velocity = Vector3.ZERO
+			p.throttle = 0.0
+			p.on_ground = true
+			# U, held as a man does: down for a few frames, the dismount on the
+			# key event, the tap latched the way `Sim._input` latches it
+			Input.action_press(&"interact")
+			Sim._taps[&"interact"] = Time.get_ticks_msec()
+			world._try_dismount()
+			_rd_step = 1
+			_rd_t = 0.0
+		1:
+			if _rd_t > 0.1:
+				Input.action_release(&"interact")
+			if _rd_t < 1.5:
+				return
+			print("[redeploy] after U: on foot %s, boarding %s, in the seat %s" % [
+				str(world.on_foot), str(world.boarding), str(not world.on_foot)])
+			if not world.on_foot or world.boarding:
+				_rd_bad.append("U did not get him out")
+			world.walker.take_hit(5000.0, null)
+			_rd_step = 2
+			_rd_t = 0.0
+		2:
+			if _rd_t < 5.0:
+				return
+			print("[redeploy] dead on foot: chooser up %s, launch reads %s, enabled %s" % [
+				str(world.menu.visible and world.menu.redeploy), world.menu._launch.text,
+				str(not world.menu._launch.disabled)])
+			if not world.menu.redeploy or world.menu._launch.disabled:
+				_rd_bad.append("no redeploy after dying on foot")
+			world._on_launch("veh:m1a2", String(Sim.mission))
+			_rd_step = 3
+			_rd_t = 0.0
+		3:
+			if _rd_t < 1.0:
+				return
+			var in_tank: bool = is_instance_valid(world.tank) and world.tank.alive
+			print("[redeploy] back in: crewing %s" % (world.tank.display_name() if in_tank else "nothing"))
+			if not in_tank:
+				_rd_bad.append("no tank after redeploy")
+				_rd_step = 9
+				return
+			world.tank.apply_damage(1.0e6)
+			_rd_step = 4
+			_rd_t = 0.0
+		4:
+			if _rd_t < 5.0:
+				return
+			print("[redeploy] tank knocked out: chooser up %s" % str(world.menu.redeploy))
+			if not world.menu.redeploy:
+				_rd_bad.append("no redeploy after losing the tank")
+			world._on_launch("foot", String(Sim.mission))
+			_rd_step = 5
+			_rd_t = 0.0
+		5:
+			if _rd_t < 1.0:
+				return
+			var w: Walker = world.walker
+			var near: float = w.global_position.distance_to(world.player.global_position) \
+				if is_instance_valid(w) and is_instance_valid(world.player) else -1.0
+			print("[redeploy] on foot: %s, %.0f m from his parked %s" % [str(world.on_foot), near,
+				String(world.player.spec.get("name", "")) if is_instance_valid(world.player) else "-"])
+			if not world.on_foot or near < 0.0 or near > 30.0:
+				_rd_bad.append("on foot did not put him by the aeroplane")
+			w.take_hit(5000.0, null)
+			_rd_step = 6
+			_rd_t = 0.0
+		6:
+			if _rd_t < 5.0:
+				return
+			world._on_launch("f16", String(Sim.mission))
+			_rd_step = 7
+			_rd_t = 0.0
+		7:
+			if _rd_t < 1.5:
+				return
+			var p2: Aircraft = world.player
+			print("[redeploy] in an aeroplane: %s alive %s, %.0f m from the runway threshold" % [
+				String(p2.spec.get("name", "")), str(p2.is_alive()),
+				p2.global_position.distance_to(Vector3(0, p2.global_position.y, 1380.0))])
+			if not p2.is_alive() or world.on_foot:
+				_rd_bad.append("no aeroplane after redeploy")
+			_rd_step = 9
+		9:
+			print("[redeploy] RESULT: %s" % ("ok" if _rd_bad.is_empty() else "FAILED -- " + ", ".join(_rd_bad)))
+			_rd_test = false
+			world.get_tree().quit()
 #endregion

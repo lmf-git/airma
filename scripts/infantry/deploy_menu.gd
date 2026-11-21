@@ -13,6 +13,8 @@ extends Control
 ## What a class is set up as stays that way for the session.
 
 signal deploy(what: String)
+## A side chosen, BLUE 0 or RED 1, in a session in a mode with sides.
+signal side_picked(abs_side: int)
 
 const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "aa20", "lmg", "dmr", "sniper",
 	"fifty"]
@@ -103,9 +105,25 @@ func _ready() -> void:
 	pad.add_child(root)
 
 	# ---- header: the title and the tabs
+	# Which side, in a session: asked here, where the match starts and where
+	# everyone comes back to, rather than only in the hangar beforehand.
+	_side_row = HBoxContainer.new()
+	_side_row.add_theme_constant_override("separation", 10)
+	_side_row.visible = false
+	var side_lbl := _label("JOIN", 18, DIM)
+	_side_row.add_child(side_lbl)
+	for sd in [0, 1]:
+		var sb := Button.new()
+		sb.custom_minimum_size = Vector2(190, 40)
+		sb.toggle_mode = true
+		sb.add_theme_font_size_override("font_size", 16)
+		sb.pressed.connect(_pick_side.bind(sd))
+		_side_row.add_child(sb)
+		_side_btns.append(sb)
 	var head := HBoxContainer.new()
 	head.add_theme_constant_override("separation", 10)
 	root.add_child(head)
+	root.add_child(_side_row)
 	var title := _label("DEPLOY", 28, ACCENT)
 	title.custom_minimum_size = Vector2(170, 0)
 	head.add_child(title)
@@ -526,6 +544,27 @@ func _show_page(i: int) -> void:
 ## Show it. `takes` is what the mode lets you bring ("none", "ground", "any")
 ## and `first` is whether the match has not started yet -- the only time
 ## changing aeroplane costs nothing.
+var _side_row: HBoxContainer = null
+var _side_btns: Array = []
+
+## Show the side picker: `mine` is the side this player is on, `counts` how
+## many are on each. Hidden with `mine` below 0.
+func show_sides(mine: int, counts: Array) -> void:
+	if _side_row == null:
+		return
+	_side_row.visible = mine >= 0
+	for i in _side_btns.size():
+		var b := _side_btns[i] as Button
+		b.text = "%s   %d player%s" % ["BLUE" if i == 0 else "RED", int(counts[i]),
+			"" if int(counts[i]) == 1 else "s"]
+		b.button_pressed = i == mine
+		b.modulate = Color(0.55, 0.75, 1.0) if i == 0 else Color(1.0, 0.6, 0.55)
+
+func _pick_side(sd: int) -> void:
+	for i in _side_btns.size():
+		(_side_btns[i] as Button).button_pressed = i == sd
+	side_picked.emit(sd)
+
 func open(takes: String, first: bool, faction: String, points := -1) -> void:
 	_rides.clear()
 	_ride_ids.clear()

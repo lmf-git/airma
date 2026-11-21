@@ -157,6 +157,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 			_impact(maxf(vel.length(), 30.0))
 	if agl < -2.0:
 		_impact(200.0)
+	_midair(pos, vel)
 	var sea_h: float = Sim.sea_at(pos.x, pos.z)
 	if pos.y < sea_h and ground < sea_h:
 		_impact(200.0)

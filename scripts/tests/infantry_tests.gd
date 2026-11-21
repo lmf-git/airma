@@ -38,6 +38,8 @@ func parse_arg(a: String) -> bool:
 		_heli_streak = true
 	elif a == "--ladderfall":
 		_ladder_fall = true
+	elif a == "--ruintest":
+		_wreck_test = true
 	elif a == "--balltest":
 		_ball_test = true
 	elif a == "--boundstest":
@@ -1679,8 +1681,18 @@ func _run_drop_test() -> void:
 	cq.bank["chopper"] = 1
 	var ch_ok: bool = cq._call("chopper")
 	var ch: Aircraft = world._cqb_gunship
+	var c_in := Vector2(cq.centre.x, cq.centre.y)
+	var called_from: float = Vector2(ch.global_position.x, ch.global_position.z).distance_to(c_in) \
+		if is_instance_valid(ch) else -1.0
+	var boarded_at := -1.0
 	for i in Engine.physics_ticks_per_second * 20:
 		await world.get_tree().physics_frame
+		if boarded_at < 0.0 and world.gunning:
+			boarded_at = float(i) / float(Engine.physics_ticks_per_second)
+	print("[drop] chopper gunner: called up %.0f m out from the town, on the guns after %.1f s" % [
+		called_from, boarded_at])
+	if called_from < 900.0 or boarded_at < 5.0:
+		bad.append("the chopper gunner did not fly in")
 	var c2 := Vector2(cq.centre.x, cq.centre.y)
 	var agl := -1.0
 	var rad := -1.0
@@ -1741,6 +1753,97 @@ func _run_drop_test() -> void:
 	seen.sort()
 	print("[drop] on the map along the way: %s" % ", ".join(PackedStringArray(seen)))
 	print("[drop] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
+	world.get_tree().quit()
+#endregion
+
+#region --ruintest
+## What is drawn and what is solid after things are blown up, in a street
+## fight: a bomb into a block, onto the props in a street, and a tank knocked
+## out. Each should be a heap you can see and that stops a round, with nothing
+## left standing whole that rounds go through. --preset=ground:foot --ruintest
+var _wreck_test := false
+
+func tick_wreck_test() -> void:
+	if not _wreck_test or not is_instance_valid(world.cqb):
+		return
+	_wreck_test = false
+	_run_wreck_test()
+
+func _run_wreck_test() -> void:
+	var ts: TownSet = world.cqb.dressing
+	var c := Vector3(world.cqb.centre.x, 0.0, world.cqb.centre.y)
+	var bad: Array = []
+	# the nearest proper block to the middle of town
+	var block := -1
+	var bd := 1e9
+	for id in Obstacles.ids_in(Vector2(c.x - 120, c.z - 120), Vector2(c.x + 120, c.z + 120)):
+		if Obstacles.gone(id) or not Obstacles._squash.has(id):
+			continue
+		var h: Vector2 = Obstacles.half_of(id)
+		if minf(h.x, h.y) < 6.0:
+			continue
+		var d: float = Vector2(Obstacles.centre_of(id).x - c.x, Obstacles.centre_of(id).z - c.z).length()
+		if d < bd:
+			bd = d
+			block = id
+	# and the props standing near it, before
+	var bc: Vector3 = Obstacles.centre_of(block)
+	var props_near := 0
+	for id2 in ts._box_mesh.keys():
+		if Obstacles.centre_of(int(id2)).distance_to(bc) < 30.0:
+			props_near += 1
+	var top_before: float = Obstacles.top_of(block)
+	world.scenery.damage_area(Vector3(bc.x, Sim.height_at(bc.x, bc.z) + 2.0, bc.z), 30.0)
+	for i in Engine.physics_ticks_per_second:
+		await world.get_tree().physics_frame
+	var heap: int = Obstacles.rubble_of(block)
+	var g: float = Sim.height_at(bc.x, bc.z)
+	var heap_top: float = Obstacles.top_of(heap) - g if heap >= 0 else -1.0
+	var h2: Vector2 = Obstacles.half_of(block)
+	var low_a: Vector3 = bc + Vector3(-h2.x - 20.0, 0.0, 0.0)
+	var low_b: Vector3 = bc + Vector3(h2.x + 20.0, 0.0, 0.0)
+	var low_y: float = g + minf(heap_top * 0.5, 0.6)
+	var stops_low: bool = Obstacles.segment(Vector3(low_a.x, low_y, low_a.z), Vector3(low_b.x, low_y, low_b.z)) < 1.0
+	print("[ruin] block %.0f m tall: gone %s, heap %.1f m (drawn at %.1f), stops a round at %.1f m: %s" % [
+		top_before - g, str(Obstacles.gone(block)), heap_top, (top_before - g) * Scenery.BLOCK_HEAP - 0.4,
+		low_y - g, str(stops_low)])
+	if not Obstacles.gone(block) or heap < 0 or not stops_low:
+		bad.append("the block left no solid heap")
+	# props: every one whose box came out is drawn down, and has a heap
+	var standing_ghosts := 0
+	var downed := 0
+	# a prop whose box went and whose mesh did not is the bug
+	for mi in ts.get_children():
+		if mi is MeshInstance3D and String(mi.name).begins_with("Prop") and not mi.has_meta("flat") \
+				and (mi as Node3D).global_position.distance_to(bc) < 30.0 - 2.0:
+			if Obstacles.blocks((mi as Node3D).global_position + Vector3(0, 0.3, 0), 0.3) < 0 \
+					and Obstacles.hit((mi as Node3D).global_position + Vector3(0, 0.8, 0), 0.3) < 0:
+				standing_ghosts += 1
+		if mi is MeshInstance3D and mi.has_meta("flat"):
+			downed += 1
+	print("[ruin] %d props near it before; %d drawn down after, %d still drawn standing with nothing solid there" % [
+		props_near, downed, standing_ghosts])
+	if standing_ghosts > 0:
+		bad.append("props left standing with no collider")
+	# a tank knocked out: its hull stops a round and a man
+	var t: Tank = null
+	for v in world.get_tree().get_nodes_in_group("vehicles"):
+		if v is Tank and (v as Tank).alive:
+			t = v
+			break
+	if t != null:
+		t.apply_damage(1.0e6)
+		for i2 in 10:
+			await world.get_tree().physics_frame
+		var tp: Vector3 = t.global_position
+		var side: Vector3 = t.global_transform.basis.x
+		var through: float = Obstacles.segment(tp + side * 8.0, tp - side * 8.0)
+		var man: int = Obstacles.blocks(Vector3(tp.x, Sim.height_at(tp.x, tp.z), tp.z), 0.3)
+		print("[ruin] %s knocked out: a round across the hull stops %s, a man in it is blocked %s" % [
+			t.display_name(), str(through < 1.0), str(man >= 0)])
+		if through >= 1.0 or man < 0:
+			bad.append("the wreck is not solid")
+	print("[ruin] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
 	world.get_tree().quit()
 #endregion
 
@@ -1843,10 +1946,12 @@ func tick_heli_streak(delta: float) -> void:
 			off = rad_to_deg(nose.angle_to(to))
 			what = "%s %.0fm" % [foe.get_class() if foe.get_script() == null
 				else String(foe.get_script().get_global_name()), to.length()]
-		print("[helistreak] t=%2.0f centre %4.0fm agl %3.0f state %d nose-off %4.0f deg  target %s  gun %s fired %s" % [
+		print("[helistreak] t=%2.0f centre %4.0fm agl %3.0f state %d nose-off %4.0f deg  target %s  gun %s fired %s hp=%.0f spd=%.0f vy=%.1f pitch=%.0f thr=%.2f" % [
 			_hs_t, h.global_position.distance_to(c),
 			h.global_position.y - Sim.height_at(h.global_position.x, h.global_position.z),
-			h.state, off, what, str(h.ammo), str(_hs_fired)])
+			h.state, off, what, str(h.ammo), str(_hs_fired), float(h.health),
+			h.linear_velocity.length(), h.linear_velocity.y,
+			rad_to_deg(asin(clampf(-h.global_transform.basis.z.y, -1.0, 1.0))), h.throttle])
 	if _hs_t > 45.0 or not is_instance_valid(_hs_heli):
 		world.get_tree().quit()
 #endregion
@@ -2112,8 +2217,22 @@ func _run_streak_test() -> void:
 		men_before, int(men_near.call()), hp_before, world.walker.health, str(world.cqb.bank["tacnuke"])])
 	if int(world.cqb.bank["tacnuke"]) != 0 or int(standing.call()) > 0 or int(men_near.call()) > 0:
 		bad.append("the tactical nuke left something standing inside its radius")
-	if Obstacles.segment(gz + Vector3(-60, 1.5, 0.3), gz + Vector3(60, 1.5, 0.3)) < 1.0:
-		bad.append("something inside the nuke's radius still stops a round")
+	# Nothing left standing: what is still solid in there is the heap a
+	# block or a prop was brought down to, drawn as that heap, and no more.
+	var heaps := {}
+	for k in Obstacles._rubble_of:
+		heaps[int(Obstacles._rubble_of[k])] = true
+	var standing_solid := 0
+	for id in Obstacles.ids_in(Vector2(gz.x - 60, gz.z - 60), Vector2(gz.x + 60, gz.z + 60)):
+		if Obstacles.gone(id) or heaps.has(id):
+			continue
+		var oc: Vector3 = Obstacles.centre_of(id)
+		if Vector2(oc.x - gz.x, oc.z - gz.z).length() < CqbMatch.TAC_LETHAL * 0.9 \
+				and Obstacles.top_of(id) - Sim.height_at(oc.x, oc.z) > 1.0:
+			standing_solid += 1
+	print("[streak] inside the nuke's radius after: %d solid things that are not a heap" % standing_solid)
+	if standing_solid > 0:
+		bad.append("something inside the nuke's radius still stands")
 	# the deploy screen
 	var dm := DeployMenu.new()
 	world.add_child(dm)

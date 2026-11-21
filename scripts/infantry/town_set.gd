@@ -79,6 +79,11 @@ var _last_mesh: MeshInstance3D = null
 ## Structure id -> [mesh, kind]: what goes when something heavy drives into it.
 var _breaks: Dictionary = {}
 const UNBREAKABLE := ["container", "bus", "crane", "scaffold"]
+## A prop a blast has gone through is a heap this much of its height, drawn and
+## solid both: see `Obstacles.set_breakable`.
+const PROP_HEAP := 0.35
+## Every prop's box -> [mesh, kind], for bringing the mesh down with the box.
+var _box_mesh: Dictionary = {}
 ## What a round goes through for a third of what its size says: see
 ## `Obstacles.set_light`.
 const LIGHT := ["hedge", "stall", "car", "bus", "small", "fence"]
@@ -90,6 +95,10 @@ func _solid(at: Vector3, size: Vector3, yaw: float, kind := "") -> void:
 		Obstacles.set_light(id)
 	if kind != "" and not UNBREAKABLE.has(kind) and is_instance_valid(_last_mesh):
 		_breaks[id] = [_last_mesh, kind]
+	# What a blast may bring down, and the mesh that has to come down with it.
+	if kind != "" and is_instance_valid(_last_mesh):
+		Obstacles.set_breakable(id, PROP_HEAP)
+		_box_mesh[id] = [_last_mesh, kind]
 
 func _mesh(at: Vector3, yaw: float, st: SurfaceTool, mat: Material) -> void:
 	var mi := MeshKit.mi(MeshKit.finish(st, mat), "Prop")
@@ -127,6 +136,7 @@ func _smash(id: int, push: Vector3) -> void:
 		return
 	var world := get_tree().current_scene
 	var at: Vector3 = mi.global_position
+	mi.set_meta("flat", true)            # crushed: not to be brought down again
 	var dir := Vector3(push.x, 0.0, push.z)
 	dir = dir.normalized() if dir.length() > 0.1 else Vector3.FORWARD
 	Effects.dust(world, at + Vector3(0, 0.8, 0), 2.2)
@@ -684,6 +694,7 @@ func _process(delta: float) -> void:
 		return
 	_gone_t = 0.5
 	_fall_with_buildings()
+	_fall_props()
 	for i in range(_hollowed.size() - 1, -1, -1):
 		var h: Array = _hollowed[i]
 		if not Obstacles.gone(int(h[0])):
@@ -726,6 +737,29 @@ func _fall_with_buildings() -> void:
 		if l.size() > 4 and is_instance_valid(l[4]):
 			_collapse(l[4] as MeshInstance3D, world)
 		ladders.remove_at(j)
+
+## A prop a blast took the box out of comes down with it, to the heap the box
+## was left as. They were taken out of the field and left standing: a car, a
+## wall, a container whole on the screen, that rounds and men went through.
+func _fall_props() -> void:
+	var world := get_tree().current_scene if is_inside_tree() else null
+	if world == null:
+		return
+	for id in _box_mesh.keys():
+		if not Obstacles.gone(int(id)):
+			continue
+		var e: Array = _box_mesh[id]
+		_box_mesh.erase(id)
+		_breaks.erase(id)
+		var mi: Variant = e[0]
+		if not is_instance_valid(mi) or (mi as Node).has_meta("flat"):
+			continue
+		var m := mi as MeshInstance3D
+		m.set_meta("flat", true)
+		var p: Vector3 = m.global_position
+		var b: Basis = m.global_transform.basis.rotated(Vector3.UP, randf_range(-0.25, 0.25))
+		m.global_transform = Transform3D(b.scaled(Vector3(1.04, PROP_HEAP, 1.04)), p)
+		Effects.dust(world, p + Vector3(0, 0.6, 0), 1.6)
 
 ## A piece of dressing whose wall has gone: it goes over away from where the
 ## wall was and lies in the rubble, and a few bits of it fly.

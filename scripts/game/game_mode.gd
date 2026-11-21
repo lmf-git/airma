@@ -101,6 +101,9 @@ func start(id: String) -> void:
 	_announce()
 
 func _zone(i: int, team: int) -> void:
+	# which sectors start whose is laid down in BLUE's terms; on a RED
+	# player's machine "ours" is the other side
+	team = NetLink.local_team(team)
 	var l: Array = _layout[i]
 	var lab := sector_label(i)
 	var z := CaptureZone.new()

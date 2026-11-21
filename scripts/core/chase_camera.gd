@@ -109,6 +109,8 @@ func shake(amount: float) -> void:
 	_shake = minf(_shake + amount, 1.2)
 
 func _unhandled_input(e: InputEvent) -> void:
+	if Sim.menu_open:
+		return
 	if _free and not pod_slew and e is InputEventMouseMotion:
 		var mm2 := Sim.mouse_rel(e as InputEventMouseMotion)
 		free_yaw = clampf(free_yaw - mm2.x * 0.0042, -2.7, 2.7)

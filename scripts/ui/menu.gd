@@ -10,6 +10,7 @@ signal host_requested(id: String, address: String)
 signal join_requested(id: String, address: String)
 signal resume_requested()
 signal settings_requested()
+signal side_changed(side: int)
 
 const MISSIONS := [
 	["takeoff", "RUNWAY START", "No threats. Cold on runway 36 — firewall it, rotate around 150 kt, gear up with G."],
@@ -284,6 +285,26 @@ func _ready() -> void:
 	_net_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_net_status.custom_minimum_size = Vector2(520, 0)
 	net_row.add_child(_net_status)
+	# Which side, in a mode that has them, for everyone in a session -- the
+	# host too. Everyone used to be on the host's side whatever the mode.
+	_side_row = HBoxContainer.new()
+	_side_row.add_theme_constant_override("separation", 8)
+	root.add_child(_side_row)
+	var sl := Label.new()
+	sl.text = "SIDE "
+	sl.add_theme_font_size_override("font_size", 13)
+	sl.add_theme_color_override("font_color", Color(0.6, 0.7, 0.8))
+	_side_row.add_child(sl)
+	for sd in [0, 1]:
+		var b := Button.new()
+		b.text = "BLUE" if sd == 0 else "RED"
+		b.custom_minimum_size = Vector2(200, 34)
+		b.toggle_mode = true
+		b.button_pressed = sd == side
+		b.pressed.connect(_pick_side.bind(sd))
+		_side_row.add_child(b)
+		_side_btns.append(b)
+	_side_row.visible = false
 
 	var settings := Button.new()
 	settings.text = "SETTINGS"
@@ -391,8 +412,9 @@ func _rebuild_cards() -> void:
 	# without having to know the GROUND tab exists
 	# a ship you can take command of: the ones with a gun on the foredeck
 	var takes := mode_takes(mission_id)
-	if takes == "ground" or takes == "any":
-		# no vehicle at all is a choice, in the modes fought over a town
+	if takes == "ground" or takes == "any" or takes == "air":
+		# no vehicle at all is a choice: in the modes fought over a town, and
+		# in the flown ones, where it means the flight line on foot
 		var fb := Button.new()
 		fb.custom_minimum_size = Vector2(152, 62)
 		fb.text = "ON FOOT\nrifle, grenades, legs"
@@ -500,8 +522,6 @@ func _apply_mode() -> void:
 		_select("foot")
 	elif takes == "any" and jet_id.begins_with("sea:"):
 		_select("foot")
-	elif takes == "air" and jet_id == "foot":
-		_select("f22")
 
 func _cqb_pick(label: String, items: Array) -> OptionButton:
 	var l := Label.new()
@@ -727,8 +747,46 @@ func _select_weather(id: String) -> void:
 ## worse, fly a different mission on the same connection.
 var net_role := ""            # "", "host" or "client"
 
+## The modes fought between two sides, where choosing one means something.
+const SIDED := ["conquest", "rush", "warlords", "tdm", "cqb", "ground", "arms", "combat"]
+var side := 0
+var _side_row: HBoxContainer = null
+var _side_btns: Array = []
+
+## The buttons with how many are on each side now.
+func show_side_counts(counts: Array) -> void:
+	for i in _side_btns.size():
+		(_side_btns[i] as Button).text = "%s  (%d)" % ["BLUE" if i == 0 else "RED",
+			int(counts[i]) if i < counts.size() else 0]
+
+func _pick_side(sd: int) -> void:
+	side = sd
+	for i in _side_btns.size():
+		(_side_btns[i] as Button).button_pressed = i == sd
+	side_changed.emit(sd)
+
+func _refresh_side_row() -> void:
+	if _side_row != null:
+		_side_row.visible = net_role != "" and SIDED.has(mission_id)
+
+## Up after being killed, to choose what to go back in as: LAUNCH is
+## REDEPLOY, for a joiner as much as for the host, and the mode cannot change.
+var redeploy := false
+
+func set_redeploy(on: bool) -> void:
+	redeploy = on
+	for k in _mission_btns:
+		_mission_btns[k].disabled = on or net_role == "client"
+	if _launch != null:
+		_launch.disabled = net_role == "client" and not on
+		_launch.text = "REDEPLOY" if on else ("HOST STARTS" if net_role == "client" else "LAUNCH")
+
 func set_net_role(role: String, host_mission: String) -> void:
 	if role == net_role and (role != "client" or host_mission == mission_id):
+		_refresh_side_row()
+		if redeploy and _launch != null:
+			_launch.disabled = false
+			_launch.text = "REDEPLOY"
 		return
 	net_role = role
 	var locked := role == "client"
@@ -741,6 +799,9 @@ func set_net_role(role: String, host_mission: String) -> void:
 		_launch.text = "HOST STARTS" if locked else "LAUNCH"
 	if locked and host_mission != "" and host_mission != mission_id:
 		_select_mission(host_mission)
+	_refresh_side_row()
+	if redeploy:
+		set_redeploy(true)
 
 func _mission_tip(id: String) -> String:
 	for m in MISSIONS:

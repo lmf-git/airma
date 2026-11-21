@@ -16,6 +16,13 @@ var _fire_wait := 8.0
 ## before it turns for home and is gone.
 var arena: Node = null
 var patrol_t := -1.0
+## Called up from out of town and on its way in: flying, not fighting, and
+## its time on station not yet started.
+var inbound := false
+## Close enough to the fight to count as there.
+const ON_STATION := 500.0
+## How low it runs in.
+const NAP_AGL := 45.0
 var _leaving := false
 var _burst_t := 0.0
 
@@ -38,6 +45,38 @@ func hit_radius() -> float:
 
 func _pilot(delta: float) -> void:
 	_state_t += delta
+	_maws(delta)
+	if inbound:
+		var flat := Vector2(global_position.x - home.x, global_position.z - home.z).length()
+		if flat > ON_STATION:
+			# In low, at a transit speed: down among the hedges and roofs, where
+			# a man with a tube on the far side of town has nothing to lock.
+			# Coming in at its working height it was in the open sky for the
+			# whole run, and the first one up shot it down every time.
+			if missile_warn > 0.0:
+				drop_flare()
+			# and over whatever is ahead, which the working orbit looks out for
+			# and this did not: at seventy with the nose down it flew into
+			# the rising ground short of the town
+			# over the tallest thing under it and on the way -- ground, roofs,
+			# pylons -- not just the ground: run in at roof height it flew into
+			# the first pylon on the line
+			var floor_h := -1e9
+			for k in 5:
+				var q: Vector3 = global_position + linear_velocity * (float(k) * 1.2)
+				floor_h = maxf(floor_h, Sim.height_at(q.x, q.z))
+				# as wide as the rotor reaches, which is what strikes first
+				var hit_id: int = Obstacles.hit(Vector3(q.x, global_position.y, q.z),
+					float(spec.get("rotor_radius", 6.0)) + 4.0)
+				if hit_id >= 0:
+					floor_h = maxf(floor_h, Obstacles.top_of(hit_id))
+			var want_h: float = floor_h + NAP_AGL
+			var low: bool = global_position.y < want_h - 30.0
+			_fly(home, want_h, 30.0 if low else 58.0, delta)
+			return
+		inbound = false
+		Sim.report("%s on station for %d seconds — it hunts on its own" % [name, int(patrol_t)],
+			Sim.Ev.GOOD)
 	if patrol_t >= 0.0 and not _leaving:
 		patrol_t -= delta
 		if patrol_t <= 0.0:
@@ -124,6 +163,35 @@ func _pilot(delta: float) -> void:
 
 	_fly(goal, want_alt, want_speed, delta)
 
+
+## A missile approach warner, which a real attack helicopter has: it sees the
+## motor of whatever is coming at it, radar or no radar. A shoulder-launched
+## round is a heat seeker and lights up no warning receiver, so the gunship
+## never knew one was coming: called over a ground fight it was killed on its
+## way in, every time, by the first man on the other side with a tube. The
+## flares now go out while one is closing.
+var _maws_t := 0.0
+
+func _maws(delta: float) -> void:
+	_maws_t -= delta
+	if _maws_t > 0.0:
+		return
+	_maws_t = 0.2
+	for m in get_tree().get_nodes_in_group("missiles"):
+		if not is_instance_valid(m) or m.get("target") != self or bool(m.get("dead")):
+			continue
+		var mn := m as Node3D
+		var d: float = mn.global_position.distance_to(global_position)
+		if d < 3000.0:
+			warn_missile()
+		# The flares in the last couple of seconds, when they work: a seeker
+		# judges each salvo once and grows warier of the next, so a salvo
+		# thrown four seconds out only taught it what to ignore.
+		var closing: float = maxf((m.get("vel") as Vector3 - linear_velocity).dot(
+			(global_position - mn.global_position).normalized()), 50.0)
+		if d / closing < 2.4:
+			drop_flare()
+			return
 
 ## Who to fight, looked for a few times a second rather than on every tick.
 ## Every AI pilot walked every contact on the map at 120 Hz -- twice a tick for

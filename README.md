@@ -207,6 +207,56 @@ Measured with two headless copies (`--mptest=host` / `--mptest=join`): the
 client follows a restart and two changes of mode, holds 9-13 pictures in a
 ground fight, none from the last match, and its kills are credited to it.
 
+**A lobby, sides, and no pausing other people.** HOST no longer starts a
+match: the host waits in the hangar, people join it there, and LAUNCH starts the
+chosen mode for everyone; a joiner waits in the hangar rather than being put in
+a placeholder flight. ESC in a session opens the menu without freezing the game
+-- one player cannot stop everyone else's match -- and lets go of that player's
+controls while it is up. In a mode with sides a joiner picks one: BLUE with the
+host or RED against it. Each machine still simulates with its own player's side
+as side 0, which is what every page and AI was written for; the swap is made
+once, where packets cross the wire. Measured with two copies, a RED client
+starts at RED's end of town, fights beside RED's AI, has its kills credited, and
+the two ends agree on the score with the sides swapped (host 5:1, client 1:5).
+`--mptest=join --mpside=1`.
+
+**What a man throws and what he calls in is seen everywhere.** Grenades,
+flashbangs, rockets off the shoulder, 40 mm rounds and mortar bombs -- a
+player's and the AI's -- go to every machine as they leave, and the others throw
+a harmless copy (a flashbang still dazzles whoever is looking at it there).
+Strikes called from the map -- airstrike, gun run, mortar barrage, carpet,
+smoke, white phosphorus, switchblades, both nukes, the cruise missile -- are
+replayed everywhere as pictures: the same aircraft, bombs and cloud, with the
+damage dealt only on the caller's machine. The attack helicopter a joiner calls
+is flown by the host, so it is one aircraft for everyone. A gunship -- the AC-130
+or the chopper gunner -- is the caller's own aircraft on every other screen
+from the moment it is called, drawn as what it is, and every shell and rocket it
+fires is shared. Sides are BLUE and RED for everybody, the host included,
+chosen in the hangar or on the deploy screen, and can be changed mid-match.
+
+**Aircraft collide.** Nothing did: two aeroplanes passed through each other, a
+wingman could sit inside his leader and a taxiing jet drove through the parked
+line. Each machine now checks its own aircraft against every other -- players'
+ghosts, the AI, the parked -- by how far each airframe really reaches; a
+head-on at 440 m/s takes both apart, and an hour of formations, flight lines,
+the carrier deck and a gunship orbit found nothing that should not have hit.
+
+**No phantom gunfire.** The man on foot fires on the left button and on K,
+which are the cockpit's fire and cannon as well, and EJECT is clicked with the
+left button; whatever was held as he left the aircraft went on firing his rifle
+until it was let go. A man put on his feet now waits for the trigger to come up
+first. A shot at middle distance also played both its near crack and its far
+thump -- which has the walls' answer built in -- so one round came as two or
+three bangs; it plays one or the other now.
+
+**Down is not out, in any mode.** Outside the street fights (which have their
+own deploy screen) being killed brings the hangar up after a moment as a
+chooser, REDEPLOY for host and joiner alike, back into the same match as an
+aeroplane, a vehicle or ON FOOT -- which every mode now offers, starting beside
+the aeroplane on the flight line. U getting out of an aeroplane no longer puts
+you straight back in it; another player's transport can be walked into when its
+ramp is down, which now shows on every screen.
+
 **Every round that flies far enough to matter is seen everywhere.** A tank's
 shell, a rocket battery's ripple, a SAM site's missile, a cruise or ballistic
 round and an AI jet's missiles are sent as they leave -- where from, how fast,
@@ -223,6 +273,20 @@ rifle, strike shipping. Everything put into the world while a match runs is
 now recorded as it arrives and swept when it ends -- the town's dressing, the
 standing fleet and what the network owns excepted -- along with a jammer or an
 EMP still counting, slow motion, and a nuclear flash still on the screen.
+
+**What is drawn is what is solid.** A blast took everything in reach out of
+the obstacle field -- fences, the control tower, every car and wall in a street
+-- while only the town's blocks were ever drawn coming down, so the rest stood
+there whole with nothing in them. Now only what something draws coming down can
+be brought down: a town block, which the scenery collapses exactly when its box
+goes (they were decided separately, one by distance across the ground and one
+through the air, and an airburst took the box out from under a block still
+standing), and a street prop, which goes down to a heap with it; benches and
+kiosks go over. What comes down leaves a heap in the field the height it is
+drawn -- a 21 m block, 2.6 m of rubble that stops a round -- instead of nothing
+at all. A knocked-out vehicle keeps its hull in the field too: rounds and the
+hit list skip what is not alive, which was the only way anything met a vehicle,
+so men walked through wrecks and rifle fire went through them. `--ruintest`.
 
 **Scaffolding and ladders come down with their building.** They were dressing
 laid against a wall, so a building shelled flat left them standing against

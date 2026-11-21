@@ -1415,6 +1415,7 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 			_impact(maxf(vel.length(), 30.0))
 	if agl < -2.0:
 		_impact(200.0)
+	_midair(pos, vel)
 	var sea_p: float = Sim.sea_at(pos.x, pos.z)
 	if pos.y < sea_p and ground < sea_p:
 		Effects.dust(get_tree().current_scene, Vector3(pos.x, sea_p, pos.z), 8.0)
@@ -1960,6 +1961,9 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	shell.set_meta("origin", muzzle)
 	world.add_child(shell)
 	shell.global_position = muzzle
+	# a gunship's shells on every screen: see `NetLink.share_launch`
+	if Sim.net != null and Sim.net.active:
+		Sim.net.share_launch(self, shell)
 	Effects.muzzle_flash(world, muzzle, dir, 2.6 if float(g["rpm"]) < 40.0 else 1.3)
 	Effects.dust(world, muzzle, 1.6)
 	Sfx.play_at(world, "boom" if float(g["rpm"]) < 40.0 else "rifle", muzzle,
@@ -2229,6 +2233,49 @@ func rotate_speed() -> float:
 
 func hit_radius() -> float:
 	return 8.0
+
+## Half the longer of its length and its span: how far from its middle this
+## airframe reaches, for running into another one.
+func body_reach() -> float:
+	if bounds.size == Vector3.ZERO:
+		return 8.0
+	return maxf(bounds.size.x, bounds.size.z) * 0.5
+
+## Into another aircraft. Nothing at all happened: aircraft had no collision
+## with one another, so two could fly through each other, a wingman could sit
+## inside his leader and a taxiing jet drove through the ones parked on the
+## line. Each machine asks for its own aircraft -- a ghost of somebody else's
+## is something to hit, not something that checks -- so in a session each
+## player finds out from his own side of it.
+var _midair_n := 0
+
+func _midair(pos: Vector3, vel: Vector3) -> void:
+	_midair_n += 1
+	if _midair_n % 3 != 0 or not alive or ghost:
+		return
+	var mine: float = body_reach()
+	Sim.hit_scan()
+	for n in Sim.hit_nodes:
+		if n == self or not is_instance_valid(n) or not (n is Aircraft):
+			continue
+		var o := n as Aircraft
+		if not o.alive:
+			continue
+		# about where the two airframes actually meet: boxes are not balls
+		var reach: float = (mine + o.body_reach()) * 0.5
+		var d: float = pos.distance_to(o.global_position)
+		if d > reach:
+			continue
+		var ov: Vector3 = o.get_meta("net_vel") if o.has_meta("net_vel") else o.linear_velocity
+		var closing: float = (vel - ov).length()
+		if Sim.debug_weapons:
+			print("[midair] %s into %s at %.0f m/s, %.1f m apart" % [name, o.name, closing, d])
+		_impact(maxf(closing, 13.0))
+		# and the other, if this machine is the one flying it: once one has
+		# come apart the other no longer finds anything alive to hit
+		if not o.ghost and o.alive:
+			o._impact(maxf(closing, 13.0))
+		return
 
 ## How many salvos have gone, so a seeker judges each one once.
 var flare_salvo := 0

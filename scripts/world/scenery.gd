@@ -1433,8 +1433,14 @@ func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false,
 	add_child(mmi)
 	# and into the obstacle field, so it is something you can fly into rather
 	# than something you fly through
-	Obstacles.add_batch(mesh, xforms, Obstacles.MIN_HEIGHT, 0.45, false, foot)
+	var obs_ids: PackedInt32Array = Obstacles.add_batch(mesh, xforms, Obstacles.MIN_HEIGHT,
+		0.45, false, foot)
 	if breakable:
+		# a blast brings these down to a heap of the height `damage_area`
+		# draws them at; nothing else in the field comes down at all
+		for oid in obs_ids:
+			if oid >= 0:
+				Obstacles.set_breakable(oid, BLOCK_HEAP)
 		var centre := Vector3.ZERO
 		var rad := 0.0
 		for x in xforms:
@@ -1443,7 +1449,7 @@ func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false,
 		for x in xforms:
 			rad = maxf(rad, centre.distance_to((x as Transform3D).origin))
 		_breakable.append({"mmi": mmi, "xforms": xforms.duplicate(),
-			"dead": PackedByteArray(), "centre": centre, "radius": rad})
+			"dead": PackedByteArray(), "centre": centre, "radius": rad, "ids": obs_ids})
 		var d: PackedByteArray = _breakable[_breakable.size() - 1]["dead"]
 		d.resize(xforms.size())
 		_breakable[_breakable.size() - 1]["dead"] = d
@@ -1465,8 +1471,15 @@ func count_standing(pos_in: Vector3, radius: float) -> int:
 				n += 1
 	return n
 
+## What is left of a town block brought down, as a share of its height: the
+## squash below, and the heap `Obstacles` leaves in the field to match it.
+const BLOCK_HEAP := 0.14
+
 func damage_area(pos_in: Vector3, radius: float) -> int:
 	var hits := 0
+	# the benches, kiosks and planters in it go over as well, rather than
+	# standing whole with nothing left in them to stop a round
+	knock(pos_in, radius, Vector3.ZERO)
 	# A building you can no longer see is a building you can no longer hit.
 	# The field is in the chart there is now; what was built is recorded where
 	# it was built.
@@ -1474,21 +1487,30 @@ func damage_area(pos_in: Vector3, radius: float) -> int:
 	var pos: Vector3 = Sim.world_to_boot(pos_in)
 	for b in _breakable:
 		var c: Vector3 = b["centre"]
-		if c.distance_to(pos) > float(b["radius"]) + radius:
+		if Vector2(c.x - pos.x, c.z - pos.z).length() > float(b["radius"]) + radius:
 			continue
 		var xf: Array = b["xforms"]
 		var dead: PackedByteArray = b["dead"]
+		var oids: PackedInt32Array = b.get("ids", PackedInt32Array())
 		for i in xf.size():
 			if dead[i] != 0:
 				continue
 			var t: Transform3D = xf[i]
-			if t.origin.distance_to(pos) > radius:
+			# Down exactly when its box came out of the field, so what is drawn
+			# and what is solid cannot disagree. Measured separately they did:
+			# the field by distance across the ground, the drawing by distance
+			# through the air, and a blast up in the air took the box out from
+			# under a block still drawn standing whole.
+			if i < oids.size() and oids[i] >= 0:
+				if not Obstacles.gone(oids[i]):
+					continue
+			elif Vector2(t.origin.x - pos.x, t.origin.z - pos.z).length() > radius:
 				continue
 			dead[i] = 1
 			hits += 1
 			# collapse in place: squash, slump and sink into its own footprint
 			var wreck := t.basis.rotated(Vector3.UP, randf_range(-0.25, 0.25))
-			wreck = wreck.scaled(Vector3(1.05, 0.14, 1.05))
+			wreck = wreck.scaled(Vector3(1.05, BLOCK_HEAP, 1.05))
 			wreck = wreck.rotated(Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)).normalized(),
 				randf_range(0.02, 0.09))
 			_redraw(b["mmi"], i, Transform3D(wreck, t.origin - Vector3(0, 0.4, 0)))

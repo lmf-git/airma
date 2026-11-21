@@ -710,6 +710,10 @@ var net: Node = null              # the live NetLink, or null offline
 ## than through the GUI, so without this a click on the map also pulled the
 ## trigger.
 var ui_modal := false
+## The pause page is up in a session. Nothing stops -- a match other people are
+## playing cannot be frozen by one of them -- so the controls are let go of
+## instead: the man stands, the vehicle coasts, nothing fires.
+var menu_open := false
 ## A range with no air threat on it. Set by the STRIKE mission: the vehicles,
 ## shipping and helicopters on it are there to be attacked from the air, and
 ## none of them shoots at an aeroplane -- not the batteries, not a tank's main
@@ -3195,7 +3199,13 @@ func kill(killer: String, killer_team: int, victim: String, victim_team: int,
 		print("[kill %6.1f] %s [%s%s] %s" % [Time.get_ticks_msec() * 0.001, killer, weapon,
 			" HS" if head else "", victim])
 
+## Swallow reports for a moment: a strike replayed from another machine says
+## its own one line instead of the caller's "inbound, get down".
+var mute_reports := false
+
 func report(text: String, kind: int = Ev.INFO) -> void:
+	if mute_reports:
+		return
 	mission_event.emit(text, kind)
 	if OS.has_feature("headless") or OS.is_debug_build():
 		print("[mission %6.1f] %s" % [Time.get_ticks_msec() * 0.001, text])
@@ -3371,7 +3381,7 @@ const MENU_ACTIONS := [&"pitch_up", &"pitch_down", &"weapon_1", &"weapon_2",
 var sensor_keys := false
 
 func strength(action: StringName) -> float:
-	if typing or (menu_keys and MENU_ACTIONS.has(action)):
+	if typing or menu_open or (menu_keys and MENU_ACTIONS.has(action)):
 		return 0.0
 	if action == &"throttle_down" and sensor_keys and Input.is_physical_key_pressed(KEY_CTRL):
 		return 1.0 if Input.is_physical_key_pressed(KEY_Z) \
@@ -3381,7 +3391,7 @@ func strength(action: StringName) -> float:
 func held(action: StringName) -> bool:
 	if _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
 		return false
-	return not typing and Input.is_action_pressed(action)
+	return not typing and not menu_open and Input.is_action_pressed(action)
 
 ## Discrete key presses, latched from the input event rather than polled.
 ##
@@ -3436,7 +3446,7 @@ func _input(e: InputEvent) -> void:
 			_taps[a] = Time.get_ticks_msec()
 
 func tapped(action: StringName) -> bool:
-	if typing or _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
+	if typing or menu_open or _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
 		return false
 	var at: int = _taps.get(action, 0)
 	if at == 0:

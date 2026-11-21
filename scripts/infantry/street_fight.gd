@@ -61,11 +61,46 @@ func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 		j.name = "Spooky"
 	j.team = 0
 	world.add_child(j)
+	# On every other screen it is this player's aircraft from now on, drawn as
+	# what it is, and what it fires goes with it.
+	if world.net != null and world.net.active:
+		_shared_jet = String(world.net.roster.get(world.net.my_id, {}).get("jet", Sim.selected_jet))
+		world.net.set_jet("ah64g" if kind == "chopper" else "ac130")
+		j.store_released.connect(func(m: Node) -> void:
+			if world.net != null:
+				world.net.share_launch(j, m))
 	if kind == "chopper":
-		# already on the circle, low, the nose on the town
-		j.global_transform = Transform3D(Basis(Vector3.UP, PI * 0.5),
-			centre + Vector3(PlayerHeli.ORBIT_R, 230.0, 0.0))
-		j.linear_velocity = Vector3.ZERO
+		# Flown in, not conjured. It was put down already on its circle over
+		# the town and the gunner was in its seat the same frame: a gunship
+		# out of nowhere. Now it comes up from behind our own end of town,
+		# where it can be seen and heard on the way, and the guns are his
+		# once it is on station.
+		var back := Vector3(0.0, 0.0, 1.0)
+		if is_instance_valid(world.walker):
+			var off: Vector3 = world.walker.global_position - centre
+			off.y = 0.0
+			if off.length() > 20.0:
+				back = off.normalized()
+		var at: Vector3 = centre + back * CHOPPER_IN
+		at.y = Sim.height_at(at.x, at.z) + float(j.spec.get("orbit_agl", 230.0))
+		j.global_transform = Transform3D(Basis.looking_at(-back, Vector3.UP), at)
+		j.linear_velocity = -back * 45.0
+		j.gear_down = false
+		j.gear_anim = 0.0
+		j.throttle = 0.6
+		j.power = 0.6
+		var h := j as PlayerHeli
+		h.orbit_alt = float(j.spec.get("orbit_agl", 230.0))
+		h.orbit_speed = float(j.spec.get("orbit_speed", 22.0))
+		h.auto = "inbound"
+		world._reset_interp.call_deferred(j)
+		world._cqb_gunship = j
+		world._cqb_gun_t = CQB_GUNSHIP_TIME
+		_gun_inbound = true
+		_gun_centre = centre
+		Sim.report("chopper gunner inbound from behind you — on station in about %d seconds" % int(
+			(CHOPPER_IN - PlayerHeli.ORBIT_R - 200.0) / 60.0 + 3.0), Sim.Ev.GOOD)
+		return true
 	else:
 		# Northbound with the town off the port wing, which is where the guns are.
 		j.global_transform = Transform3D(Basis(), centre + Vector3(3000.0, 1500.0, 0.0))
@@ -75,9 +110,21 @@ func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 	j.throttle = 0.6
 	j.power = 0.6
 	world._reset_interp.call_deferred(j)
-	world._cqb_parked = world.player
 	world._cqb_gunship = j
 	world._cqb_gun_t = CQB_GUNSHIP_TIME
+	_board_gunship(j, centre, kind)
+	return true
+
+
+## How far out the chopper gunner is called up from.
+const CHOPPER_IN := 1400.0
+## The chopper is on its way in and nobody is on its guns yet.
+var _gun_inbound := false
+var _gun_centre := Vector3.ZERO
+
+## On the guns: the gunship has arrived, or (the AC-130) is already up there.
+func _board_gunship(j: Aircraft, centre: Vector3, kind: String) -> void:
+	world._cqb_parked = world.player
 	world.cqb.set_away(true)
 	world._take_hold_station(j)
 	# laid on the middle of the fight to begin with; the mouse takes it from there
@@ -92,10 +139,15 @@ func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 	ears.make_current()
 	Sim.report("%s on station for %d seconds — you have the guns" % [
 		"Chopper gunner" if kind == "chopper" else "AC-130", int(CQB_GUNSHIP_TIME)], Sim.Ev.GOOD)
-	return true
 
+
+## What this player was flying, as the others saw it, before the gunship.
+var _shared_jet := ""
 
 func _cqb_gunship_done() -> void:
+	if _shared_jet != "" and world.net != null and world.net.active:
+		world.net.set_jet(_shared_jet)
+	_shared_jet = ""
 	if is_instance_valid(world._station_walker):
 		world._leave_hold_station()
 	if is_instance_valid(world._cqb_parked):
@@ -135,6 +187,9 @@ func cqb_fire_mission(mark: Vector3) -> bool:
 		world._cqb_tel = world._spawn_tank(Vector3(mark.x + 350.0, 0.0, mark.z + 2700.0), 0.0, 0,
 			"m270" if nato else "tel_kalibr")
 		world._cqb_tel.name = "Fire support"
+	# what it fires is seen on every screen
+	if world.net != null:
+		world.net.watch_launcher(world._cqb_tel)
 	world._cqb_tel.map_target = mark
 	world._cqb_tel_t = 45.0
 	_cqb_tel_fired = false
@@ -145,6 +200,22 @@ func cqb_fire_mission(mark: Vector3) -> bool:
 
 func tick_cqb_support(delta: float) -> void:
 	_tick_air()
+	if _gun_inbound:
+		var g: Aircraft = world._cqb_gunship
+		if not is_instance_valid(g) or not g.is_alive() or not is_instance_valid(world.cqb):
+			# shot down on the way in
+			_gun_inbound = false
+			world._cqb_gunship = null
+			world._cqb_gun_t = 0.0
+			if is_instance_valid(g):
+				Sim.report("chopper gunner lost on the way in", Sim.Ev.BAD)
+		elif String(g.get("auto")) == "orbit" and world.on_foot \
+				and is_instance_valid(world.walker) and not world.walker.dead \
+				and not (is_instance_valid(world.deploy_ui) and world.deploy_ui.visible):
+			# on station, and he is somewhere he can take the guns from
+			_gun_inbound = false
+			_board_gunship(g, _gun_centre, "chopper")
+		return
 	if is_instance_valid(world._cqb_gunship):
 		world._cqb_gun_t -= delta
 		# time up, or he has stepped away from the guns himself
@@ -374,6 +445,7 @@ func setup_cqb(kind := "cqb") -> void:
 	if kind not in ["cqb", "range"]:
 		_cqb_armour(c3)
 	_air_earned = {0: 0, 1: 0}
+	_gun_inbound = false
 	if kind == "arms":
 		# Nobody's air is up when it starts. It used to open with four of
 		# theirs -- a pair of fighters and a pair of gunships -- and four of
@@ -384,8 +456,11 @@ func setup_cqb(kind := "cqb") -> void:
 	if flying:
 		# In from the south at a height to see the town from, with the fight
 		# already going on under the nose.
-		world.player.global_transform = Transform3D(Basis(), c3 + Vector3(0.0, 1500.0, 7000.0))
-		world.player.linear_velocity = Vector3(0, 0, -world._entry_speed(230.0))
+		# (from the north on the RED side)
+		var sgn: float = 1.0 if NetLink.local_team(0) == 0 else -1.0
+		world.player.global_transform = Transform3D(Basis(Vector3.UP, 0.0 if sgn > 0.0 else PI),
+			c3 + Vector3(0.0, 1500.0, 7000.0 * sgn))
+		world.player.linear_velocity = Vector3(0, 0, -world._entry_speed(230.0) * sgn)
 		world.player.gear_down = false
 		world.player.gear_anim = 0.0
 		world.player.throttle = 0.8
@@ -508,6 +583,7 @@ func cqb_deploy(first: bool) -> void:
 		# under the pause menu, never over it
 		world.menu.get_parent().move_child(world.deploy_ui, world.menu.get_index())
 		world.deploy_ui.deploy.connect(_on_cqb_deploy)
+		world.deploy_ui.side_picked.connect(_on_side_picked)
 	world.walker.set_physics_process(false)
 	world.walker.shelter(true)
 	world.cqb.set_away(true)
@@ -530,9 +606,31 @@ func cqb_deploy(first: bool) -> void:
 	world.walker.body.visible = true
 	world.walker.body.set_head_visible(true)
 	var takes: String = {"ground": "ground", "arms": "any"}.get(String(Sim.mission), "none")
-	world.deploy_ui.open(takes, first, String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa")),
+	var fac := String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa"))
+	if world.net != null and world.net.active:
+		fac = world.net.side_faction(fac)
+	world.deploy_ui.open(takes, first, fac,
 		world.cqb.points if takes != "none" else -1)
+	# which side, in a session
+	if world.net != null and world.net.active:
+		world.deploy_ui.show_sides(world.net.abs_side, world.net.side_counts())
+	else:
+		world.deploy_ui.show_sides(-1, [])
 
+
+## Joined the other side on the deploy screen: announced, and the man moved
+## to that side's end of town before he goes in.
+func _on_side_picked(sd: int) -> void:
+	if world.net == null or not world.net.active or not is_instance_valid(world.cqb):
+		return
+	if sd == world.net.abs_side:
+		return
+	world.net.set_side(sd)
+	Sim.report("you are %s" % ("BLUE" if sd == 0 else "RED"), Sim.Ev.INFO)
+	if is_instance_valid(world.walker):
+		world.walker.global_position = world.cqb.spawn_point(0, 0)
+		world.walker.yaw = 0.0 if NetLink.local_team(0) == 0 else PI
+	cqb_deploy(false)
 
 func _on_cqb_deploy(what: String) -> void:
 	if not is_instance_valid(world.cqb):
@@ -595,9 +693,10 @@ func cqb_fly(id: String) -> void:
 	var p: Aircraft = world.player
 	p.active = true
 	var rotary: bool = JetSpec.is_rotary(id)
-	p.global_transform = Transform3D(Basis(), c3 + (Vector3(0.0, 250.0, 1800.0) if rotary
-		else Vector3(0.0, 1500.0, 7000.0)))
-	p.linear_velocity = Vector3(0, 0, -(30.0 if rotary else world._entry_speed(230.0)))
+	var sgn: float = 1.0 if NetLink.local_team(0) == 0 else -1.0
+	p.global_transform = Transform3D(Basis(Vector3.UP, 0.0 if sgn > 0.0 else PI),
+		c3 + (Vector3(0.0, 250.0, 1800.0 * sgn) if rotary else Vector3(0.0, 1500.0, 7000.0 * sgn)))
+	p.linear_velocity = Vector3(0, 0, -(30.0 if rotary else world._entry_speed(230.0)) * sgn)
 	p.gear_down = false
 	p.gear_anim = 0.0
 	p.throttle = 0.6 if rotary else 0.8
@@ -663,8 +762,9 @@ func _on_cqb_air_down(_who: Variant = null) -> void:
 ## two of those points looked straight at each other down the gaps between
 ## the buildings: the match opened with the tanks already laid on one another.
 func _cqb_vehicle_spot(c3: Vector3, team: int) -> Vector3:
-	var z: float = c3.z + (126.0 if team == 0 else -126.0)
-	var far_z: float = c3.z - (126.0 if team == 0 else -126.0)
+	var end: float = 126.0 if NetLink.local_team(team) == 0 else -126.0
+	var z: float = c3.z + end
+	var far_z: float = c3.z - end
 	var best := Vector3(c3.x + 60.0, c3.y, z)
 	var best_score := 1e9
 	for k in 29:

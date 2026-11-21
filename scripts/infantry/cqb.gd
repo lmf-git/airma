@@ -197,6 +197,8 @@ var _wp_from := Vector3.INF
 const WP_MAX := 100.0
 ## How long the attack helicopter stays over the town.
 const HELI_TIME := 55.0
+## How far out the ATTACK HELICOPTER is called up from.
+const HELI_IN := 1800.0
 ## The first end of a smoke screen's line, between its two picks.
 var _smoke_from := Vector3.INF
 ## The longest screen one barrage lays.
@@ -542,7 +544,9 @@ func spawn_point(team: int, slot := -1) -> Vector3:
 		var fr: Variant = world.get("firing_range")
 		if fr != null and is_instance_valid(fr):
 			return (fr as FiringRange).origin - (fr as FiringRange).dir * 1.5
-	var z: float = centre.y + (118.0 if team == 0 else -118.0)
+	# which end of town is the absolute side's, not this machine's "us": a
+	# RED player's side 0 comes in from RED's end
+	var z: float = centre.y + (118.0 if NetLink.local_team(team) == 0 else -118.0)
 	var best := Vector3.INF
 	var best_score := -1e9
 	for k in 9:
@@ -667,15 +671,17 @@ func forget_ghost(s: Soldier) -> void:
 	soldiers.erase(s)
 
 ## Host: a player on another machine was killed in the fight.
-func remote_down() -> void:
+func remote_down(vside := 0) -> void:
 	if is_instance_valid(mode) and mode.running:
-		mode.register_kill(0)
+		mode.register_kill(vside)
 
 ## Host: the other players on foot are men of the side for the AI to fight
 ## beside and against. See `NetMan`.
 func _sync_net_men() -> void:
 	for n in get_tree().get_nodes_in_group("net_men"):
 		var t: int = int(n.team)
+		# changed sides: out of the other list
+		(_teams[1 - t] as Array).erase(n)
 		if not (_teams[t] as Array).has(n):
 			(_teams[t] as Array).append(n)
 			n.tree_exiting.connect(func() -> void: (_teams[t] as Array).erase(n),
@@ -1061,7 +1067,7 @@ func _support(delta: float) -> void:
 		else:
 			if is_instance_valid(rv):
 				rv.queue_free()
-			_nuke(nk[1], float(nk[2]), bool(nk[3]))
+			_nuke(nk[1], float(nk[2]), bool(nk[3]), nk.size() > 7 and bool(nk[7]))
 	_nukes = still
 	for tm in jammed:
 		jammed[tm] = maxf(float(jammed[tm]) - delta, 0.0)
@@ -1082,6 +1088,7 @@ func _support(delta: float) -> void:
 					continue
 				if _call(String(k["id"])):
 					bank[k["id"]] = int(bank[k["id"]]) - 1
+					_share_streak(String(k["id"]))
 	var keep: Array = []
 	for b in _bombs:
 		b[0] = float(b[0]) - delta
@@ -1251,6 +1258,8 @@ func inbound() -> Array:
 ## called by the man on foot, so in either of those, where you spend most of
 ## the match, the keys did nothing and the kills earned nothing.
 func _who() -> Node3D:
+	if _picturing and is_instance_valid(_pic_caller):
+		return _pic_caller
 	if is_instance_valid(player):
 		return player
 	if world != null:
@@ -1264,12 +1273,103 @@ func _who() -> Node3D:
 	return null
 
 func _who_yaw() -> float:
+	if _picturing:
+		return _pic_yaw
 	var w := _who()
 	if w == null:
 		return 0.0
 	if w == player:
 		return player.yaw
 	return w.global_rotation.y
+
+## The ATTACK HELICOPTER, for `team` (this machine's frame), in from `back`
+## of the town. Called here for the player, or by the host for a player on
+## another machine.
+func spawn_streak_heli(team: int, back: Vector3) -> AIHeli:
+	var nato_h: bool = ["usa", "uk", "france"].has(Sim.home_faction) == (team == 0)
+	var h := AIHeli.new()
+	h.setup("ah64" if nato_h else "mi28")
+	h.team = team
+	h.name = "Gunship"
+	h.arena = self
+	h.patrol_t = HELI_TIME
+	var c3 := Vector3(centre.x, _ground(centre.x, centre.y), centre.y)
+	h.home = c3
+	h.station_alt = 140.0
+	world.add_child(h)
+	# In from behind him, from far enough out to be seen and heard coming. Put
+	# down six hundred metres off it was simply there; it now flies in at a
+	# transit speed and its time on station starts when it arrives, so the trip
+	# costs none of it.
+	var at: Vector3 = c3 + back * HELI_IN
+	at.y = _ground(at.x, at.z) + AIHeli.NAP_AGL
+	h.global_transform = Transform3D(Basis.looking_at(-back, Vector3.UP), at)
+	h.linear_velocity = -back * 50.0
+	h.inbound = true
+	return h
+
+# ---------------------------------------------------------- strikes, shared
+## The strikes that are drawn on every screen: called here, replayed as a
+## picture everywhere else. The rest are either already shared some other
+## way -- the attack helicopter is flown by the host, the gunships are the
+## caller's own aircraft, the missile goes from a launcher -- or are this
+## machine's business: the map picture of a UAV, a suit of armour.
+const PICTURED := ["strike_at", "strafe_at", "mortar_at", "carpet_at", "wp_at", "smoke_at",
+	"swarm", "tacnuke_at", "stratnuke_at", "cruise_at"]
+var _picturing := false
+var _pic_caller: Node3D = null
+var _pic_yaw := 0.0
+
+func _share_streak(which: String) -> void:
+	if not PICTURED.has(which) or Sim.net == null or not Sim.net.active:
+		return
+	var w := _who()
+	var x := {"cpos": w.global_position if w != null else Vector3(centre.x, 0.0, centre.y),
+		"cyaw": _who_yaw(), "strafe": _strafe_from, "carpet": _carpet_from,
+		"wp": _wp_from, "smoke": _smoke_from}
+	Sim.net.share_streak(which, _pick_at, x)
+
+## Somebody on another machine called a strike: the same strike, run here as
+## a picture -- the aircraft, the bombs, the cloud -- with nothing in it that
+## hurts anybody. The damage is dealt on the caller's machine, and reaches
+## everyone through the hits it reports, the same as his rifle's.
+func call_picture(which: String, at: Vector3, x: Dictionary, who: String, friendly: bool) -> void:
+	if not PICTURED.has(which):
+		return
+	_pick_at = at
+	_strafe_from = x.get("strafe", Vector3.INF)
+	_carpet_from = x.get("carpet", Vector3.INF)
+	_wp_from = x.get("wp", Vector3.INF)
+	_smoke_from = x.get("smoke", Vector3.INF)
+	_pic_caller = Node3D.new()
+	world.add_child(_pic_caller)
+	_pic_caller.global_position = x.get("cpos", at)
+	_pic_yaw = float(x.get("cyaw", 0.0))
+	var made: Array = []
+	var catch_it := func(n: Node) -> void: made.append(n)
+	world.child_entered_tree.connect(catch_it)
+	_picturing = true
+	Sim.mute_reports = true
+	var keep_node: Node = _pick_node
+	_call(which)
+	Sim.mute_reports = false
+	_picturing = false
+	_pick_node = keep_node
+	world.child_entered_tree.disconnect(catch_it)
+	for n in made:
+		if not is_instance_valid(n):
+			continue
+		if "picture" in n:
+			n.set("picture", true)
+		elif n is Missile:
+			(n as Missile).harmless = true
+	_pic_caller.queue_free()
+	_pic_caller = null
+	var nm := String(which).trim_suffix("_at").to_upper()
+	for k in STREAK_POOL:
+		if String(k["id"]) == which.trim_suffix("_at"):
+			nm = String(k["name"])
+	Sim.report("%s called in: %s" % [who, nm], Sim.Ev.GOOD if friendly else Sim.Ev.BAD)
 
 ## What can only be done by a man standing in the street.
 const FOOT_STREAKS := ["jugg", "dogs", "sentry", "vest"]
@@ -1307,25 +1407,15 @@ func _call(id: String) -> bool:
 				tk.display_name(), int(VehicleDrop.FROM / VehicleDrop.SINK)], Sim.Ev.GOOD)
 			return true
 		"heli":
-			var nato_h: bool = ["usa", "uk", "france"].has(Sim.home_faction)
-			var h := AIHeli.new()
-			h.setup("ah64" if nato_h else "mi28")
-			h.team = 0
-			h.name = "Gunship"
-			h.arena = self
-			h.patrol_t = HELI_TIME
-			var c3 := Vector3(centre.x, _ground(centre.x, centre.y), centre.y)
-			h.home = c3
-			h.station_alt = 140.0
-			world.add_child(h)
-			# in from behind him, already at height
 			var back := Vector3(sin(_who_yaw()), 0.0, cos(_who_yaw()))
-			h.global_transform = Transform3D(Basis(Vector3.UP, _who_yaw()),
-				c3 + back * 600.0 + Vector3(0, 160.0, 0))
-			# Six hundred metres out, not fifteen hundred: at its cruise that
-			# was forty of its fifty-five seconds spent getting to the town.
-			h.linear_velocity = -back * 40.0
-			Sim.report("gunship on station for %d seconds — it hunts on its own" % int(HELI_TIME), Sim.Ev.GOOD)
+			if NetLink.mirroring():
+				# The host flies it, on our side, so everyone sees the same
+				# helicopter: one flown here would be on this screen only.
+				Sim.net.request_heli(back)
+			else:
+				spawn_streak_heli(0, back)
+			Sim.report("gunship inbound from behind you — over the town in about %d seconds" % int(
+				(HELI_IN - AIHeli.ON_STATION) / 55.0 + 2.0), Sim.Ev.GOOD)
 			return true
 		"jugg":
 			if not is_instance_valid(player) or player.juggernaut:
@@ -1697,6 +1787,7 @@ func _picked(id: String, at: Vector3) -> void:
 	_pick_node = null
 	if _call(id + "_at"):
 		bank[id] = int(bank[id]) - 1
+		_share_streak(id + "_at")
 		# tell the map how long its mark is worth keeping: until the thing
 		# itself has gone, or for as long as the last of it takes to land
 		if world.get("map") != null and is_instance_valid(world.map):
@@ -1717,6 +1808,9 @@ var _pick_node: Node = null
 ## far side. The bombs are real: they fall, and where they land they go off as
 ## the match's own bombs do, credited to the man who called it.
 class CarpetRun extends Node3D:
+	## A picture of a strike called on another machine: flies and goes off
+	## here, and hurts nobody. See `CqbMatch.call_picture`.
+	var picture := false
 	## What flies it and how. As set out here it is the B-2's carpet; the
 	## airstrike sets it up as a pair of strike jets low and fast with a stick
 	## of bombs (see `_call("strike_at")`). One run, so the release is worked
@@ -1827,6 +1921,7 @@ class CarpetRun extends Node3D:
 				# its own from there on
 				var sw := Switchblade.new()
 				sw.team = 0
+				sw.picture = picture
 				sw.arena = arena
 				sw.owner_node = arena.player if is_instance_valid(arena) else null
 				sw.centre = drone_centre
@@ -1838,6 +1933,7 @@ class CarpetRun extends Node3D:
 				continue
 			var b := CarpetBomb.new()
 			b.arena = arena
+			b.picture = picture
 			b.vel = _dir * speed
 			b.cluster = cluster
 			b.payload = payload
@@ -1869,6 +1965,9 @@ class CarpetRun extends Node3D:
 ## after they are fired, which is the thing a gun run sounds like from the
 ## ground: the strikes first, the gun after.
 class GunRun extends Node3D:
+	## A picture of a strike called on another machine: flies and goes off
+	## here, and hurts nobody. See `CqbMatch.call_picture`.
+	var picture := false
 	const SPEED := 190.0
 	const RUN_IN := 3600.0
 	## The dive, and the climb out after.
@@ -1998,7 +2097,7 @@ class GunRun extends Node3D:
 		for l in _landing:
 			if _t >= float(l[0]):
 				if is_instance_valid(arena):
-					arena._cannon(l[1])
+					arena._cannon(l[1], picture)
 			else:
 				keep.append(l)
 		_landing = keep
@@ -2041,6 +2140,9 @@ class MortarRound extends Node3D:
 	## Who fired it from a tube of his own (see `Walker._mortar`); null for a
 	## barrage called in.
 	var shooter: Node3D = null
+	## A picture of a round fired on another machine: lands and goes off here,
+	## hurts nothing. See `NetLink.share_round`.
+	var picture := false
 	static var _mesh: Mesh = null
 
 	func _init() -> void:
@@ -2097,6 +2199,15 @@ class MortarRound extends Node3D:
 			_whiz = true
 			Sfx.play_at(get_parent(), "whiz", to + Vector3(0.0, 25.0, 0.0), 2.0, 0.65, 700.0)
 		if _t >= flight:
+			if picture:
+				var was_mp: bool = Effects.mute_blast
+				Effects.mute_blast = true
+				Effects.explosion(get_parent(), to + Vector3(0, 0.6, 0), 9.0, false)
+				Effects.he_impact(get_parent(), to + Vector3(0, 0.4, 0), 2.6)
+				Effects.mute_blast = was_mp
+				Effects.dust(get_parent(), to, 3.0)
+				queue_free()
+				return
 			if is_instance_valid(shooter):
 				# one man's 60 mm: the blast, credited to him, hurting whoever
 				# is in it on the other side
@@ -2135,6 +2246,9 @@ class MortarRound extends Node3D:
 ## view from its nose and the mouse steers it the rest of the way down, with
 ## every hostile man and vehicle boxed. Left alone it goes where it was sent.
 class CruiseMissile extends Node3D:
+	## A picture of a strike called on another machine: flies and goes off
+	## here, and hurts nobody. See `CqbMatch.call_picture`.
+	var picture := false
 	const SPEED := 240.0
 	const RANGE := 5200.0
 	## How far out, over the ground, the player is given it.
@@ -2410,9 +2524,9 @@ class CruiseMissile extends Node3D:
 		if is_instance_valid(_view):
 			_view.queue_free()
 		if is_instance_valid(arena):
-			arena._bomb(at, BLAST, false, "cruise")
+			arena._bomb(at, BLAST, false, "cruise", picture)
 			arena._bomb(at + Vector3(randf_range(-6, 6), 0, randf_range(-6, 6)), BLAST * 0.6,
-				false, "cruise")
+				false, "cruise", picture)
 		# stand off and watch it for a moment before going back to the street
 		var back: Vector3 = at - dir * 70.0 + Vector3(0, 25.0, 0)
 		global_position = back
@@ -2564,6 +2678,9 @@ class UavDrone extends Node3D:
 ## lets its bomblets go, each of which goes off on whatever it meets first -- a
 ## roof or the road. All of it falls in the same flight model a round flies.
 class CarpetBomb extends Node3D:
+	## A picture of a strike called on another machine: flies and goes off
+	## here, and hurts nobody. See `CqbMatch.call_picture`.
+	var picture := false
 	## What the air takes off it per metre. A canister with its fins out is a
 	## draggy thing: it sheds the bomber's two hundred and thirty metres a
 	## second inside the first few hundred metres and comes down steepening, at
@@ -2663,6 +2780,7 @@ class CarpetBomb extends Node3D:
 			for i in BOMBLETS:
 				var c := CarpetBomb.new()
 				c.arena = arena
+				c.picture = picture
 				c.bomblet = true
 				# strung out along the run and kept narrow across it: thrown
 				# evenly all round, each canister made a patch ninety metres
@@ -2688,6 +2806,7 @@ class CarpetBomb extends Node3D:
 				ns.from = hit
 				ns.to = hit
 				ns.delay = 0.0
+				ns.picture = picture
 				ns.owner_node = arena.player if is_instance_valid(arena) else null
 				world0.add_child(ns)
 			queue_free()
@@ -2695,7 +2814,7 @@ class CarpetBomb extends Node3D:
 		if nxt.y <= floor_y:
 			if is_instance_valid(arena):
 				arena._bomb(Vector3(nxt.x, floor_y, nxt.z), 1.0 if bomblet else 1.25, bomblet,
-					"carpet")
+					"carpet", picture)
 			else:
 				Effects.explosion(get_tree().current_scene, Vector3(nxt.x, floor_y, nxt.z), 6.0)
 			queue_free()
@@ -2735,7 +2854,7 @@ func _add_nuke(eta: float, at: Vector3, lethal: float, strategic: bool) -> void:
 	var rv := _warhead_body(strategic)
 	world.add_child(rv)
 	rv.global_position = from
-	_nukes.append([eta, at, lethal, strategic, from, eta, rv])
+	_nukes.append([eta, at, lethal, strategic, from, eta, rv, _picturing])
 
 ## Where a warhead is on its track now: straight down the line, so it is where
 ## the map says and arrives when the countdown says.
@@ -2769,7 +2888,7 @@ func _warhead_body(strategic: bool) -> Node3D:
 	n.add_child(trail)
 	return n
 
-func _nuke(at: Vector3, lethal: float, strategic: bool) -> void:
+func _nuke(at: Vector3, lethal: float, strategic: bool, picture := false) -> void:
 	var scn: Variant = world.get("scenery")
 	var flat := lethal * 1.2
 	if scn != null and is_instance_valid(scn) and scn.has_method("damage_area"):
@@ -2782,6 +2901,8 @@ func _nuke(at: Vector3, lethal: float, strategic: bool) -> void:
 	Effects.mute_blast = true
 	Effects.nuke(world, at, lethal)
 	Effects.mute_blast = false
+	if picture:
+		return
 	var seen := {}
 	var hurt: Array = soldiers.duplicate()
 	hurt.append_array(get_tree().get_nodes_in_group("hittable"))
@@ -2930,12 +3051,12 @@ var _carpet_n := 0
 ## A round of thirty millimetre landing: small, many, and hard on anything with
 ## armour. Not `_bomb` -- a cannon shell is not a bomblet, and sixty of those
 ## booms in two seconds is a firework display rather than a gun.
-func _cannon(at: Vector3) -> void:
+func _cannon(at: Vector3, picture := false) -> void:
 	KillFeed.cause = "strafe"
-	_cannon_hit(at)
+	_cannon_hit(at, picture)
 	KillFeed.cause = ""
 
-func _cannon_hit(at: Vector3) -> void:
+func _cannon_hit(at: Vector3, picture := false) -> void:
 	cannon_hits += 1
 	var fb := Effects.Boom.new()
 	fb.radius = 3.4
@@ -2946,6 +3067,8 @@ func _cannon_hit(at: Vector3) -> void:
 	fb.global_position = at + Vector3(0, 0.6, 0)
 	if cannon_hits % 2 == 0:
 		Effects.dust(world, at + Vector3(0, 0.3, 0), 1.6)
+	if picture:
+		return
 	for n in soldiers.duplicate():
 		if not is_instance_valid(n) or (n as Soldier).team == 0:
 			continue
@@ -2971,12 +3094,12 @@ func _cannon_hit(at: Vector3) -> void:
 			player.take_hit(160.0 * (1.0 - dp / 5.0), player)
 
 ## `why` is what the kill feed puts it down to.
-func _bomb(at: Vector3, big := 1.0, many := false, why := "strike") -> void:
+func _bomb(at: Vector3, big := 1.0, many := false, why := "strike", picture := false) -> void:
 	KillFeed.cause = why
-	_bomb_hit(at, big, many)
+	_bomb_hit(at, big, many, picture)
 	KillFeed.cause = ""
 
-func _bomb_hit(at: Vector3, big: float, many: bool) -> void:
+func _bomb_hit(at: Vector3, big: float, many: bool, picture := false) -> void:
 	if many:
 		_carpet_n += 1
 		var fb := Effects.Boom.new()
@@ -3001,6 +3124,8 @@ func _bomb_hit(at: Vector3, big: float, many: bool) -> void:
 		Effects.explosion(world, at + Vector3(0, 1.0, 0), 5.0 * big)
 		Effects.he_impact(world, at + Vector3(0, 0.6, 0), 4.5 * big)
 		Effects.mute_blast = false
+	if picture:
+		return                         # the look of it; the damage was dealt where it was called
 	var kill_r: float = 14.0 * big
 	for n in soldiers.duplicate():
 		if not is_instance_valid(n) or (n as Soldier).team == 0:

@@ -385,6 +385,9 @@ func _auto_pilot(_delta: float) -> void:
 	if auto == "orbit":
 		_orbit_fly()
 		return
+	if auto == "inbound":
+		_inbound_fly()
+		return
 	if auto == "depart":
 		# away from where it was working, climbing, and gone once well off
 		if _depart_from == Vector3.INF:
@@ -456,6 +459,34 @@ func _orbit_fly() -> void:
 	in_yaw = clampf(wrapf(bearing - hdg, -PI, PI) * 1.4, -1.0, 1.0)
 	var fwd_speed := linear_velocity.dot(-b.z)
 	var want_att := clampf((orbit_speed - fwd_speed) * 0.010, -0.22, 0.30)
+	var pitch_att := asin(clampf(-b.z.y, -1.0, 1.0))
+	in_pitch = clampf((-want_att - pitch_att) * 2.4, -1.0, 1.0)
+	var bank := atan2(-b.x.y, b.y.y)
+	in_roll = clampf(-bank * 2.2 - linear_velocity.dot(b.x) * 0.03, -1.0, 1.0)
+	var want_y: float = Sim.height_at(global_position.x, global_position.z) + orbit_alt
+	var want_vs := clampf((want_y - global_position.y) * 0.30, -8.0, 10.0)
+	throttle = clampf(0.52 + (want_vs - linear_velocity.y) * 0.055, 0.0, 1.0)
+	wheel_brake = false
+
+## In from wherever it was called up, nose on the mark at a transit speed,
+## and into the orbit once it gets there: `auto` turns to "orbit", which is
+## how whoever called it knows it has arrived.
+func _inbound_fly() -> void:
+	var c: Vector3 = orbit_centre
+	if c == Vector3.INF:
+		auto = "orbit"
+		return
+	var b := global_transform.basis
+	var to := Vector3(c.x - global_position.x, 0.0, c.z - global_position.z)
+	var dist: float = to.length()
+	if dist < ORBIT_R + 200.0:
+		auto = "orbit"
+		return
+	var hdg := atan2(-b.z.x, b.z.z)
+	in_yaw = clampf(wrapf(atan2(to.x, -to.z) - hdg, -PI, PI) * 1.4, -1.0, 1.0)
+	# fast while there is distance to cover, slowing into the circle
+	var want_spd: float = clampf((dist - ORBIT_R) * 0.12, 18.0, 62.0)
+	var want_att := clampf((want_spd - linear_velocity.dot(-b.z)) * 0.010, -0.22, 0.30)
 	var pitch_att := asin(clampf(-b.z.y, -1.0, 1.0))
 	in_pitch = clampf((-want_att - pitch_att) * 2.4, -1.0, 1.0)
 	var bank := atan2(-b.x.y, b.y.y)

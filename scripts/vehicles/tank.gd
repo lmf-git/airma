@@ -303,6 +303,40 @@ var turret_pitch := 0.0
 var speed := 0.0
 var _turret: Node3D
 var _wrecked := false
+## The burnt-out hull in the obstacle field, -1 while it is running. A wreck
+## used to be nothing to anything: rounds and the hit list skip what is not
+## alive, and that was the only way anything ever met a vehicle, so men walked
+## through the hull and rifle fire went through it as through smoke.
+var _wreck_box := -1
+var _wreck_at := Vector3.INF
+
+func _place_wreck_box() -> void:
+	if _wreck_box >= 0:
+		Obstacles.remove(_wreck_box)
+		_wreck_box = -1
+	var size := Vector3(3.4, 2.0, 7.0)
+	for c in get_children():
+		if c is CollisionShape3D and (c as CollisionShape3D).shape is BoxShape3D:
+			size = ((c as CollisionShape3D).shape as BoxShape3D).size
+			break
+	var b: Basis = global_transform.basis
+	var yaw: float = atan2(-b.z.x, -b.z.z)
+	_wreck_at = global_position
+	# the hull, from the ground up; the turret has gone
+	_wreck_box = Obstacles.add_box(global_position - b.y * size.y * 0.5, size.x * 0.5,
+		size.y, size.z * 0.5, yaw)
+
+## Kept where the hull is: a wreck can still slide off a slope or be shoved.
+func _keep_wreck_box() -> void:
+	if _wreck_box < 0:
+		return
+	if global_position.distance_to(_wreck_at) > 0.8:
+		_place_wreck_box()
+
+func _exit_tree() -> void:
+	if _wreck_box >= 0:
+		Obstacles.remove(_wreck_box)
+		_wreck_box = -1
 var _burn := 0.0
 var _fire: GPUParticles3D
 var _wreck_smoke: GPUParticles3D
@@ -1128,6 +1162,8 @@ func display_name() -> String:
 	return String(KINDS[kind]["name"])
 
 func _unhandled_input(e: InputEvent) -> void:
+	if Sim.menu_open:
+		return
 	if not occupied or not alive:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -1305,6 +1341,8 @@ func _may_park() -> bool:
 
 func _physics_process(delta: float) -> void:
 	var _pt := Sim.prof_at()
+	if _wrecked:
+		_keep_wreck_box()
 	_tick_tank_p(delta)
 	if _parked:
 		if not freeze:
@@ -1599,7 +1637,7 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 			# up off the ground a little: a kerb is not a wall
 			sp += xf.basis.y * 0.6
 			var id: int = Obstacles.hit(sp, r_hull)
-			if id >= 0 and _flattens(id):
+			if id >= 0 and (_flattens(id) or id == _wreck_box):
 				id = -1
 			if id >= 0:
 				var push: Vector3 = Obstacles.push_out(id, sp, r_hull)
@@ -2929,6 +2967,7 @@ func _wreck() -> void:
 	if _wrecked:
 		return
 	_wrecked = true
+	_place_wreck_box()
 	_burn = 0.0
 	var parent := get_parent()
 	if is_instance_valid(_turret) and parent != null:

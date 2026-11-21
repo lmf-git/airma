@@ -98,6 +98,8 @@ func tick_before_sensors(delta: float) -> void:
 func tick_after_input(delta: float) -> void:
 	session_tests.tick_nettest()
 	session_tests.tick_mptest(delta)
+	session_tests.tick_lobby(delta)
+	session_tests.tick_redeploy(delta)
 	session_tests.tick_holdnet(delta)
 
 
@@ -123,6 +125,8 @@ func tick_after_flight(delta: float) -> bool:
 ## ends the frame.
 func tick_main(delta: float) -> bool:
 	dev_options.tick_nuke_shot()
+	dev_options.tick_sound_log(delta)
+	dev_options.tick_midair(delta)
 	dev_options.tick_road_probe()
 	weapon_tests.tick_decoy()
 	ground_tests.tick_mirv_lock(delta)
@@ -336,6 +340,7 @@ func tick_after_street(delta: float) -> void:
 	infantry_tests.tick_streak()
 	infantry_tests.tick_heli_streak(delta)
 	infantry_tests.tick_ladder_fall()
+	infantry_tests.tick_wreck_test()
 	infantry_tests.tick_drop()
 	infantry_tests.tick_zero()
 	infantry_tests.tick_holdfire()

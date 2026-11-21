@@ -452,9 +452,14 @@ static func report(world: Node, g: Dictionary, at: Vector3, own := false) -> voi
 	var ear := world.get_viewport().get_camera_3d()
 	var far: float = 0.0 if (ear == null or own) else ear.global_position.distance_to(at)
 	var db: float = g["db"]
-	if far < 110.0:
+	# One report a shot: the crack up close, the thump and the walls' answer
+	# further off. Between sixty and a hundred and ten metres it played both,
+	# and the far one has its own slap off the buildings in it, so a single
+	# round from across the street came as two and three bangs: an echo on
+	# every shot.
+	if far < 85.0:
 		Sfx.play_at(world, String(g["sound"]), at, db, randf_range(0.95, 1.06), 320.0)
-	if far > 60.0:
+	else:
 		Sfx.play_at(world, "shot_far", at, db + 5.0 + clampf((far - 60.0) / 50.0, 0.0, 1.0) * 3.0 - 3.0,
 			randf_range(0.85, 1.1), 900.0)
 
@@ -474,6 +479,10 @@ class Frag extends Node3D:
 	## he is on, the man who threw it included.
 	var flash := false
 	const FLASH_RADIUS := 16.0
+	## A picture of one thrown on another machine: it flies, bounces and goes
+	## off here, and the damage is the thrower's machine's to deal. A stun
+	## grenade's flash is not damage: it dazzles whoever here is looking at it.
+	var harmless := false
 
 	func _ready() -> void:
 		var st := MeshKit.begin()
@@ -586,6 +595,10 @@ class Frag extends Node3D:
 		Effects.mute_blast = true          # the walls are checked below
 		Effects.he_impact(world, at, 2.4)
 		Effects.mute_blast = false
+		if harmless:
+			KillFeed.cause = was_cause
+			queue_free()
+			return
 		# under a vehicle it is the one thing a man on foot has that hurts it
 		for v in get_tree().get_nodes_in_group("hittable"):
 			if is_instance_valid(v) and v is Tank and (v as Tank).alive \
@@ -762,6 +775,8 @@ class Rocket extends Node3D:
 	var arm := 0.0
 	## A 40 mm grenade rather than a rocket: smaller, and nothing burning.
 	var small := false
+	## Only the look of it: see `Frag.harmless`.
+	var harmless := false
 	var _flown := 0.0
 	## Where it went off or struck, for the harness.
 	var ended_at := Vector3.INF
@@ -846,6 +861,18 @@ class Rocket extends Node3D:
 		var world := get_tree().current_scene
 		var was_cause: String = KillFeed.cause
 		KillFeed.cause = "gl" if small else "law"
+		if harmless:
+			var was_m: bool = Effects.mute_blast
+			Effects.mute_blast = true
+			if _flown < arm:
+				Effects.bullet_impact(world, at, true)
+			else:
+				Effects.explosion(world, at, blast, false)
+				Effects.he_impact(world, at, blast * 0.56)
+			Effects.mute_blast = was_m
+			KillFeed.cause = was_cause
+			queue_free()
+			return
 		if struck != null and struck.has_method("take_hit"):
 			struck.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
 		if _flown < arm:
@@ -887,6 +914,8 @@ static func rocket(world: Node, shooter: Node, team: int, g: Dictionary, from: V
 	r.global_position = from + dir * 0.4
 	Effects.watch(r, shooter)
 	Sfx.play_at(world, "launch", from, 2.0, 1.5, 900.0)
+	if Sim.net != null:
+		Sim.net.share_round(r)
 	Effects.dust(world, from - dir * 1.4, 1.6)        # the backblast
 
 ## A 40 mm grenade out of the drum: a round that arcs, arms after ten metres
@@ -907,6 +936,8 @@ static func grenade40(world: Node, shooter: Node, team: int, g: Dictionary, from
 	r.global_position = from + dir * 0.3
 	Effects.watch(r, shooter)
 	Sfx.play_at(world, "launch", from, -4.0, 2.3, 300.0)
+	if Sim.net != null:
+		Sim.net.share_round(r)
 
 ## Which way to send something at `speed` so it falls onto `to` under `fall`:
 ## the low arc, or zero if it cannot get there at all. A rifle round at a
@@ -938,4 +969,6 @@ static func sam(world: Node, shooter: Node, team: int, from: Vector3, dir: Vecto
 	world.add_child(m)
 	Effects.watch(m, shooter)
 	Sfx.play_at(world, "launch", from, 2.0, 1.1, 1400.0)
+	if Sim.net != null:
+		Sim.net.share_launch(shooter, m)
 	Effects.dust(world, from - dir * 1.4, 1.8)

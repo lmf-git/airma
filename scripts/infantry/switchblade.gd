@@ -7,6 +7,8 @@ extends Node3D
 ## not go for the same man while there is another to go for.
 
 var team := 0
+## Only the look of it: see `CqbMatch.call_picture`.
+var picture := false
 var arena: Node = null
 var owner_node: Node = null
 ## Where it circles while it looks: over the man who launched it.
@@ -138,7 +140,7 @@ func _detonate() -> void:
 	_gone = true
 	_release()
 	if arena != null and is_instance_valid(arena) and arena.has_method("_bomb"):
-		arena._bomb(global_position, BLAST, false, "switchblade")
+		arena._bomb(global_position, BLAST, false, "switchblade", picture)
 	else:
 		Effects.explosion(get_tree().current_scene, global_position, 3.0, true)
 	queue_free()

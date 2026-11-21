@@ -97,7 +97,7 @@ func host(jet_id: String) -> bool:
 	my_id = 1
 	if my_name == "":
 		my_name = callsign()
-	roster[1] = {"jet": jet_id, "name": my_name, "team": 0}
+	roster[1] = {"jet": jet_id, "name": my_name, "team": abs_side}
 	status = "hosting on port %d" % port
 	Sim.report("Hosting. Others join at %s" % join_address(), Sim.Ev.GOOD)
 	_open_port()
@@ -253,11 +253,16 @@ func _drop_peer() -> void:
 func _open_port() -> void:
 	if _upnp_thread != null:
 		return
-	_upnp_thread = Thread.new()
-	_upnp_thread.start(_upnp_worker)
-
-func _upnp_worker() -> void:
+	# Made here, on the main thread, and handed over. Godot finishes setting
+	# up a class the first time one is made, and doing that from the worker
+	# -- the UPNP itself, and the devices `discover` makes -- printed
+	# "Finalizing a GDType from a subtype from another thread" on every host.
 	var up := UPNP.new()
+	var _warm := UPNPDevice.new()
+	_upnp_thread = Thread.new()
+	_upnp_thread.start(_upnp_worker.bind(up))
+
+func _upnp_worker(up: UPNP) -> void:
 	var disc := up.discover()
 	if disc != UPNP.UPNP_RESULT_SUCCESS:
 		_upnp_done.call_deferred(false, "", "no router answered (%d)" % disc)
@@ -371,6 +376,9 @@ func leave() -> void:
 	roster.clear()
 	active = false
 	is_host = false
+	if side == 1:
+		side = 0
+		_side_the_fleet()
 	status = "offline"
 	roster_changed.emit()
 
@@ -386,10 +394,12 @@ func _on_peer_joined(id: int) -> void:
 	# on identical default start points, in a mission the host was not flying.
 	rpc_id(id, "net_lobby_mission", lobby_mission if lobby_mission != ""
 		else String(Sim.mission))
-	if match_gen == 0:
-		match_gen = 1
-	rpc_id(id, "net_match", running_mission if running_mission != "" else String(Sim.mission),
-		match_gen, match_settings())
+	# Only a match that is actually running: a host still in the hangar has
+	# nothing to load, and the joiner waits there with it.
+	if world.get("running") and running_mission != "":
+		if match_gen == 0:
+			match_gen = 1
+		rpc_id(id, "net_match", running_mission, match_gen, match_settings())
 	_publish_weather.call_deferred()      # and the sky they are joining
 	for pid in roster:
 		rpc_id(id, "net_announce", pid, roster[pid]["jet"], roster[pid]["team"],
@@ -414,8 +424,9 @@ func _on_connected(jet_id: String) -> void:
 		print("[net] announcing self %d to server" % my_id)
 	if my_name == "":
 		my_name = callsign()
-	rpc("net_announce", my_id, jet_id, 0, my_name)
-	net_announce(my_id, jet_id, 0, my_name)
+	rpc("net_announce", my_id, jet_id, abs_side, my_name)
+	net_announce(my_id, jet_id, abs_side, my_name)
+	_side_the_fleet()
 	set_fleet_ghosts(true)
 
 func _on_failed() -> void:
@@ -456,15 +467,15 @@ func net_objectives(labels: PackedStringArray, owners: PackedInt32Array,
 	var mode = world.get("mode")
 	if mode == null or not is_instance_valid(mode):
 		return
-	mode.tickets[0] = t_us
-	mode.tickets[1] = t_them
+	mode.tickets[lt(0)] = t_us
+	mode.tickets[lt(1)] = t_them
 	for z in world.get_tree().get_nodes_in_group("zones"):
 		if not is_instance_valid(z):
 			continue
 		var idx := labels.find(String(z.label))
 		if idx < 0:
 			continue
-		z.owner_team = owners[idx]
+		z.owner_team = lt(owners[idx])
 		z.progress = progress[idx]
 		# Whatever the host says has been destroyed is destroyed here too, so
 		# nobody is left shooting at a hangar that fell over minutes ago.
@@ -483,18 +494,53 @@ func net_announce(id: int, jet_id: String, team: int, nm := "") -> void:
 	if verbose:
 		print("[net] announce id=%d jet=%s from=%d roster=%d" % [
 			id, jet_id, multiplayer.get_remote_sender_id(), roster.size()])
+	# a different aircraft than the ghost is drawn as: built again as this one
+	if id != my_id and ghosts.has(id) and is_instance_valid(ghosts[id]) \
+			and String((ghosts[id] as Node).get_meta("jet", jet_id)) != jet_id:
+		var old: Aircraft = ghosts[id]
+		var keep_xf := old.global_transform
+		ghosts.erase(id)
+		old.queue_free()
+		# hidden until his next packet puts it somewhere: back on foot after a
+		# gunship there may be no more of them, and it hung in the sky
+		_make_ghost(id, jet_id, peer_team(id))
+		if ghosts.has(id):
+			(ghosts[id] as Aircraft).global_transform = keep_xf
 	if id != my_id and not ghosts.has(id):
-		_make_ghost(id, jet_id, team)
+		_make_ghost(id, jet_id, peer_team(id))
+	elif id != my_id and is_instance_valid(ghosts[id]):
+		(ghosts[id] as Aircraft).team = peer_team(id)
+	if id != my_id and veh_ghosts.has(id) and is_instance_valid(veh_ghosts[id]):
+		(veh_ghosts[id] as Tank).team = peer_team(id)
 	if is_host and id != 1:
 		# relay to everyone else
 		rpc("net_announce", id, jet_id, team, String(roster[id]["name"]))
+	if id == 1 or id == my_id:
+		_recompute_side()
+	else:
+		_retag_players()
 	roster_changed.emit()
+
+## This player's aircraft is now a different one -- a gunship he has been put
+## on, and back again after -- and every other screen redraws his ghost.
+func set_jet(jet_id: String) -> void:
+	if not active or not roster.has(my_id):
+		return
+	roster[my_id]["jet"] = jet_id
+	var nm := String(roster[my_id].get("name", ""))
+	rpc("net_announce", my_id, jet_id, abs_side, nm)
 
 func _make_ghost(id: int, jet_id: String, team: int) -> void:
 	if world == null:
 		return
 	var g := Aircraft.new()
 	g.setup(jet_id)
+	g.set_meta("jet", jet_id)
+	# Another player's transport can be walked into when its ramp is down --
+	# it is offered to a man on foot for that and nothing else (see
+	# `Walker._scan` and `World._board`).
+	if g.has_hold():
+		g.add_to_group("boardable")
 	g.team = team
 	g.name = "Player %d" % id
 	g.make_ghost()
@@ -545,6 +591,7 @@ func net_state(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, thr: float,
 		g.drop_chaff()
 	g.gear_down = bool(flags & 1)
 	g.hook_down = bool(flags & 2)
+	g.ramp_open = (flags & 128) != 0
 	g.flaps = 1.0 if (flags & 4) else 0.0
 	if (flags & 8) != 0:
 		g.set_bays(true)
@@ -573,7 +620,7 @@ func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int,
 		var man := NetMan.new()
 		man.name = "Man"
 		man.peer = id
-		man.team = int(roster.get(id, {}).get("team", 0))
+		man.team = peer_team(id)
 		man.callsign = name_of(id)
 		pil.add_child(man)
 		world.add_child(pil)
@@ -608,6 +655,7 @@ func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int,
 	g.set_meta("t_rx", Time.get_ticks_msec())
 	var nm: NetMan = g.get_node_or_null("Man") as NetMan
 	if nm != null:
+		nm.team = peer_team(id)
 		nm.crouching = crouch
 		nm.yaw = yaw
 		nm.dead = dead
@@ -689,8 +737,11 @@ func net_foot_shot(id: int, from: Vector3, dir: Vector3, kit: String, quiet: boo
 	if not quiet:
 		Firearm.report(world, g, muzzle)
 	# harmless, and stopped by the same hulls the real one is
+	# On his side: a copy with no side struck everyone, his friends and the
+	# man at this keyboard included -- no damage, but the hit and the blood.
+	var t_side: int = peer_team(id)
 	Effects.bullet(world, muzzle, dir * float(g["muzzle"]) + carrier_vel,
-		null, 0.0, -1, 1.0, 3.5, Firearm.drag_of(g), 0.0)
+		null, 0.0, t_side, 1.0, 3.5, Firearm.drag_of(g), 0.0)
 
 ## Only the host simulates the AI. Clients are told what exists and where it
 ## is, so every player in a co-op match is fighting the same aircraft rather
@@ -707,7 +758,7 @@ func net_ai_roster(idx: PackedInt32Array, kinds: PackedStringArray,
 			continue
 		var g := Aircraft.new()
 		g.setup(kinds[i])
-		g.team = teams[i]
+		g.team = lt(teams[i])
 		g.name = "AI %d" % key
 		g.make_ghost()
 		g.add_to_group("remote")
@@ -792,7 +843,7 @@ func net_chat(who: String, text: String, team: int) -> void:
 		return
 	var box = world.get("chat")
 	if box != null and is_instance_valid(box):
-		box.post(who, text.substr(0, 140), team)
+		box.post(who, text.substr(0, 140), lt(team ^ host_abs()))
 
 func say(text: String) -> void:
 	if not active:
@@ -803,6 +854,7 @@ func say(text: String) -> void:
 		who = String(roster[my_id].get("name", who))
 		team = int(roster[my_id].get("team", 0))
 	rpc("net_chat", who, text.substr(0, 140), team)
+	# (absolute: see `side`)
 
 # ---------------------------------------------------------------- ships
 ## Ships do not need a spawn roster. Every peer builds the same fleet from the
@@ -996,7 +1048,7 @@ func net_vehicle(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, turret: f
 	var t: Tank = veh_ghosts.get(id)
 	if t == null or not is_instance_valid(t):
 		t = Tank.new()
-		t.setup(int(roster.get(id, {}).get("team", 1)))
+		t.setup(peer_team(id))
 		t.name = "Armour %d" % id
 		t.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 		t.freeze = true
@@ -1338,6 +1390,14 @@ func _send(_delta: float) -> void:
 				rpc("net_objectives", labels, owners, prog, masks,
 					int(mode.tickets.get(0, 0)), int(mode.tickets.get(1, 0)))
 				rpc("net_kills", int(mode.kills.get(0, 0)), int(mode.kills.get(1, 0)))
+	# A gunship called in and on its way, before he is on its guns: it is his
+	# aircraft as far as everybody else is concerned (see `set_jet`).
+	var gs = world.get("_cqb_gunship")
+	if gs != null and is_instance_valid(gs) and gs != world.get("player"):
+		tx += 1
+		rpc("net_state", my_id, gs.global_position,
+			gs.global_transform.basis.get_rotation_quaternion(), gs.linear_velocity,
+			gs.throttle, 0)
 	# holding the conn of a ship: the orders go over, the hull comes back
 	if ship_conn >= 0 and not is_host:
 		var sh := _ship_by_index(ship_conn)
@@ -1385,6 +1445,10 @@ func _send(_delta: float) -> void:
 		flags |= 32
 	if p.chaff_active():
 		flags |= 64
+	# The cargo ramp. It was not in the packet, so another player's C-130 was
+	# shut on every screen but his, and nobody could walk into its hold.
+	if bool(p.get("ramp_open")):
+		flags |= 128
 	tx += 1
 	rpc("net_state", my_id, p.global_position,
 		p.global_transform.basis.get_rotation_quaternion(), p.linear_velocity,
@@ -1482,9 +1546,9 @@ func spawn_offset() -> Vector3:
 	var k := spawn_slot()
 	if k == 0:
 		return Vector3.ZERO
-	var side: float = 1.0 if k % 2 == 1 else -1.0
+	var wing: float = 1.0 if k % 2 == 1 else -1.0
 	var rankf := float(int((k + 1) / 2.0))
-	return Vector3(side * rankf * 90.0, -rankf * 24.0, rankf * 70.0)
+	return Vector3(wing * rankf * 90.0, -rankf * 24.0, rankf * 70.0)
 
 ## Called by the local player when it looses a store.
 func report_fire(weapon: String, xf: Transform3D, vel: Vector3) -> void:
@@ -1503,6 +1567,141 @@ static func mirroring() -> bool:
 ## restarted a conquest left everyone else in the old one, and a host that
 ## picked another mode from the pause menu told nobody at all.
 var match_gen := 0
+
+# ---------------------------------------------------------------- sides
+## This machine's side, absolute: 0 is BLUE, the host's side; 1 is RED, the
+## side against it. The host is always BLUE.
+##
+## Every machine simulates in its own frame, where 0 is its own player's side
+## -- which is what every page, every AI and every piece of scoring here was
+## written to assume, in a couple of hundred places. A RED player's machine is
+## the same game with the two sides swapped, so instead of teaching all of it
+## about a second "us", the swap is done once, at the wire: whatever side a
+## packet names is turned into this machine's frame on the way in and back on
+## the way out (`lt`). The host's frame is the absolute one.
+var side := 0
+
+## A side between this machine's frame and the absolute one; its own inverse.
+func lt(t: int) -> int:
+	if side == 1 and (t == 0 or t == 1):
+		return 1 - t
+	return t
+
+## The faction this machine's side fights with: the host's bloc for BLUE, the
+## other one for RED, whatever aeroplane happens to be picked in the hangar.
+func side_faction(mine: String) -> String:
+	if not active or roster.is_empty():
+		return mine
+	var host_jet := String(roster.get(1, {}).get("jet", Sim.selected_jet))
+	var host_bloc := JetSpec.bloc_of(host_jet)
+	var want_nato: bool = (host_bloc == "nato") == (side == 0)
+	var mine_nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+	if mine_nato == want_nato:
+		return mine
+	return "usa" if want_nato else "russia"
+
+## The same, for code that only has `Sim`.
+static func local_team(t: int) -> int:
+	if Sim.net != null and Sim.net.active:
+		return Sim.net.lt(t)
+	return t
+
+## The side this player chose: 0 BLUE, 1 RED -- the same name on every screen,
+## the host's included. `side` above is what that comes to in the host's
+## frame (it is the same as this for the host, whose frame it is).
+var abs_side := 0
+
+## The host's own choice, as everyone knows it from the roster.
+func host_abs() -> int:
+	if is_host:
+		return abs_side
+	return int(roster.get(1, {}).get("team", 0))
+
+## A player's side in this machine's frame, from his choice in the roster.
+func peer_team(id: int) -> int:
+	return lt(int(roster.get(id, {}).get("team", 0)) ^ host_abs())
+
+## Choose a side, BLUE or RED. Anyone may, the host included, at any time; it
+## is announced, and every machine whose relation to the host's side changes
+## with it turns its frame over (`_flip_frame`).
+func set_side(s: int) -> void:
+	abs_side = clampi(s, 0, 1)
+	if roster.has(my_id):
+		roster[my_id]["team"] = abs_side
+		if active:
+			rpc("net_announce", my_id, String(roster[my_id].get("jet", "")), abs_side,
+				String(roster[my_id].get("name", "")))
+	_recompute_side()
+	roster_changed.emit()
+
+## Players on each side, by name: for the screens that ask which to join.
+func side_counts() -> Array:
+	var out := [0, 0]
+	for id in roster:
+		out[clampi(int(roster[id].get("team", 0)), 0, 1)] += 1
+	return out
+
+func _recompute_side() -> void:
+	var now: int = 0 if is_host else (abs_side ^ host_abs())
+	if now != side:
+		side = now
+		_flip_frame()
+	_retag_players()
+
+## Every other player's ghost on the side it is now in this frame.
+func _retag_players() -> void:
+	for id in ghosts:
+		if is_instance_valid(ghosts[id]):
+			(ghosts[id] as Aircraft).team = peer_team(id)
+	for id in veh_ghosts:
+		if is_instance_valid(veh_ghosts[id]):
+			(veh_ghosts[id] as Tank).team = peer_team(id)
+	for id in foot_ghosts:
+		var g: Variant = foot_ghosts[id]
+		if is_instance_valid(g):
+			var nm: NetMan = (g as Node).get_node_or_null("Man") as NetMan
+			if nm != null:
+				nm.team = peer_team(id)
+
+## This machine's side and the host's have changed relation: what was "ours"
+## here is "theirs". The host's pictures are let go of and described again in
+## the new frame; what is counted -- sectors, kills, tickets -- is swapped now
+## rather than at the next packet.
+func _flip_frame() -> void:
+	if world == null:
+		return
+	for d in [ai_ghosts, units]:
+		for k in d:
+			if is_instance_valid(d[k]):
+				(d[k] as Node).queue_free()
+		d.clear()
+	ai_kinds.clear()
+	_unit_shots.clear()
+	if active and not is_host:
+		rpc_id(1, "net_resync")
+	_side_the_fleet()
+	for z in world.get_tree().get_nodes_in_group("zones"):
+		if is_instance_valid(z) and int(z.owner_team) in [0, 1]:
+			z.owner_team = 1 - int(z.owner_team)
+	var m = world.get("mode")
+	if m != null and is_instance_valid(m):
+		var k0 = m.kills.get(0, 0)
+		m.kills[0] = m.kills.get(1, 0)
+		m.kills[1] = k0
+		var t0 = m.tickets.get(0, 0)
+		m.tickets[0] = m.tickets.get(1, 0)
+		m.tickets[1] = t0
+
+func _side_the_fleet() -> void:
+	if world == null:
+		return
+	for n in world.get_tree().get_nodes_in_group("ships"):
+		var sh := n as Ship
+		if sh == null or sh.fleet_idx < 0:
+			continue
+		if not sh.has_meta("abs_team"):
+			sh.set_meta("abs_team", sh.team)
+		sh.team = lt(int(sh.get_meta("abs_team")))
 ## The generation this client last loaded, so a repeat of the same message
 ## (a join racing a restart) does not start it twice.
 var _gen_loaded := -1
@@ -1581,7 +1780,8 @@ func net_finish(win: bool, text: String) -> void:
 		return
 	var m = world.get("mode")
 	if m != null and is_instance_valid(m):
-		m.finish_from_host(win, text)
+		# the host's result is BLUE's: a RED player won what BLUE lost
+		m.finish_from_host(win if side == 0 else not win, text)
 
 ## The kill count, which in a street fight is the score.
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -1590,8 +1790,8 @@ func net_kills(k_us: int, k_them: int) -> void:
 		return
 	var m = world.get("mode")
 	if m != null and is_instance_valid(m):
-		m.kills[0] = k_us
-		m.kills[1] = k_them
+		m.kills[lt(0)] = k_us
+		m.kills[lt(1)] = k_them
 
 ## One line of the kill feed, on every screen. `skip` is a peer that already
 ## wrote it for itself.
@@ -1605,7 +1805,7 @@ func broadcast_feed(k: String, kt: int, v: String, vt: int, w: String, head: boo
 
 @rpc("authority", "call_remote", "reliable")
 func net_feed(k: String, kt: int, v: String, vt: int, w: String, head: bool) -> void:
-	Sim.kill(k, kt, v, vt, w, head)
+	Sim.kill(k, lt(kt), v, lt(vt), w, head)
 
 # ---------------------------------------------------- players on foot, as men
 ## Damage that landed on somebody else's man on foot: it goes to his machine.
@@ -1642,21 +1842,21 @@ func report_down(victim: String, killer: String, cause: String, head := false) -
 	if not active:
 		return
 	if is_host:
-		net_down(victim, killer, cause, head)
+		net_down(victim, killer, cause, head, side)
 	else:
-		rpc_id(1, "net_down", victim, killer, cause, head)
+		rpc_id(1, "net_down", victim, killer, cause, head, side)
 
 @rpc("any_peer", "call_remote", "reliable")
-func net_down(victim: String, killer: String, cause: String, head: bool) -> void:
+func net_down(victim: String, killer: String, cause: String, head: bool, vside := 0) -> void:
 	if not is_host or world == null:
 		return
 	var sender := multiplayer.get_remote_sender_id()
 	var fight = world.get("cqb")
 	if fight != null and is_instance_valid(fight) and sender != 0:
-		fight.remote_down()
+		fight.remote_down(vside)
 	if sender != 0:
-		Sim.kill(killer, 1, victim, 0, cause, head)
-	broadcast_feed(killer, 1, victim, 0, cause, head, sender)
+		Sim.kill(killer, 1 - vside, victim, vside, cause, head)
+	broadcast_feed(killer, 1 - vside, victim, vside, cause, head, sender)
 
 # ------------------------------------------------------------- host's units
 ## What the host simulates on the ground and is not a sector's garrison: the
@@ -1793,7 +1993,7 @@ func net_units_roster(keys: PackedInt32Array, kinds: PackedStringArray,
 		match bits[0]:
 			"man":
 				var s := Soldier.new()
-				s.team = teams[i]
+				s.team = lt(teams[i])
 				s.kit = bits[1] if bits.size() > 1 else "carbine"
 				s.launcher = bits[2] if bits.size() > 2 else ""
 				s.callsign = names[i]
@@ -1809,7 +2009,7 @@ func net_units_roster(keys: PackedInt32Array, kinds: PackedStringArray,
 				n = s
 			"tank":
 				var t := Tank.new()
-				t.setup(teams[i], bits[1] if bits.size() > 1 else "m1a2")
+				t.setup(lt(teams[i]), bits[1] if bits.size() > 1 else "m1a2")
 				t.name = names[i]
 				t.ai = false
 				t.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
@@ -1820,7 +2020,7 @@ func net_units_roster(keys: PackedInt32Array, kinds: PackedStringArray,
 				n = t
 			"ship":
 				var sh := Ship.new()
-				sh.setup(bits[1] if bits.size() > 1 else "cargo", teams[i])
+				sh.setup(bits[1] if bits.size() > 1 else "cargo", lt(teams[i]))
 				sh.name = names[i]
 				sh.ghost = true
 				sh.set_meta("strike", true)
@@ -2006,7 +2206,7 @@ func _who_of(n: Node) -> String:
 	if n.has_meta("zone_asset"):
 		var k: Array = n.get_meta("zone_asset")
 		return "z:%s:%d" % [String(k[0]), int(k[1])]
-	if n == world.get("tank") or n == world.get("player"):
+	if n == world.get("tank") or n == world.get("player") or n == world.get("walker"):
 		return "p:%d" % my_id
 	if n.is_in_group("bandits") and not n.is_in_group("remote"):
 		return "a:%d" % (n.get_instance_id() % 100000)
@@ -2119,7 +2319,10 @@ class _Mark extends Node3D:
 func share_launch(by: Node, r: Node) -> void:
 	if not active or not is_instance_valid(r) or r.get("harmless") == true:
 		return
-	var d := {"by": _who_of(by), "team": int(by.get("team")) if "team" in by else 1}
+	var tm: int = 1
+	if is_instance_valid(by):
+		tm = int(by.get("team")) if "team" in by else (int(by.get("side")) if "side" in by else 1)
+	var d := {"by": _who_of(by), "team": lt(tm)}
 	if r is Aircraft.Shell:
 		var sh := r as Aircraft.Shell
 		d["k"] = "shell"
@@ -2164,6 +2367,66 @@ func share_launch(by: Node, r: Node) -> void:
 	else:
 		rpc_id(1, "net_launch", d)
 
+## A man's round -- a grenade, a rocket off the shoulder, a 40 mm, a mortar
+## bomb -- sent to everyone else as it leaves, the way a vehicle's are. Only
+## his bullets used to go: a grenade or a flashbang he threw went off on his
+## own screen and nowhere else.
+func share_round(r: Node) -> void:
+	if not active or not is_instance_valid(r) or r.get("harmless") == true \
+			or r.get("picture") == true:
+		return
+	var d := {}
+	if r is Firearm.Frag:
+		var f := r as Firearm.Frag
+		d = {"k": "frag", "o": f.global_position, "v": f.vel, "fuse": f.fuse,
+			"flash": f.flash, "team": lt(f.team)}
+	elif r is Firearm.Rocket:
+		var k := r as Firearm.Rocket
+		d = {"k": "rkt", "o": k.global_position, "v": k.vel, "fall": k.fall,
+			"blast": k.blast, "arm": k.arm, "small": k.small, "life": k.life,
+			"team": lt(k.team)}
+	elif r is CqbMatch.MortarRound:
+		var mr := r as CqbMatch.MortarRound
+		d = {"k": "mortar", "from": mr.from, "to": mr.to, "flight": mr.flight,
+			"delay": mr.delay}
+	else:
+		return
+	d["by"] = _who_of(world.get("walker"))
+	launches_sent += 1
+	if is_host:
+		rpc("net_launch", d)
+	else:
+		rpc_id(1, "net_launch", d)
+
+## A strike called here, for everyone else to see: what it was, where, and
+## where the man who called it was standing and facing -- which is where the
+## run comes in from. See `CqbMatch.call_picture`.
+func share_streak(which: String, at: Vector3, x: Dictionary) -> void:
+	if not active:
+		return
+	var d := {"k": "streak", "call": which, "at": at, "x": x, "team": lt(0),
+		"by": "p:%d" % my_id}
+	launches_sent += 1
+	if is_host:
+		rpc("net_launch", d)
+	else:
+		rpc_id(1, "net_launch", d)
+
+## The ATTACK HELICOPTER for a player on another machine is flown by the host,
+## on that player's side, so it is one aircraft on every screen (it reaches
+## the others as AI, like any other the host flies).
+func request_heli(back: Vector3) -> void:
+	if active and not is_host:
+		rpc_id(1, "net_heli", back, side)
+
+@rpc("any_peer", "call_remote", "reliable")
+func net_heli(back: Vector3, host_side: int) -> void:
+	if not is_host or world == null:
+		return
+	var fight = world.get("cqb")
+	if fight != null and is_instance_valid(fight):
+		fight.spawn_streak_heli(host_side, back)
+
 ## Launches shared from here and copies drawn here, for the harness.
 var launches_sent := 0
 var launches_drawn := 0
@@ -2180,8 +2443,16 @@ func net_launch(d: Dictionary) -> void:
 	var who := String(d.get("by", "x"))
 	if who == "p:%d" % my_id:
 		return                        # our own, passed back
+	if String(d.get("k", "")) == "streak":
+		var fight = world.get("cqb")
+		if fight != null and is_instance_valid(fight):
+			var pid := int(who.split(":")[1]) if who.begins_with("p:") else 0
+			fight.call_picture(String(d["call"]), d.get("at", Vector3.ZERO), d.get("x", {}),
+				name_of(pid), lt(int(d.get("team", 0))) == 0)
+			launches_drawn += 1
+		return
 	var by := _who_node(who)
-	var team := int(d.get("team", 1))
+	var team := lt(int(d.get("team", 1)))
 	var at: Vector3 = d.get("o", Vector3.ZERO)
 	var scn: Node = world
 	launches_drawn += 1
@@ -2218,6 +2489,37 @@ func net_launch(d: Dictionary) -> void:
 				m.tree_exiting.connect(tgt.queue_free)
 			Effects.dust(scn, at, 3.0)
 			Sfx.play_at(scn, "launch", at, 0.0, 1.0, 3000.0)
+		"frag":
+			var fg := Firearm.Frag.new()
+			fg.harmless = true
+			fg.flash = bool(d.get("flash", false))
+			fg.fuse = float(d.get("fuse", 2.9))
+			fg.team = team
+			fg.vel = d.get("v", Vector3.ZERO)
+			scn.add_child(fg)
+			fg.global_position = at
+		"rkt":
+			var rk := Firearm.Rocket.new()
+			rk.harmless = true
+			rk.team = team
+			rk.dmg = 0.0
+			rk.vel = d.get("v", Vector3.ZERO)
+			rk.fall = float(d.get("fall", 3.0))
+			rk.blast = float(d.get("blast", 4.6))
+			rk.arm = float(d.get("arm", 0.0))
+			rk.small = bool(d.get("small", false))
+			rk.life = float(d.get("life", 3.5))
+			scn.add_child(rk)
+			rk.global_position = at
+			Sfx.play_at(scn, "launch", at, -2.0 if rk.small else 2.0, 2.3 if rk.small else 1.5, 900.0)
+		"mortar":
+			var mo := CqbMatch.MortarRound.new()
+			mo.picture = true
+			mo.from = d.get("from", Vector3.ZERO)
+			mo.to = d.get("to", Vector3.ZERO)
+			mo.flight = float(d.get("flight", 12.0))
+			mo.delay = float(d.get("delay", 0.0))
+			scn.add_child(mo)
 		"icbm":
 			var ic := Icbm.new()
 			ic.harmless = true

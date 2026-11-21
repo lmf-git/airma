@@ -60,6 +60,19 @@ func parse_arg(a: String) -> bool:
 		world._bank_deg = float(a.substr(10))
 	elif a.begins_with("--dashalt="):
 		world._dash_alt = float(a.substr(10))
+	elif a == "--soundlog":
+		_sound_log = true
+	elif a == "--soundquit":
+		_sl_quit = true
+	elif a == "--midairtest":
+		_midair_test = true
+	elif a == "--phantomtest":
+		_phantom = true
+		_sound_log = true
+	elif a.begins_with("--soundswitch="):
+		_sound_switch = a.substr(14)
+		_sound_log = true
+		_sl_quit = true
 	elif a.begins_with("--nukeshot="):
 		for v in a.substr(11).split(","):
 			_nuke_shot.append(float(v))
@@ -495,4 +508,103 @@ func tick_fx_2(delta: float) -> void:
 				world.player.selected = maxi(world.player.weapon_types.find("aim120"), 0)
 				world.player.locked = true
 				world.player.fire()
+#endregion
+
+
+#region --soundlog
+## Every positional sound, by kind, and how far from the ears it was: printed
+## every five seconds. With --soundswitch=MODE:VEH the match is changed half
+## way through, to hear what the last one leaves playing.
+var _sound_log := false
+var _sound_switch := ""
+var _sl_quit := false
+var _sl_t := 0.0
+var _sl_hooked := false
+var _sl: Dictionary = {}
+var _phantom := false
+var _ph_step := 0
+
+## Runway start: a bomb off the rails on the runway, then out of the seat.
+func _tick_phantom() -> void:
+	var p: Aircraft = world.player
+	if _ph_step == 0 and _sl_t > 3.0:
+		_ph_step = 1
+		if world.boarding:
+			world._end_boarding()
+		for i in p.weapon_types.size():
+			if String(WeaponSpec.get_spec(String(p.weapon_types[i])).get("kind", "")) == "bomb":
+				p.selected = i
+		print("[phantom] releasing %s on the runway: %s" % [p.current_weapon(), p.fire()])
+	elif _ph_step == 1 and _sl_t > 20.0:
+		_ph_step = 2
+		print("[phantom] ejecting")
+		world._eject()
+
+func tick_sound_log(delta: float) -> void:
+	if not _sound_log or not world.running:
+		return
+	if not _sl_hooked:
+		_sl_hooked = true
+		Sfx.listen = func(id: String, pos: Vector3) -> void:
+			var eye := world.get_viewport().get_camera_3d()
+			var d: float = -1.0 if (eye == null or pos == Vector3.INF) \
+				else eye.global_position.distance_to(pos)
+			if _phantom and id in ["rifle", "mg", "autocannon", "gun", "carbine", "smg", "shot_far",
+					"dmr", "pistol", "shotgun", "lmg", "suppressed"]:
+				print("[phantom] %s at %s (%.0f m), stack: %s" % [id, str(pos.round()), d,
+					" < ".join(PackedStringArray(get_stack().slice(1, 5).map(
+						func(f): return "%s:%d" % [String(f["source"]).get_file(), int(f["line"])])))])
+			var e: Array = _sl.get(id, [0, 1e9, 0.0])
+			e[0] = int(e[0]) + 1
+			if d >= 0.0:
+				e[1] = minf(float(e[1]), d)
+			_sl[id] = e
+	_sl_t += delta
+	if _phantom:
+		_tick_phantom()
+	if fmod(_sl_t, 5.0) < delta:
+		var parts: Array = []
+		for k in _sl:
+			parts.append("%s x%d (nearest %.0f m)" % [k, int(_sl[k][0]), float(_sl[k][1])])
+		print("[sound] t=%.0f %s: %s" % [_sl_t, String(Sim.mission), ", ".join(PackedStringArray(parts))])
+		_sl.clear()
+	if _sound_switch != "" and _sl_t > 30.0:
+		var parts2 := _sound_switch.split(":")
+		_sound_switch = ""
+		print("[sound] -> %s" % parts2[0])
+		world._start(parts2[1] if parts2.size() > 1 else "f16", parts2[0])
+	if _sl_t > 60.0 and _sl_quit:
+		world.get_tree().quit()
+#endregion
+
+
+#region --midairtest
+## Head-on with another aeroplane: the player's must come apart. --preset=free:f16
+var _midair_test := false
+var _ma_t := 0.0
+var _ma_other: Aircraft = null
+
+func tick_midair(delta: float) -> void:
+	if not _midair_test or not world.running or not is_instance_valid(world.player):
+		return
+	_ma_t += delta
+	var p: Aircraft = world.player
+	if _ma_other == null and _ma_t > 2.0:
+		_ma_other = PlayerJet.new()
+		_ma_other.setup("su35")
+		_ma_other.team = 1
+		_ma_other.name = "Oncoming"
+		world.add_child(_ma_other)
+		var fwd: Vector3 = -p.global_transform.basis.z
+		_ma_other.global_transform = Transform3D(Basis.looking_at(-fwd, Vector3.UP),
+			p.global_position + fwd * 600.0)
+		_ma_other.linear_velocity = -fwd * 200.0
+		_ma_other.throttle = 0.8
+		print("[midair] an Su-35 600 m ahead, coming the other way, closing at %.0f m/s" % (
+			(p.linear_velocity + fwd * 200.0).length()))
+	if _ma_other != null and _ma_t > 8.0:
+		print("[midair] RESULT: player %s, the other %s" % [
+			"destroyed" if not p.is_alive() else "still flying",
+			"destroyed" if not (is_instance_valid(_ma_other) and _ma_other.is_alive()) else "still flying"])
+		world.get_tree().quit()
 #endregion

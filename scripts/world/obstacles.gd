@@ -65,6 +65,8 @@ static var _laid := PackedFloat32Array()
 
 static func clear() -> void:
 	_light.clear()
+	_squash.clear()
+	_rubble_of.clear()
 	_ent = PackedFloat32Array()
 	_laid = PackedFloat32Array()
 	_dead = PackedByteArray()
@@ -693,6 +695,44 @@ static func centre_of(id: int) -> Vector3:
 	var b := id * STRIDE
 	return Vector3(_ent[b], _ent[b + 1], _ent[b + 2])
 
+## What a blast may bring down, and how much of it is left as rubble: the
+## fraction of its height the heap stands. Only what something draws coming
+## down is registered -- a town's blocks, the props in its streets. Everything
+## else in the field used to be taken out by any blast in reach as well, and
+## stood there drawn and whole with nothing in it: a fence, a control tower, a
+## block of flats you could walk and shoot through.
+static var _squash := {}
+## A structure brought down -> the heap left where it stood.
+static var _rubble_of := {}
+
+static func set_breakable(id: int, squash: float) -> void:
+	if id >= 0 and id < _dead.size():
+		_squash[id] = squash
+
+## Where a structure stood, a heap the height of what is drawn there now: low,
+## on the ground, solid. It was nothing at all, so the wreck of a block was
+## something you walked through and a round went through at knee height.
+static func _leave_rubble(id: int, squash: float) -> void:
+	var b: int = id * STRIDE
+	var x: float = _ent[b]
+	var z: float = _ent[b + 2]
+	# on the ground, whatever the box began at: a block with a ground floor
+	# opened up in it starts a storey up, and its heap does not
+	var ground: float = Sim.height_at(x, z)
+	var whole: float = _ent[b + 1] + _ent[b + 4] - ground
+	var h: float = whole * squash
+	if whole > 4.0:
+		h -= 0.4                         # the block sinks into its footprint
+	if h < 0.35:
+		return
+	var rid := add_box(Vector3(x, ground - 0.3, z), _ent[b + 3] * 1.04, h + 0.3,
+		_ent[b + 5] * 1.04, yaw_of(id))
+	_rubble_of[id] = rid
+
+## The heap a structure left, or -1.
+static func rubble_of(id: int) -> int:
+	return int(_rubble_of.get(id, -1))
+
 ## Take everything inside a blast out of the field. Called by whatever flattens
 ## the meshes, so the two stay in step -- a building you can no longer see is a
 ## building you can no longer hit.
@@ -702,11 +742,14 @@ static func kill_near(pos: Vector3, radius: float) -> void:
 	var r2 := radius * radius
 	for id in _ids_in(Vector2(pos.x - radius, pos.z - radius),
 			Vector2(pos.x + radius, pos.z + radius), true):
+		if not _squash.has(id) or _dead[id] == GONE:
+			continue
 		var b: int = id * STRIDE
 		var dx: float = _ent[b] - pos.x
 		var dz: float = _ent[b + 2] - pos.z
 		if dx * dx + dz * dz <= r2:
 			_dead[id] = GONE
+			_leave_rubble(id, float(_squash[id]))
 
 # ------------------------------------------------------------ near colliders
 ## Real bodies for the structures nearest the viewer. Everything else in the

@@ -604,6 +604,8 @@ func activate() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _unhandled_input(e: InputEvent) -> void:
+	if Sim.menu_open:
+		return
 	if not cam.current or dead:
 		return
 	# On the sights the arrow keys are the turrets: up and down elevation,
@@ -1632,6 +1634,8 @@ func _mortar(start: Vector3, look: Vector3) -> bool:
 	mr.flight = clampf(5.0 + flat / 70.0, 6.0, 16.0)
 	mr.delay = 0.0
 	get_tree().current_scene.add_child(mr)
+	if Sim.net != null:
+		Sim.net.share_round(mr)
 	Sim.report("round out — %d m, %.0f seconds" % [int(flat), mr.flight], Sim.Ev.INFO)
 	return true
 
@@ -1794,6 +1798,8 @@ func _throw() -> void:
 	var hand: Vector3 = body.fore_l.global_transform * Vector3(0, -Pilot.ARM_2, 0)
 	f.global_position = hand if hand.distance_to(body.eye_pos()) < 1.2 \
 		else body.eye_pos() + look * 0.5
+	if Sim.net != null:
+		Sim.net.share_round(f)
 	Sfx.play_at(world, "cloth", f.global_position, -8.0, 1.3, 30.0)
 
 ## A round of yours landed.
@@ -2040,6 +2046,11 @@ func _scan() -> void:
 	var best := 4.5
 	for n in get_tree().get_nodes_in_group("boardable"):
 		if not is_instance_valid(n):
+			continue
+		# somebody else's aircraft: its hold, when the ramp is down, and not
+		# its cockpit
+		if n.is_in_group("remote") and not (n.has_method("has_hold") and n.has_hold()
+				and n.get("ramp_open")):
 			continue
 		var d: float = n.hull_distance(global_position) if n.has_method("hull_distance") \
 			else global_position.distance_to(n.global_position) - 6.0

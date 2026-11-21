@@ -845,7 +845,7 @@ func ghost_shot() -> void:
 	var muzzle: Vector3 = body.muzzle_pos() if body != null and body.has_gun() else eye()
 	Effects.muzzle_flash(world, muzzle + aim * 0.12, aim, 0.16)
 	Firearm.report(world, gun, muzzle)
-	Effects.bullet(world, muzzle, aim * float(gun["muzzle"]), null, 0.0, -1, 1.0, 3.5,
+	Effects.bullet(world, muzzle, aim * float(gun["muzzle"]), null, 0.0, team, 1.0, 3.5,
 		Firearm.drag_of(gun), 0.0)
 
 ## The host says he died: he falls here the way he fell there.

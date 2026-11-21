@@ -6,6 +6,8 @@ extends Node3D
 
 var from := Vector3.ZERO
 var to := Vector3.ZERO
+## Only the look of it: see `CqbMatch.call_picture`.
+var picture := false
 ## Who called it, for the kill feed and the credit.
 var owner_node: Node = null
 ## Seconds from the call to the canisters coming down.
@@ -68,7 +70,10 @@ func _ignite() -> void:
 		for s in [-1.0, 1.0]:
 			var p: Vector3 = on + across * SIDE * s * 0.5
 			p.y = Sim.height_at(p.x, p.z)
+			var was_m: bool = Effects.mute_blast
+			Effects.mute_blast = was_m or picture
 			Effects.explosion(world, p + Vector3(0, 0.5, 0), 3.0, false)
+			Effects.mute_blast = was_m
 			var fire: GPUParticles3D = Effects.ember_particles(Color(1.0, 0.55, 0.15), 2.6, 40)
 			fire.lifetime = 1.6
 			var pm: ParticleProcessMaterial = fire.process_material
@@ -97,6 +102,8 @@ func _ignite() -> void:
 
 ## Everyone standing in a fire takes it, and can barely see for it.
 func _burn(dt: float) -> void:
+	if picture:
+		return
 	var by: Node = owner_node if is_instance_valid(owner_node) else null
 	var hurt: Dictionary = {}
 	for grp in ["infantry", "hittable"]:

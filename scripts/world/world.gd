@@ -442,12 +442,16 @@ func _ready() -> void:
 	menu.modulate.a = 0.0
 	menu.jet_changed.connect(_set_preview)
 	menu.weather_changed.connect(set_weather)
-	menu.start_requested.connect(_start)
+	menu.start_requested.connect(_on_launch)
 	menu.host_requested.connect(_host_game)
 	# the slot depends on the roster, which arrives after the mission starts
 	net.roster_changed.connect(_offset_for_peer)
 	menu.mission_changed.connect(_on_lobby_mission)
 	menu.join_requested.connect(_join_game)
+	menu.side_changed.connect(func(sd: int) -> void:
+		if net != null:
+			net.set_side(sd)
+			Sim.report("you are %s" % ("BLUE" if sd == 0 else "RED"), Sim.Ev.INFO))
 	menu.resume_requested.connect(_resume)
 	menu.settings_requested.connect(func() -> void: pause_menu.open_settings())
 	ui.add_child(menu)
@@ -923,6 +927,8 @@ func _tick_world(delta: float) -> void:
 		if net.active:
 			role = "host" if net.is_host else "client"
 		menu.set_net_role(role, String(net.lobby_mission))
+		if net.active:
+			menu.show_side_counts(net.side_counts())
 	# The cloud volume rides with whatever camera is actually current — the
 	# cockpit, the chase, the sensor pod, a ship's bridge — not with the
 	# aircraft chase camera specifically. Handing the sky the wrong eye position
@@ -1004,6 +1010,9 @@ func _start(id: String, mission: String) -> void:
 	var keep := mission == "strike" or mission in ["ground", "arms"]
 	# "foot" is a choice in the modes that are fought over a town: no vehicle
 	_cqb_on_foot = id == "foot" or mission in ["cqb", "range"]
+	# ON FOOT in a mode flown from the field: on the flight line beside the
+	# aeroplane, the way the ramp walk starts. It was not on offer at all.
+	var foot_at_field: bool = id == "foot" and mission not in ["cqb", "ground", "arms", "range", "ramp"]
 	if id == "foot":
 		# whatever aeroplane was last looked at in the hangar says whose side
 		# this is, which is what the deploy screen offers vehicles from
@@ -1025,9 +1034,10 @@ func _start(id: String, mission: String) -> void:
 	# The click that started this is still down. Nothing may read the trigger
 	# again until it has been let go, or the first thing a new vehicle does is
 	# fire whatever it is holding.
-	Sim.block_until_released([&"fire", &"gun"])
+	Sim.block_until_released([&"foot_fire", &"fire", &"gun"])
 	Sim.score = 0
 	get_tree().paused = false
+	Sim.menu_open = false
 	_clear_mission()
 	fleet_yard.muster_fleet(kept_mission, ship_kind != "")
 	# no fight, no edges, and the whole country back
@@ -1043,6 +1053,8 @@ func _start(id: String, mission: String) -> void:
 	# a hangar shown from the pause page said RESUME and LAUNCH NEW; the next
 	# time it comes up it is between matches
 	menu.set_paused(false)
+	menu.set_redeploy(false)
+	_redeploy_wait = false
 	if is_instance_valid(pause_menu):
 		pause_menu.close()
 	_show_roster(false)
@@ -1146,11 +1158,170 @@ func _start(id: String, mission: String) -> void:
 			player.power = 0.85
 			_spawn_threats()
 			Sim.report("Bandits north of the field. Bays open before you shoot.", Sim.Ev.INFO)
+	if foot_at_field:
+		if boarding:
+			_end_boarding()
+		_foot_at_field()
+
+## On foot on the flight line: the aeroplane parked on the apron, canopy up,
+## and the man beside it, free to walk to it or to any other.
+func _foot_at_field() -> void:
+	if not is_instance_valid(player):
+		return
+	player.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(-90.0)),
+		Vector3(150.0, _apron_y(150.0, -150.0) + _stance(player.spec), -150.0))
+	player.linear_velocity = Vector3.ZERO
+	player.angular_velocity = Vector3.ZERO
+	player.gear_down = true
+	player.gear_anim = 1.0
+	player.throttle = 0.0
+	player.power = 0.0
+	player.active = false
+	player.set_canopy(true, true)
+	player.add_to_group("boardable")
+	if not parked.has(player):
+		parked.append(player)
+	_reset_interp(player)
+	var nose: float = maxf(absf(player.bounds.position.z), absf(player.bounds.end.z))
+	_spawn_walker(player.global_transform * Vector3(0.0, 0.0, -(nose + 5.0)))
+	# Not stepped out to a spawn slot afterwards: that moved the aeroplane a
+	# hundred metres from the man standing beside it. A parked aeroplane is
+	# only on its own player's screen, so there is nothing for it to collide
+	# with.
+	_slot_home = Vector3(1e9, 0, 0)
+
+# ------------------------------------------------------------------ redeploy
+## Down, in a mode that is not a street fight: after a moment the hangar comes
+## up to choose what to go back in as, and REDEPLOY puts you back into the same
+## match. There was nothing at all -- a joiner who was shot down could not
+## restart a match that was not his, and sat looking at his wreck.
+var _redeploy_wait := false
+
+func _offer_redeploy() -> void:
+	if _redeploy_wait or is_instance_valid(cqb) or not running:
+		return
+	_redeploy_wait = true
+	var gen := _mission_started
+	await get_tree().create_timer(3.5).timeout
+	_redeploy_wait = false
+	if not running or gen != _mission_started or not is_inside_tree():
+		return
+	# still down? something else may already have put him back
+	var down: bool = (on_foot and is_instance_valid(walker) and walker.dead) \
+		or (is_instance_valid(tank) and not tank.alive) \
+		or (not on_foot and not is_instance_valid(tank) and (not is_instance_valid(player)
+			or not player.is_alive()))
+	if not down:
+		return
+	Sim.report("choose what to go back in as, and REDEPLOY", Sim.Ev.INFO)
+	menu.set_redeploy(true)
+	menu.visible = true
+	Sim.menu_open = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+func _on_crew_down(who: Node) -> void:
+	if who == tank:
+		_offer_redeploy()
+
+## LAUNCH, or REDEPLOY when the hangar is up for that.
+func _on_launch(id: String, mission: String) -> void:
+	if menu.redeploy:
+		_redeploy(id)
+	else:
+		_start(id, mission)
+
+## Back into the match that is running, as `id`: an aeroplane at this mode's
+## start, a vehicle at the park, or on foot on the flight line.
+func _redeploy(id: String) -> void:
+	menu.set_redeploy(false)
+	menu.visible = false
+	Sim.menu_open = false
+	Sim.block_until_released([&"fire", &"gun"])
+	if is_instance_valid(tank):
+		tank.mount(false)
+	tank = null
+	hud.tank = null
+	if is_instance_valid(walker) and not is_instance_valid(_station_walker):
+		walker.queue_free()
+	walker = null
+	hud.walker = null
+	on_foot = false
+	var mission := String(Sim.mission)
+	var jet := id
+	if id == "foot" or id.begins_with("veh:") or id.begins_with("sea:"):
+		jet = String(Sim.selected_jet) if not String(Sim.selected_jet).contains(":") else "f16"
+	# the wreck stays where it fell; this is a new aeroplane
+	if is_instance_valid(player) and player.is_alive() and not parked.has(player):
+		parked.append(player)
+	player = null
+	_make_player(jet)
+	player.died.connect(func(_w): _offer_redeploy())
+	if id == "foot" or id.begins_with("veh:") or id.begins_with("sea:"):
+		_foot_at_field()
+		if id.begins_with("veh:"):
+			var b: Vector3 = base.global_position if is_instance_valid(base) else Vector3.ZERO
+			var t := _spawn_tank(Vector3(b.x + 196.0, 0.0, b.z - 470.0), deg_to_rad(-90.0), 0,
+				id.substr(4))
+			_enter_tank(t)
+	else:
+		_place_at_start(mission)
+		_slot_home = Vector3.INF
+	_slot_said = -1
+	_mission_started = Time.get_ticks_msec()
+	_offset_for_peer.call_deferred()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Sim.report("back in", Sim.Ev.GOOD)
+
+## Where this mode starts an aeroplane: on the runway, on the approach, or in
+## the air over the fight.
+func _place_at_start(mission: String) -> void:
+	var gear_h := 0.0
+	for g in player.spec["gear"]:
+		gear_h = maxf(gear_h, absf(g["pos"].y) + g["r"])
+	if mission in ["takeoff", "ramp", "sandbox"]:
+		player.global_transform = Transform3D(Basis(),
+			Vector3(0, _apron_y(0.0, 1380.0) + gear_h + 0.02, 1380.0))
+		player.gear_down = true
+		player.gear_anim = 1.0
+		player.throttle = 0.0
+		player.flaps = 1.0
+		player.flap_anim = 1.0
+		player.set_canopy(false, true)
+	elif mission == "landing":
+		var z := Airbase.AIM_Z + 12000.0
+		player.global_transform = Transform3D(Basis(), Vector3(140.0, _apron_y(140.0, z) + 640.0, z))
+		player.rotation = Vector3(deg_to_rad(-3.0), deg_to_rad(-1.2), 0.0)
+		player.linear_velocity = -player.global_transform.basis.z * _entry_speed(148.0)
+		player.gear_down = true
+		player.gear_anim = 1.0
+		player.flaps = 1.0
+		player.throttle = 0.42
+		player.power = 0.42
+	else:
+		var at := Vector3(-600.0, 2400.0, 7000.0)
+		var yaw := deg_to_rad(-4.0)
+		if mission in ["conquest", "rush", "warlords", "tdm", "ffa", "combat"]:
+			at = Vector3(-500.0, 3600.0, 7200.0)
+			if NetLink.local_team(0) == 1:
+				at = Vector3(500.0, 3700.0, -12500.0)
+				yaw = PI + deg_to_rad(4.0)
+		player.global_transform = Transform3D(Basis(Vector3.UP, yaw), at)
+		player.linear_velocity = -player.global_transform.basis.z * _entry_speed(240.0)
+		player.gear_down = false
+		player.gear_anim = 0.0
+		player.throttle = 0.8
+		player.power = 0.8
+	_reset_interp(player)
 
 ## The player's aircraft, built and wired to every page that reads it. Also
 ## what a street fight uses to put somebody in the air in the middle of a
 ## match: see `StreetFight.cqb_fly`.
 func _make_player(id: String) -> void:
+	# What everyone else draws this player as. It was the aeroplane he had
+	# selected when he pressed HOST or JOIN and never again: a host who then
+	# chose a C-130 was a fighter on every other screen.
+	if net != null and net.active:
+		net.set_jet(id)
 	var craft: Aircraft
 	if JetSpec.is_rotary(id):
 		craft = PlayerHeli.new()
@@ -1164,7 +1335,9 @@ func _make_player(id: String) -> void:
 	add_child(player)
 	player.store_released.connect(_on_store_released)
 	player.touched_down.connect(_on_touchdown)
-	player.died.connect(func(_w): Sim.report("you were shot down", Sim.Ev.BAD))
+	player.died.connect(func(_w):
+		Sim.report("you were shot down", Sim.Ev.BAD)
+		_offer_redeploy())
 
 	if cam == null:
 		cam = ChaseCamera.new()
@@ -1316,6 +1489,11 @@ func _tick_boarding(delta: float) -> void:
 func _setup_battle(id: String) -> void:
 	player.global_transform = Transform3D(Basis(), Vector3(-500.0, 3600.0, 7200.0))
 	player.rotation.y = deg_to_rad(-4.0)
+	if NetLink.local_team(0) == 1:
+		# RED, in a session: from behind the far side's sectors, heading south
+		# at the BLUE side coming up from the field
+		player.global_transform = Transform3D(Basis(), Vector3(500.0, 3700.0, -12500.0))
+		player.rotation.y = PI + deg_to_rad(4.0)
 	player.linear_velocity = -player.global_transform.basis.z * _entry_speed(250.0)
 	player.gear_down = false
 	player.gear_anim = 0.0
@@ -1796,6 +1974,8 @@ func _offset_for_peer() -> void:
 	# onto the same offset. It is always applied to the *original* start point
 	# rather than to wherever the aeroplane is now, so refining the answer moves
 	# it to the right place instead of shifting it again.
+	if _slot_home != Vector3.INF and _slot_home.x >= 1e8:
+		return                          # on foot on the flight line: see `_foot_at_field`
 	if _slot_home == Vector3.INF:
 		_slot_home = player.global_position
 	if Time.get_ticks_msec() - _mission_started > 15000:
@@ -1804,7 +1984,14 @@ func _offset_for_peer() -> void:
 	var off: Vector3 = net.spawn_offset()
 	if off == Vector3.ZERO:
 		return
-	if player.on_ground or Sim.mission == "ramp" or Sim.mission == "takeoff":
+	# On the ground by where it is, not by `on_ground`: an aeroplane made this
+	# frame says it is on the ground until its first physics step, so every
+	# joiner in an airborne start -- free flight, a battle, an approach -- was
+	# set down on the terrain at flying speed and destroyed before the first
+	# frame was drawn. The host, slot 0, is never moved, so only joiners met
+	# it: two players in a session who could not see each other.
+	var agl: float = _slot_home.y - Sim.height_at(_slot_home.x, _slot_home.z)
+	if agl < 30.0 or Sim.mission == "ramp" or Sim.mission == "takeoff":
 		# on the ground, step along the apron and keep the wheels on it
 		var p := _slot_home + Vector3(off.x, 0.0, off.z)
 		p.y = Sim.height_at(p.x, p.z) + _stance(player.spec) + 0.02
@@ -1965,6 +2152,13 @@ func _spawn_tank(at: Vector3, yaw: float, team: int, kind := "m1a2") -> Tank:
 ## `thrown` puts the man in the air with that velocity and a canopy over him,
 ## which is what an ejection is. Left at zero he is simply stood on the ground.
 func _spawn_walker(at: Vector3, thrown := Vector3.ZERO) -> void:
+	# A man put on his feet does not fire until the trigger has been let go.
+	# The left button and K fire his rifle, and they are the cockpit's fire
+	# and cannon too -- and the action menu's EJECT is clicked with the left
+	# button -- so whatever was held as he left the aircraft went straight on
+	# firing his rifle, for nothing, until it was released: phantom gunfire
+	# after ejecting, after a crash, and from the LAUNCH click on the range.
+	Sim.block_until_released([&"foot_fire", &"fire", &"gun"])
 	on_foot = true
 	walker = Walker.new()
 	walker.name = "Walker"
@@ -2649,6 +2843,10 @@ func _enter_tank(t: Tank) -> void:
 			t.global_position.y - Sim.height_at(t.global_position.x, t.global_position.z),
 			str(Sim.mission)])
 	on_foot = false
+	# knocked out with him in it, outside a street fight (which has its own
+	# way back): the choice of what to go back in as
+	if not is_instance_valid(cqb) and not t.died.is_connected(_on_crew_down):
+		t.died.connect(_on_crew_down)
 	if is_instance_valid(walker):
 		walker.queue_free()
 	walker = null
@@ -2711,6 +2909,9 @@ func _on_walker_died(where: Vector3) -> void:
 				bool(walker._last_head) if is_instance_valid(walker) else false)
 	else:
 		Sim.report("pilot down", Sim.Ev.BAD)
+		# outside a street fight: choose what to go back in as
+		_offer_redeploy()
+		return
 	await get_tree().create_timer(3.5).timeout
 	if not on_foot or not is_inside_tree():
 		return
@@ -2782,6 +2983,8 @@ func _board(jet: Node) -> void:
 		return
 	if not is_instance_valid(jet) or not (jet is Aircraft):
 		return
+	if jet.is_in_group("remote"):
+		return                     # another player's: its hold, never its seat
 	on_foot = false
 	if is_instance_valid(walker):
 		walker.queue_free()
@@ -2790,6 +2993,9 @@ func _board(jet: Node) -> void:
 	player = jet as Aircraft
 	player.active = true
 	player.remove_from_group("boardable")
+	# into another aeroplane on the line: that is what the others now see
+	if net != null and net.active:
+		net.set_jet(net._kind_of(player))
 	for j in parked:
 		if is_instance_valid(j) and j != player:
 			j.set_canopy(false)
@@ -2834,13 +3040,25 @@ func _try_dismount() -> void:
 	if not parked.has(player):
 		parked.append(player)
 	var out: Vector3 = player.to_global(player.ladder_offset() + Vector3(-1.6, 0, 0))
+	# U is getting out and getting in. The press that got him out was still
+	# latched as "interact", and the man stood beside the aircraft read it on
+	# his first step and climbed straight back in: the boarding sequence again,
+	# every time.
+	Sim.block_until_released([&"interact"])
 	_spawn_walker(out)
 
 func _host_game(jet_id: String, _address: String) -> void:
 	Sim.selected_jet = jet_id
 	if net.host(jet_id):
-		# host whatever match is selected; joiners are told to load the same one
-		_start(jet_id, String(menu.mission_id))
+		# Into a lobby, not into a match. HOST started whatever mode happened
+		# to be selected the moment it was pressed; now the host stays in the
+		# hangar, people join it there, and LAUNCH starts the match for all of
+		# them. Hosting from a match already running keeps it running.
+		net.announce_lobby(String(menu.mission_id))
+		if running:
+			net.running_mission = String(Sim.mission)
+		else:
+			Sim.report("hosting — choose a mode and press LAUNCH when everyone is in", Sim.Ev.GOOD)
 
 ## The host started a match: this client starts the same one, in whatever it
 ## picked in the hangar -- its own aeroplane, a vehicle or on foot.
@@ -2853,8 +3071,11 @@ func _start_from_host(mission: String) -> void:
 func _join_game(jet_id: String, address: String) -> void:
 	Sim.selected_jet = jet_id
 	if net.join(address, jet_id):
-		# a placeholder match until the host says which one it is running
-		_start(jet_id, "free")
+		# Waits in the hangar for the host's match: it is started as soon as
+		# the host says what it is running (`NetLink.net_match`). A placeholder
+		# free flight was started here, which put the joiner in the air over
+		# nothing until the host got round to launching.
+		Sim.report("joined — waiting in the hangar for the host to launch", Sim.Ev.INFO)
 
 ## Everything put straight into the world while a match is running: rounds in
 ## flight, shells, bombs, warheads and their mushroom clouds, wrecks, debris,
@@ -3170,7 +3391,9 @@ func _on_store_released(m: Node) -> void:
 	# path already tells the other end
 	if net and net.active and is_instance_valid(m) and is_instance_valid(player) \
 			and m.shooter == player:
-		net.report_fire(m.wid, m.global_transform, m.vel)
+		# as a picture with what it is after, not as a second live round on
+		# every other machine that hit things there as well
+		net.share_launch(player, m)
 
 ## Every round fired anywhere, offered to the weapon camera by `Effects.watch`.
 ## It takes the player's own -- from his gun on foot, his rocket or his
@@ -3276,6 +3499,7 @@ func _watch_landing(delta: float) -> void:
 		Sim.report("FULL STOP — %d m of runway to spare. Score %d." % [int(rem), Sim.score], Sim.Ev.GOOD)
 
 func _resume() -> void:
+	Sim.menu_open = false
 	menu.visible = false
 	if is_instance_valid(pause_menu):
 		pause_menu.close()
@@ -3308,9 +3532,17 @@ func _pause() -> void:
 	# Put on its own key it simply took escape over, and there was then no way
 	# to reach the menu at all.
 	_show_roster(true)
-	get_tree().paused = true
-	if audio:
-		audio.set_paused(true)
+	# In a session the match goes on: one player cannot stop everybody else's
+	# game, and freezing his own copy of it while theirs ran put the two out of
+	# step. His controls are let go of instead (`Sim.menu_open`).
+	var online: bool = net != null and net.active
+	Sim.menu_open = true
+	if not online:
+		get_tree().paused = true
+		if audio:
+			audio.set_paused(true)
+	else:
+		Sim.report("menu open — the match goes on around you", Sim.Ev.INFO)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_deploy_yield(true)
 
@@ -3658,6 +3890,8 @@ func _parse_cmdline() -> void:
 			harness.parse_arg(a)
 	if _net_host:
 		_host_game(menu.jet_id, "")
+		# from the command line there is nobody to press LAUNCH
+		_start(menu.jet_id, String(menu.mission_id))
 		return
 	if _net_join != "":
 		_join_game(menu.jet_id, _net_join)
