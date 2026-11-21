@@ -71,6 +71,8 @@ var _stuck_n := 0
 ## A sidestep off whatever has him wedged, and how long it lasts.
 var _nudge := Vector3.ZERO
 var _nudge_t := 0.0
+## Seconds before he will try to walk up to the man he is fighting again.
+var _close_block := 0.0
 ## How long he has been in the state he is in.
 var _state_t := 0.0
 var _last_state := ROAM
@@ -130,6 +132,12 @@ var _heavy_at: Node3D = null
 ## same frame.
 var _anim_acc := 0.0
 var _anim_n := 0
+## A picture of a man the host is running, on a client in a session: posed
+## from the host's packets, never thinking for himself, and anything that hits
+## him is sent to the host to decide. See `NetLink.net_units`.
+var ghost := false
+## Rounds fired, counted so a client can see each burst: see `ghost_shot`.
+var shots := 0
 
 func _ready() -> void:
 	var u: Array = UNIFORM.get(team, UNIFORM[1])
@@ -180,6 +188,11 @@ func rearm() -> void:
 
 func take_hit(amount: float, from: Node = null) -> void:
 	if not alive:
+		return
+	if ghost:
+		if amount > 0.0 and Sim.net != null and Sim.net.active:
+			Sim.net.report_unit_hit(self, amount, KillFeed.weapon_of(from), _last_head)
+		_last_head = false
 		return
 	last_cause = KillFeed.weapon_of(from)
 	if armour > 0.0:
@@ -232,6 +245,9 @@ func hear(at: Vector3) -> void:
 		_seen_t = 1.0
 
 func _process(delta: float) -> void:
+	if ghost:
+		_ghost_tick(delta)
+		return
 	if not alive or not is_instance_valid(arena):
 		return
 	delta = minf(delta, 0.1)
@@ -517,7 +533,8 @@ func _move(delta: float) -> void:
 		face = atan2(-to.x, -to.z)
 		var reach: float = float(gun["reach"])
 		speed = WALK
-		if d > reach * 1.15:
+		_close_block = maxf(_close_block - delta, 0.0)
+		if d > reach * 1.15 and _close_block <= 0.0:
 			# close the distance, along the streets rather than at the wall
 			if _repath <= 0.0 or _goal == Vector3.INF:
 				_set_goal(target.global_position)
@@ -603,6 +620,16 @@ func _move(delta: float) -> void:
 		if _stuck > 0.8:
 			if _was.distance_to(p) < 0.35:
 				_stuck_n += 1
+				if Obstacles.blocks(p, BODY_R) >= 0:
+					# Inside something -- shouldered into it by the man beside
+					# him, or put down on its edge. Every step from in there is
+					# refused, the one he is standing in included, and he stood
+					# in the wall for the rest of the match. Out to the nearest
+					# clear ground.
+					var out: Vector3 = arena.free_near(p)
+					if out != Vector3.INF and out.distance_to(p) < 6.0:
+						p = Vector3(out.x, p.y, out.z)
+						global_position = p
 				if _goal != Vector3.INF:
 					_set_goal(_goal)
 				_strafe = -_strafe if _strafe != 0.0 else 1.0
@@ -636,6 +663,12 @@ func _give_up_goal() -> void:
 	_goal = Vector3.INF
 	_hold = 0.0
 	_path = PackedVector2Array()
+	# In a fight the route to the target was asked for again on the very next
+	# frame, and it was the route he had just failed to walk: he pressed into
+	# the same corner for as long as the target stayed where it was. A few
+	# seconds of working the angle from here instead.
+	if state == FIGHT:
+		_close_block = 3.0
 	if state == COVER:
 		_kneel = false
 		state = HUNT
@@ -739,6 +772,7 @@ func _shoot(delta: float) -> void:
 	loud = 1.6
 	body.kick(clampf(float(gun["kick"]) * 34.0, 0.3, 1.5))
 	_rounds -= 1
+	shots += 1
 	_burst -= 1
 	_cd = float(gun["cd"]) if gun["auto"] else maxf(float(gun["cd"]), 0.26) + randf() * 0.25
 	if _burst <= 0:
@@ -783,3 +817,46 @@ func _pose(delta: float, moved: Vector3) -> void:
 			Sfx.play_at(get_tree().current_scene, ["step_a", "step_b", "step_c"][randi() % 3],
 				global_position, -13.0 if moved.length() > 4.0 else -19.0,
 				randf_range(0.88, 1.1), 40.0)
+
+
+# ------------------------------------------------------------------ in a session
+## Eased onto where the host last put him, and animated by how he moved.
+func _ghost_tick(delta: float) -> void:
+	if not alive or not has_meta("target_pos"):
+		return
+	delta = minf(delta, 0.1)
+	var before := global_position
+	var want: Vector3 = get_meta("target_pos")
+	if before.distance_to(want) > 6.0:
+		global_position = want
+	else:
+		global_position = before.lerp(want, clampf(delta * 10.0, 0.0, 1.0))
+	yaw = lerp_angle(yaw, float(get_meta("net_yaw", yaw)), clampf(delta * 12.0, 0.0, 1.0))
+	rotation.y = yaw
+	_pose(delta, (global_position - before) / maxf(delta, 0.001))
+
+## The host's man fired: the flash, the report and a round down his line of
+## sight that hurts nothing. What it hit comes over on its own.
+func ghost_shot() -> void:
+	if not alive or gun.is_empty() or not is_inside_tree():
+		return
+	var world := get_tree().current_scene
+	var aim := Vector3(-sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch))
+	var muzzle: Vector3 = body.muzzle_pos() if body != null and body.has_gun() else eye()
+	Effects.muzzle_flash(world, muzzle + aim * 0.12, aim, 0.16)
+	Firearm.report(world, gun, muzzle)
+	Effects.bullet(world, muzzle, aim * float(gun["muzzle"]), null, 0.0, -1, 1.0, 3.5,
+		Firearm.drag_of(gun), 0.0)
+
+## The host says he died: he falls here the way he fell there.
+func ghost_die(head: bool) -> void:
+	if not alive:
+		return
+	alive = false
+	remove_from_group("infantry")
+	var u: Array = UNIFORM.get(team, UNIFORM[1])
+	if is_instance_valid(arena) and arena.has_method("forget_ghost"):
+		arena.forget_ghost(self)
+	Ragdoll.fall(get_tree().current_scene, global_transform, Vector3.ZERO, u[0], u[1],
+		100.0, head, false, Vector3.ZERO)
+	queue_free()

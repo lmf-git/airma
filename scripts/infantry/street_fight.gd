@@ -144,6 +144,7 @@ func cqb_fire_mission(mark: Vector3) -> bool:
 
 
 func tick_cqb_support(delta: float) -> void:
+	_tick_air()
 	if is_instance_valid(world._cqb_gunship):
 		world._cqb_gun_t -= delta
 		# time up, or he has stepped away from the guns himself
@@ -372,8 +373,14 @@ func setup_cqb(kind := "cqb") -> void:
 	_hide_far_scenery(c3, (_bounds_air + KEEP_AIR) if kind == "arms" else (_bounds_ground + KEEP_FOOT))
 	if kind not in ["cqb", "range"]:
 		_cqb_armour(c3)
+	_air_earned = {0: 0, 1: 0}
 	if kind == "arms":
-		_cqb_air(c3)
+		# Nobody's air is up when it starts. It used to open with four of
+		# theirs -- a pair of fighters and a pair of gunships -- and four of
+		# ours, before anyone on the ground had fired a shot; now each side
+		# earns its aircraft with kills. See `_tick_air`.
+		Sim.report("air is earned: every %d kills a side puts something up" % AIR_EVERY,
+			Sim.Ev.INFO)
 	if flying:
 		# In from the south at a height to see the town from, with the fight
 		# already going on under the nose.
@@ -523,7 +530,8 @@ func cqb_deploy(first: bool) -> void:
 	world.walker.body.visible = true
 	world.walker.body.set_head_visible(true)
 	var takes: String = {"ground": "ground", "arms": "any"}.get(String(Sim.mission), "none")
-	world.deploy_ui.open(takes, first, String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa")))
+	world.deploy_ui.open(takes, first, String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa")),
+		world.cqb.points if takes != "none" else -1)
 
 
 func _on_cqb_deploy(what: String) -> void:
@@ -541,6 +549,14 @@ func _on_cqb_deploy(what: String) -> void:
 			world.walker.activate()
 		world.cqb.set_away(false)
 		return
+	var cost: int = CqbMatch.ride_cost(what)
+	if cost > world.cqb.points:
+		# not earned yet: on foot instead
+		_on_cqb_deploy("foot")
+		return
+	world.cqb.points -= cost
+	if cost > 0:
+		Sim.report("%d points spent — %d left" % [cost, world.cqb.points], Sim.Ev.INFO)
 	if what.begins_with("veh:"):
 		var at: Vector3 = _cqb_vehicle_spot(Vector3(world.cqb.centre.x,
 			Sim.height_at(world.cqb.centre.x, world.cqb.centre.y), world.cqb.centre.y), 0)
@@ -552,15 +568,54 @@ func _on_cqb_deploy(what: String) -> void:
 		Sim.report("you are crewing the %s — U to get out and go on foot" % mine.display_name(),
 			Sim.Ev.INFO)
 		return
-	# An aeroplane. Only offered before the match has begun, because taking
-	# one means beginning it again with you in the air.
-	world._start(what, String(Sim.mission))
+	# An aeroplane, earned: into the air over the town, the match going on.
+	cqb_fly(what)
+
+
+## Into the air in the middle of a combined fight, in something earned on the
+## deploy screen. It used to be offered only before the match had begun,
+## because taking one restarted the match with you in the air.
+func cqb_fly(id: String) -> void:
+	var fight: CqbMatch = world.cqb
+	if not is_instance_valid(fight):
+		return
+	var c3 := Vector3(fight.centre.x, Sim.height_at(fight.centre.x, fight.centre.y), fight.centre.y)
+	var old: Aircraft = world.player
+	if is_instance_valid(old) and old != world._cqb_gunship:
+		world.parked.erase(old)
+		old.queue_free()
+	if is_instance_valid(world.walker):
+		world.walker.queue_free()
+	world.walker = null
+	world.on_foot = false
+	world.hud.walker = null
+	fight.set_player(null)
+	fight.set_away(false)
+	world._make_player(id)
+	var p: Aircraft = world.player
+	p.active = true
+	var rotary: bool = JetSpec.is_rotary(id)
+	p.global_transform = Transform3D(Basis(), c3 + (Vector3(0.0, 250.0, 1800.0) if rotary
+		else Vector3(0.0, 1500.0, 7000.0)))
+	p.linear_velocity = Vector3(0, 0, -(30.0 if rotary else world._entry_speed(230.0)))
+	p.gear_down = false
+	p.gear_anim = 0.0
+	p.throttle = 0.6 if rotary else 0.8
+	p.power = p.throttle
+	world._reset_interp.call_deferred(p)
+	p.died.connect(_on_cqb_air_down)
+	if world.audio:
+		world.audio.aircraft = p
+	Sim.report("%s — the town is off the nose" % String(p.spec.get("name", "")), Sim.Ev.INFO)
 
 
 ## Two vehicles a side on the start lines: a tank and something lighter, in
 ## each side's own kit. They go for the other end of town and fight what they
 ## meet on the way.
 func _cqb_armour(c3: Vector3) -> void:
+	# the host drives the armour; a client is sent pictures of it
+	if NetLink.mirroring():
+		return
 	var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
 	var ours: Array = ["m1a2", "bradley"] if nato else ["t90", "bmp3"]
 	var theirs: Array = ["t90", "bmp3"] if nato else ["m1a2", "bradley"]
@@ -661,6 +716,72 @@ func _on_cqb_vehicle_down(who: Node) -> void:
 		world.walker.yaw = 0.0
 		fight.set_player(world.walker)
 		cqb_deploy(false)
+
+
+## Air over a combined fight, earned. Each side puts an aircraft up for every
+## `AIR_EVERY` kills it makes -- a helicopter, then a fighter, in turn -- with no
+## more than `AIR_MAX` of its own up at once.
+const AIR_EVERY := 12
+const AIR_MAX := 2
+var _air_earned := {0: 0, 1: 0}
+var _air_up := {0: [], 1: []}
+
+func _tick_air() -> void:
+	var fight: CqbMatch = world.cqb
+	if not is_instance_valid(fight) or not fight.air or NetLink.mirroring() \
+			or not is_instance_valid(world.mode) or not world.mode.running:
+		return
+	for team in [0, 1]:
+		var due: int = int(int(world.mode.kills.get(team, 0)) / float(AIR_EVERY))
+		if due <= int(_air_earned[team]):
+			continue
+		var up: Array = []
+		for a in _air_up[team]:
+			if is_instance_valid(a) and a.is_alive():
+				up.append(a)
+		_air_up[team] = up
+		if up.size() >= AIR_MAX:
+			continue
+		_air_earned[team] = due
+		up.append(_air_one(team, due, fight))
+
+func _air_one(team: int, n: int, fight: CqbMatch) -> Aircraft:
+	var c3 := Vector3(fight.centre.x, Sim.height_at(fight.centre.x, fight.centre.y), fight.centre.y)
+	var nato: bool = (JetSpec.bloc_of(Sim.selected_jet) == "nato") == (team == 0)
+	# from behind its own side's end of the town
+	var back := Vector3(0.0, 0.0, 1.0 if team == 0 else -1.0)
+	var a: Aircraft
+	if n % 2 == 1:
+		var rotary: Array = World.NATO_HELIS if nato else World.OPFOR_HELIS
+		var h := AIHeli.new()
+		h.setup(rotary[n % rotary.size()])
+		h.arena = fight
+		h.home = c3
+		h.station_alt = 150.0
+		a = h
+	else:
+		var jets: Array = World.NATO_JETS if nato else World.OPFOR_JETS
+		var b := AIPlane.new()
+		b.setup(jets[n % jets.size()])
+		b.home = Vector3(c3.x, 0.0, c3.z)
+		b.patrol_r = 2500.0
+		a = b
+	a.team = team
+	a.name = "%s %s" % ["Blue" if team == 0 else "Red", String(a.spec.get("name", "air"))]
+	world.add_child(a)
+	var fast: bool = a is AIPlane
+	var at: Vector3 = c3 + back * (6000.0 if fast else 1800.0) + Vector3(0, 1800.0 if fast else 200.0, 0)
+	a.global_transform = Transform3D(Basis.looking_at(-back, Vector3.UP), at)
+	a.linear_velocity = -back * (220.0 if fast else 30.0)
+	world._reset_interp.call_deferred(a)
+	a.died.connect(_on_cqb_air_lost.bind(team))
+	Sim.report("%s %s is up" % ["our" if team == 0 else "their", String(a.spec.get("name", "aircraft"))],
+		Sim.Ev.GOOD if team == 0 else Sim.Ev.BAD)
+	return a
+
+func _on_cqb_air_lost(_who: Variant, team: int) -> void:
+	if is_instance_valid(world.cqb):
+		world.cqb.vehicle_down(team, "aircraft")
 
 
 ## Both sides' aircraft, moved to wherever the town is. The flights are laid

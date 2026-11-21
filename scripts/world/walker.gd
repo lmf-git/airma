@@ -1567,6 +1567,11 @@ func _fight(delta: float) -> void:
 			lock_t = 0.0
 		elif String(g["launcher"]) == "gl":
 			Firearm.grenade40(world, self, side, g, from, aim)
+		elif String(g["launcher"]) == "mortar":
+			if not _mortar(start, look):
+				ammo += 1
+				_rounds[kit_idx] = ammo
+				_shot_cd = 0.3
 		else:
 			Firearm.rocket(world, self, side, g, from, aim)
 	else:
@@ -1603,6 +1608,32 @@ func _fight(delta: float) -> void:
 	if cyc != "":
 		_cycle_snd = cyc
 		_pump_in = 0.24 if cyc == "pump" else 0.40
+
+## A mortar round onto what the crosshair is on: up and over, down on the
+## mark. False, and nothing fired, if there is nothing there or it is too close
+## for the tube to lay on.
+func _mortar(start: Vector3, look: Vector3) -> bool:
+	# ranged further out than a rifle looks: it is laid on a street, not a man
+	var seen: float = Firearm.sight_range(start, look, 850.0)
+	var mark: Vector3 = start + look * seen
+	var flat: float = Vector2(mark.x - global_position.x, mark.z - global_position.z).length()
+	if seen >= 849.0 or flat > 820.0:
+		Sim.report("mortar: nothing to range on — look at the ground", Sim.Ev.BAD)
+		return false
+	if flat < 70.0:
+		Sim.report("mortar: too close — seventy metres at least", Sim.Ev.BAD)
+		return false
+	var mr := CqbMatch.MortarRound.new()
+	mr.arena = arena as CqbMatch if is_instance_valid(arena) and arena is CqbMatch else null
+	mr.shooter = self
+	mr.from = global_position + Vector3(0.0, 1.0, 0.0)
+	mr.to = Vector3(mark.x, Sim.height_at(mark.x, mark.z), mark.z)
+	# a high-angle shot: about as long in the air as the range wants
+	mr.flight = clampf(5.0 + flat / 70.0, 6.0, 16.0)
+	mr.delay = 0.0
+	get_tree().current_scene.add_child(mr)
+	Sim.report("round out — %d m, %.0f seconds" % [int(flat), mr.flight], Sim.Ev.INFO)
+	return true
 
 ## The seeker. With the missile up and the sights on something that flies,
 ## it takes a moment to settle; look away and it lets go.

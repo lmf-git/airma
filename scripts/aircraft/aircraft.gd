@@ -1885,6 +1885,13 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	var muzzle: Vector3 = global_transform * (ports[pick] as Vector3)
 	# laid on where the round will meet the mark, from the barrel that fires it
 	var lead_pt := battery_lead(aim, muzzle)
+	# A rocket steers itself onto the spot: it leaves pointed at it. Laid like a
+	# shell -- held up for a fall at its full speed, which it does not reach
+	# for a second -- every Hydra off a gunner's pod went out high, overflew
+	# the mark and was trying to pull fifty g at the bottom of it with ten to
+	# pull with: measured, closest pass eighty-five metres, every round.
+	if g.has("missile"):
+		lead_pt = muzzle + (aim - muzzle).normalized() * 100000.0
 	if not aim_battery(lead_pt):
 		return false
 	# One round, then the loader. This line went missing once and the 105 fired
@@ -2651,6 +2658,8 @@ class Debris extends Node3D:
 ## Gunship shell: ballistic, explodes on impact.
 class Shell extends Node3D:
 	var _has_smoke := false
+	## Only the look of it: see `Effects.Tracer.harmless`.
+	var harmless := false
 
 	func _exit_tree() -> void:
 		if _has_smoke:
@@ -2823,6 +2832,13 @@ class Shell extends Node3D:
 				Vector2(aim.x - org.x, aim.z - org.z).length() * 0.001,
 				Vector2(at.x - org.x, at.z - org.z).length(),
 				str(at.round()), str(aim.round()), 140.0 - life])
+		if harmless:
+			var was_m: bool = Effects.mute_blast
+			Effects.mute_blast = true
+			Effects.explosion(get_tree().current_scene, at, blast)
+			Effects.mute_blast = was_m
+			queue_free()
+			return
 		Effects.explosion(get_tree().current_scene, at, blast)
 		# The fireball is not what a shell kills men with. A soldier is not in
 		# the list below -- he is not a radar contact -- so all he ever took was

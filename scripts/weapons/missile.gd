@@ -112,7 +112,12 @@ func launch(id: String, xf: Transform3D, carrier_vel: Vector3, from: Node, tgt: 
 		var to_t: Vector3 = (tgt.global_position - xf.origin)
 		if to_t.length() > 50.0 and to_t.normalized().dot(_axis) > 0.0:
 			var flat_d: float = Vector2(to_t.x, to_t.z).length()
-			var lofted := Vector3(to_t.x, maxf(to_t.y, 0.0) + flat_d * 0.06, to_t.z)
+			# Lofted a little above the line, not above the horizon. Clamped
+			# to level, a round fired down at a mark -- a gunner two hundred
+			# metres over the town -- left flat, sailed over the spot and
+			# was trying to pull fifty g at the bottom with ten to pull with:
+			# every Hydra off the CHOPPER GUNNER passed eighty-five metres wide.
+			var lofted := Vector3(to_t.x, to_t.y + flat_d * 0.06, to_t.z)
 			_axis = lofted.normalized()
 	vel = carrier_vel
 	shooter = from

@@ -1494,6 +1494,10 @@ class Tracer extends Node3D:
 	var small := false
 	## A vehicle's machine gun: flies and hits as a shell does, drawn slighter.
 	var light := false
+	## A picture of a round somebody else's machine fired: drawn, heard and
+	## bursting like the real one, hurting nothing. The real one, on the
+	## machine that owns the gun, deals the damage.
+	var harmless := false
 	var glow := 1.0
 	var _whizzed := false
 	## How much it can still go through, as metres of wall. A round used to
@@ -1819,11 +1823,11 @@ class Tracer extends Node3D:
 					r = n.hit_radius() if n.has_method("hit_radius") else 6.0
 				var np: Vector3 = n.global_position
 				if Geometry3D.get_closest_point_to_segment(np, from, end).distance_to(np) < r:
-					if n.has_method("take_hit"):
+					if n.has_method("take_hit") and not harmless:
 						n.take_hit(dmg, shooter if is_instance_valid(shooter) else null)
 					ended_at = end
 					if he > 0.0:
-						Effects.he_impact(get_tree().current_scene, end, he)
+						_he(end, he, 0.0)
 					else:
 						Effects.dust(get_tree().current_scene, end, 0.4 if light else 1.2)
 					queue_free()
@@ -1833,7 +1837,7 @@ class Tracer extends Node3D:
 			# just short of the face, so the burst is on this side of it
 			var face: Vector3 = end - vel.normalized() * 0.08
 			if he > 0.0:
-				Effects.he_impact(get_tree().current_scene, face, he * 0.85, dmg, shooter, team)
+				_he(face, he * 0.85, dmg)
 			else:
 				Effects.bullet_impact(get_tree().current_scene, face, true)
 			queue_free()
@@ -1841,7 +1845,7 @@ class Tracer extends Node3D:
 		if dirt_t < 1.0 or end.y < Sim.height_at(end.x, end.z):
 			ended_at = end
 			if he > 0.0:
-				Effects.he_impact(get_tree().current_scene, end, he * 0.85, dmg, shooter, team)
+				_he(end, he * 0.85, dmg)
 			else:
 				Effects.dust(get_tree().current_scene, end, 0.5 if light else 1.6)
 			queue_free()
@@ -2010,6 +2014,15 @@ class Tracer extends Node3D:
 					Sfx.play_at(world, "whiz" if miss > 1.2 else "snap", c2,
 						-3.0, randf_range(0.85, 1.3), 40.0)
 		return 0
+
+	## An explosive round's burst: the real thing, or only the look of it.
+	func _he(at: Vector3, size: float, d: float) -> void:
+		var was: bool = Effects.mute_blast
+		if harmless:
+			Effects.mute_blast = true
+		Effects.he_impact(get_tree().current_scene, at, size, 0.0 if harmless else d,
+			shooter, team)
+		Effects.mute_blast = was
 
 static var boom_sphere: SphereMesh = null
 

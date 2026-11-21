@@ -460,7 +460,9 @@ static func _db() -> Dictionary:
 		"eject": 0.0, "trail": Color(0.88, 0.86, 0.84),
 		"flare_bait": 0.0,
 		# The laser kit (APKWS): with a laser on the target the same rocket
-		# homes on the spot, and steers like a guided round to do it.
+		# homes on the spot, and steers like a guided round to do it. The
+		# seeker sees wide -- a gunner circling the town lays the spot well
+		# off the rocket's line -- and it pulls hard enough to come round.
 		"laser_g": 12.0, "laser_fov": 40.0,
 		# and with no laser it is still a rocket: it leaves the rail and goes
 		# where the aircraft is pointing

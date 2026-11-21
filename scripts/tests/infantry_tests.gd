@@ -34,6 +34,8 @@ func parse_arg(a: String) -> bool:
 		_drop_shot = a.substr(11)
 	elif a == "--streaktest":
 		_streak_test = true
+	elif a == "--helistreak":
+		_heli_streak = true
 	elif a == "--balltest":
 		_ball_test = true
 	elif a == "--boundstest":
@@ -1699,6 +1701,14 @@ func _run_drop_test() -> void:
 		mark_man.set_physics_process(false)
 		ch.set_weapon(1)
 		var shots := 0
+		# where each rocket comes down, against the spot it was laid on
+		var falls: Array = []
+		var flying := {}
+		ch.store_released.connect(func(m: Node) -> void:
+			flying[m] = 1e9
+			m.tree_exiting.connect(func() -> void:
+				falls.append(float(flying[m]))
+				flying.erase(m)))
 		for i in Engine.physics_ticks_per_second * 8:
 			await world.get_tree().physics_frame
 			if not is_instance_valid(mark_man) or not mark_man.alive:
@@ -1706,6 +1716,19 @@ func _run_drop_test() -> void:
 			mark_man.global_position = spot
 			if ch.fire_gunship(world, Soldier.chest_of(mark_man)):
 				shots += 1
+			for fm in flying:
+				if is_instance_valid(fm):
+					flying[fm] = minf(float(flying[fm]), (fm as Node3D).global_position.distance_to(spot))
+		for i in Engine.physics_ticks_per_second * 4:
+			if flying.is_empty():
+				break
+			await world.get_tree().physics_frame
+			for fm in flying:
+				if is_instance_valid(fm):
+					flying[fm] = minf(float(flying[fm]), (fm as Node3D).global_position.distance_to(spot))
+		falls.sort()
+		print("[drop] chopper gunner rockets: %d down, from the spot (m): %s" % [falls.size(),
+			", ".join(PackedStringArray(falls.map(func(f: float) -> String: return "%.0f" % f)))])
 		var dead: bool = not is_instance_valid(mark_man) or not mark_man.alive
 		print("[drop] chopper gunner: %d %s at a man in the street, he is %s" % [
 			shots, String(ch.gunship_gun().get("name", "rounds")), "dead" if dead else "still up"])
@@ -1717,6 +1740,60 @@ func _run_drop_test() -> void:
 	print("[drop] on the map along the way: %s" % ", ".join(PackedStringArray(seen)))
 	print("[drop] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
 	world.get_tree().quit()
+#endregion
+
+#region --helistreak
+## The ATTACK HELICOPTER streak over a ground fight: once a second, how far it
+## is from the middle of the town, how far its nose is off whatever it is
+## after, what that is, and what it has fired. --preset=ground:foot --helistreak
+var _heli_streak := false
+var _hs_heli: AIHeli = null
+var _hs_t := 0.0
+var _hs_fired := {}
+
+func tick_heli_streak(delta: float) -> void:
+	if not _heli_streak or not is_instance_valid(world.cqb) or not is_instance_valid(world.walker):
+		return
+	var cq: CqbMatch = world.cqb
+	if _hs_heli == null:
+		cq.set_away(false)
+		cq.bank["heli"] = 1
+		if not cq._call("heli"):
+			print("[helistreak] could not call it")
+			world.get_tree().quit()
+			return
+		for n in world.get_children():
+			if n is AIHeli and n.team == 0:
+				_hs_heli = n
+		if _hs_heli == null:
+			print("[helistreak] no helicopter appeared")
+			world.get_tree().quit()
+			return
+		_hs_heli.store_released.connect(func(m: Node) -> void:
+			var k: String = String(m.get("wid")) if m != null else "?"
+			_hs_fired[k] = int(_hs_fired.get(k, 0)) + 1)
+		return
+	_hs_t += delta
+	if fmod(_hs_t, 1.0) < delta and is_instance_valid(_hs_heli):
+		var h := _hs_heli
+		var c := Vector3(cq.centre.x, h.global_position.y, cq.centre.y)
+		var foe: Node3D = h.target as Node3D if is_instance_valid(h.target) else null
+		var off := -1.0
+		var what := "-"
+		if foe != null:
+			var to: Vector3 = foe.global_position - h.global_position
+			to.y = 0.0
+			var nose: Vector3 = -h.global_transform.basis.z
+			nose.y = 0.0
+			off = rad_to_deg(nose.angle_to(to))
+			what = "%s %.0fm" % [foe.get_class() if foe.get_script() == null
+				else String(foe.get_script().get_global_name()), to.length()]
+		print("[helistreak] t=%2.0f centre %4.0fm agl %3.0f state %d nose-off %4.0f deg  target %s  gun %s fired %s" % [
+			_hs_t, h.global_position.distance_to(c),
+			h.global_position.y - Sim.height_at(h.global_position.x, h.global_position.z),
+			h.state, off, what, str(h.ammo), str(_hs_fired)])
+	if _hs_t > 45.0 or not is_instance_valid(_hs_heli):
+		world.get_tree().quit()
 #endregion
 
 #region --streaktest

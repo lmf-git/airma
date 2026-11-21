@@ -54,7 +54,18 @@ func _pilot(delta: float) -> void:
 	var foe := _find_enemy()
 	target = foe
 
-	if missile_warn > 0.0:
+	if missile_warn > 0.0 and arena != null:
+		# Called in over a fight it stays on the fight: flares out and the
+		# nose kept on the target. Breaking away and down, which a bandit
+		# does, had it turning its back on the town every time a man on the
+		# other side shouldered a missile, and diving to thirty metres.
+		# Flares only: what a man shoulders is a heat seeker, and chaff
+		# dumped over the town drew off radar-guided rockets fired into it,
+		# ours included.
+		drop_flare()
+		if state == STATION and foe:
+			state = ENGAGE
+	elif missile_warn > 0.0:
 		state = BREAK
 		_state_t = 0.0
 	elif foe and global_position.distance_to(foe.global_position) < 6500.0:
@@ -63,7 +74,9 @@ func _pilot(delta: float) -> void:
 	elif _state_t > 5.0 and state != STATION:
 		state = STATION
 
-	var goal := home + Vector3(cos(_phase), 0, sin(_phase)) * 900.0
+	# A bandit patrols wide; a gunship called in over a fight circles the
+	# middle of it, where the fight is.
+	var goal := home + Vector3(cos(_phase), 0, sin(_phase)) * (220.0 if arena != null else 900.0)
 	var want_alt := Sim.height_at(goal.x, goal.z) + station_alt
 	var want_speed := 22.0
 
@@ -76,6 +89,9 @@ func _pilot(delta: float) -> void:
 				var d := global_position.distance_to(foe.global_position)
 				# a man is worked from closer in than a vehicle, with the chin gun
 				var stand: float = 700.0 if foe is Soldier else 1600.0
+				if arena != null:
+					# over the town, close enough for the gun and the rockets
+					stand = 320.0 if foe is Soldier else 900.0
 				want_speed = 0.0 if d < stand else 48.0
 				_shoot(foe, delta)
 		BREAK:
@@ -134,6 +150,22 @@ func _find_enemy() -> Node3D:
 func _scan_enemy() -> Node3D:
 	var best: Node3D = null
 	var bd := 1e9
+	# Over a fight, armour first: it is what the missiles are for, and a man
+	# can be left to the gun once nothing heavier is about.
+	if arena != null:
+		var heavy: Node3D = null
+		var hd := 3500.0
+		for v in get_tree().get_nodes_in_group("vehicles"):
+			if not is_instance_valid(v) or not (v is Tank) or (v as Tank).team == team \
+					or not (v as Tank).alive:
+				continue
+			var dv: float = global_position.distance_to((v as Node3D).global_position)
+			if dv < hd and Firearm.can_see(global_position,
+					(v as Node3D).global_position + Vector3(0, 2.0, 0)):
+				hd = dv
+				heavy = v
+		if heavy != null:
+			return heavy
 	# over a street fight it hunts the men in it as well, any it can see
 	if arena != null and is_instance_valid(arena):
 		for n in arena.enemies_of(team):
@@ -191,11 +223,23 @@ func _shoot(foe: Node3D, delta: float) -> void:
 		_burst_t += delta
 		if dm < 1100.0 and fmod(_burst_t, 2.2) < 0.8:
 			fire_gun(get_tree().current_scene)
+		# and over a fight, a pair of rockets into him now and then
+		var rel_s: Vector3 = foe.global_position - global_position
+		if arena != null and _fire_wait <= 0.0 and dm < 2500.0 and count_remaining("hydra") > 0 \
+				and rad_to_deg((-global_transform.basis.z).angle_to(rel_s)) < 20.0:
+			selected = maxi(weapon_types.find("hydra"), 0)
+			target = foe
+			locked = true
+			if fire() == "":
+				_fire_wait = randf_range(2.5, 4.0) if randf() < 0.5 else 0.3
 		return
 	gun_aim = Vector3.INF
 	var rel: Vector3 = foe.global_position - global_position
 	var d := rel.length()
 	var ang := rad_to_deg((-global_transform.basis.z).angle_to(rel))
+	if arena != null and foe is Tank:
+		_strike_armour(foe, d, ang, delta)
+		return
 	if d < 1300.0 and ang < 5.0:
 		fire_gun(get_tree().current_scene)
 	if _fire_wait > 0.0 or ang > 16.0:
@@ -211,3 +255,29 @@ func _shoot(foe: Node3D, delta: float) -> void:
 	locked = true
 	if fire() == "":
 		_fire_wait = randf_range(7.0, 13.0)
+
+
+## A vehicle, from a gunship over a fight: Hellfires while it has them, then
+## the rockets, and the chin gun laid on it throughout. It had nothing for a
+## tank but the air to air missiles -- which it does not carry -- so it hovered
+## in front of the armour and did nothing.
+func _strike_armour(foe: Node3D, d: float, ang: float, delta: float) -> void:
+	gun_aim = foe.global_position + Vector3(0, 1.5, 0)
+	_burst_t += delta
+	if d < 1500.0 and fmod(_burst_t, 2.4) < 1.0:
+		fire_gun(get_tree().current_scene)
+	if _fire_wait > 0.0 or ang > 20.0 or d > 7000.0:
+		return
+	var want := ""
+	if count_remaining("agm114") > 0:
+		want = "agm114"
+	elif d < 4500.0 and count_remaining("hydra") > 0:
+		want = "hydra"
+	if want == "":
+		return
+	selected = maxi(weapon_types.find(want), 0)
+	target = foe
+	locked = true
+	if fire() == "":
+		# a Hellfire every few seconds; a pair of rockets in quick succession
+		_fire_wait = randf_range(3.5, 5.0) if want == "agm114" else randf_range(0.35, 0.6)

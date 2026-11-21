@@ -16,7 +16,7 @@ signal deploy(what: String)
 
 const LONG := ["carbine", "ak", "scar", "smg", "vector", "shotgun", "aa20", "lmg", "dmr", "sniper",
 	"fifty"]
-const SECOND := ["smg", "vector", "glock", "carbine", "shotgun", "aa20", "gl", "law", "stinger"]
+const SECOND := ["smg", "vector", "glock", "carbine", "shotgun", "aa20", "gl", "law", "stinger", "mortar"]
 
 # ------------------------------------------------------------------ the look
 const BG := Color(0.035, 0.045, 0.06, 0.94)
@@ -526,9 +526,10 @@ func _show_page(i: int) -> void:
 ## Show it. `takes` is what the mode lets you bring ("none", "ground", "any")
 ## and `first` is whether the match has not started yet -- the only time
 ## changing aeroplane costs nothing.
-func open(takes: String, first: bool, faction: String) -> void:
+func open(takes: String, first: bool, faction: String, points := -1) -> void:
 	_rides.clear()
 	_ride_ids.clear()
+	_points = points
 	_add_ride("foot", "ON FOOT — as the class")
 	if takes == "ground" or takes == "any":
 		# Every tank, fighting vehicle, gun carrier and scout car there is,
@@ -554,8 +555,13 @@ func open(takes: String, first: bool, faction: String) -> void:
 			var kd2: Dictionary = Tank.KINDS[k]
 			_add_ride("veh:" + String(k), "%s — %s" % [String(kd2["name"]),
 				String(tags.get(String(kd2.get("class", "")), ""))])
-	if takes == "any" and first:
+	# In the air from the start if it was chosen before the match; earned with
+	# points once it has begun (see `CqbMatch.ride_cost`).
+	if takes == "any" and (first or points >= 0):
 		for id in JetSpec.ids_for(faction):
+			var sp0 := JetSpec.get_spec(id)
+			if bool(sp0.get("unmanned", false)) or bool(sp0.get("gunship", false)):
+				continue
 			var sp := JetSpec.get_spec(id)
 			_add_ride(String(id), "%s — %s" % [String(sp["name"]), String(sp["role"])])
 	# nothing to choose but walking: no page for it
@@ -570,9 +576,19 @@ func open(takes: String, first: bool, faction: String) -> void:
 			_show_page(clampi(int(a.substr(13)), 0, _pages.size() - 1))
 	visible = true
 
+## Points to spend, or -1 when nothing costs anything.
+var _points := -1
+
 func _add_ride(id: String, text: String) -> void:
+	var cost: int = CqbMatch.ride_cost(id) if _points >= 0 else 0
+	if cost > 0:
+		text += "   [%d pts]" % cost
 	_rides.add_item(text)
 	_ride_ids.append(id)
+	if cost > _points and _points >= 0:
+		# earned with kills: shown, so there is something to work toward
+		_rides.set_item_disabled(_rides.item_count - 1, true)
+		_rides.set_item_custom_fg_color(_rides.item_count - 1, DIM)
 
 # ------------------------------------------------------------------ class
 func _pick(i: int) -> void:

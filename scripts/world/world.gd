@@ -166,6 +166,7 @@ var _eye_vel := Vector3.ZERO
 var roster_view: RosterView
 
 func _ready() -> void:
+	child_entered_tree.connect(_note_match_child)
 	# A lambda captures by value, so a closure that tries to carry the clock
 	# forward records cumulative totals dressed up as per-phase costs.
 	#
@@ -1053,60 +1054,12 @@ func _start(id: String, mission: String) -> void:
 	_slot_said = -1
 	_mission_started = Time.get_ticks_msec()
 	_offset_for_peer.call_deferred()
+	# Everyone else in the session starts it too: a restart as much as a
+	# change of mode. See `NetLink.announce_match`.
+	if net != null and net.active and net.is_host:
+		net.announce_match(kept_mission)
 
-	var craft: Aircraft
-	if JetSpec.is_rotary(id):
-		craft = PlayerHeli.new()
-	else:
-		craft = PlayerJet.new()
-	player = craft
-	player.setup(id)
-	player.team = 0
-	player.name = "Player"
-	player.assist = Sim.assist
-	add_child(player)
-	player.store_released.connect(_on_store_released)
-	player.touched_down.connect(_on_touchdown)
-	player.died.connect(func(_w): Sim.report("you were shot down", Sim.Ev.BAD))
-
-	if cam == null:
-		cam = ChaseCamera.new()
-		add_child(cam)
-		Effects.round_watch = _offer_round
-	player.auto = _auto
-	if "_dash_alt" in player:
-		player._dash_alt = _dash_alt
-	if "bank_deg" in player:
-		player.bank_deg = _bank_deg
-	if "_hover_alt" in player:
-		player._hover_alt = _dash_alt
-	if _view != "":
-		cam.mode = {"cockpit": 0, "chase": 1, "orbit": 2}.get(_view, 0)
-	if _dist > 0.0:
-		cam.orbit_dist = _dist
-		cam.orbit_fixed = true
-		cam.orbit = _orbit if _orbit != Vector2.ZERO else Vector2(2.3, 0.18)
-	if _openbay:
-		player.set_bays(true)
-	if _nocockpit:
-		for n in player._model.get("cockpit_parts", []):
-			n.visible = false
-	player.debug_forces = _dump > 0
-	cam.subject = player
-	cam.current = true
-	hud.aircraft = player
-	veil.aircraft = player
-	hud.cam = cam
-	pod.platform = player
-	map.aircraft = player
-	if "pod" in player:
-		player.pod = pod
-	for ab in bases:
-		if is_instance_valid(ab):
-			(ab as Airbase).watcher = player
-	if is_instance_valid(base):
-		base.watcher = player
-	_reset_interp.call_deferred(player)
+	_make_player(id)
 
 	var gear_h := 0.0
 	for g in player.spec["gear"]:
@@ -1193,6 +1146,64 @@ func _start(id: String, mission: String) -> void:
 			player.power = 0.85
 			_spawn_threats()
 			Sim.report("Bandits north of the field. Bays open before you shoot.", Sim.Ev.INFO)
+
+## The player's aircraft, built and wired to every page that reads it. Also
+## what a street fight uses to put somebody in the air in the middle of a
+## match: see `StreetFight.cqb_fly`.
+func _make_player(id: String) -> void:
+	var craft: Aircraft
+	if JetSpec.is_rotary(id):
+		craft = PlayerHeli.new()
+	else:
+		craft = PlayerJet.new()
+	player = craft
+	player.setup(id)
+	player.team = 0
+	player.name = "Player"
+	player.assist = Sim.assist
+	add_child(player)
+	player.store_released.connect(_on_store_released)
+	player.touched_down.connect(_on_touchdown)
+	player.died.connect(func(_w): Sim.report("you were shot down", Sim.Ev.BAD))
+
+	if cam == null:
+		cam = ChaseCamera.new()
+		add_child(cam)
+		Effects.round_watch = _offer_round
+	player.auto = _auto
+	if "_dash_alt" in player:
+		player._dash_alt = _dash_alt
+	if "bank_deg" in player:
+		player.bank_deg = _bank_deg
+	if "_hover_alt" in player:
+		player._hover_alt = _dash_alt
+	if _view != "":
+		cam.mode = {"cockpit": 0, "chase": 1, "orbit": 2}.get(_view, 0)
+	if _dist > 0.0:
+		cam.orbit_dist = _dist
+		cam.orbit_fixed = true
+		cam.orbit = _orbit if _orbit != Vector2.ZERO else Vector2(2.3, 0.18)
+	if _openbay:
+		player.set_bays(true)
+	if _nocockpit:
+		for n in player._model.get("cockpit_parts", []):
+			n.visible = false
+	player.debug_forces = _dump > 0
+	cam.subject = player
+	cam.current = true
+	hud.aircraft = player
+	veil.aircraft = player
+	hud.cam = cam
+	pod.platform = player
+	map.aircraft = player
+	if "pod" in player:
+		player.pod = pod
+	for ab in bases:
+		if is_instance_valid(ab):
+			(ab as Airbase).watcher = player
+	if is_instance_valid(base):
+		base.watcher = player
+	_reset_interp.call_deferred(player)
 
 ## A body that was just teleported has stale interpolation history; without this
 ## it renders a smear from its old position to the new one.
@@ -2681,11 +2692,23 @@ func _on_walker_died(where: Vector3) -> void:
 	var fight := cqb
 	if is_instance_valid(fight):
 		var by: Node = walker.last_attacker if is_instance_valid(walker) else null
-		Sim.report("you were dropped by %s" % (String(by.get("callsign"))
-			if is_instance_valid(by) and by is Soldier else "your own grenade"), Sim.Ev.BAD)
-		fight.feed_player(by if by != walker else null,
-			String(walker.last_cause) if is_instance_valid(walker) else "explosion")
+		# In a session the round that did it was fired on the host, and only
+		# its name came over with the damage.
+		var net_by: String = String(walker.get_meta("net_by", "")) \
+			if is_instance_valid(walker) else ""
+		var by_name := "your own grenade"
+		if is_instance_valid(by) and by is Soldier:
+			by_name = String(by.get("callsign"))
+		elif net_by != "":
+			by_name = net_by
+		Sim.report("you were dropped by %s" % by_name, Sim.Ev.BAD)
+		var cause := String(walker.last_cause) if is_instance_valid(walker) else "explosion"
+		fight.feed_player(by if by != walker else null, cause)
 		fight.player_down()
+		if net != null and net.active:
+			net.report_down(net.name_of(net.my_id),
+				by_name if by_name != "your own grenade" else "", cause,
+				bool(walker._last_head) if is_instance_valid(walker) else false)
 	else:
 		Sim.report("pilot down", Sim.Ev.BAD)
 	await get_tree().create_timer(3.5).timeout
@@ -2819,11 +2842,82 @@ func _host_game(jet_id: String, _address: String) -> void:
 		# host whatever match is selected; joiners are told to load the same one
 		_start(jet_id, String(menu.mission_id))
 
+## The host started a match: this client starts the same one, in whatever it
+## picked in the hangar -- its own aeroplane, a vehicle or on foot.
+func _start_from_host(mission: String) -> void:
+	var id := String(menu.jet_id) if is_instance_valid(menu) else ""
+	if id == "":
+		id = String(Sim.selected_jet)
+	_start(id, mission)
+
 func _join_game(jet_id: String, address: String) -> void:
 	Sim.selected_jet = jet_id
 	if net.join(address, jet_id):
 		# a placeholder match until the host says which one it is running
 		_start(jet_id, "free")
+
+## Everything put straight into the world while a match is running: rounds in
+## flight, shells, bombs, warheads and their mushroom clouds, wrecks, debris,
+## smoke, the men of a street fight and whatever they called in. Each kind used
+## to be tidied up by its own line in `_clear_mission`, and every kind that
+## nobody had written a line for -- a nuke still climbing, a burst of tracer, a
+## gunship called in over the town -- carried on into the next match. Recording
+## them as they arrive means a new kind is swept up without anyone having to
+## remember to.
+var _match_spawn: Array = []
+
+func _note_match_child(n: Node) -> void:
+	if running and n.get_parent() == self:
+		_match_spawn.append(n)
+
+## Not the match's to sweep: other players and what the network layer built for
+## them, the fleet and the carrier (furniture, refitted instead), and the
+## camera, which is made once on the first launch and kept.
+func _sweep_keeps(n: Node) -> bool:
+	if n == cam or n == menu_cam or n == cine_cam:
+		return true
+	# a town's dressing is built once and kept for every visit: see
+	# `StreetFight.town_set`
+	if n is TownSet:
+		return true
+	# A strike wave's shipping is the match's; the standing fleet is not.
+	if n.is_in_group(&"ships") and not n.has_meta("strike"):
+		return true
+	for g in [&"remote", &"carrier", &"persistent"]:
+		if n.is_in_group(g):
+			return true
+	if net != null and n == net:
+		return true
+	if net != null and (net.ghosts.values().has(n) or net.foot_ghosts.values().has(n)):
+		return true
+	return false
+
+func _sweep_match() -> void:
+	var swept := {}
+	for n in _match_spawn:
+		if not is_instance_valid(n) or n.is_queued_for_deletion() or _sweep_keeps(n):
+			continue
+		var k: String = n.get_class()
+		if n.get_script() != null:
+			k = n.get_script().get_global_name()
+			if k == "":
+				var props: Array = []
+				for pr in n.get_script().get_script_property_list():
+					if props.size() < 2 and not String(pr["name"]).contains(" "):
+						props.append(String(pr["name"]))
+				k = "(%s)" % ",".join(props)
+		swept[k] = int(swept.get(k, 0)) + 1
+		n.queue_free()
+	_match_spawn.clear()
+	# Anything parented somewhere else that still belongs to the match.
+	for n in get_tree().get_nodes_in_group(&"transient"):
+		if is_instance_valid(n) and not n.is_queued_for_deletion():
+			n.queue_free()
+	if sweep_log and not swept.is_empty():
+		print("[sweep] %s" % str(swept))
+
+## Print what each restart sweeps up: --sweeplog.
+var sweep_log := false
 
 func _clear_mission() -> void:
 	# The rocket and its pad go with the mission, and time goes back to normal.
@@ -2941,6 +3035,18 @@ func _clear_mission() -> void:
 			z.queue_free()
 	if boarding:
 		_end_boarding()
+	_sweep_match()
+	# What the last match left set rather than standing: a jammer or an EMP
+	# still counting down, the range's slow motion, and a nuclear flash still
+	# whiting the screen out as the next match opened.
+	for tm in CqbMatch.jammed:
+		CqbMatch.jammed[tm] = 0.0
+	for tm in CqbMatch.emp_t:
+		CqbMatch.emp_t[tm] = 0.0
+	Engine.time_scale = 1.0
+	vision_fx.clear_flash()
+	if net != null and net.active:
+		net.match_reset()
 
 func _spawn_threats(count := -1) -> void:
 	# in a session, only the host simulates the opposition; clients receive it

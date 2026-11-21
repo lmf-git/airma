@@ -185,6 +185,36 @@ start point rather than to wherever the aeroplane has got to, so refining the
 answer moves it to the right place instead of shifting it again. Four peers now
 take slots 0, 1, 2 and 3.
 
+**Every mode is a session now, and a restart is everybody's.** The host
+counts its matches. A restart of the same mode reached nobody -- the clients
+compared the mode's *name*, which had not changed -- and picking another mode
+from the pause menu told nobody at all, because the call that announces it had
+no callers. Every match the host starts is now numbered and sent, with the
+street fight's town, squad sizes and kill goal, and the clients start it too.
+
+The town fights (CQB, GROUND COMBAT, COMBAT, the range) had no network code at
+all. They are co-op now: every player on one side against the AI, which the
+host runs. Its men, its armour and a strike's columns and shipping go out as
+**units** ten times a second; a client holds pictures of them, posed and
+animated, firing visibly, never thinking. A round a client puts into a picture
+goes to the host, which decides, and a kill comes back to the man who made it
+for his streaks. Players on foot are men on every other machine -- something
+the AI can see and shoot, and grenades and rounds can find -- with the damage
+sent to whoever is playing them. Kills, the result and the kill feed are the
+host's.
+
+Measured with two headless copies (`--mptest=host` / `--mptest=join`): the
+client follows a restart and two changes of mode, holds 9-13 pictures in a
+ground fight, none from the last match, and its kills are credited to it.
+
+**Starting again starts clean.** Each kind of thing a match leaves behind had
+its own line in the cleanup, and every kind nobody had written one for went on
+into the next match: a mushroom cloud, tracer in flight, gibs, smoke, a dropped
+rifle, strike shipping. Everything put into the world while a match runs is
+now recorded as it arrives and swept when it ends -- the town's dressing, the
+standing fleet and what the network owns excepted -- along with a jammer or an
+EMP still counting, slow motion, and a nuclear flash still on the screen.
+
 ## Helicopters
 
 Four gunships on a rotary flight model: the main rotor makes thrust along the

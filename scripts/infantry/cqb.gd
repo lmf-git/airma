@@ -249,6 +249,10 @@ func setup(at: Vector2, game: GameMode, owner_world: Node, town_set: TownSet) ->
 	Sfx.warm(Firearm.SOUNDS)
 	if range_mode:
 		return
+	# In a session the host runs both squads; this end is sent pictures of
+	# them (see `adopt_ghost`).
+	if NetLink.mirroring():
+		return
 	for t in [0, 1]:
 		for i in side_size(t):
 			if t == 0 and i == 0:
@@ -602,29 +606,80 @@ func _on_died(who: Soldier, killer: Node, head: bool) -> void:
 	(_teams[who.team] as Array).erase(who)
 	soldiers.erase(who)
 	_feed(killer, who.callsign, who.team, who.last_cause, head)
-	var by_player: bool = is_instance_valid(player) and killer == player
-	if by_player:
-		kills += 1
-		streak += 1
-		var carried: Array = chosen_streaks()
-		var top := 1
-		for k0 in carried:
-			top = maxi(top, int(k0["at"]))
-		for k in carried:
-			# the ladder comes round again after the top rung of what he carries
-			if (streak - 1) % top + 1 == int(k["at"]):
-				bank[k["id"]] = int(bank[k["id"]]) + 1
-				Sim.report("%d in a row — %s ready, press %d" % [streak, String(k["name"]),
-					int(k["key"])], Sim.Ev.GOOD)
-				Sfx.play_ui(world, "killmark", -4.0, 0.7)
-		if head:
-			headshots += 1
-		Sim.score += 150 if head else 100
-		Sim.report("you dropped %s%s" % [who.callsign, " — headshot" if head else ""], Sim.Ev.GOOD)
+	var by_player: bool = killer != null and is_instance_valid(killer) \
+		and (killer == player or (not is_instance_valid(player) and killer == _who()))
+	# A hit a player on another machine landed: his kill, for his streaks.
+	if Sim.net != null and Sim.net.active and Sim.net.is_host and int(Sim.net.crediting) > 1:
+		Sim.net.credit_kill(int(Sim.net.crediting), who.callsign, head)
+	elif by_player:
+		credit_kill(who.callsign, head)
 	# the rest is the kill feed's: see `_feed`
 	if is_instance_valid(mode) and mode.running:
 		mode.register_kill(who.team)
 	_queue.append([RESPAWN, who.team, int(who.get_meta("slot", 0))])
+
+## A man dropped by the player on this machine: the count, the streak and what
+## the streak has earned. Called for a kill made here, and in a session for one
+## the host says this machine's player made.
+func credit_kill(victim: String, head: bool) -> void:
+	kills += 1
+	points += 150 if head else 100
+	streak += 1
+	var carried: Array = chosen_streaks()
+	var top := 1
+	for k0 in carried:
+		top = maxi(top, int(k0["at"]))
+	for k in carried:
+		# the ladder comes round again after the top rung of what he carries
+		if (streak - 1) % top + 1 == int(k["at"]):
+			bank[k["id"]] = int(bank[k["id"]]) + 1
+			Sim.report("%d in a row — %s ready, press %d" % [streak, String(k["name"]),
+				int(k["key"])], Sim.Ev.GOOD)
+			Sfx.play_ui(world, "killmark", -4.0, 0.7)
+	if head:
+		headshots += 1
+	Sim.score += 150 if head else 100
+	Sim.report("you dropped %s%s" % [victim, " — headshot" if head else ""], Sim.Ev.GOOD)
+
+## Points to spend on the deploy screen, from kills: see `ride_cost`.
+var points := 0
+
+## What a ride costs on the deploy screen in a ground or combined fight. A
+## vehicle or an aircraft was free for the asking, so a combined fight opened
+## with everybody in the air; now it is earned, the lighter things first.
+static func ride_cost(what: String) -> int:
+	if what == "foot" or what == "":
+		return 0
+	if what.begins_with("veh:"):
+		var kd: Dictionary = Tank.KINDS.get(what.substr(4), {})
+		return {"lav": 200, "ifv": 400, "spaag": 400, "mbt": 600}.get(
+			String(kd.get("class", "")), 500)
+	return 900 if JetSpec.is_rotary(what) else 1200
+
+## A picture of one of the host's men, in a session: counted on his side so
+## everything here that looks for the other side's men finds him.
+func adopt_ghost(s: Soldier) -> void:
+	(_teams[s.team] as Array).append(s)
+	soldiers.append(s)
+
+func forget_ghost(s: Soldier) -> void:
+	(_teams[s.team] as Array).erase(s)
+	soldiers.erase(s)
+
+## Host: a player on another machine was killed in the fight.
+func remote_down() -> void:
+	if is_instance_valid(mode) and mode.running:
+		mode.register_kill(0)
+
+## Host: the other players on foot are men of the side for the AI to fight
+## beside and against. See `NetMan`.
+func _sync_net_men() -> void:
+	for n in get_tree().get_nodes_in_group("net_men"):
+		var t: int = int(n.team)
+		if not (_teams[t] as Array).has(n):
+			(_teams[t] as Array).append(n)
+			n.tree_exiting.connect(func() -> void: (_teams[t] as Array).erase(n),
+				CONNECT_ONE_SHOT)
 
 ## One line of the kill feed. A man in a vehicle is credited as the vehicle's
 ## driver, and the player as YOU.
@@ -645,6 +700,9 @@ func _feed(killer: Node, victim: String, victim_team: int, weapon: String,
 	if kname == victim:
 		kname = ""
 	Sim.kill(kname, kteam, victim, victim_team, weapon, head)
+	if Sim.net != null and Sim.net.active and Sim.net.is_host:
+		Sim.net.broadcast_feed(kname if kname != "YOU" else Sim.net.name_of(1), kteam,
+			victim, victim_team, weapon, head)
 
 ## The player went down.
 func feed_player(by: Node, weapon: String) -> void:
@@ -656,6 +714,9 @@ func vehicle_down(team: int, what: String, who: Node = null) -> void:
 	var cause: String = String(who.get("last_cause")) \
 		if is_instance_valid(who) and "last_cause" in who else "explosion"
 	_feed(by, what, team, cause if cause != "" else "explosion")
+	if team == 1 and by != null and is_instance_valid(by) and by == _who():
+		points += 300
+		credit_kill(what, false)
 	Sim.report("%s %s knocked out" % ["our" if team == 0 else "their", what],
 		Sim.Ev.BAD if team == 0 else Sim.Ev.GOOD)
 	if is_instance_valid(mode) and mode.running:
@@ -684,7 +745,10 @@ func _under_wheels() -> void:
 			if rel.dot(t.linear_velocity) < 0.0:
 				continue
 			KillFeed.cause = "roadkill"
-			if s is Soldier:
+			if s is Soldier and (s as Soldier).ghost:
+				# the host decides, and credits the kill back
+				s.take_hit(600.0, driver)
+			elif s is Soldier:
 				s.take_hit(600.0, driver)
 				if world.get("tank") == t:
 					# the man who would be credited is inside the vehicle
@@ -889,6 +953,8 @@ func _process(delta: float) -> void:
 	_under_wheels()
 	_drive_armour(delta)
 	Sim.prof_end(&"cqb.match", _pc)
+	if Sim.net != null and Sim.net.active and Sim.net.is_host:
+		_sync_net_men()
 	for q in _queue:
 		q[0] = float(q[0]) - delta
 	while not _queue.is_empty() and float(_queue[0][0]) <= 0.0:
@@ -957,10 +1023,12 @@ func set_away(on: bool) -> void:
 
 ## Where the player is looking, on the ground or a wall.
 func _mark() -> Vector3:
-	if not is_instance_valid(player) or not is_instance_valid(player.cam):
+	var eye_cam: Camera3D = player.cam if is_instance_valid(player) and is_instance_valid(player.cam) \
+		else get_viewport().get_camera_3d()
+	if eye_cam == null:
 		return Vector3.INF
-	var eye: Vector3 = player.cam.global_position
-	var look: Vector3 = -player.cam.global_transform.basis.z
+	var eye: Vector3 = eye_cam.global_position
+	var look: Vector3 = -eye_cam.global_transform.basis.z
 	var d: float = Firearm.sight_range(eye, look, 500.0)
 	if d >= 499.0:
 		return Vector3.INF
@@ -1003,7 +1071,9 @@ func _support(delta: float) -> void:
 	if _picking and world.get("map") != null and is_instance_valid(world.map) \
 			and not world.map.pick_cb.is_valid():
 		_picking = false
-	if is_instance_valid(player) and player.is_alive() and not away:
+	var on_duty: bool = (is_instance_valid(player) and player.is_alive() and not away) \
+		or (not is_instance_valid(player) and _who() != null)
+	if on_duty:
 		for k in chosen_streaks():
 			if int(bank[k["id"]]) > 0 and Sim.tapped(StringName("weapon_%d" % int(k["key"]))):
 				if AIR_STREAKS.has(String(k["id"])) and float(jammed[0]) > 0.0:
@@ -1176,7 +1246,40 @@ func inbound() -> Array:
 					"head": (sh2 as Node).get("vel")})
 	return out
 
+## Who called it in: the man on foot, or whatever he is crewing -- a tank in a
+## ground fight, an aeroplane over a combined one. Streaks were only ever
+## called by the man on foot, so in either of those, where you spend most of
+## the match, the keys did nothing and the kills earned nothing.
+func _who() -> Node3D:
+	if is_instance_valid(player):
+		return player
+	if world != null:
+		var t: Variant = world.get("tank")
+		if t != null and is_instance_valid(t) and bool(t.get("alive")):
+			return t
+		var p: Variant = world.get("player")
+		if p != null and is_instance_valid(p) and not bool(world.get("on_foot")) \
+				and bool(p.get("active")) and p.is_alive():
+			return p
+	return null
+
+func _who_yaw() -> float:
+	var w := _who()
+	if w == null:
+		return 0.0
+	if w == player:
+		return player.yaw
+	return w.global_rotation.y
+
+## What can only be done by a man standing in the street.
+const FOOT_STREAKS := ["jugg", "dogs", "sentry", "vest"]
+
 func _call(id: String) -> bool:
+	if _who() == null:
+		return false
+	if not is_instance_valid(player) and FOOT_STREAKS.has(id):
+		Sim.report("%s — only on foot" % id.to_upper(), Sim.Ev.BAD)
+		return false
 	match id:
 		"armour":
 			if world.get("map") != null and is_instance_valid(world.map) and not _picking:
@@ -1193,7 +1296,7 @@ func _call(id: String) -> bool:
 					kind = k
 					break
 			var at: Vector3 = Vector3(_pick_at.x, _ground(_pick_at.x, _pick_at.z), _pick_at.z)
-			var tk: Tank = world._spawn_tank(at, player.yaw, 0, kind)
+			var tk: Tank = world._spawn_tank(at, _who_yaw(), 0, kind)
 			if not is_instance_valid(tk):
 				return false
 			var vd := VehicleDrop.new()
@@ -1216,9 +1319,11 @@ func _call(id: String) -> bool:
 			h.station_alt = 140.0
 			world.add_child(h)
 			# in from behind him, already at height
-			var back := Vector3(sin(player.yaw), 0.0, cos(player.yaw))
-			h.global_transform = Transform3D(Basis(Vector3.UP, player.yaw),
-				c3 + back * 1500.0 + Vector3(0, 220.0, 0))
+			var back := Vector3(sin(_who_yaw()), 0.0, cos(_who_yaw()))
+			h.global_transform = Transform3D(Basis(Vector3.UP, _who_yaw()),
+				c3 + back * 600.0 + Vector3(0, 160.0, 0))
+			# Six hundred metres out, not fifteen hundred: at its cruise that
+			# was forty of its fifty-five seconds spent getting to the town.
 			h.linear_velocity = -back * 40.0
 			Sim.report("gunship on station for %d seconds — it hunts on its own" % int(HELI_TIME), Sim.Ev.GOOD)
 			return true
@@ -1230,7 +1335,7 @@ func _call(id: String) -> bool:
 				Sim.Ev.GOOD)
 			return true
 		"dogs":
-			var dc: Vector3 = player.global_position
+			var dc: Vector3 = _who().global_position
 			for i in 3:
 				var dg := AttackDog.new()
 				dg.team = 0
@@ -1244,8 +1349,8 @@ func _call(id: String) -> bool:
 			return true
 		"swarm":
 			# A transport over him, and four off its ramp as it passes.
-			var c: Vector3 = player.global_position
-			var fwd_s := Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
+			var c: Vector3 = _who().global_position
+			var fwd_s := Vector3(-sin(_who_yaw()), 0.0, -cos(_who_yaw()))
 			var run := CarpetRun.new()
 			run.arena = self
 			run.payload = "drones"
@@ -1283,8 +1388,8 @@ func _call(id: String) -> bool:
 			run.y = 0.0
 			if run.length() < 3.0:
 				# one click: across his line to it, sixty metres
-				var look2 := Vector3(_pick_at.x - player.global_position.x, 0.0,
-					_pick_at.z - player.global_position.z).normalized()
+				var look2 := Vector3(_pick_at.x - _who().global_position.x, 0.0,
+					_pick_at.z - _who().global_position.z).normalized()
 				var across2: Vector3 = look2.cross(Vector3.UP).normalized()
 				a = _pick_at - across2 * 30.0
 				run = across2 * 60.0
@@ -1309,7 +1414,7 @@ func _call(id: String) -> bool:
 					else:
 						(n as Node).queue_free()
 					killed += 1
-			Effects.emp_flash(world, player.global_position)
+			Effects.emp_flash(world, _who().global_position)
 			Sim.report("EMP — their sights and electronics are dead for a minute%s" % (
 				"; %d of their systems knocked out" % killed if killed > 0 else ""), Sim.Ev.GOOD)
 			return true
@@ -1317,8 +1422,8 @@ func _call(id: String) -> bool:
 			if not is_instance_valid(player) or not player.on_floor:
 				Sim.report("set it down on solid ground", Sim.Ev.BAD)
 				return false
-			var fwd := Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
-			var at: Vector3 = player.global_position + fwd * 1.4
+			var fwd := Vector3(-sin(_who_yaw()), 0.0, -cos(_who_yaw()))
+			var at: Vector3 = _who().global_position + fwd * 1.4
 			at.y = _ground(at.x, at.z)
 			if Obstacles.blocks(at + Vector3(0, 0.5, 0), 0.4) >= 0:
 				Sim.report("no room to set it down here", Sim.Ev.BAD)
@@ -1327,7 +1432,7 @@ func _call(id: String) -> bool:
 			st.team = 0
 			st.arena = self
 			st.owner_node = player
-			st.facing = player.yaw
+			st.facing = _who_yaw()
 			world.add_child(st)
 			st.global_position = at
 			Sim.report("sentry up — it watches %d degrees either side of where you faced" % int(rad_to_deg(SentryTurret.ARC)),
@@ -1365,9 +1470,9 @@ func _call(id: String) -> bool:
 			var sa: Vector3 = _smoke_from
 			var sb: Vector3 = _pick_at
 			if sa == Vector3.INF or sa.distance_to(sb) < 3.0:
-				var look := Vector3(_pick_at.x - player.global_position.x, 0.0,
-					_pick_at.z - player.global_position.z)
-				look = look.normalized() if look.length() > 2.0 else Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
+				var look := Vector3(_pick_at.x - _who().global_position.x, 0.0,
+					_pick_at.z - _who().global_position.z)
+				look = look.normalized() if look.length() > 2.0 else Vector3(-sin(_who_yaw()), 0.0, -cos(_who_yaw()))
 				var across: Vector3 = look.cross(Vector3.UP).normalized()
 				sa = _pick_at - across * 30.0
 				sb = _pick_at + across * 30.0
@@ -1438,8 +1543,8 @@ func _call(id: String) -> bool:
 			# fast, with a stick of bombs walked through it. It was seven bombs
 			# on a timer and the sound of a jet: nothing came over, and nothing
 			# was on the map until the bombs were.
-			var run := Vector3(at.x - player.global_position.x, 0.0, at.z - player.global_position.z)
-			run = run.normalized() if run.length() > 1.0 else Vector3(-sin(player.yaw), 0.0, -cos(player.yaw))
+			var run := Vector3(at.x - _who().global_position.x, 0.0, at.z - _who().global_position.z)
+			run = run.normalized() if run.length() > 1.0 else Vector3(-sin(_who_yaw()), 0.0, -cos(_who_yaw()))
 			var nato: bool = ["usa", "uk", "france"].has(Sim.home_faction)
 			var sr := CarpetRun.new()
 			sr.arena = self
@@ -1495,9 +1600,9 @@ func _call(id: String) -> bool:
 		"mortar_at":
 			# Ten rounds walked over the spot from a battery a kilometre and a
 			# bit back on his side of it, each in the air on its own arc.
-			var back := Vector3(player.global_position.x - _pick_at.x, 0.0,
-				player.global_position.z - _pick_at.z)
-			back = back.normalized() if back.length() > 5.0 else Vector3(sin(player.yaw), 0.0, cos(player.yaw))
+			var back := Vector3(_who().global_position.x - _pick_at.x, 0.0,
+				_who().global_position.z - _pick_at.z)
+			back = back.normalized() if back.length() > 5.0 else Vector3(sin(_who_yaw()), 0.0, cos(_who_yaw()))
 			var bat: Vector3 = _pick_at + back * 1300.0 + back.cross(Vector3.UP) * _rng.randf_range(-250.0, 250.0)
 			_battery = Vector3(bat.x, _ground(bat.x, bat.z) + 1.0, bat.z)
 			for i in 10:
@@ -1568,10 +1673,10 @@ func _call(id: String) -> bool:
 			_cruise.arena = self
 			_cruise.target = Vector3(_pick_at.x, _ground(_pick_at.x, _pick_at.z), _pick_at.z)
 			# in over his own shoulder, so it arrives going the way he is facing
-			var back := Vector3(player.global_position.x - _pick_at.x, 0.0,
-				player.global_position.z - _pick_at.z)
+			var back := Vector3(_who().global_position.x - _pick_at.x, 0.0,
+				_who().global_position.z - _pick_at.z)
 			_cruise.from_dir = back.normalized() if back.length() > 5.0 \
-				else Vector3(sin(player.yaw), 0.0, cos(player.yaw))
+				else Vector3(sin(_who_yaw()), 0.0, cos(_who_yaw()))
 			world.add_child(_cruise)
 			_pick_node = _cruise
 			Sim.report("cruise missile launched — it is yours in about %d seconds" % int(_cruise.eta),
@@ -1586,7 +1691,7 @@ var _pick_at := Vector3.ZERO
 ## there to spend.
 func _picked(id: String, at: Vector3) -> void:
 	_picking = false
-	if int(bank.get(id, 0)) <= 0 or not is_instance_valid(player):
+	if int(bank.get(id, 0)) <= 0 or _who() == null:
 		return
 	_pick_at = at
 	_pick_node = null
@@ -1736,6 +1841,7 @@ class CarpetRun extends Node3D:
 			b.vel = _dir * speed
 			b.cluster = cluster
 			b.payload = payload
+			b.weapon = load_weapon
 			get_parent().add_child(b)
 			# every other bomb off the wingman, from where he actually is
 			var off := Vector3(0.0, -3.0, 0.0)
@@ -1931,6 +2037,10 @@ class MortarRound extends Node3D:
 	var _v0 := Vector3.ZERO
 	var _fired := false
 	var _whiz := false
+	var _trail: GeometryInstance3D = null
+	## Who fired it from a tube of his own (see `Walker._mortar`); null for a
+	## barrage called in.
+	var shooter: Node3D = null
 	static var _mesh: Mesh = null
 
 	func _init() -> void:
@@ -1947,7 +2057,18 @@ class MortarRound extends Node3D:
 		var mi := MeshInstance3D.new()
 		mi.mesh = MortarRound._mesh
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# A 120 mm bomb, not a pencil: at a third of a metre and dark green it
+		# could not be picked out against the sky at any range, so a barrage
+		# was ten bangs out of nowhere.
+		mi.scale = Vector3.ONE * 1.9
 		add_child(mi)
+		# and the streak it leaves coming down: a faint grey line is what you
+		# actually see of a mortar round in the air
+		var rb := Effects.ribbon(Color(0.82, 0.80, 0.76, 0.55), 0.35, 0.9, 3.0, false, 1)
+		if rb != null:
+			rb.top_level = true
+			add_child(rb)
+			_trail = rb
 		# Up and over: the vertical speed that carries it from the tube to the
 		# mark in exactly the time of flight, which is a mortar's arc -- a few
 		# hundred metres up -- for a battery a kilometre or so off.
@@ -1967,17 +2088,38 @@ class MortarRound extends Node3D:
 			visible = true
 			Sfx.play_at(get_parent(), "thump", from, 4.0, 0.85, 3000.0)
 			reset_physics_interpolation()
+			if is_instance_valid(_trail):
+				_trail.global_position = global_position
+				_trail.call(&"clear")
 		_t += delta
 		vel = _v0 - Vector3(0.0, G * _t, 0.0)
 		if not _whiz and flight - _t < 1.5:
 			_whiz = true
 			Sfx.play_at(get_parent(), "whiz", to + Vector3(0.0, 25.0, 0.0), 2.0, 0.65, 700.0)
 		if _t >= flight:
-			if is_instance_valid(arena):
-				arena._bomb(to, 0.65, false, "mortar")
+			if is_instance_valid(shooter):
+				# one man's 60 mm: the blast, credited to him, hurting whoever
+				# is in it on the other side
+				var was_c: Node = Effects.credit
+				var was_s: int = Effects.spare_team
+				var was_k: String = KillFeed.cause
+				Effects.credit = shooter
+				Effects.spare_team = int(shooter.get("side")) if "side" in shooter else -1
+				KillFeed.cause = "mortar"
+				Effects.explosion(get_parent(), to + Vector3(0, 0.6, 0), 9.0, false)
+				Effects.he_impact(get_parent(), to + Vector3(0, 0.4, 0), 2.6)
+				Effects.credit = was_c
+				Effects.spare_team = was_s
+				KillFeed.cause = was_k
+				Effects.dust(get_parent(), to, 3.0)
+			elif is_instance_valid(arena):
+				arena._bomb(to, 0.8, false, "mortar")
+				Effects.dust(get_parent(), to, 4.0)
 			queue_free()
 			return
 		global_position = from + _v0 * _t + Vector3(0.0, -0.5 * G * _t * _t, 0.0)
+		if is_instance_valid(_trail):
+			_trail.global_position = global_position
 		if vel.length_squared() > 1.0:
 			look_at(global_position + vel, Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD)
 
@@ -2461,20 +2603,33 @@ class CarpetBomb extends Node3D:
 	var payload := ""
 	## A bomblet out of a canister rather than a bomb.
 	var bomblet := false
+	## The store it is, off the aeroplane's own load: see `CarpetRun.load_weapon`.
+	var weapon := ""
 	var _flown := 0.0
 
 	func _ready() -> void:
 		top_level = true
-		var st := MeshKit.begin()
-		if bomblet:
-			MeshKit.cone(st, 0.09, 0.09, -0.18, 0.18, Vector3.ZERO, 6)
+		# The bomb the aeroplane was carrying, as it is drawn on its pylon and
+		# in the hangar. They were made up here instead -- a fat cylinder with
+		# a pair of fins the size of doors -- and a stick of them coming off an
+		# A-10 looked like oil drums next to the stores it had just let go of.
+		var store: String = "bomblet" if bomblet else ("cbu97" if cluster else weapon)
+		WeaponSpec.get_spec(store)
+		if payload == "" and WeaponSpec._table.has(store):
+			var mi := MeshInstance3D.new()
+			mi.name = "Bomb"
+			mi.mesh = WeaponSpec.build_mesh(store)
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(mi)
 		else:
-			# the canister: body, and the fins that slow it
+			# a drogue canister of smoke or phosphorus: body, and the fins that
+			# slow it
+			var st := MeshKit.begin()
 			MeshKit.cone(st, 0.2, 0.2, -1.2, 1.1, Vector3.ZERO, 8)
 			MeshKit.box(st, Vector3(0.7, 0.03, 0.5), Vector3(0, 0, 1.0))
 			MeshKit.box(st, Vector3(0.03, 0.7, 0.5), Vector3(0, 0, 1.0))
-		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
-			Color(0.42, 0.40, 0.22) if cluster or bomblet else Color(0.22, 0.23, 0.22), 0.6, 0.3)), "Bomb"))
+			add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
+				Color(0.42, 0.40, 0.22), 0.6, 0.3)), "Bomb"))
 		if not bomblet:
 			return
 		if CarpetBomb.trail_mesh == null:

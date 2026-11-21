@@ -105,6 +105,17 @@ const KIT := [
 	# Six 40 mm rounds in a drum, loaded one at a time. They arc, they arm
 	# after ten metres, and they burst; a round that hits something closer
 	# than that is a lump of metal and nothing more.
+	# A 60 mm light mortar, handheld: no bipod, no plotting board -- put the
+	# crosshair on the street you want it in and it goes up and comes down
+	# there, eighty to eight hundred metres off, the round in the air for as
+	# long as a real one would be. Not for anything in front of you.
+	{"id": "mortar", "name": "M224 60 mm MORTAR", "mag": 1, "spare": 9, "cd": 0.8,
+		"auto": false, "dmg": 0.0, "muzzle": 110.0, "pellets": 1,
+		"hip": 0.030, "ads": 0.004, "fov": 44.0, "reload": 2.2, "kick": 0.040,
+		"side": 0.010, "sound": "shotgun", "db": -4.0, "work": "bolt",
+		"len": 0.80, "stock": 0.0, "mag_len": 0.0, "sight": 0.085, "dot": false,
+		"launcher": "mortar",
+		"grip_l": Vector3(0.0, -0.075, -0.30), "move": 0.82, "reach": 800.0},
 	{"id": "gl", "name": "MGL GRENADE LAUNCHER", "mag": 6, "spare": 12, "cd": 0.55,
 		"auto": false, "dmg": 60.0, "muzzle": 76.0, "pellets": 1,
 		"hip": 0.030, "ads": 0.005, "fov": 44.0, "reload": 0.75, "kick": 0.050,
@@ -162,6 +173,9 @@ const CLASSES := [
 	{"id": "breacher", "name": "BREACHER", "primary": "shotgun", "second": "smg",
 		"sight": "irons", "quiet": false, "grip": true, "mag": true,
 		"note": "For going through doors. Useless across a square."},
+	{"id": "mortarman", "name": "INDIRECT FIRE", "primary": "carbine", "second": "mortar",
+		"sight": "2x", "quiet": false, "grip": false, "mag": false,
+		"note": "A 60 mm mortar. Look at a street up to eight hundred metres off and fire: it comes down there twelve seconds later."},
 	{"id": "grenadier", "name": "GRENADIER", "primary": "carbine", "second": "gl",
 		"sight": "2x", "quiet": false, "grip": false, "mag": false,
 		"note": "Six rounds of 40 mm in a drum: over the wall, through the window, into the yard."},

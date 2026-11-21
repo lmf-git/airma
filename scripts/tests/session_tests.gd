@@ -19,6 +19,14 @@ func parse_arg(a: String) -> bool:
 		_admin_from = a.substr(12)
 	elif a == "--restarttest":
 		_restart_test = true
+	elif a.begins_with("--restartmodes="):
+		# each mode in turn, fought for a while, then the next: what is left
+		# standing after each change is counted (see `_sweep_match`)
+		_restart_test = true
+		_restart_modes = a.substr(15).split(",")
+		world.sweep_log = true
+	elif a == "--sweeplog":
+		world.sweep_log = true
 	elif a == "--chattest":
 		_chat_test = true
 	elif a == "--warlordstest":
@@ -35,6 +43,9 @@ func parse_arg(a: String) -> bool:
 		_hn_shots = a.substr(12)
 	elif a == "--nettest":
 		_nettest = true
+	elif a.begins_with("--mptest="):
+		# two copies: --mptest=host, then --mptest=join on the same machine
+		_mp_role = a.substr(9)
 	else:
 		return false
 	return true
@@ -285,10 +296,46 @@ func _tick_mode_test(delta: float) -> void:
 var _restart_test := false
 var _restart_t := 0.0
 var _restart_n := 0
+var _restart_modes: PackedStringArray = []
+
+## What is in the world right now that a match put there.
+func _restart_report() -> void:
+	var kinds := {}
+	for n in world.get_children():
+		var k: String = n.get_script().get_global_name() if n.get_script() != null else ""
+		if k == "":
+			k = n.get_class()
+		kinds[k] = int(kinds.get(k, 0)) + 1
+	var groups := {}
+	for g in ["infantry", "hittable", "missiles", "vehicles", "ships", "bandits"]:
+		groups[g] = world.get_tree().get_nodes_in_group(g).size()
+	print("[restart] %s children=%d groups=%s" % [String(Sim.mission),
+		world.get_child_count(), str(groups)])
 
 func tick_restart(delta: float) -> bool:
 	if _restart_test:
 		_restart_t += delta
+		if not _restart_modes.is_empty():
+			if _restart_t > 12.0:
+				_restart_t = 0.0
+				if _restart_n >= _restart_modes.size():
+					_restart_test = false
+					_restart_report()
+					world.get_tree().quit()
+					return true
+				var m: String = _restart_modes[_restart_n]
+				_restart_n += 1
+				_restart_report()
+				print("[restart] -> %s" % m)
+				world._start("foot" if m in ["cqb", "range"] else "f16", m)
+				# set the fight off: a nuke and a strike in a street fight,
+				# missiles in the air anywhere else
+				if is_instance_valid(world.cqb) and not world.cqb.range_mode:
+					var c: Vector2 = world.cqb.centre
+					world.cqb._add_nuke(3.0, Vector3(c.x + 40.0, Sim.height_at(c.x + 40.0, c.y),
+						c.y), CqbMatch.TAC_LETHAL, false)
+					world.cqb._bomb(Vector3(c.x - 30.0, 0.0, c.y), 1.0, true)
+			return true
 		if _restart_t > 3.0 and _restart_n < 3:
 			_restart_n += 1
 			# swap aircraft and restart, which is what the player was doing
@@ -908,5 +955,100 @@ func tick_nettest() -> void:
 		var ok3 := world.net.host("f16")
 		print("[net] host() after leave -> %s, port %d" % [str(ok3), world.net.port])
 		world.net.leave()
+		world.get_tree().quit()
+#endregion
+
+
+#region --mptest
+## A session across the modes, from both ends. The host starts a ground fight,
+## restarts it, changes to STRIKE and then to CQB; the client follows and once
+## a second says what it is looking at -- which match, how many of the host's
+## men and vehicles it has pictures of -- and puts rounds into the nearest of
+## the host's men, which only the host can kill. The host says what it is
+## running and what it has been sent.
+##   --preset=ground:foot --mptest=host     then     --preset=ground:foot --mptest=join
+var _mp_role := ""
+var _mp_t := 0.0
+var _mp_said := 0.0
+var _mp_step := 0
+var _mp_shot := 0.0
+
+func tick_mptest(delta: float) -> void:
+	if _mp_role == "" or world.net == null:
+		return
+	_mp_t += delta
+	if _mp_role == "host" and _mp_step == 0 and world.running:
+		_mp_step = 1
+		world.net.host("f16")
+		world.net.running_mission = String(world.menu.mission_id) if world.menu != null else "ground"
+		world.net.running_mission = "ground"
+		print("[mp] host: hosting, running ground")
+	elif _mp_role == "join" and _mp_step == 0 and world.running:
+		_mp_step = 1
+		world.net.join("127.0.0.1", "f16")
+		print("[mp] join: joining")
+	if _mp_role == "host":
+		var peers: int = world.net.roster.size()
+		if _mp_step == 1 and peers > 1:
+			_mp_step = 2
+			_mp_t = 0.0
+			_mp_said = 0.0
+		elif _mp_step == 2 and _mp_t > 25.0:
+			_mp_step = 3
+			print("[mp] host: restart")
+			world._start("foot", "ground")
+		elif _mp_step == 3 and _mp_t > 45.0:
+			_mp_step = 4
+			print("[mp] host: change to strike")
+			world._start("f16", "strike")
+		elif _mp_step == 4 and _mp_t > 65.0:
+			_mp_step = 5
+			print("[mp] host: change to cqb")
+			world._start("foot", "cqb")
+		elif _mp_step == 5 and _mp_t > 85.0:
+			print("[mp] host: done")
+			world.get_tree().quit()
+		if _mp_t - _mp_said > 3.0:
+			_mp_said = _mp_t
+			var men := 0
+			var kills := "-"
+			if is_instance_valid(world.cqb):
+				men = world.cqb.soldiers.size()
+			if is_instance_valid(world.mode):
+				kills = "%d:%d" % [int(world.mode.kills.get(0, 0)), int(world.mode.kills.get(1, 0))]
+			print("[mp] host t=%.0f gen=%d mission=%s peers=%d men=%d units=%d net_men=%d kills=%s" % [
+				_mp_t, world.net.match_gen, String(Sim.mission), peers, men, world.net.units.size(),
+				world.get_tree().get_nodes_in_group("net_men").size(), kills])
+		return
+	# the client
+	if _mp_t - _mp_said > 3.0:
+		_mp_said = _mp_t
+		var kinds := {}
+		for k in world.net.units:
+			var u: Variant = world.net.units[k]
+			if is_instance_valid(u):
+				var nm: String = "man" if u is Soldier else ("tank" if u is Tank else "ship")
+				kinds[nm] = int(kinds.get(nm, 0)) + 1
+		var kills := "-"
+		if is_instance_valid(world.mode):
+			kills = "%d:%d" % [int(world.mode.kills.get(0, 0)), int(world.mode.kills.get(1, 0))]
+		var mine := -1
+		if is_instance_valid(world.cqb):
+			mine = world.cqb.kills
+		var hp: float = world.walker.health if is_instance_valid(world.walker) else -1.0
+		print("[mp] join t=%.0f gen=%d mission=%s units=%s ai=%d my_kills=%d match_kills=%s mirror=%s vehicle_rounds=%s hp=%.0f" % [
+			_mp_t, world.net.match_gen, String(Sim.mission), str(kinds), world.net.ai_ghosts.size(),
+			mine, kills, str(NetLink.mirroring()), str(world.net.vehicle_rounds_drawn), hp])
+	# a burst into the nearest of the host's men every second
+	_mp_shot += delta
+	if _mp_shot > 1.0 and is_instance_valid(world.cqb) and is_instance_valid(world.walker):
+		_mp_shot = 0.0
+		for k in world.net.units:
+			var u2: Variant = world.net.units[k]
+			if is_instance_valid(u2) and u2 is Soldier and (u2 as Soldier).team == 1 \
+					and (u2 as Soldier).alive:
+				(u2 as Soldier).take_hit(45.0, world.walker)
+				break
+	if _mp_t > 150.0:
 		world.get_tree().quit()
 #endregion

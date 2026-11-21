@@ -76,6 +76,13 @@ static func _door_gunship(base: Dictionary) -> Dictionary:
 		{"id": "hydra", "name": "70 mm Hydra rockets", "rpm": 150.0, "damage": 220.0,
 		 "blast": 8.0, "frag": 14.0, "muzzle": 300.0, "spread": 0.004, "missile": "hydra",
 		 "ports": [Vector3(-1.95, -0.42, 0.6), Vector3(1.95, -0.42, 0.6)]},
+		# The Hellfires off the outer rails. They were on the aircraft and on
+		# the gunner's selector, but not in this list -- and a gunner's weapon
+		# not found here is the first one, so picking HELLFIRE fired the chin
+		# gun.
+		{"id": "agm114", "name": "AGM-114 Hellfire", "rpm": 24.0, "damage": 340.0,
+		 "blast": 12.0, "frag": 16.0, "muzzle": 120.0, "spread": 0.0, "missile": "agm114",
+		 "ports": [Vector3(-2.60, -0.35, 0.4), Vector3(2.60, -0.35, 0.4)]},
 	]
 	return s
 

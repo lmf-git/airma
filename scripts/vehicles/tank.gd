@@ -2269,6 +2269,7 @@ func fire_main(world: Node) -> bool:
 			adir * float(kd["muzzle"]) + linear_velocity, self,
 			float(kd["gun"]), team, float(kd.get("blast", 3.0)) * 0.4)
 		Effects.muzzle_flash(world, _muzzle.global_position - adir * 1.2, adir, 1.7)
+		shots_main += 1
 		# Its own clip, not "gun": the gun clip is a looping buzzsaw meant to be
 		# started and stopped, and firing it as a one-shot sixteen times a
 		# second stacks up loops that never end. A shell leaving an autocannon
@@ -2768,6 +2769,7 @@ func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 	shell.team = team
 	world.add_child(shell)
 	shell.global_position = _muzzle.global_position
+	shots_main += 1
 	Effects.muzzle_flash(world, _muzzle.global_position, vel.normalized(), flash)
 	Effects.dust(world, _muzzle.global_position, 4.5)
 	Sfx.play_at(world, "boom", _muzzle.global_position, -2.0, 0.7, 4000.0)
@@ -2775,6 +2777,60 @@ func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 	# so a rocket battery -- the one thing whose whole point is watching where
 	# the salvo lands -- was the one thing you could not follow.
 	store_released.emit(shell)
+
+## Rounds fired, main gun and machine gun, counted so a client in a session
+## can draw each one: see `ghost_fire`.
+var shots_main := 0
+var shots_coax := 0
+
+## A picture of a vehicle the host is driving fired: the same round from the
+## same muzzle -- flash, report, streak, burst -- hurting nothing. Whatever it
+## hit was hit on the host, and that comes over on its own. Without this a
+## client was shot at by armour that never visibly fired, and its men died to
+## shells nobody could see coming.
+func ghost_fire(world: Node, main: bool) -> void:
+	if not alive or _muzzle == null or not is_inside_tree():
+		return
+	var kd: Dictionary = KINDS[kind]
+	var dir := -_muzzle.global_transform.basis.z
+	if not main or vclass() == "lav":
+		var port: Vector3 = _muzzle.global_position - dir * 1.5
+		match vclass():
+			"ifv":
+				port = _mantlet.global_transform * Vector3(0.15, 0.0, -0.66)
+			"mbt":
+				port = _mantlet.global_transform * Vector3(0.36, 0.0, -0.84)
+		var r := Effects.mg_round(world, port, dir * float(kd.get("muzzle", 900.0)), null, 0.0, team)
+		if r != null:
+			r.harmless = true
+		Effects.muzzle_flash(world, port + dir * 0.2, dir, 0.35)
+		Sfx.play_at(world, "mg", port, -8.0,
+			randf_range(0.78, 0.84) if vclass() == "lav" else randf_range(0.96, 1.06), 700.0)
+		return
+	if vclass() == "ifv" or vclass() == "spaag":
+		var t := Effects.tracer(world, _muzzle.global_position - dir * 1.5,
+			dir * float(kd["muzzle"]), null, 0.0, team, float(kd.get("blast", 3.0)) * 0.4)
+		if t != null:
+			t.harmless = true
+		Effects.muzzle_flash(world, _muzzle.global_position - dir * 1.2, dir, 1.7)
+		Sfx.play_at(world, "autocannon", _muzzle.global_position, -3.0,
+			randf_range(0.94, 1.06), 2400.0)
+		return
+	if not kd.has("gun") or not kd.has("blast"):
+		return
+	var shell := Aircraft.Shell.new()
+	shell.harmless = true
+	shell.drag = shell_drag()
+	shell.vel = dir * float(kd["muzzle"])
+	shell.damage = 0.0
+	shell.blast = float(kd["blast"])
+	shell.team = team
+	world.add_child(shell)
+	shell.global_position = _muzzle.global_position
+	var flash: float = 4.2 if is_indirect() else 3.4
+	Effects.muzzle_flash(world, _muzzle.global_position, dir, flash)
+	Effects.dust(world, _muzzle.global_position, 4.5)
+	Sfx.play_at(world, "boom", _muzzle.global_position, -2.0, 0.7, 4000.0)
 
 func fire_coax(world: Node) -> bool:
 	if _coax_cd > 0.0 or not alive:
@@ -2798,6 +2854,7 @@ func fire_coax(world: Node) -> bool:
 	Effects.mg_round(world, port,
 		dir * float(kd.get("muzzle", 900.0)) + linear_velocity,
 		self, float(kd.get("mg_damage", 26.0)), team)
+	shots_coax += 1
 	Effects.muzzle_flash(world, port + dir * 0.2, dir, 0.35)
 	# The roof gun on a patrol car is a .50: the same rattle, lower and slower.
 	Sfx.play_at(world, "mg", port, -8.0,
@@ -2859,6 +2916,9 @@ func take_hit(amount: float, from: Node = null) -> void:
 	if Sim.net != null and Sim.net.active and not Sim.net.is_host \
 			and (has_meta("net_id") or has_meta("zone_asset")):
 		Sim.net.report_ground_damage(self, amount)
+		return
+	if Sim.net != null and Sim.net.active and not Sim.net.is_host and has_meta("net_unit"):
+		Sim.net.report_unit_hit(self, amount, last_cause)
 		return
 	apply_damage(amount)
 

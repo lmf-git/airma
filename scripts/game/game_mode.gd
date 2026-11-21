@@ -168,6 +168,10 @@ func _on_captured(z: CaptureZone, team: int) -> void:
 			zones[active_sector].place], Sim.Ev.INFO)
 
 func register_kill(team_of_victim: int) -> void:
+	# In a session the host keeps the count and sends it; a client counting
+	# as well would score every kill twice and finish on its own.
+	if NetLink.mirroring():
+		return
 	var scorer: int = 1 - team_of_victim
 	kills[scorer] = int(kills.get(scorer, 0)) + 1
 	if mode in ["tdm", "ffa", "cqb", "ground", "arms"] and kills[scorer] >= kill_goal:
@@ -406,8 +410,18 @@ func spend(cost: int) -> bool:
 	return true
 
 func _finish(win: bool, text: String) -> void:
-	if not running:
+	if not running or NetLink.mirroring():
 		return
+	if Sim.net != null and Sim.net.active:
+		Sim.net.announce_finish(win, text)
+	_end(win, text)
+
+## The host's result, on a client.
+func finish_from_host(win: bool, text: String) -> void:
+	if running:
+		_end(win, text)
+
+func _end(win: bool, text: String) -> void:
 	running = false
 	result = ("VICTORY — " if win else "DEFEAT — ") + text
 	Sim.report(result, Sim.Ev.GOOD if win else Sim.Ev.BAD)
@@ -442,7 +456,7 @@ var _wave_units: Array = []
 var _strike_check := 2.0
 
 func _tick_strike(delta: float) -> void:
-	if mode != "strike":
+	if mode != "strike" or NetLink.mirroring():
 		return
 	_strike_check -= delta
 	if _strike_check > 0.0:
@@ -467,6 +481,9 @@ func _strike_left() -> int:
 	return n
 
 func _strike_wave() -> void:
+	# the host runs the waves and every client is sent what is in them
+	if NetLink.mirroring():
+		return
 	wave += 1
 	_wave_units.clear()
 	var world: Node = get_parent()

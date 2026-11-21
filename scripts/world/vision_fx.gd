@@ -277,6 +277,13 @@ func nuke_flash(at: Vector3, lethal: float) -> void:
 	_flash.visible = true
 
 
+## Off at once: a new match does not open under the last one's flash.
+func clear_flash() -> void:
+	_flash_t = 0.0
+	if _flash != null:
+		_flash.visible = false
+
+
 func update_flash(delta: float) -> void:
 	if _flash == null or not _flash.visible:
 		return

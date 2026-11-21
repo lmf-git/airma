@@ -225,6 +225,9 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 		"gl":
 			k.mats["furn"] = MeshKit.mat(OD, 0.8, 0.04)
 			_mgl(k, g)
+		"mortar":
+			k.mats["furn"] = MeshKit.mat(OD.darkened(0.15), 0.8, 0.04)
+			_mortar(k, g)
 		_:
 			_ar(k, g, false)
 	if _rec_on:
@@ -705,6 +708,21 @@ static func _at4(k: Kit, g: Dictionary) -> void:
 	# folding sights: a post at the front and a peep at the back
 	blk(m, Vector3(0.012, 0.06, 0.05), Vector3(0, float(g["sight"]) - 0.03, -0.05))
 	blk(m, Vector3(0.014, 0.05, 0.03), Vector3(0, float(g["sight"]) - 0.025, 0.12))
+
+## The M224 in its handheld fit: the tube, the base plate at the back and the
+## trigger grip, carried like a launcher.
+static func _mortar(k: Kit, g: Dictionary) -> void:
+	var m := k.at("metal")
+	var f := k.at("furn")
+	var ln: float = g["len"]
+	tube(f, 0.036, 0.036, -ln + 0.05, 0.30, Vector3.ZERO, 14)
+	tube(m, 0.042, 0.042, -ln - 0.01, -ln + 0.06, Vector3.ZERO, 14)
+	# the base plate, square on the breech end
+	blk(m, Vector3(0.20, 0.20, 0.025), Vector3(0, 0, 0.34))
+	# grip and trigger, and the sight on its bracket on the left
+	blk(m, Vector3(0.030, 0.10, 0.040), Vector3(0, -0.090, 0.12))
+	blk(m, Vector3(0.030, 0.07, 0.040), Vector3(0, -0.075, -0.25))
+	blk(m, Vector3(0.040, 0.05, 0.08), Vector3(-0.06, float(g["sight"]) - 0.02, 0.02))
 
 static func _stinger(k: Kit, g: Dictionary) -> void:
 	var m := k.at("metal")
