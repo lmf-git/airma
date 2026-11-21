@@ -40,6 +40,8 @@ var vel := Vector3.ZERO
 ## Where each warhead is going: a direction from the planet's centre, or the
 ## unit it was locked on. The first is the round's own.
 var marks: Array = []
+## Only the look of it: see `Missile.harmless`.
+var harmless := false
 ## A warhead rather than the missile that carried it.
 var rv := false
 var age := 0.0
@@ -338,6 +340,7 @@ func _open() -> void:
 		w.ws = ws
 		w.shooter = shooter
 		w.team = team
+		w.harmless = harmless
 		w.rv = true
 		w._burning = false
 		w._opened = true
@@ -464,6 +467,13 @@ func _end(burst: bool) -> void:
 	if dead:
 		return
 	dead = true
+	var was_mute: bool = Effects.mute_blast
+	if harmless:
+		Effects.mute_blast = true
+	_end_body(burst)
+	Effects.mute_blast = was_mute
+
+func _end_body(burst: bool) -> void:
 	var world := get_tree().current_scene
 	var at: Vector3 = global_position
 	if not burst:
@@ -474,7 +484,7 @@ func _end(burst: bool) -> void:
 	var lethal: float = float(ws.get("lethal", 3000.0))
 	var hit := 0
 	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or not n.has_method("take_hit"):
+		if harmless or not is_instance_valid(n) or not n.has_method("take_hit"):
 			continue
 		var d: float = (n as Node3D).global_position.distance_to(at)
 		if n.has_method("surface_gap"):

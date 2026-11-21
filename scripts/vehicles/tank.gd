@@ -2769,7 +2769,6 @@ func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 	shell.team = team
 	world.add_child(shell)
 	shell.global_position = _muzzle.global_position
-	shots_main += 1
 	Effects.muzzle_flash(world, _muzzle.global_position, vel.normalized(), flash)
 	Effects.dust(world, _muzzle.global_position, 4.5)
 	Sfx.play_at(world, "boom", _muzzle.global_position, -2.0, 0.7, 4000.0)
@@ -2816,21 +2815,8 @@ func ghost_fire(world: Node, main: bool) -> void:
 		Sfx.play_at(world, "autocannon", _muzzle.global_position, -3.0,
 			randf_range(0.94, 1.06), 2400.0)
 		return
-	if not kd.has("gun") or not kd.has("blast"):
-		return
-	var shell := Aircraft.Shell.new()
-	shell.harmless = true
-	shell.drag = shell_drag()
-	shell.vel = dir * float(kd["muzzle"])
-	shell.damage = 0.0
-	shell.blast = float(kd["blast"])
-	shell.team = team
-	world.add_child(shell)
-	shell.global_position = _muzzle.global_position
-	var flash: float = 4.2 if is_indirect() else 3.4
-	Effects.muzzle_flash(world, _muzzle.global_position, dir, flash)
-	Effects.dust(world, _muzzle.global_position, 4.5)
-	Sfx.play_at(world, "boom", _muzzle.global_position, -2.0, 0.7, 4000.0)
+	# A main gun's shell, a rocket and a missile are not counted here: each is
+	# sent as it leaves, with where it is going (`NetLink.share_launch`).
 
 func fire_coax(world: Node) -> bool:
 	if _coax_cd > 0.0 or not alive:

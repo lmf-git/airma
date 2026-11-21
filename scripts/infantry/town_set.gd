@@ -683,6 +683,7 @@ func _process(delta: float) -> void:
 	if _gone_t > 0.0:
 		return
 	_gone_t = 0.5
+	_fall_with_buildings()
 	for i in range(_hollowed.size() - 1, -1, -1):
 		var h: Array = _hollowed[i]
 		if not Obstacles.gone(int(h[0])):
@@ -692,6 +693,66 @@ func _process(delta: float) -> void:
 		if is_instance_valid(h[2]):
 			(h[2] as Node).queue_free()
 		_hollowed.remove_at(i)
+
+## What is bolted to a building comes down with it. The scaffolding up a
+## front and the ladders up a back wall were dressing laid against a building
+## and nothing more, so a building shelled flat left them standing in the air
+## against nothing -- a ladder you could still climb, to a roof that was not
+## there, and a scaffold you could stand on three storeys up.
+func _fall_with_buildings() -> void:
+	var world := get_tree().current_scene if is_inside_tree() else null
+	if world == null:
+		return
+	for i in range(scaffolds.size() - 1, -1, -1):
+		var sc: Array = scaffolds[i]
+		if sc.size() < 10 or not Obstacles.gone(int(sc[5])):
+			continue
+		for k in range(int(sc[8]), int(sc[9])):
+			Obstacles.remove(_boxes[k])
+		var at: Vector3 = sc[0]
+		var h: float = sc[4]
+		for part in [sc[6], sc[7]]:
+			if is_instance_valid(part):
+				_collapse(part as MeshInstance3D, world)
+		for k2 in 3:
+			Effects.dust(world, at + (sc[1] as Vector3) * float(sc[2]) * (float(k2) - 1.0) * 0.35
+				+ Vector3(0, h * 0.3, 0), 2.5)
+		Sfx.play_at(world, "thump", at, 0.0, 0.7, 600.0)
+		scaffolds.remove_at(i)
+	for j in range(ladders.size() - 1, -1, -1):
+		var l: Array = ladders[j]
+		if not Obstacles.gone(int(l[2])):
+			continue
+		if l.size() > 4 and is_instance_valid(l[4]):
+			_collapse(l[4] as MeshInstance3D, world)
+		ladders.remove_at(j)
+
+## A piece of dressing whose wall has gone: it goes over away from where the
+## wall was and lies in the rubble, and a few bits of it fly.
+func _collapse(mi: MeshInstance3D, world: Node) -> void:
+	if mi.has_meta("flat"):
+		return
+	mi.set_meta("flat", true)
+	var b: Basis = mi.global_transform.basis
+	# Over onto its back, along the ground: rotated about its own along-face
+	# axis so the top comes away from the building and down, then pressed flat
+	# the way the nuke presses the rest of the street.
+	var tip := Basis(b.x.normalized(), deg_to_rad(randf_range(70.0, 85.0)))
+	mi.global_transform = Transform3D(tip * b, mi.global_position + Vector3(0, 0.2, 0))
+	var mat: Material = mi.mesh.surface_get_material(0) if mi.mesh != null else null
+	for k in 4:
+		var st := MeshKit.begin()
+		MeshKit.box(st, Vector3(randf_range(0.05, 0.12), randf_range(0.8, 2.4), randf_range(0.05, 0.12)),
+			Vector3.ZERO)
+		var d := Effects.Debris.new()
+		d.add_child(MeshKit.mi(MeshKit.finish(st, mat), "Bit"))
+		d.vel = Vector3(randf_range(-3, 3), randf_range(2.0, 6.0), randf_range(-3, 3))
+		d.spin = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
+		d.rest_offset = 0.05
+		d.life = 40.0
+		world.add_child(d)
+		d.global_position = mi.global_position + Vector3(randf_range(-1, 1), randf_range(1.0, 4.0),
+			randf_range(-1, 1))
 
 ## A building site: a tower crane you can climb and walk out along, and the
 ## stacks it was lifting. The mast is a wall like any other -- take hold of it
@@ -765,7 +826,7 @@ var ruins_at: Array = []
 ## [middle at the foot, along it, its length, out from the wall, height]
 var scaffolds: Array = []
 
-## Ladders: [foot, outward normal, structure id, top]. A ladder is a line up a
+## Ladders: [foot, outward normal, structure id, top, mesh]. A ladder is a line up a
 ## face that somebody has bolted rungs to; the man climbing it is on the same
 ## wall he would be without it, held to that line and going faster.
 var ladders: Array = []
@@ -807,7 +868,7 @@ func _ladder(id: int, toward: Vector3, shift := 0.0) -> void:
 	var mi := MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.62, 0.63, 0.66), 0.4, 0.7)), "Ladder")
 	add_child(mi)
 	mi.global_transform = Transform3D(Basis(Vector3.UP, yaw), foot)
-	ladders.append([foot, n, id, top])
+	ladders.append([foot, n, id, top, mi])
 	stats["ladders"] = int(stats.get("ladders", 0)) + 1
 
 ## Scaffolding up the face of a building: netted, so it stops a round, and the
@@ -831,6 +892,7 @@ func _scaffold(lot: Vector2) -> void:
 	mid.y = _seat(mid.x, mid.z, 1.0)
 	if Obstacles.hit(mid + n * 1.4 + Vector3(0, 1.0, 0), 0.6) >= 0:
 		return
+	var first_box: int = _boxes.size()
 	var st := MeshKit.begin()
 	var poles := int(run / 2.4) + 1
 	for k in poles + 1:
@@ -877,9 +939,12 @@ func _scaffold(lot: Vector2) -> void:
 	# deck, and a man at the top of a ladder steps off onto what is there
 	var net_h: float = maxf(top_deck, 2.3)
 	_solid(mid + n * 0.76, Vector3(0.08, net_h, run) if is_x else Vector3(run, net_h, 0.08), 0.0)
+	var last_box: int = _boxes.size()
 	# and the ladder up the outside of it
 	_ladder(_boxes[_boxes.size() - 1], mid + n * 6.0, run * 0.5 - 1.0)
-	scaffolds.append([mid, axis, run, n, h])
+	# [mid, along, run, out, height, the building it is bolted to, its frame,
+	# its net, and its own boxes from .. to]: see `_fall_with_buildings`
+	scaffolds.append([mid, axis, run, n, h, id, fm, nmi, first_box, last_box])
 	stats["scaffolds"] = int(stats.get("scaffolds", 0)) + 1
 
 ## Lay the town out. The same town always comes out the same: the seed is the

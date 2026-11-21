@@ -131,6 +131,11 @@ func _build() -> void:
 func _physics_process(delta: float) -> void:
 	if not alive or Sim.no_air_threat:
 		return
+	# In a session the host's sites do the shooting and every other machine
+	# is sent the rounds; a client's copy firing as well put two missiles
+	# after everybody, one of them invisible to the rest of the session.
+	if NetLink.mirroring():
+		return
 	if kind == "manpads":
 		_manpads(delta)
 		return
@@ -163,6 +168,8 @@ func _physics_process(delta: float) -> void:
 			m.launch("aim120", xf, Vector3.ZERO, self, n)
 			m.team = team
 			get_tree().current_scene.add_child(m)
+			if Sim.net != null:
+				Sim.net.share_launch(self, m)
 			Effects.dust(get_tree().current_scene, global_position + Vector3(0, 2, 0), 4.0)
 			return
 
@@ -205,6 +212,8 @@ func _manpads(delta: float) -> void:
 		m.launch("manpads", xf, to * 30.0, self, n)
 		m.team = team
 		get_tree().current_scene.add_child(m)
+		if Sim.net != null:
+			Sim.net.share_launch(self, m)
 		Effects.dust(get_tree().current_scene, global_position + Vector3(0, 1.2, 0), 2.2)
 		Sfx.play_at(get_tree().current_scene, "launch", global_position, -4.0, 1.1, 1400.0)
 		return

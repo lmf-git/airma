@@ -1006,6 +1006,10 @@ func tick_mptest(delta: float) -> void:
 			print("[mp] host: change to cqb")
 			world._start("foot", "cqb")
 		elif _mp_step == 5 and _mp_t > 85.0:
+			_mp_step = 6
+			print("[mp] host: change to conquest")
+			world._start("f16", "conquest")
+		elif _mp_step == 6 and _mp_t > 125.0:
 			print("[mp] host: done")
 			world.get_tree().quit()
 		if _mp_t - _mp_said > 3.0:
@@ -1016,9 +1020,9 @@ func tick_mptest(delta: float) -> void:
 				men = world.cqb.soldiers.size()
 			if is_instance_valid(world.mode):
 				kills = "%d:%d" % [int(world.mode.kills.get(0, 0)), int(world.mode.kills.get(1, 0))]
-			print("[mp] host t=%.0f gen=%d mission=%s peers=%d men=%d units=%d net_men=%d kills=%s" % [
+			print("[mp] host t=%.0f gen=%d mission=%s peers=%d men=%d units=%d net_men=%d kills=%s launches_sent=%d" % [
 				_mp_t, world.net.match_gen, String(Sim.mission), peers, men, world.net.units.size(),
-				world.get_tree().get_nodes_in_group("net_men").size(), kills])
+				world.get_tree().get_nodes_in_group("net_men").size(), kills, world.net.launches_sent])
 		return
 	# the client
 	if _mp_t - _mp_said > 3.0:
@@ -1036,9 +1040,10 @@ func tick_mptest(delta: float) -> void:
 		if is_instance_valid(world.cqb):
 			mine = world.cqb.kills
 		var hp: float = world.walker.health if is_instance_valid(world.walker) else -1.0
-		print("[mp] join t=%.0f gen=%d mission=%s units=%s ai=%d my_kills=%d match_kills=%s mirror=%s vehicle_rounds=%s hp=%.0f" % [
+		print("[mp] join t=%.0f gen=%d mission=%s units=%s ai=%d my_kills=%d match_kills=%s mirror=%s vehicle_rounds=%s launches_drawn=%d missiles=%d hp=%.0f" % [
 			_mp_t, world.net.match_gen, String(Sim.mission), str(kinds), world.net.ai_ghosts.size(),
-			mine, kills, str(NetLink.mirroring()), str(world.net.vehicle_rounds_drawn), hp])
+			mine, kills, str(NetLink.mirroring()), str(world.net.vehicle_rounds_drawn), world.net.launches_drawn,
+			world.get_tree().get_nodes_in_group("missiles").size(), hp])
 	# a burst into the nearest of the host's men every second
 	_mp_shot += delta
 	if _mp_shot > 1.0 and is_instance_valid(world.cqb) and is_instance_valid(world.walker):
@@ -1049,6 +1054,6 @@ func tick_mptest(delta: float) -> void:
 					and (u2 as Soldier).alive:
 				(u2 as Soldier).take_hit(45.0, world.walker)
 				break
-	if _mp_t > 150.0:
+	if _mp_t > 175.0:
 		world.get_tree().quit()
 #endregion

@@ -36,6 +36,8 @@ func parse_arg(a: String) -> bool:
 		_streak_test = true
 	elif a == "--helistreak":
 		_heli_streak = true
+	elif a == "--ladderfall":
+		_ladder_fall = true
 	elif a == "--balltest":
 		_ball_test = true
 	elif a == "--boundstest":
@@ -1739,6 +1741,59 @@ func _run_drop_test() -> void:
 	seen.sort()
 	print("[drop] on the map along the way: %s" % ", ".join(PackedStringArray(seen)))
 	print("[drop] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
+	world.get_tree().quit()
+#endregion
+
+#region --ladderfall
+## Shell the buildings that have scaffolding and ladders on them, and see what
+## is left standing against nothing: --preset=cqb:foot --ladderfall
+var _ladder_fall := false
+
+func tick_ladder_fall() -> void:
+	if not _ladder_fall or not is_instance_valid(world.cqb):
+		return
+	_ladder_fall = false
+	_run_ladder_fall()
+
+func _run_ladder_fall() -> void:
+	var ts: TownSet = world.cqb.dressing
+	if not is_instance_valid(ts):
+		print("[ladderfall] RESULT: FAILED -- no town set")
+		world.get_tree().quit()
+		return
+	var sc_before: int = ts.scaffolds.size()
+	var ld_before: int = ts.ladders.size()
+	# every building with something on it, from the scaffolds and the ladders
+	var targets: Array = []
+	for sc in ts.scaffolds:
+		targets.append(Obstacles.centre_of(int(sc[5])))
+	for l in ts.ladders:
+		if not Obstacles.gone(int(l[2])) and Obstacles.top_of(int(l[2])) - (l[0] as Vector3).y > 6.0:
+			targets.append(Obstacles.centre_of(int(l[2])))
+	var climbable_before := 0
+	for l2 in ts.ladders:
+		if not TownSet.ladder_at((l2[0] as Vector3) + (l2[1] as Vector3) * 0.5 + Vector3(0, 0.5, 0)).is_empty():
+			climbable_before += 1
+	for c in targets:
+		world.scenery.damage_area(c, 14.0)
+	for i in Engine.physics_ticks_per_second * 2:
+		await world.get_tree().physics_frame
+	var standing_meshes := 0
+	for l3 in ts.ladders:
+		if l3.size() > 4 and is_instance_valid(l3[4]) and not (l3[4] as Node).has_meta("flat"):
+			standing_meshes += 1
+	var climbable_after := 0
+	for l4 in ts.ladders:
+		if not TownSet.ladder_at((l4[0] as Vector3) + (l4[1] as Vector3) * 0.5 + Vector3(0, 0.5, 0)).is_empty():
+			climbable_after += 1
+	print("[ladderfall] %d buildings shelled: scaffolds %d -> %d, ladders %d -> %d (climbable %d -> %d, %d upright meshes left)" % [
+		targets.size(), sc_before, ts.scaffolds.size(), ld_before, ts.ladders.size(),
+		climbable_before, climbable_after, standing_meshes])
+	var bad := ts.scaffolds.size() > 0 and sc_before > 0
+	for l5 in ts.ladders:
+		if Obstacles.gone(int(l5[2])):
+			bad = true
+	print("[ladderfall] RESULT: %s" % ("FAILED -- dressing left against nothing" if bad else "ok"))
 	world.get_tree().quit()
 #endregion
 

@@ -207,6 +207,15 @@ Measured with two headless copies (`--mptest=host` / `--mptest=join`): the
 client follows a restart and two changes of mode, holds 9-13 pictures in a
 ground fight, none from the last match, and its kills are credited to it.
 
+**Every round that flies far enough to matter is seen everywhere.** A tank's
+shell, a rocket battery's ripple, a SAM site's missile, a cruise or ballistic
+round and an AI jet's missiles are sent as they leave -- where from, how fast,
+and what they are after, named so every machine can find it -- and the others
+fly a copy that homes, warns and bursts the same way and hurts nothing; the
+damage is the launcher owner's to deal. Autocannon and machine-gun fire, far
+too frequent for that, goes as a count of rounds in the vehicle's own packet.
+A client's garrison SAM sites no longer fire their own, second missile.
+
 **Starting again starts clean.** Each kind of thing a match leaves behind had
 its own line in the cleanup, and every kind nobody had written one for went on
 into the next match: a mushroom cloud, tracer in flight, gibs, smoke, a dropped
@@ -214,6 +223,12 @@ rifle, strike shipping. Everything put into the world while a match runs is
 now recorded as it arrives and swept when it ends -- the town's dressing, the
 standing fleet and what the network owns excepted -- along with a jammer or an
 EMP still counting, slow motion, and a nuclear flash still on the screen.
+
+**Scaffolding and ladders come down with their building.** They were dressing
+laid against a wall, so a building shelled flat left them standing against
+nothing -- climbable, to a roof that was not there. `--ladderfall` shells every
+dressed building in a street fight: 4 scaffolds and 10 ladders down, none
+climbable after.
 
 ## Helicopters
 

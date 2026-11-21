@@ -227,6 +227,10 @@ var _deck := 0.0
 ## Aiming points programmed before launch, one per warhead as the bus opens.
 ## Empty for an ordinary shot, which spreads its load over the footprint.
 var programmed: Array = []
+## A picture of a round somebody else's machine fired: it flies, homes,
+## warns and goes off like the real one and hurts nothing. The real one, on
+## the machine that fired it, does the damage. See `NetLink.share_launch`.
+var harmless := false
 ## The last flare and chaff salvo this round has been shown, by the target's
 ## own count, so each salvo is judged once.
 var _flare_judged := -1
@@ -1571,6 +1575,7 @@ func _open_up() -> void:
 		var rad: float = lerpf(0.35, 1.0, randf())
 		var kick: Vector3 = (right * cos(a) + up * sin(a)) * lateral * rad
 		var m := Missile.new()
+		m.harmless = harmless
 		var dir: Vector3 = (vel + kick).normalized()
 		var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
 		var xf := Transform3D(Basis.looking_at(dir, up_ref), global_position)
@@ -1699,6 +1704,9 @@ func _hit(what: Node, miss := 0.0) -> void:
 	# lethal radius is what the falloff belongs to.
 	var reach: float = float(ws.get("lethal", maxf(float(ws["fuse"]), 1.0)))
 	var falloff: float = clampf(1.0 - miss / maxf(reach, 0.1), 0.22, 1.0)
+	if harmless:
+		_die(true)
+		return
 	if what.has_method("take_hit"):
 		KillFeed.cause = "missile"
 		what.take_hit(ws["damage"] * falloff, _from_who())
@@ -1714,7 +1722,7 @@ func _hit(what: Node, miss := 0.0) -> void:
 ## Warhead going off against the ground or a structure: everything inside the
 ## blast takes it, and the scenery in the middle comes down.
 func _ground_burst(at: Vector3) -> void:
-	if ws["kind"] == "bomb":
+	if ws["kind"] == "bomb" or harmless:
 		return                     # the bomb path does its own, much bigger, one
 	var r: float = maxf(float(ws["fuse"]) * 1.8, 12.0)
 	for n in get_tree().get_nodes_in_group("hittable"):
@@ -1756,6 +1764,13 @@ func _die(big: bool) -> void:
 	if dead:
 		return
 	dead = true
+	var was_mute: bool = Effects.mute_blast
+	if harmless:
+		Effects.mute_blast = true
+	_die_body(big)
+	Effects.mute_blast = was_mute
+
+func _die_body(big: bool) -> void:
 	Effects.explosion(get_tree().current_scene, global_position, 9.0 if big else 4.0)
 	if ws["kind"] != "bomb" and Sim.debug_weapons:
 		var near := 9999.0
@@ -1826,7 +1841,7 @@ func _die(big: bool) -> void:
 		var nuke: bool = bool(ws.get("nuclear", false))
 		var hit := 0
 		for n in get_tree().get_nodes_in_group("hittable"):
-			if not is_instance_valid(n) or not n.has_method("take_hit"):
+			if harmless or not is_instance_valid(n) or not n.has_method("take_hit"):
 				continue
 			# Measured to the hull, not to the middle of it. Against a ninety
 			# metre ship the centre is forty-five metres from a hit on the bow,

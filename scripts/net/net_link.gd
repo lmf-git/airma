@@ -1075,6 +1075,7 @@ func _publish_ground() -> void:
 			var a = z.assets[i]
 			if not is_instance_valid(a) or not (a is Tank) or not a.alive:
 				continue
+			watch_launcher(a)
 			labels.append(String(z.label))
 			slots.append(i)
 			pos.append(a.global_position)
@@ -1348,6 +1349,7 @@ func _send(_delta: float) -> void:
 	# in a vehicle: send the hull and turret instead
 	var tk = world.get("tank")
 	if tk != null and is_instance_valid(tk):
+		watch_launcher(tk)
 		rpc("net_vehicle", my_id, tk.global_position,
 			tk.global_transform.basis.get_rotation_quaternion(), tk.linear_velocity,
 			tk.turret_yaw, tk.turret_pitch, 1 if tk.alive else 0)
@@ -1421,6 +1423,7 @@ func _publish_ai() -> void:
 	var alive := PackedByteArray()
 	for key in now:
 		var n: Node3D = now[key]
+		watch_launcher(n)
 		if not _ai_seen.has(key):
 			_ai_seen[key] = true
 			new_idx.append(key)
@@ -1739,6 +1742,7 @@ func _publish_units() -> void:
 	for key in now:
 		var n: Node3D = now[key]
 		units[key] = n
+		watch_launcher(n)
 		if not _units_seen.has(key):
 			_units_seen[key] = true
 			nk.append(key)
@@ -1976,3 +1980,254 @@ func net_credit(victim: String, head: bool) -> void:
 	var fight = world.get("cqb") if world != null else null
 	if fight != null and is_instance_valid(fight):
 		fight.credit_kill(victim, head)
+
+# --------------------------------------------------- rounds off the ground
+## Every round a vehicle or a site fires that flies far enough to matter -- a
+## tank's shell, a rocket battery's ripple, a SAM, a cruise or ballistic
+## missile -- shown on every other machine. Only the machine that owns the
+## launcher simulates the real one; everyone else is sent where it left, how
+## fast, and what it is after, and flies a copy of it that homes, warns and goes
+## off the same way and hurts nothing. Without this a client was shot down by a
+## battery that never visibly fired, and a rocket ripple landed out of nowhere.
+
+## Start sharing what this launcher fires. Safe to call every frame.
+func watch_launcher(t: Node) -> void:
+	if not is_instance_valid(t) or t.has_meta("net_watch") or not t.has_signal("store_released"):
+		return
+	t.set_meta("net_watch", true)
+	t.store_released.connect(func(r: Node) -> void: share_launch(t, r))
+
+## Who fired, as every machine can name it.
+func _who_of(n: Node) -> String:
+	if not is_instance_valid(n):
+		return "x"
+	if n.has_meta("net_unit"):
+		return "u:%d" % int(n.get_meta("net_unit"))
+	if n.has_meta("zone_asset"):
+		var k: Array = n.get_meta("zone_asset")
+		return "z:%s:%d" % [String(k[0]), int(k[1])]
+	if n == world.get("tank") or n == world.get("player"):
+		return "p:%d" % my_id
+	if n.is_in_group("bandits") and not n.is_in_group("remote"):
+		return "a:%d" % (n.get_instance_id() % 100000)
+	return "x"
+
+func _who_node(who: String) -> Node3D:
+	var bits := who.split(":")
+	match bits[0]:
+		"u":
+			var u: Variant = units.get(int(bits[1]))
+			return u as Node3D if is_instance_valid(u) else null
+		"z":
+			return _zone_asset(bits[1], int(bits[2]))
+		"a":
+			var ag: Variant = ai_ghosts.get(int(bits[1]))
+			return ag as Node3D if is_instance_valid(ag) else null
+		"p":
+			var pid := int(bits[1])
+			if veh_ghosts.has(pid) and is_instance_valid(veh_ghosts[pid]):
+				return veh_ghosts[pid]
+			if ghosts.has(pid) and is_instance_valid(ghosts[pid]):
+				return ghosts[pid]
+	return null
+
+func _zone_asset(label: String, idx: int) -> Node3D:
+	for z in world.get_tree().get_nodes_in_group("zones"):
+		if is_instance_valid(z) and String(z.label) == label and idx >= 0 and idx < z.assets.size():
+			var a: Variant = z.assets[idx]
+			return a as Node3D if is_instance_valid(a) else null
+	return null
+
+## What a round is after, as every machine can find it.
+func _target_ref(n: Variant) -> Dictionary:
+	if n == null or not is_instance_valid(n) or not (n is Node3D):
+		return {}
+	var t := n as Node3D
+	if t.has_meta("net_unit"):
+		return {"u": int(t.get_meta("net_unit"))}
+	if t.has_meta("net_id"):
+		return {"p": int(t.get_meta("net_id"))}
+	if t == world.get("player") or t == world.get("tank"):
+		return {"p": my_id}
+	if t.has_meta("net_ai"):
+		return {"a": int(t.get_meta("net_ai"))}
+	if t.is_in_group("bandits") and not t.is_in_group("remote"):
+		return {"a": t.get_instance_id() % 100000}
+	if t.has_meta("zone_asset"):
+		var k: Array = t.get_meta("zone_asset")
+		return {"z": String(k[0]), "zi": int(k[1]), "m": t.global_position}
+	if t.is_in_group("satellites"):
+		return {"sat": String(t.name), "m": t.global_position}
+	return {"m": t.global_position}
+
+func _target_node(r: Dictionary) -> Node3D:
+	if r.has("u"):
+		var u: Variant = units.get(int(r["u"]))
+		if is_instance_valid(u):
+			return u
+	if r.has("p"):
+		var pid := int(r["p"])
+		if pid == my_id:
+			var mine: Variant = world.get("tank")
+			if mine == null or not is_instance_valid(mine):
+				mine = world.get("player")
+			if mine != null and is_instance_valid(mine):
+				return mine
+		else:
+			var g := _who_node("p:%d" % pid)
+			if g != null:
+				return g
+	if r.has("a"):
+		var key := int(r["a"])
+		if not is_host and ai_ghosts.has(key) and is_instance_valid(ai_ghosts[key]):
+			return ai_ghosts[key]
+		if is_host:
+			for b in world.get_tree().get_nodes_in_group("bandits"):
+				if is_instance_valid(b) and not b.is_in_group("remote") \
+						and b.get_instance_id() % 100000 == key:
+					return b
+	if r.has("z"):
+		var za := _zone_asset(String(r["z"]), int(r["zi"]))
+		if za != null:
+			return za
+	if r.has("sat"):
+		for s in world.get_tree().get_nodes_in_group("satellites"):
+			if is_instance_valid(s) and String(s.name) == String(r["sat"]):
+				return s
+	if r.has("m"):
+		# a place: a mark of its own, gone with the round
+		var mk := _Mark.new()
+		world.add_child(mk)
+		mk.global_position = r["m"]
+		return mk
+	return null
+
+## A spot on the ground for a copied round to go to: what a launcher's own
+## aiming mark is on the machine that fired it.
+class _Mark extends Node3D:
+	var team := -1
+	func _ready() -> void:
+		add_to_group("no_lock")
+	func hit_radius() -> float:
+		return 6.0
+	func is_alive() -> bool:
+		return true
+	func take_hit(_a: float, _f: Node = null) -> void:
+		pass
+
+## The launcher here fired `r`: tell everyone else.
+func share_launch(by: Node, r: Node) -> void:
+	if not active or not is_instance_valid(r) or r.get("harmless") == true:
+		return
+	var d := {"by": _who_of(by), "team": int(by.get("team")) if "team" in by else 1}
+	if r is Aircraft.Shell:
+		var sh := r as Aircraft.Shell
+		d["k"] = "shell"
+		d["o"] = sh.global_position
+		d["v"] = sh.vel
+		d["b"] = sh.blast
+		d["r"] = sh.rocket
+		d["d"] = sh.drag
+	elif r is Missile:
+		var m := r as Missile
+		d["k"] = "missile"
+		d["w"] = m.wid
+		d["o"] = m.global_position
+		d["q"] = m.global_transform.basis.get_rotation_quaternion()
+		d["v"] = m.vel
+		d["t"] = _target_ref(m.target)
+		var prog: Array = []
+		for p in m.programmed:
+			if p is Vector3:
+				prog.append(p)
+			elif is_instance_valid(p) and p is Node3D:
+				prog.append((p as Node3D).global_position)
+		d["prog"] = prog
+	elif r is Icbm:
+		var ic := r as Icbm
+		d["k"] = "icbm"
+		d["w"] = ic.wid
+		d["o"] = ic.global_position
+		var marks: Array = []
+		for mk in ic.marks:
+			if mk is Vector3:
+				marks.append(mk)              # already a direction on the planet
+			elif is_instance_valid(mk) and mk is Node3D:
+				var gp: Vector3 = (mk as Node3D).global_position
+				marks.append(Sim.chart_to_dir(gp.x, gp.z))
+		d["marks"] = marks
+	else:
+		return
+	launches_sent += 1
+	if is_host:
+		rpc("net_launch", d)
+	else:
+		rpc_id(1, "net_launch", d)
+
+## Launches shared from here and copies drawn here, for the harness.
+var launches_sent := 0
+var launches_drawn := 0
+
+@rpc("any_peer", "call_remote", "reliable")
+func net_launch(d: Dictionary) -> void:
+	if world == null:
+		return
+	if is_host:
+		var sender := multiplayer.get_remote_sender_id()
+		for pid in multiplayer.get_peers():
+			if pid != sender:
+				rpc_id(pid, "net_launch", d)
+	var who := String(d.get("by", "x"))
+	if who == "p:%d" % my_id:
+		return                        # our own, passed back
+	var by := _who_node(who)
+	var team := int(d.get("team", 1))
+	var at: Vector3 = d.get("o", Vector3.ZERO)
+	var scn: Node = world
+	launches_drawn += 1
+	match String(d.get("k", "")):
+		"shell":
+			var sh := Aircraft.Shell.new()
+			sh.harmless = true
+			sh.vel = d.get("v", Vector3.ZERO)
+			sh.blast = float(d.get("b", 8.0))
+			sh.damage = 0.0
+			sh.rocket = bool(d.get("r", false))
+			sh.drag = float(d.get("d", 0.0))
+			sh.team = team
+			sh.shooter = by
+			scn.add_child(sh)
+			sh.global_position = at
+			var dir: Vector3 = (sh.vel as Vector3).normalized()
+			Effects.muzzle_flash(scn, at, dir, 2.2 if sh.rocket else 3.4)
+			Effects.dust(scn, at, 4.5)
+			Sfx.play_at(scn, "launch" if sh.rocket else "boom", at, -2.0,
+				1.0 if sh.rocket else 0.7, 4000.0)
+		"missile":
+			var tgt := _target_node(d.get("t", {}))
+			var m := Missile.new()
+			m.harmless = true
+			var q: Quaternion = d.get("q", Quaternion.IDENTITY)
+			m.launch(String(d["w"]), Transform3D(Basis(q), at), d.get("v", Vector3.ZERO),
+				by, tgt)
+			m.team = team
+			for p in d.get("prog", []):
+				m.programmed.append(p)
+			scn.add_child(m)
+			if tgt is _Mark:
+				m.tree_exiting.connect(tgt.queue_free)
+			Effects.dust(scn, at, 3.0)
+			Sfx.play_at(scn, "launch", at, 0.0, 1.0, 3000.0)
+		"icbm":
+			var ic := Icbm.new()
+			ic.harmless = true
+			ic.wid = String(d["w"])
+			ic.ws = WeaponSpec.get_spec(ic.wid)
+			ic.shooter = by
+			ic.team = team
+			for mk in d.get("marks", []):
+				ic.marks.append(mk)
+			var p: Vector3 = Sim.world_to_space(at)
+			ic._s = Orbit.make(p, p.normalized() * 4.0)
+			scn.add_child(ic)
+			ic.global_position = at

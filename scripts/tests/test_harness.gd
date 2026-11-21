@@ -335,6 +335,7 @@ func tick_after_street(delta: float) -> void:
 	infantry_tests.tick_cqb_fix()
 	infantry_tests.tick_streak()
 	infantry_tests.tick_heli_streak(delta)
+	infantry_tests.tick_ladder_fall()
 	infantry_tests.tick_drop()
 	infantry_tests.tick_zero()
 	infantry_tests.tick_holdfire()
