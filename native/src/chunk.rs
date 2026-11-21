@@ -22,7 +22,7 @@ pub const CELLS: usize = 16;
 /// Mirrors `Terrain.HALF_CELLS`.
 const HALF_CELLS: i32 = 8;
 /// The finest cell the ground can hold. Mirrors `Terrain.BASE_CELL`.
-const BASE_CELL: f32 = 15.0;
+pub const BASE_CELL: f32 = 15.0;
 /// 15 x 16 x 8192. Mirrors `Terrain.ROOT_SPAN`.
 pub const ROOT_SPAN: f32 = BASE_CELL * CELLS as f32 * 8192.0;
 

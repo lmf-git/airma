@@ -103,6 +103,7 @@ func plan_finish() -> void:
 		_plan_town_streets(sites[i]["c"], float(sites[i]["r"]), trunks[i])
 	var t2 := Time.get_ticks_msec()
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
+	_plan_junctions()
 	var t3 := t2
 	var t4 := t2
 	var t5 := t2
@@ -607,6 +608,101 @@ func _spanning(nodes: Array, group: Array, loops: int) -> Array:
 	return out
 
 
+## Where a street meets a road of the network, it meets it the way a street
+## does. A road at the town's own level is a crossroads: the street stops at
+## its edge and neither lays its kerb across the other (`ribbon` in
+## raster.rs). A road a little up on a bank -- the foot of a ramp to a bridge,
+## a road carried over a dip -- the street climbs to meet: its last few tens of
+## metres are graded into the ground as an approach, like the road's own bank,
+## and it is laid on that. One higher than that, it does not climb: it ends at
+## the foot of the bank.
+##
+## They used to be cut back a fixed twenty metres and more from any ramp, which
+## was neither: the street stopped on open ground short of the bank, with the
+## made ground between, and the town's grid did not join the road through it.
+const JOIN_FILL := 3.0
+## Below this the road is at the street's level, near enough.
+const JOIN_MIN := 0.3
+## How steep a street's approach climbs: one in sixteen. (One in twelve and a
+## half was drawn at one in five in places, the fifteen metre mesh folding the
+## climb into the road's bank beside it.)
+const STREET_GRADE := 0.06
+const STREET_HALF := 5.0
+## How far past the top of a street's climb its own bank still reaches: the
+## shoulder a raised leg rounds off over, and the margin a street keeps.
+const APPROACH_TAIL := 16.0
+## For each street that climbs to meet a road, where along it (0 to 1) it does:
+## street index -> [[t0, t1], ...].
+var _approach_spans: Dictionary = {}
+## Every place a street meets a road, for the harness: {p, dir (the street's),
+## fill, kind: "level", "join" or "stop"}.
+var junctions: Array = []
+var _junctions_laid: Array = []
+## The road network as it was handed to the painter, in the chart it was laid
+## out in: carried into whatever chart there is and handed over again when the
+## chart moves (`rechart`).
+var _road_legs_laid := PackedFloat32Array()
+
+func _plan_junctions() -> void:
+	_approach_spans = {}
+	junctions = []
+	var flat := PackedFloat32Array()
+	for seg in _streets:
+		var a: Vector2 = seg[0]
+		var b: Vector2 = seg[1]
+		flat.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y]))
+	var got: PackedFloat32Array = Sim.native.street_crossings(flat)
+	var legs: Array = []
+	var joins := 0
+	var stops := 0
+	for i in range(0, got.size() - 7, 8):
+		var si: int = int(got[i])
+		var t: float = got[i + 1]
+		var p := Vector2(got[i + 2], got[i + 3])
+		var road_y: float = got[i + 4]
+		var town_y: float = got[i + 5]
+		var along := Vector2(got[i + 6], got[i + 7])
+		var fill: float = road_y - town_y
+		var a2: Vector2 = _streets[si][0]
+		var b2: Vector2 = _streets[si][1]
+		var run: float = a2.distance_to(b2)
+		if run < 1.0:
+			continue
+		var dir: Vector2 = (b2 - a2) / run
+		var kind := "level" if absf(fill) < JOIN_MIN else ("stop" if absf(fill) > JOIN_FILL else "join")
+		junctions.append({"p": p, "dir": dir, "along": along, "fill": fill, "kind": kind,
+			"t": t, "street": si})
+		if kind == "level":
+			continue
+		if kind == "stop":
+			stops += 1
+			continue
+		# out of the road's carriageway and kerbs, measured along the street,
+		# which may cross it at an angle
+		var start: float = Sim.ROAD_HALF * 1.55 / maxf(absf(dir.cross(along)), 0.4)
+		var reach: float = clampf(absf(fill) / STREET_GRADE, 8.0, 50.0)
+		for side in [-1.0, 1.0]:
+			# only on the side of the road the street goes on to
+			var room: float = t * run if side < 0.0 else (1.0 - t) * run
+			if room < start + 2.0:
+				continue
+			var l: float = minf(reach, room - start)
+			var q0: Vector2 = p + dir * side * start
+			var q1: Vector2 = p + dir * side * (start + l)
+			legs.append([q0, q1, road_y, town_y, town_y, town_y,
+				Sim.LEG_APPROACH, STREET_HALF])
+			# out past the end of the climb by as far as its bank rounds off,
+			# so the street's own approach is never taken for a bank it has to
+			# keep clear of (`_streets_clear_of_bridges`)
+			var t1: float = clampf(t + side * (start + l + APPROACH_TAIL) / run, 0.0, 1.0)
+			if not _approach_spans.has(si):
+				_approach_spans[si] = []
+			(_approach_spans[si] as Array).append([minf(t, t1), maxf(t, t1)])
+			joins += 1
+	Sim.set_street_approaches(legs)
+	_stats["street_joins"] = joins
+	_stats["street_stops"] = stops
+
 func _plan_town_streets(centre: Vector2, radius: float, trunk: Vector2) -> void:
 	var block := 128.0
 	var lines := int(radius / block)
@@ -728,6 +824,7 @@ func _lay_down() -> void:
 	for t in sites:
 		_sites_laid.append(t["c"])
 	_streets_laid = _streets.duplicate(true)
+	_junctions_laid = junctions.duplicate(true)
 
 ## The chart has moved: carry everything built into it. Worked from what was
 ## laid down every time, so there and back again is exactly where it started.
@@ -752,6 +849,33 @@ func rechart() -> void:
 	for j in mini(_streets.size(), _streets_laid.size()):
 		var sg: Array = _streets_laid[j]
 		_streets[j] = [_carried_xz(sg[0]), _carried_xz(sg[1])]
+	# The painted roads with them. As strips of geometry they were carried
+	# like everything else built; painted, they are a list in the extension,
+	# and left at their old numbers they were painted where the roads had been
+	# in the old chart -- across fields, with the towns somewhere else.
+	if not _road_legs_laid.is_empty():
+		var moved := PackedFloat32Array(_road_legs_laid)
+		for i in range(0, moved.size() - 7, 8):
+			var a2: Vector2 = _carried_xz(Vector2(moved[i], moved[i + 1]))
+			var b2: Vector2 = _carried_xz(Vector2(moved[i + 2], moved[i + 3]))
+			moved[i] = a2.x
+			moved[i + 1] = a2.y
+			moved[i + 2] = b2.x
+			moved[i + 3] = b2.y
+		Sim.native.publish_road_pieces(moved)
+		var terrain_node: Node = get_parent().get("terrain") if get_parent() != null else null
+		if terrain_node != null and terrain_node.has_method("roads_changed"):
+			terrain_node.roads_changed()
+	# and where they meet the roads, which go with them
+	for j in mini(junctions.size(), _junctions_laid.size()):
+		var jl: Dictionary = _junctions_laid[j]
+		var at: Vector2 = jl["p"]
+		var to: Vector2 = _carried_xz(at + (jl["dir"] as Vector2))
+		var pm: Vector2 = _carried_xz(at)
+		junctions[j]["p"] = pm
+		junctions[j]["dir"] = (to - pm).normalized()
+		var ro: Vector2 = _carried_xz(at + (jl["along"] as Vector2))
+		junctions[j]["along"] = (ro - pm).normalized()
 
 ## One instance of a MultiMesh carried on its own, in its node's own frame.
 func _carried(node_xf: Transform3D, t: Transform3D) -> Transform3D:
@@ -859,7 +983,9 @@ func _town_detail() -> void:
 		var at := PackedVector2Array()
 		var yaw := PackedFloat32Array()
 		var which := PackedInt32Array()
-		for seg in _streets:
+		# along the streets as they are drawn: a stretch cut back from a bank
+		# or a low deck has no lamp posts standing along it in the open
+		for seg in (street_draw if not street_draw.is_empty() else _streets):
 			var a: Vector2 = seg[0]
 			var b: Vector2 = seg[1]
 			if a.distance_to(c) > r * 1.2 and b.distance_to(c) > r * 1.2:
@@ -1638,12 +1764,6 @@ func _farms() -> void:
 # the draw calls; instance count sets how much is actually on the ground. Going
 # up on both at once is what lets the ground read as ground at low level, which
 # is most of what makes a fast jet feel fast.
-## How big a piece of the road network is drawn as one mesh.
-##
-## Small enough that only a few are ever on screen, large enough that the extra
-## draw calls do not cost more than the culling saves. At 32 km a bucket is
-## comfortably inside the camera's far plane.
-const ROAD_BUCKET := 32000.0
 
 const SCAT_CELL := 2200.0
 const SCAT_HALF := 9                       # cells either side of the field
@@ -1947,78 +2067,32 @@ func _wall_mesh() -> ArrayMesh:
 ## a leg at a time goes to the worker pool and only the two meshes are made
 ## here.
 func _build_roads() -> void:
-	# Every leg on the map in one call. Four height samples every eleven metres
-	# of every road and street, and with a settlement network spread across the
-	# world that was two and a half seconds of world generation -- each of those
-	# samples its own crossing of the extension boundary, from eight workers
-	# that then queued at it. The extension builds both vertex lists across
-	# every core and hands them back once.
+	# The roads are painted into the ground, not laid over it.
+	#
+	# They were strips of geometry, bucketed into meshes: a carriageway and a
+	# kerb either side, hugging the drawn ground. Where two met, the two strips
+	# fought for the same pixels and one's kerb ran across the other; wherever
+	# the terrain bent between two of its samples it came up through them. The
+	# ground's own material paints them now (`Terrain.follow_roads`): a
+	# junction is one surface, the kerb stops at every mouth, and nothing can
+	# come through a road that is the ground. This hands the network over --
+	# the trunk legs and the streets as drawn, the approach stretches marked --
+	# and the extension works out which parts of each street are drawn.
 	var legs := PackedFloat32Array(Sim.road_draw)
 	street_draw = _streets_clear_of_bridges()
 	for r in street_draw:
 		var a: Vector2 = r[0]
 		var b: Vector2 = r[1]
+		# 3: an approach climbing to a road, laid on its made ground
 		legs.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y,
-			5.0, 0.0, 0.0, 0.0]))
-	# Cut into square buckets, not laid down as two meshes.
-	#
-	# A mesh is culled as one object, so a single mesh spanning the whole road
-	# network submits all of it the moment any part of it is on screen.
-	# Measured, those two meshes were 4.15 ms of the 6.20 ms the frame spent
-	# drawing -- two thirds of it, from two objects out of eighteen hundred,
-	# most of which was behind the camera or over the horizon. At this size a
-	# bucket is comfortably inside the far plane, so a few are drawn and the
-	# rest are dropped before they cost anything.
+			STREET_HALF, 0.0, 0.0, float(r[2]) if r.size() > 2 else 0.0]))
+	_road_legs_laid = legs
 	var t_rib := Time.get_ticks_msec()
-	var out: Array = Sim.native.road_ribbons_bucketed(legs, ROAD_BUCKET)
-	_stats["ms_ribbons"] = Time.get_ticks_msec() - t_rib
-	var tris := 0
-	# Neither casts a shadow, and the saving is not small.
-	#
-	# A road is a ribbon lying on the ground: its shadow is cast onto the very
-	# surface it is painted on, from a metre above it at most, so it is
-	# invisible in principle and z-fighting in practice. Measured, these two
-	# meshes were 1.52 M of the 1.85 M triangles in the whole world that were
-	# casting shadows -- eighty-two per cent of the shadow cost, for nothing you
-	# can see. A shadow-casting mesh is drawn again for every split of the
-	# directional light, so this is four passes over a million and a half
-	# triangles, every frame.
-	# One material for all the buckets, so they still batch: what is being
-	# bought here is culling, and paying for it in draw calls would be a poor
-	# trade.
-	var kerb_mat := _road_shader(Color(0.34, 0.32, 0.28), 0.98)
-	var road_mat := _road_shader(Color(0.105, 0.105, 0.115), 0.94)
-	# The skirts down the sides of a road on a bank (see `ribbon` in
-	# raster.rs): earth, and drawn where they are -- not pulled toward the
-	# eye like the carriageway, or the buried part of one would show through
-	# the bank it is buried in.
-	var wall_mat := MeshKit.mat(Color(0.30, 0.31, 0.24), 0.97, 0.0)
-	var cells := 0
-	for i in range(0, out.size(), 5):
-		var cx: int = int(out[i])
-		var cz: int = int(out[i + 1])
-		var surf: PackedVector3Array = out[i + 2]
-		var kerb: PackedVector3Array = out[i + 3]
-		var wall: PackedVector3Array = out[i + 4]
-		# the skirts down a raised road's sides: upright, so real normals
-		if not wall.is_empty():
-			var wm := MeshKit.mi(_faced_mesh(wall, wall_mat), "Walls %d,%d" % [cx, cz])
-			wm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-			add_child(wm)
-		tris += int((surf.size() + kerb.size()) / 3.0)
-		cells += 1
-		if not surf.is_empty():
-			var rm := MeshKit.mi(_flat_mesh(surf, road_mat),
-				"Roads %d,%d" % [cx, cz])
-			rm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			add_child(rm)
-		if not kerb.is_empty():
-			var km := MeshKit.mi(_flat_mesh(kerb, kerb_mat),
-				"Kerbs %d,%d" % [cx, cz])
-			km.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			add_child(km)
-	_stats["road_tris"] = tris
-	_stats["road_cells"] = cells
+	_stats["road_pieces"] = Sim.native.publish_road_pieces(legs)
+	_stats["ms_road_pieces"] = Time.get_ticks_msec() - t_rib
+	var terrain_node: Node = get_parent().get("terrain") if get_parent() != null else null
+	if terrain_node != null and terrain_node.has_method("roads_changed"):
+		terrain_node.roads_changed()
 
 ## The streets as they are drawn: `_streets`, less wherever one runs into a
 ## road bridge -- across the ramp up to it, or underneath the deck where there
@@ -2032,38 +2106,133 @@ const STREET_REACH := 7.75
 
 func _streets_clear_of_bridges() -> Array:
 	var out: Array = []
-	if Sim.road_bridges.is_empty():
-		return _streets.duplicate()
 	const STEP := 3.0
-	for seg in _streets:
+	var cut_back := 0
+	for si in _streets.size():
+		var seg: Array = _streets[si]
 		var a: Vector2 = seg[0]
 		var b: Vector2 = seg[1]
-		if not Sim.near_bridges(Vector2(minf(a.x, b.x), minf(a.y, b.y)),
-				Vector2(maxf(a.x, b.x), maxf(a.y, b.y)), STREET_REACH):
-			out.append(seg)
-			continue
 		var run := a.distance_to(b)
-		var n: int = maxi(int(ceil(run / STEP)), 1)
-		var from := -1
-		var cut := 0
-		for k in n + 1:
-			var q: Vector2 = a.lerp(b, float(k) / float(n))
-			var ok: bool = Sim.bridge_headroom(q.x, q.y, STREET_REACH) >= STREET_HEADROOM
-			if ok and from < 0:
-				from = k
-			elif not ok and from >= 0:
-				# the last clear point is where this piece stops
-				if k - 1 > from:
-					out.append([a.lerp(b, float(from) / float(n)),
-						a.lerp(b, float(k - 1) / float(n))])
-				from = -1
-			if not ok:
-				cut += 1
-		if from >= 0 and n > from:
-			out.append([a.lerp(b, float(from) / float(n)), b] if from > 0 else [a, b])
-		if cut > 0:
-			_stats["streets_cut"] = int(_stats.get("streets_cut", 0)) + 1
+		if run < 1.0:
+			continue
+		var spans: Array = _approach_spans.get(si, [])
+		# Where it cannot go: under a deck too low to pass beneath, or over a
+		# bank -- the side of a ramp, or a road raised on one it does not
+		# climb to meet -- and a margin round it. As [t0, t1].
+		var blocked: Array = []
+		if not Sim.road_bridges.is_empty() and Sim.near_bridges(
+				Vector2(minf(a.x, b.x), minf(a.y, b.y)),
+				Vector2(maxf(a.x, b.x), maxf(a.y, b.y)), STREET_REACH):
+			var n: int = maxi(int(ceil(run / STEP)), 1)
+			var from := -1.0
+			for k in n + 1:
+				var t := float(k) / float(n)
+				var q: Vector2 = a.lerp(b, t)
+				var ok: bool = Sim.bridge_headroom(q.x, q.y, STREET_REACH, NAN, false) \
+					>= STREET_HEADROOM
+				if not ok and from < 0.0:
+					from = t
+				elif ok and from >= 0.0:
+					blocked.append([from, t])
+					from = -1.0
+			if from >= 0.0:
+				blocked.append([from, 1.0])
+		var clear: PackedFloat32Array = Sim.native.street_clear(a, b, STREET_HALF)
+		var c0 := 0.0
+		for k2 in range(0, clear.size() - 1, 2):
+			if clear[k2] > c0:
+				_block_outside(blocked, c0, clear[k2], spans)
+			c0 = clear[k2 + 1]
+		if c0 < 1.0:
+			_block_outside(blocked, c0, 1.0, spans)
+		var keep: Array = [[0.0, 1.0]]
+		if not blocked.is_empty():
+			# Cut back to the junctions either side. Stopped where it was
+			# blocked, a street ran up to the side of a ramp, or to a deck too
+			# low to pass under, and stopped there -- two dead ends facing each
+			# other across a bridge. A street that cannot get through ends at
+			# the last street it meets on the way, which makes that a T.
+			var joins := _street_joins(si, a, b)
+			var cuts: Array = []
+			for bl in blocked:
+				var lo := 0.0
+				var hi := 1.0
+				for t2 in joins:
+					if t2 <= bl[0] and t2 > lo:
+						lo = t2
+					if t2 >= bl[1] and t2 < hi:
+						hi = t2
+				cuts.append([lo, hi])
+			keep = _subtract_spans([[0.0, 1.0]], cuts)
+			cut_back += 1
+		# and the stretches that climb to a road, drawn as approaches
+		for kp in keep:
+			var marks: Array = [kp[0], kp[1]]
+			for sp in spans:
+				for e in sp:
+					if e > kp[0] and e < kp[1]:
+						marks.append(e)
+			marks.sort()
+			for c in marks.size() - 1:
+				var t0: float = marks[c]
+				var t1: float = marks[c + 1]
+				if (t1 - t0) * run < 1.0:
+					continue
+				var mid: float = (t0 + t1) * 0.5
+				var climbs := false
+				for sp in spans:
+					if mid >= sp[0] and mid <= sp[1]:
+						climbs = true
+				# 4: laid clear of every bank here already; 3: an approach
+				out.append([a.lerp(b, t0), b if t1 >= 1.0 else a.lerp(b, t1),
+					3.0 if climbs else 4.0])
+	_stats["streets_cut"] = cut_back
 	return out
+
+## A stretch of street that the banks block, less any part of it that is the
+## street's own approach climbing to the road (which is meant to be raised).
+static func _block_outside(blocked: Array, t0: float, t1: float, spans: Array) -> void:
+	for piece in _subtract_spans([[t0, t1]], spans):
+		blocked.append(piece)
+
+## `spans` less `cuts`, both lists of [t0, t1].
+static func _subtract_spans(spans: Array, cuts: Array) -> Array:
+	var out: Array = spans.duplicate(true)
+	for c in cuts:
+		var next: Array = []
+		for sp in out:
+			if c[1] <= sp[0] or c[0] >= sp[1]:
+				next.append(sp)
+				continue
+			if c[0] > sp[0]:
+				next.append([sp[0], c[0]])
+			if c[1] < sp[1]:
+				next.append([c[1], sp[1]])
+		out = next
+	return out
+
+## Where along street `si` (0 to 1) it meets another street or a road of the
+## network.
+func _street_joins(si: int, a: Vector2, b: Vector2) -> Array:
+	var ts: Array = []
+	var run := a.distance_to(b)
+	var lo := Vector2(minf(a.x, b.x), minf(a.y, b.y))
+	var hi := Vector2(maxf(a.x, b.x), maxf(a.y, b.y))
+	for oi in _streets.size():
+		if oi == si:
+			continue
+		var c: Vector2 = _streets[oi][0]
+		var d: Vector2 = _streets[oi][1]
+		if maxf(c.x, d.x) < lo.x or minf(c.x, d.x) > hi.x \
+				or maxf(c.y, d.y) < lo.y or minf(c.y, d.y) > hi.y:
+			continue
+		var x: Variant = Geometry2D.segment_intersects_segment(a, b, c, d)
+		if x != null:
+			ts.append(a.distance_to(x) / run)
+	for j in junctions:
+		if int(j["street"]) == si:
+			ts.append(float(j["t"]))
+	return ts
 
 ## A road surface that wins against the ground it lies on without being lifted
 ## off it. Each vertex is pulled a fraction of its own distance toward the eye
@@ -2073,7 +2242,15 @@ func _streets_clear_of_bridges() -> Array:
 ## to be done by standing the ribbon sixteen centimetres up, and every soldier
 ## on a street was in it to the ankles.
 static var _road_sh: Shader = null
-static func _road_shader(col: Color, rough: float) -> ShaderMaterial:
+## The markings, and the surface's own grain, are drawn only as near as they
+## can be seen: the lines fade out between 180 and 320 m, the grain by 120 m,
+## so a road across the country is the plain dark ribbon it always was and the
+## one under the wheels has a centre line, its edges and some texture. `marked`
+## is the carriageway; a kerb has the grain and no lines. The lines are found
+## from UV: across the carriageway, -1 at one edge to 1 at the other, and the
+## length along it in metres (`ribbon` in raster.rs) -- so a street and a trunk
+## road get the same lines in proportion.
+static func _road_shader(col: Color, rough: float, marked := false) -> ShaderMaterial:
 	if _road_sh == null:
 		_road_sh = Shader.new()
 		_road_sh.code = """
@@ -2081,7 +2258,12 @@ shader_type spatial;
 render_mode cull_disabled;
 uniform vec3 albedo : source_color;
 uniform float roughness = 0.94;
+uniform bool marked = false;
+uniform vec3 paint : source_color = vec3(0.86, 0.85, 0.80);
+varying vec3 wpos;
+varying float dist;
 void vertex() {
+	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec4 v = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
 	// Toward the eye by a share of the distance. The terrain is drawn coarser
 	// the further off it is, and its error grows with the distance: held to a
@@ -2089,11 +2271,48 @@ void vertex() {
 	// was drawn, under the grass, and the roads looked missing up to every
 	// bridge and across every town.
 	float d = length(v.xyz);
+	dist = d;
 	v.xyz -= v.xyz / max(d, 0.001) * clamp(d * 0.005, 0.10, 3.0);
 	POSITION = PROJECTION_MATRIX * v;
 }
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float vnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+		mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
 void fragment() {
-	ALBEDO = albedo;
+	vec3 col = albedo;
+	// grain and patching, close to
+	float near = 1.0 - smoothstep(40.0, 120.0, dist);
+	if (near > 0.0) {
+		vec2 q = mod(wpos.xz, 4096.0);
+		float g = vnoise(q * 3.0) * 0.55 + vnoise(q * 0.3) * 0.45;
+		col *= mix(1.0, 0.82 + 0.36 * g, near);
+	}
+	if (marked) {
+		float fade = 1.0 - smoothstep(180.0, 320.0, dist);
+		if (fade > 0.0) {
+			float a = abs(UV.x);
+			float fu = max(fwidth(UV.x), 1e-4);
+			// a dashed centre line, six on and six off
+			float centre = 1.0 - smoothstep(0.02 - fu, 0.02 + fu, a);
+			float ph = fract(UV.y / 12.0);
+			float fv = max(fwidth(UV.y / 12.0), 1e-4);
+			float dash = smoothstep(0.0, fv, ph) * (1.0 - smoothstep(0.5 - fv, 0.5 + fv, ph));
+			// and a solid line just in from each edge
+			float edge = smoothstep(0.93 - fu, 0.93 + fu, a)
+				* (1.0 - smoothstep(0.965 - fu, 0.965 + fu, a));
+			// worn: a little of the road through the paint
+			float wear = 0.8 + 0.2 * vnoise(mod(wpos.xz, 4096.0) * 1.7);
+			col = mix(col, paint, max(centre * dash, edge) * fade * wear);
+		}
+	}
+	ALBEDO = col;
 	ROUGHNESS = roughness;
 	METALLIC = 0.0;
 }
@@ -2102,6 +2321,7 @@ void fragment() {
 	m.shader = _road_sh
 	m.set_shader_parameter("albedo", col)
 	m.set_shader_parameter("roughness", rough)
+	m.set_shader_parameter("marked", marked)
 	return m
 
 ## Viaducts and tunnel portals.
@@ -2113,13 +2333,118 @@ void fragment() {
 ## other, and disappeared into a hillside with no way in.
 const PIER_STEP := 90.0
 const DECK_HALF := 8.5
+## The parapet along each edge of a deck: how tall over the running surface,
+## and how thick.
+const PARAPET_TALL := 1.0
+const PARAPET_THICK := 0.35
 ## How far under the deck a walled ramp's abutment block reaches: `SHELF` in
 ## world.rs, which is the ground it stands for.
 const ABUT_LEN := 4.5
 ## Where every pier stands: x and z, and half its width in y.
 var pier_spots: Array = []
 
+## The road along a deck: the same carriageway, material and markings as the
+## ribbons on the ground (see `_road_shader`), a few centimetres over the deck
+## so the deck's own grey is the margin either side of it. `a` to `b` is the
+## centreline, with the heights at each end on the -1 and +1 sides.
+var _deck_v := PackedVector3Array()
+var _deck_uv := PackedVector2Array()
+
+func _deck_road(a: Vector2, b: Vector2, ya_m: float, ya_p: float,
+		yb_m: float, yb_p: float, b_edge := PackedFloat32Array()) -> void:
+	var run := a.distance_to(b)
+	if run < 0.1:
+		return
+	var dir := (b - a) / run
+	var n := Vector2(-dir.y, dir.x)
+	var va: float = fposmod(a.dot(dir), 1200.0)
+	var vb: float = va + run
+	var offs := [-1.0, -0.5, 0.0, 0.5, 1.0]
+	for k in offs.size() - 1:
+		var o0: float = offs[k]
+		var o1: float = offs[k + 1]
+		var corner := func(at: Vector2, o: float, ym: float, yp: float) -> Vector3:
+			var q: Vector2 = at + n * Sim.ROAD_HALF * o
+			return Vector3(q.x, lerpf(ym, yp, (o + 1.0) * 0.5) + 0.03, q.y)
+		var p00: Vector3 = corner.call(a, o0, ya_m, ya_p)
+		var p01: Vector3 = corner.call(a, o1, ya_m, ya_p)
+		var p11: Vector3 = corner.call(b, o1, yb_m, yb_p)
+		var p10: Vector3 = corner.call(b, o0, yb_m, yb_p)
+		# (a lap's outer edge, as `_deck_lap` laid it: the road's offset on
+		# the deck's width)
+		if b_edge.size() == LAP_N:
+			p11.y = _lap_y(b_edge, o1 * Sim.ROAD_HALF / DECK_HALF) + 0.03
+			p10.y = _lap_y(b_edge, o0 * Sim.ROAD_HALF / DECK_HALF) + 0.03
+		_deck_v.append_array(PackedVector3Array([p00, p01, p11, p00, p11, p10]))
+		_deck_uv.append_array(PackedVector2Array([Vector2(o0, va), Vector2(o1, va),
+			Vector2(o1, vb), Vector2(o0, va), Vector2(o1, vb), Vector2(o0, vb)]))
+
+## The end panel of a deck, lapped over the ramp from the abutment's line:
+## level with the deck at the line and down on the road at its outer edge. Held
+## level, as it was, it stood a few inches proud of the ramp the whole width of
+## the road -- the ground meets the deck at the line only as nearly as a
+## fifteen metre mesh can, and the road is laid on that mesh. So the panel
+## meets the road where the road is: at each corner, the drawn ground (what
+## `Terrain.drawn_ground` and the road ribbon are both laid on) and the
+## ribbon's own couple of centimetres. `out` points away from the deck.
+func _deck_lap(st: SurfaceTool, at: Vector2, out: Vector2, top: float) -> void:
+	var nrm := Vector2(-out.y, out.x)
+	var tip: Vector2 = at + out * Sim.BRIDGE_LAP
+	# The outer edge at LAP_N points across, from the +nrm side to the other,
+	# each on the road it meets. Taken at the two corners alone and drawn
+	# straight between them, the edge stood up to forty centimetres off a road
+	# that bends across its width where the ground mesh's triangles meet.
+	var pts := PackedVector2Array()
+	for k in LAP_N:
+		pts.append(tip + nrm * DECK_HALF * _lap_side(k))
+	var got: PackedFloat32Array = Sim.native.surfaces_at(pts, Terrain.BASE_CELL)
+	var hs := PackedFloat32Array()
+	for k in LAP_N:
+		var g: float = got[k] + 0.03 if got.size() > k else top
+		# never more than a step off the deck: it is a lap, not a ramp
+		hs.append(clampf(g, top - Sim.BRIDGE_STEP, top + Sim.BRIDGE_STEP))
+	for k in LAP_N - 1:
+		var sa: float = _lap_side(k)
+		var sb: float = _lap_side(k + 1)
+		var p0 := Vector3(at.x + nrm.x * DECK_HALF * sa, top, at.y + nrm.y * DECK_HALF * sa)
+		var p1 := Vector3(at.x + nrm.x * DECK_HALF * sb, top, at.y + nrm.y * DECK_HALF * sb)
+		var q0 := Vector3(pts[k].x, hs[k], pts[k].y)
+		var q1 := Vector3(pts[k + 1].x, hs[k + 1], pts[k + 1].y)
+		var up := (q0 - p0).cross(p1 - p0).normalized()
+		if up.y < 0.0:
+			up = -up
+		# wound as the deck's own panels are
+		MeshKit.quad_n(st, p0, p1, q1, q0, up)
+	# and its two edges, down into the bank, so the side of the lap is not open
+	var e_hi := Vector3(at.x + nrm.x * DECK_HALF, top, at.y + nrm.y * DECK_HALF)
+	var e_lo := Vector3(at.x - nrm.x * DECK_HALF, top, at.y - nrm.y * DECK_HALF)
+	var t_hi := Vector3(pts[0].x, hs[0], pts[0].y)
+	var t_lo := Vector3(pts[LAP_N - 1].x, hs[LAP_N - 1], pts[LAP_N - 1].y)
+	for e in [[e_hi, t_hi, nrm], [t_lo, e_lo, -nrm]]:
+		var a3: Vector3 = e[0]
+		var b3: Vector3 = e[1]
+		var side3 := Vector3((e[2] as Vector2).x, 0.0, (e[2] as Vector2).y)
+		MeshKit.quad_n(st, a3, b3, b3 - Vector3(0, 1.0, 0), a3 - Vector3(0, 1.0, 0), side3)
+	# and the road over it, from the deck down onto the ramp, following the
+	# same edge
+	_deck_road(at, tip, top, top, 0.0, 0.0, hs)
+
+## Points across a lap's outer edge, and where point `k` of them is: +1 on the
+## +nrm side to -1 on the other.
+const LAP_N := 9
+
+static func _lap_side(k: int) -> float:
+	return 1.0 - 2.0 * float(k) / float(LAP_N - 1)
+
+## The height of a lap's outer edge at `side` (+1 to -1) across it.
+static func _lap_y(hs: PackedFloat32Array, side: float) -> float:
+	var f: float = clampf((1.0 - side) * 0.5 * float(LAP_N - 1), 0.0, float(LAP_N - 1))
+	var k: int = mini(int(f), LAP_N - 2)
+	return lerpf(hs[k], hs[k + 1], f - float(k))
+
 func _build_structures() -> void:
+	_deck_v = PackedVector3Array()
+	_deck_uv = PackedVector2Array()
 	var st := MeshKit.begin()
 	var dark := MeshKit.begin()
 	var decks := 0
@@ -2156,11 +2481,12 @@ func _build_structures() -> void:
 			var dir := (b2 - a2) / run
 			var nrm := Vector2(-dir.y, dir.x)
 			# The two end panels reach a couple of metres past the station, over
-			# the end of the carriageway, so the join is a lap and not a seam.
+			# the end of the carriageway, so the join is a lap and not a seam --
+			# drawn on their own, below.
 			if i == 0:
-				a2 -= dir * 2.5
+				_deck_lap(st, a2, -dir, ys[i] - Sim.planet_drop(a2.x, a2.y))
 			if i == last:
-				b2 += dir * 2.5
+				_deck_lap(st, b2, dir, ys[i + 1] - Sim.planet_drop(b2.x, b2.y))
 			# The surveyed profile is in the flat frame, like everything the
 			# router produces. The piers under this deck reach down to
 			# `height_at`, which is not -- so left flat the deck floated a
@@ -2174,6 +2500,7 @@ func _build_structures() -> void:
 			var p2 := Vector3(b2.x - nrm.x * DECK_HALF, yb, b2.y - nrm.y * DECK_HALF)
 			var p3 := Vector3(b2.x + nrm.x * DECK_HALF, yb, b2.y + nrm.y * DECK_HALF)
 			MeshKit.quad_n(st, p0, p1, p2, p3, Vector3.UP)
+			_deck_road(a2, b2, ya, ya, yb, yb)
 			# the box girder under it, so the deck has a thickness
 			var u0 := p0 - Vector3(0, 1.9, 0)
 			var u1 := p1 - Vector3(0, 1.9, 0)
@@ -2182,15 +2509,29 @@ func _build_structures() -> void:
 			MeshKit.quad_n(st, u1, u0, u3, u2, Vector3.DOWN)
 			MeshKit.quad_n(st, p0, p3, u3, u0, Vector3(nrm.x, 0, nrm.y))
 			MeshKit.quad_n(st, p2, p1, u1, u2, Vector3(-nrm.x, 0, -nrm.y))
-			# parapets
+			# Parapets: a wall along each edge, faced on both sides and capped.
+			# They were the cap alone -- a strip forty centimetres wide lying at
+			# the parapet's height -- so from beside the bridge, or driving
+			# along it, there was nothing there.
 			for sx in [1.0, -1.0]:
-				var e0 := Vector3(a2.x + nrm.x * DECK_HALF * sx, ya + 0.55,
-					a2.y + nrm.y * DECK_HALF * sx)
-				var e1 := Vector3(b2.x + nrm.x * DECK_HALF * sx, yb + 0.55,
-					b2.y + nrm.y * DECK_HALF * sx)
-				var i0 := e0 - Vector3(nrm.x * 0.4 * sx, 0, nrm.y * 0.4 * sx)
-				var i1 := e1 - Vector3(nrm.x * 0.4 * sx, 0, nrm.y * 0.4 * sx)
-				MeshKit.quad_n(st, e0, e1, i1, i0, Vector3.UP)
+				var side3 := Vector3(nrm.x * sx, 0.0, nrm.y * sx)
+				var o0 := Vector3(a2.x + nrm.x * DECK_HALF * sx, ya, a2.y + nrm.y * DECK_HALF * sx)
+				var o1 := Vector3(b2.x + nrm.x * DECK_HALF * sx, yb, b2.y + nrm.y * DECK_HALF * sx)
+				var in0 := o0 - side3 * PARAPET_THICK
+				var in1 := o1 - side3 * PARAPET_THICK
+				var up := Vector3(0.0, PARAPET_TALL, 0.0)
+				# outside, down over the edge of the girder too
+				MeshKit.quad_n(st, o0 - Vector3(0, 0.3, 0), o1 - Vector3(0, 0.3, 0),
+					o1 + up, o0 + up, side3)
+				# inside, from the deck
+				MeshKit.quad_n(st, in0, in1, in1 + up, in0 + up, -side3)
+				# the cap
+				MeshKit.quad_n(st, o0 + up, o1 + up, in1 + up, in0 + up, Vector3.UP)
+				# and its ends, where a span starts or finishes
+				if i == 0:
+					MeshKit.quad_n(st, o0, in0, in0 + up, o0 + up, Vector3(-dir.x, 0.0, -dir.y))
+				if i == last:
+					MeshKit.quad_n(st, o1, in1, in1 + up, o1 + up, Vector3(dir.x, 0.0, dir.y))
 			# An abutment under each end: the deck sits on a wall rather than
 			# stopping in the air, whatever the embankment managed to reach.
 			for endp in ([[a2, ya, pts[i], dir]] if i == 0 else []) \
@@ -2282,6 +2623,13 @@ func _build_structures() -> void:
 				Vector3(at.x - d2.x * 3.0, y2 + 4.2, at.y - d2.y * 3.0))
 	add_child(MeshKit.mi(MeshKit.finish(st,
 		MeshKit.mat(Color(0.58, 0.57, 0.55), 0.92, 0.0)), "RoadStructures"))
+	if not _deck_v.is_empty():
+		# the painted ground's tarmac (`Terrain.GROUND_SHADER`), so the road on
+		# the deck is the road it runs on from
+		var dr := MeshKit.mi(_flat_mesh(_deck_v,
+			_road_shader(Color(0.135, 0.133, 0.140), 0.94, true), _deck_uv), "DeckRoads")
+		dr.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(dr)
 	add_child(MeshKit.mi(MeshKit.finish(dark,
 		MeshKit.mat(Color(0.04, 0.04, 0.05), 0.98, 0.0)), "TunnelMouths"))
 	_stats["viaducts"] = decks
@@ -2290,27 +2638,8 @@ func _build_structures() -> void:
 
 ## Ground-hugging triangles need no normal but up, so the mesh is a vertex list
 ## and nothing else.
-## Triangles with their own face normals, for what is not lying flat.
-func _faced_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
-	var m := ArrayMesh.new()
-	if verts.is_empty():
-		return m
-	var nrm := PackedVector3Array()
-	nrm.resize(verts.size())
-	for t in range(0, verts.size() - 2, 3):
-		var n: Vector3 = (verts[t + 1] - verts[t]).cross(verts[t + 2] - verts[t]).normalized()
-		nrm[t] = n
-		nrm[t + 1] = n
-		nrm[t + 2] = n
-	var arr: Array = []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	arr[Mesh.ARRAY_NORMAL] = nrm
-	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-	m.surface_set_material(0, mat)
-	return m
-
-func _flat_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
+func _flat_mesh(verts: PackedVector3Array, mat: Material,
+		uv := PackedVector2Array()) -> ArrayMesh:
 	var m := ArrayMesh.new()
 	if verts.is_empty():
 		return m
@@ -2321,6 +2650,8 @@ func _flat_mesh(verts: PackedVector3Array, mat: Material) -> ArrayMesh:
 	arr.resize(Mesh.ARRAY_MAX)
 	arr[Mesh.ARRAY_VERTEX] = verts
 	arr[Mesh.ARRAY_NORMAL] = nrm
+	if uv.size() == verts.size():
+		arr[Mesh.ARRAY_TEX_UV] = uv
 	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 	m.surface_set_material(0, mat)
 	return m

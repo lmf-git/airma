@@ -874,6 +874,9 @@ func _tick_world(delta: float) -> void:
 		terrain.flush_pending(24)
 		if is_instance_valid(obstacles) and eye3 != null:
 			obstacles.follow(eye3.global_position)
+		# and the roads painted sharp round wherever you are
+		if eye3 != null:
+			terrain.follow_roads(eye3.global_position)
 		# and the painted ground follows you to whichever part of the world you
 		# are in, so a town three hundred kilometres from home has streets and
 		# made ground under it like any other

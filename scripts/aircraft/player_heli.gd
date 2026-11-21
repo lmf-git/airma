@@ -14,12 +14,27 @@ var hold_alt := 0.0        # height the stability system is holding
 var _coll_trim := 0.5      # slowly learned hover power
 ## Where the harness is holding the collective, or INF when a person has it.
 var lever := INF
+## ...and the pedals, the same way.
+var pedal := INF
 ## True while the collective is off centre, so the hold knows when it has just
 ## been handed the aircraft.
 var _coll_held := false
 ## How much of the climb still in the machine counts toward the height it will
 ## settle at: about the time the collective takes to arrest it.
 const COLL_LEAD := 1.15
+## Below this height and speed the gear lowers itself: see `_pilot`.
+const AUTO_GEAR_AGL := 12.0
+const AUTO_GEAR_SPEED := 15.0
+## The height hold: metres a second of climb asked for each metre off the
+## height, and no more than this either way.
+const HOLD_GAIN := 0.45
+const HOLD_VS := 3.0
+## Between letting go of the lever and taking the height: arresting the climb.
+var _arresting := false
+## How fast the lever moves the power while it is held, a second; and the rate
+## of climb past which holding it up adds no more.
+const LEVER_RATE := 0.6
+const VS_UP_MAX := 15.0
 var pod: Node = null
 var _mouse := Vector2.ZERO
 
@@ -73,7 +88,8 @@ func _pilot(delta: float) -> void:
 	stick = stick.lerp(target_stick, clampf(delta * 8.0, 0.0, 1.0))
 	in_roll = stick.x
 	in_pitch = stick.y
-	in_yaw = Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
+	in_yaw = pedal if is_finite(pedal) \
+		else Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
 	# The hover has the cyclic, the pedals and the lever until the pilot takes
 	# them back — which is any real input on any of them. It does NOT take the
 	# rest of the cockpit: you can still work the weapons and the gear while it
@@ -104,32 +120,54 @@ func _pilot(delta: float) -> void:
 		pass
 	elif assist and not on_ground:
 		if absf(t) > 0.01:
+			# The lever moves the power, for as long as it is held. It used to
+			# ask the stability system for six metres a second up or down,
+			# which held the power where that took: holding CTRL left the
+			# throttle within a few percent of the hover, and nothing came
+			# down faster than six metres a second however long it was held.
+			# The system keeps only an envelope -- it will not let the lever
+			# climb or sink the machine past a safe rate -- and takes the
+			# height back when the lever is let go.
+			# Down always takes power off: the pilot who wants to drop drops,
+			# and nothing puts the power back against the lever as the speed
+			# builds. Up stops adding power past a brisk climb, so a held lever
+			# does not run away into the sky; it never takes power off either.
 			_coll_held = true
-			_collective(t * 6.0, delta)
+			if not (t > 0.0 and linear_velocity.y > VS_UP_MAX):
+				throttle = clampf(throttle + t * delta * LEVER_RATE, 0.0, 1.0)
 		else:
 			if _coll_held:
-				# Centring the lever holds the height the machine is going to
-				# reach, not the one it happens to be passing through.
-				#
-				# Grabbing the current altitude on release means the loop is
-				# instantly six metres a second fast at a target it has already
-				# left behind: it chops the collective to arrest the climb,
-				# overshoots the other way, and the trim it wound up during the
-				# climb takes seconds to come back out. Measured, an Apache let
-				# go after an eight second climb sank seventeen metres through
-				# the height it was at before settling -- which is what dropping
-				# when you release the lever feels like. Leading the target out
-				# by the climb it still has in it gives the loop nothing to
-				# fight, and it settles where the lever left it.
+				# Let go of the lever: stop the climb or the sink first, and
+				# only then take the height. A target picked while the machine
+				# was still moving -- where it was, or where it was going to be
+				# -- was one the loop then chased, with the rotor's spool lag
+				# behind it: it overshot, came back, overshot the other way, and
+				# rode up and down through tens of metres before it settled.
 				_coll_held = false
-				hold_alt = global_position.y + linear_velocity.y * COLL_LEAD
-			_collective(clampf((hold_alt - global_position.y) * 1.10, -6.0, 6.0), delta)
+				_arresting = true
+			if _arresting:
+				_collective(0.0, delta)
+				if absf(linear_velocity.y) < 0.6:
+					_arresting = false
+					hold_alt = global_position.y
+			else:
+				# and then hold it gently: a firm grip on height with a rotor
+				# that takes a couple of seconds to answer is a porpoise
+				_collective(clampf((hold_alt - global_position.y) * HOLD_GAIN,
+					-HOLD_VS, HOLD_VS), delta)
 	else:
 		_coll_held = false
 		hold_alt = global_position.y
 		_coll_trim = throttle
 		throttle = clampf(throttle + t * delta * 0.7, 0.0, 1.0)
 	wheel_brake = Sim.held(&"brakes") and on_ground
+	# The gear comes down by itself low and slow. A helicopter is flown in the
+	# air with its wheels up and set down with them out, and nobody thinks of
+	# the gear in a hover -- free flight starts it with them up, and a pilot
+	# who came down onto a pad, a bridge or a field without pressing G landed
+	# on the belly, which is a crash. G still raises and lowers it by hand.
+	if not gear_down and agl < AUTO_GEAR_AGL and linear_velocity.length() < AUTO_GEAR_SPEED:
+		gear_down = true
 
 	if Sim.tapped(&"gear"):
 		toggle_gear()
@@ -264,7 +302,13 @@ func fly_hover(delta: float) -> void:
 ## hover and a fast proportional term damps what is left.
 func _collective(want_vs: float, delta: float) -> void:
 	var err := want_vs - linear_velocity.y
-	_coll_trim = clampf(_coll_trim + err * delta * 0.045, 0.0, 1.0)
+	# The trim is the power that hovers. It learns only while the error is a
+	# matter of trim: let go of the lever in a fifteen metre a second climb and
+	# the error is twenty for the second or two the climb takes to arrest, which
+	# wound the hover power down to nothing -- and the machine then sank twelve
+	# metres through the height it had been let go at while it learned it back.
+	if absf(err) < 2.5:
+		_coll_trim = clampf(_coll_trim + err * delta * 0.045, 0.0, 1.0)
 	throttle = clampf(_coll_trim + err * 0.055, 0.0, 1.0)
 
 func cycle_target() -> void:

@@ -579,7 +579,11 @@ func _move(delta: float) -> void:
 	vel = flat
 	var was := global_position
 	var p: Vector3 = was + flat * delta
-	p.y = Sim.drive_height(p.x, p.z, was.y)
+	# On the ground as it is drawn, or the deck of a bridge: what his legs
+	# reach for (see `Pilot._floor_under`), so they do not fold into the grass
+	# or hang over it.
+	p.y = maxf(Terrain.drawn_ground(p.x, p.z, was + Vector3(0.0, 1.7, 0.0)),
+		Sim.bridge_floor(p.x, p.z, was.y))
 	if Obstacles.blocks(p, BODY_R) >= 0:
 		var try_x := Vector3(p.x, p.y, was.z)
 		var try_z := Vector3(was.x, p.y, p.z)

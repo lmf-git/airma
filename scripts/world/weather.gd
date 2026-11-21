@@ -828,7 +828,10 @@ func _process(delta: float) -> void:
 	_apply_sun(false)
 
 ## Put the sun where the clock says it is, and colour the world to match.
-func _apply_sun(_force: bool) -> void:
+## How far the sun's light is let turn before it is moved: see `_apply_sun`.
+const SUN_STEP := 0.00175
+
+func _apply_sun(force: bool) -> void:
 	var sa := solar_angles(time_of_day)
 	_sun_elev = sa.x
 	_sun_az = sa.y
@@ -836,7 +839,18 @@ func _apply_sun(_force: bool) -> void:
 	# A directional light shines down its own -Z. Pitch it down by the sun's
 	# elevation and swing it to the sun's bearing plus half a turn, so the light
 	# travels *from* the sun rather than towards it.
-	_sun_node.rotation = Vector3(-_sun_elev, _sun_az + PI, 0.0)
+	# In steps, not every frame. A directional light's shadow map is laid out
+	# in the light's own frame, so turning the sun by a hair re-lays the whole
+	# map and every shadow edge falls on different texels: with the clock
+	# running, every building's shadow shimmered and crawled continuously.
+	# The engine holds the map still as the camera moves, not as the light
+	# turns. A tenth of a degree is a step every few seconds at the usual
+	# rate, and a few centimetres at the end of a house's shadow.
+	var want := Vector3(-_sun_elev, _sun_az + PI, 0.0)
+	var cur: Vector3 = _sun_node.rotation
+	if force or absf(angle_difference(cur.x, want.x)) > SUN_STEP \
+			or absf(angle_difference(cur.y, want.y)) > SUN_STEP:
+		_sun_node.rotation = want
 	var day := daylight()
 	var dusk := twilight()
 	# Below the horizon there is no sun, only what the sky scatters back.

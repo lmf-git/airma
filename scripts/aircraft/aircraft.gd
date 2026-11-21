@@ -1088,7 +1088,8 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 	var up := b.y
 	var right := b.x
 
-	var ground := Sim.height_at(pos.x, pos.z)
+	# the ground, or a bridge's deck if it is under the wheels
+	var ground := maxf(Sim.height_at(pos.x, pos.z), Sim.bridge_floor(pos.x, pos.z, pos.y))
 	agl = pos.y - ground
 	# The engine pulls a rigid body straight down; the planet pulls it toward
 	# its centre. Over this world those differ by up to eight tenths of a
@@ -1478,12 +1479,19 @@ func _gear_forces(state: PhysicsDirectBodyState3D, _force: Vector3, _torque: Vec
 		var lp: Vector3 = g["pos"]
 		var wp: Vector3 = xf * lp
 		var gh := Sim.height_at(wp.x, wp.z)
+		# A road bridge's deck is ground to a wheel or a skid at its level, as
+		# it is to a vehicle (`Sim.bridge_floor`). Without it a helicopter set
+		# down on a viaduct went through the deck to the valley floor.
+		var deck: float = Sim.bridge_floor(wp.x, wp.z, wp.y)
+		var on_deck: bool = deck > gh
+		if on_deck:
+			gh = deck
 		var comp: float = (gh + g["r"]) - wp.y
 		if comp <= 0.0:
 			continue
 		comp = minf(comp, 0.55)
 		hits += 1
-		var n := Sim.normal_at(wp.x, wp.z)
+		var n := Vector3.UP if on_deck else Sim.normal_at(wp.x, wp.z)
 		var arm := wp - com
 		var pv := state.linear_velocity + state.angular_velocity.cross(arm)
 		var vn := pv.dot(n)
@@ -1493,7 +1501,7 @@ func _gear_forces(state: PhysicsDirectBodyState3D, _force: Vector3, _torque: Vec
 		fn = minf(fn, mass * 9.81 * 9.0)
 		var f := n * fn
 		# tyre friction in the ground plane
-		var grip: float = Sim.surface_grip(wp.x, wp.z)
+		var grip: float = 1.0 if on_deck else Sim.surface_grip(wp.x, wp.z)
 		var roll_dir := -xf.basis.z
 		if g["steer"]:
 			var steer := deg_to_rad(20.0) * -in_yaw * clampf(1.0 - pv.length() / 45.0, 0.06, 1.0)

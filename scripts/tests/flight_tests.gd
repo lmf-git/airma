@@ -53,6 +53,8 @@ func parse_arg(a: String) -> bool:
 		_flap_test = true
 	elif a == "--seattest":
 		_seat_test = true
+	elif a == "--helideck":
+		_heli_deck = true
 	elif a == "--helitest":
 		_heli_test = true
 	elif a.begins_with("--ctltest="):
@@ -1344,10 +1346,86 @@ var _heli_up := 0.0
 ## centred, and where it settled.
 var _heli_sag := 0.0
 var _heli_settled := 0.0
+var _heli_down := 0.0
+var _heli_thr_lo := 1.0
+var _heli_yaw := 0.0
+var _heli_bob_lo := 1e9
+var _heli_bob_hi := -1e9
+
+## Set down on a road bridge: does the deck hold a helicopter up, or does it
+## go through to the valley floor? --preset=free:ah64 --helideck
+var _heli_deck := false
+var _hd_t := 0.0
+var _hd_at := Vector3.ZERO
+
+func _tick_heli_deck(delta: float) -> void:
+	var p: Node = world.player
+	if _hd_t == 0.0:
+		var best: Dictionary = {}
+		for br in Sim.road_bridges:
+			var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+			if pts.size() >= 3:
+				best = br
+				break
+		if best.is_empty():
+			print("[helideck] RESULT: FAILED — no bridge to land on")
+			world.get_tree().quit()
+			_heli_deck = false
+			return
+		var bp: PackedVector2Array = best["pts"]
+		var ys: PackedFloat32Array = best["ys"]
+		var k: int = int(bp.size() / 2.0)
+		var q: Vector2 = bp[k]
+		var dy: float = ys[k] - Sim.planet_drop(q.x, q.y)
+		_hd_at = Vector3(q.x, dy, q.y)
+		print("[helideck] deck at %s, %.1f m over the ground under it" % [
+			str(_hd_at.round()), dy - Sim.height_at(q.x, q.y)])
+	_hd_t += delta
+	if _hd_t < 0.1:
+		p.auto = ""
+		# a few metres up and a little under the power that hovers, settling
+		# onto the deck the way a pilot puts one down
+		p.global_transform = Transform3D(Basis(), _hd_at + Vector3(0, 3.0, 0))
+		p.linear_velocity = Vector3.ZERO
+		p.angular_velocity = Vector3.ZERO
+		p.throttle = 0.6
+		p.power = 0.6
+		p.lever = 0.0
+		p.pedal = 0.0
+		return
+	p.lever = -0.03
+	if fmod(_hd_t, 1.0) < delta:
+		var gp: Vector3 = p.global_position
+		print("[helideck]   t=%.0f %.2f m over the deck, vs %+.1f, on the ground %s, alive %s; gear %.2f, deck under it %.2f (the wheel's height %.2f), agl %.2f" % [
+			_hd_t, gp.y - _hd_at.y, p.linear_velocity.y, str(p.on_ground), str(p.alive),
+			p.gear_anim, Sim.bridge_floor(gp.x, gp.z, gp.y - 1.6) - _hd_at.y, gp.y - 1.62 - _hd_at.y, p.agl])
+	if _hd_t > 10.0:
+		var y: float = p.global_position.y
+		print("[helideck] after ten seconds: %.2f m over the deck, on the ground %s, alive %s" % [
+			y - _hd_at.y, str(p.on_ground), str(p.alive)])
+		print("[helideck] RESULT: %s" % ("ok" if p.on_ground and p.alive
+			and absf(y - _hd_at.y) < 4.0 else "FAILED"))
+		_heli_deck = false
+		world.get_tree().quit()
 
 func tick_heli(delta: float) -> bool:
+	if _heli_deck and is_instance_valid(world.player) and "lever" in world.player:
+		_tick_heli_deck(delta)
+		return true
+	if _heli_test and not is_instance_valid(world.player) and _heli_t > 0.0:
+		print("[heli] RESULT: FAILED — the helicopter is gone at t=%.1f" % _heli_t)
+		_heli_test = false
+		world.get_tree().quit()
+		return false
 	if _heli_test and is_instance_valid(world.player):
 		_heli_t += delta
+		if _heli_t > 24.0 and fmod(_heli_t, 2.0) < delta:
+			var pl: Node = world.player
+			print("[heli]   t=%4.1f alt=%6.1f vs=%+5.1f thr=%.2f lever=%.2f alive=%s pitch=%.0f bank=%.0f" % [
+				_heli_t, pl.global_position.y, pl.linear_velocity.y, pl.throttle,
+				float(pl.get("lever")), str(pl.alive),
+				rad_to_deg(asin(clampf(-pl.global_transform.basis.z.y, -1.0, 1.0))),
+				rad_to_deg(atan2(-pl.global_transform.basis.x.y, pl.global_transform.basis.y.y))])
 		# The lever is driven from here rather than through the input map. A
 		# headless session reports the shift key as held from the moment it
 		# starts, so a test that presses actions is measuring the operating
@@ -1388,19 +1466,42 @@ func tick_heli(delta: float) -> bool:
 			world.player.lever = 0.0
 			_heli_sag = minf(_heli_sag, world.player.global_position.y - _heli_up)
 			_heli_settled = world.player.global_position.y
-		elif _heli_t < 48.0:
+			# how far it still rides up and down once the climb is arrested
+			if _heli_t > 35.0:
+				_heli_bob_lo = minf(_heli_bob_lo, world.player.global_position.y)
+				_heli_bob_hi = maxf(_heli_bob_hi, world.player.global_position.y)
+		elif _heli_t < 44.0:
 			world.player.lever = -1.0                    # Z / CTRL, collective down
-		elif _heli_t >= 48.0:
+			_heli_thr_lo = minf(_heli_thr_lo, world.player.throttle)
+			_heli_down = world.player.global_position.y
+		elif _heli_t < 51.0:
+			# the lever centred again, then full right pedal
 			world.player.lever = 0.0
+		elif _heli_t < 56.0:
+			world.player.pedal = 1.0
+			var yr: float = absf(world.player.angular_velocity.dot(
+				world.player.global_transform.basis.y))
+			_heli_yaw = maxf(_heli_yaw, yr)
+		elif _heli_t >= 56.0:
+			world.player.lever = 0.0
+			world.player.pedal = 0.0
 			_heli_test = false
+			print("[heli]   down lever: throttle down to %.2f, %.0f m lost in four seconds" % [
+				_heli_thr_lo, _heli_settled - _heli_down])
+			print("[heli]   full pedal: turning at %.0f deg/s" % rad_to_deg(_heli_yaw))
+			print("[heli]   after letting go of the up lever: riding %.1f m up and down from 3 s on" % [
+				_heli_bob_hi - _heli_bob_lo])
 			print("[heli]   climbed to %.0f m on the up lever; on release it settled at %.0f m, sagging %.1f m first" % [
 				_heli_up, _heli_settled, -_heli_sag])
-			print("[heli]   then down to %.0f m on the down lever" % world.player.global_position.y)
+			print("[heli]   then down to %.0f m on the down lever" % _heli_down)
 			# Hands off it holds; on release it settles where the lever left it
-			# rather than sinking through that height first.
+			# rather than sinking through that height first; the down lever
+			# takes the power off; the pedals turn it briskly.
 			print("[heli] RESULT: %s" % ("ok"
 				if _heli_hi - _heli_lo < 5.0 and -_heli_sag < 3.0
-				and world.player.global_position.y < _heli_settled - 20.0 else "FAILED"))
+				and _heli_down < _heli_settled - 20.0 and _heli_thr_lo < 0.4
+				and _heli_yaw > deg_to_rad(45.0)
+				and _heli_bob_hi - _heli_bob_lo < 3.0 else "FAILED"))
 			print("[heli] %s hands off for 20 s: altitude %.1f to %.1f m (drift %.1f m), throttle %.2f" % [
 				str(world.player.spec["name"]), _heli_lo, _heli_hi, _heli_hi - _heli_lo, world.player.throttle])
 			world.get_tree().quit()

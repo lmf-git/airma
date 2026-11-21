@@ -36,8 +36,8 @@ const ERR_ABS: f32 = 0.4;
 /// How much less a node entirely under water is worth subdividing. Mirrors
 /// `Terrain.SEABED_DETAIL`.
 const SEABED_DETAIL: f32 = 0.12;
-/// Mirrors `Sim.WATER_LEVEL`, which is `field::WATER_LEVEL`.
-const WATER_LEVEL: f32 = crate::field::WATER_LEVEL;
+/// How far round a bridge abutment the ground is drawn at the finest cell.
+const ABUT_PAD: f32 = 45.0;
 
 /// A node's identity as one integer: depth in four bits and each index in
 /// twenty-seven. Mirrors `Terrain._node_key`, and has to, because the harness
@@ -117,17 +117,24 @@ fn stats(g: &Ground, depth: i32, ix: i32, iz: i32) -> (f32, f32) {
     let cell = span / cn as f32;
     let mut grid = vec![0f32; n * n];
     let mut top = -1e9f32;
+    // how far the highest of it stands over the sea where it stands
+    let mut dry = -1e9f32;
     for j in 0..n {
         let z = z0 + j as f32 * cell;
         for i in 0..n {
-            let h = g.at(x0 + i as f32 * cell, z);
+            let x = x0 + i as f32 * cell;
+            let h = g.at(x, z);
             grid[j * n + i] = h;
             if h > top {
                 top = h;
             }
+            dry = dry.max(h - g.sea_drawn(x, z));
         }
     }
-    let mut e = 0.0f32;
+    // The end of a bridge is drawn at the finest cell, whatever the samples
+    // say: see `Ground::abutment_in`. Out as far as the seat and the spill
+    // under the first span reach, and the side slopes beside them.
+    let mut e = if g.abutment_in(x0, z0, span, ABUT_PAD) { ERR_ABS * 4.0 } else { 0.0f32 };
     for j in (0..cn).step_by(2) {
         for i in (0..cn).step_by(2) {
             let drawn = (grid[j * n + i] + grid[(j + 1) * n + i + 1]) * 0.5;
@@ -135,6 +142,18 @@ fn stats(g: &Ground, depth: i32, ix: i32, iz: i32) -> (f32, f32) {
                 z0 + (j as f32 + 0.5) * cell);
             e = e.max((truth - drawn).abs());
         }
+    }
+    // Nothing above the surface anywhere in it: this is seabed, and it does
+    // not earn the triangles the same relief above water would.
+    //
+    // Against the sea *here*, not the sea's level at the origin. On the planet
+    // the field carries the curve, so the ground falls away below that level
+    // with distance alone -- six hundred metres of it ninety kilometres out --
+    // and every node past twenty or so was taken for seabed and drawn at an
+    // eighth of the detail: towns, ramps and bridge ends on thirty and sixty
+    // metre cells.
+    if dry < -1.0 {
+        e *= SEABED_DETAIL;
     }
     (e, top)
 }
@@ -247,17 +266,11 @@ pub fn wanted(eye: [f32; 3]) -> Vec<Leaf> {
         let mut next: Vec<(i32, i32)> = Vec::new();
         for ((ix, iz), flat2, reach) in near {
             let k = node_key(depth, ix, iz);
-            let (mut e, top) = table[&k];
+            let (e, top) = table[&k];
             let dy = (eye[1] - top).max(0.0);
             if (flat2 + dy * dy).sqrt() >= reach {
                 leaves.push(Leaf { depth, ix, iz, nb: [0; 4], fine: 0, raw: [0; 4] });
                 continue;
-            }
-            if top < WATER_LEVEL - 1.0 {
-                // Nothing above the surface anywhere in it: this is seabed, and
-                // it does not earn the triangles the same relief above water
-                // would.
-                e *= SEABED_DETAIL;
             }
             // The error decides *whether* a node is worth subdividing, not how
             // close you have to get before it is: every hand-over that happens
@@ -400,15 +413,12 @@ fn splits_one(g: &Ground, table: &mut Map<i64, (f32, f32)>,
     if dx * dx + dz * dz >= reach * reach {
         return false;
     }
-    let (mut e, top) = *table
+    let (e, top) = *table
         .entry(k)
         .or_insert_with(|| stats(g, depth, ix, iz));
     let dy = (eye[1] - top).max(0.0);
     if (dx * dx + dz * dz + dy * dy).sqrt() >= reach {
         return false;
-    }
-    if top < WATER_LEVEL - 1.0 {
-        e *= SEABED_DETAIL;
     }
     e > ERR_ABS
 }

@@ -8,7 +8,7 @@
 
 use crate::field::{climate, lerp, smoothstep, WATER_LEVEL};
 use crate::index::SegGrid;
-use crate::world::{base, carve_built, corridor, ground_at, world, Corridor, Ground, G_ALL};
+use crate::world::{base, carve_built, corridor, ground_at, world, Corridor, G_ALL};
 use rayon::prelude::*;
 
 // ------------------------------------------------------------- ground mask
@@ -157,197 +157,22 @@ pub fn climate_map(n: usize, half: f32) -> Vec<u8> {
     out
 }
 
-// ------------------------------------------------------------- road ribbons
+// ------------------------------------------------------------- streets
 
-/// The drawn surface of one road: a carriageway and a kerb strip either side,
-/// hugging the ground closely enough not to float over it.
-///
-/// Four height samples every eleven metres of every leg, and with a settlement
-/// network spread across the map that was two and a half seconds -- the single
-/// largest thing left in world generation. Every one of those samples used to
-/// be its own crossing of the boundary.
-pub struct Ribbon {
-    pub surf: Vec<[f32; 3]>,
-    pub kerb: Vec<[f32; 3]>,
-    /// Retaining walls: where a raised road runs through a town, the face at
-    /// the back of each footway down to the town's own ground.
-    pub wall: Vec<[f32; 3]>,
-}
-
-fn strip(out: &mut Vec<[f32; 3]>, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) {
-    out.extend_from_slice(&[a, b, c, a, c, d]);
-}
-
-/// The terrain mesh's cell at its finest: `Terrain.BASE_CELL`.
-const MESH_CELL: f32 = 15.0;
-/// How far back from a bridge or a portal the road leaves the ground and
-/// follows its design height to meet the structure.
-const MEET: f32 = 12.0;
-
-/// The ground as the terrain mesh draws it at its finest, in the frame the
-/// game measures heights in -- drop and all, on the planet or the flat world:
-/// the cell's two triangles, split as the chunks split them. Exactly the sum
-/// `surfaces_at` does. (In the mesh's own frame it came out a planet's drop
-/// low on the globe, where the field already carries the curve: every road
-/// eighteen metres under the ground fifteen kilometres out.)
-fn mesh_y(g: &Ground, x: f32, z: f32) -> f32 {
-    let x0 = (x / MESH_CELL).floor() * MESH_CELL;
-    let z0 = (z / MESH_CELL).floor() * MESH_CELL;
-    let tx = (x - x0) / MESH_CELL;
-    let tz = (z - z0) / MESH_CELL;
-    let h00 = g.world_y(x0, z0);
-    let h10 = g.world_y(x0 + MESH_CELL, z0);
-    let h11 = g.world_y(x0 + MESH_CELL, z0 + MESH_CELL);
-    let h01 = g.world_y(x0, z0 + MESH_CELL);
-    if tz <= tx {
-        h00 + (h10 - h00) * tx + (h11 - h10) * tz
-    } else {
-        h00 + (h11 - h01) * tx + (h01 - h00) * tz
-    }
-}
-
-/// One leg of road. `ya`/`yb` are the design height at its two ends, and
-/// `deck` says which end, if either, is a bridge or a tunnel portal: 1 for `a`,
-/// 2 for `b`, 0 for neither.
-///
-/// It is laid on the ground as the terrain mesh draws it, not on the ground
-/// itself. The mesh is the ground sampled every fifteen metres and drawn flat
-/// between; a road on the true ground ran under the mesh wherever the ground
-/// bent between two samples -- in every cutting, and up every ramp -- and on
-/// a bank it hung over it with its sides open. On the mesh it is on what is
-/// drawn and on what a man stands on. Only the last few metres to a structure
-/// leave it, for the design height the deck or the portal is built to.
-#[allow(clippy::too_many_arguments)]
-fn ribbon(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
-        ya: f32, yb: f32, deck: u8) -> Ribbon {
-    let mut out = Ribbon { surf: Vec::new(), kerb: Vec::new(), wall: Vec::new() };
-    let dx = bx - ax;
-    let dz = bz - az;
-    let len = (dx * dx + dz * dz).sqrt();
-    if len < 1.0 {
-        return out;
-    }
-    let w = world();
-    // One quad is enough for a leg shorter than a step. Routing chops the trunk
-    // network into thousands of short segments, and a floor of two steps gave
-    // every fifteen metre piece four rows of samples it had no detail to fill.
-    let trunk = half > 6.0;
-    // Close enough together that the terrain's own bends, every fifteen
-    // metres, fall between them by no more than the material's depth bias:
-    // at eleven metres along and one span across fifteen metres of
-    // carriageway, any rise in the ground between the edges came up through
-    // the middle of the road.
-    let steps = ((len / if trunk { 7.5 } else { 10.0 }).round() as i32).max(1);
-    let nx = -dz / len;
-    let nz = dx / len;
-    // kerb, the carriageway in four spans, kerb
-    const OFF: [f32; 7] = [-1.55, -1.0, -0.5, 0.0, 0.5, 1.0, 1.55];
-    const N: usize = OFF.len();
-    let mut prev = [[0.0f32; 3]; N];
-    let mut prev_raised = false;
-    let g = Ground::land().drawn();
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let px = ax + dx * t;
-        let pz = az + dz * t;
-        let mut row = [[0.0f32; 3]; N];
-        let mut raised = false;
-        for (k, o) in OFF.iter().enumerate() {
-            let qx = px + nx * half * o;
-            let qz = pz + nz * half * o;
-            let mut y = mesh_y(&g, qx, qz);
-            if deck != 0 {
-                // the last few metres to the structure: onto its design height
-                let from_end = if deck == 1 { t * len } else { (1.0 - t) * len };
-                let k = 1.0 - smoothstep(0.0, MEET, from_end);
-                // the design height is in the flat frame: dropped to meet it
-                // -- but never under the ground that is drawn: where the hill
-                // stands above the deck the road stays on it, or the grass
-                // closed over the last metres of carriageway
-                y = y.max(lerp(y, lerp(ya, yb, t) - drop_at(qx, qz), k));
-            } else if !trunk {
-                // A street that meets a raised road stops at its wall: drawn on
-                // the ground it went up and over the bank like a ramp.
-                let made = carve_built(w, base(qx, qz), qx, qz, G_ALL).0;
-                if (ground_at(w, c, qx, qz, G_ALL) - made).abs() > 0.8 {
-                    raised = true;
-                }
-            }
-            // Already in the frame the ground is drawn in, fall of the planet
-            // and all (see `mesh_y`); only the design height near a structure
-            // had it taken off above. On the ground, near enough: the material
-            // keeps it in front of the terrain (a depth bias that grows with
-            // distance, see `Scenery._road_shader`), so it is not lifted clear.
-            row[k] = [qx, y + 0.025, qz];
-        }
-        // the kerbs tuck just under the carriageway edge, so no seam shows
-        row[0][1] = row[0][1].min(row[1][1]) - 0.02;
-        row[N - 1][1] = row[N - 1][1].min(row[N - 2][1]) - 0.02;
-        // A ramp up to a bridge in a town is terrain, like the bank out in the
-        // country: drawn as walls standing on the town's own ground, with the
-        // carriageway on top, it read as a walled enclosure at the foot of
-        // every town bridge -- walls with nothing behind them to hit, and a
-        // road surface that was not where the ground under a wheel was.
-        if i > 0 && !raised && !prev_raised {
-            for k in 1..N - 2 {
-                strip(&mut out.surf, prev[k], prev[k + 1], row[k + 1], row[k]);
-            }
-            strip(&mut out.kerb, prev[0], prev[1], row[1], row[0]);
-            strip(&mut out.kerb, prev[N - 2], prev[N - 1], row[N - 1], row[N - 2]);
-        }
-        prev = row;
-        prev_raised = raised;
-    }
-    out
-}
-
-/// How far the drawn ground has fallen below the flat frame here: the same
-/// number as `Sim.planet_drop`, exact on the planet and the parabola on the flat
-/// world, and written so a float keeps it.
-#[inline]
-pub fn drop_at(x: f32, z: f32) -> f32 {
-    let r = crate::sphere::chart().radius.max(1.0);
-    let s2 = x * x + z * z;
-    if crate::world::is_globe() {
-        let h = (s2.sqrt() / (2.0 * r)).sin();
-        2.0 * r * h * h
-    } else {
-        s2 / (2.0 * r)
-    }
-}
-
-/// One ribbon per leg, before they are put together.
-///
-/// Split out because the bucketed form wants them *apart*: joined into one pair
-/// of lists and then sorted into cells, a million triangles are copied twice
-/// over -- forty megabytes each way -- to arrive somewhere they could have been
-/// put in the first place.
-pub fn ribbon_parts(legs: &[f32]) -> Vec<Ribbon> {
-    let c = corridor();
-    legs.par_chunks_exact(8)
-        .map(|q| ribbon(c, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7].round() as u8))
-        .collect()
-}
-
-/// Every road and street on the map, as two vertex lists. `legs` is a flat run
-/// of ax, az, bx, bz, half, design a, design b, and whether it is a structure
-/// approach.
-pub fn ribbons(legs: &[f32]) -> Ribbon {
-    let parts = ribbon_parts(legs);
-    let ns: usize = parts.iter().map(|p| p.surf.len()).sum();
-    let nk: usize = parts.iter().map(|p| p.kerb.len()).sum();
-    let mut all = Ribbon {
-        surf: Vec::with_capacity(ns),
-        kerb: Vec::with_capacity(nk),
-        wall: Vec::new(),
-    };
-    for p in &parts {
-        all.surf.extend_from_slice(&p.surf);
-        all.kerb.extend_from_slice(&p.kerb);
-        all.wall.extend_from_slice(&p.wall);
-    }
-    all
-}
+/// A street stops where the made ground under it stands this far off the
+/// town's own level -- at the foot of a bank it does not climb. It does not
+/// stop at a road it meets: it runs on into it, and the two are painted as one
+/// surface. Cut square a little inside the road, as it was, a street that met
+/// one at an angle left a corner of the road's kerb across its mouth.
+const STREET_RAISED: f32 = 0.3;
+/// How far beyond its carriageway a street keeps off a bank. Taken only under
+/// the carriageway, a street running beside a ramp, or into it, stopped where
+/// the bank had already climbed over its kerb: the side of the ramp was built
+/// over it, and it was cut off. Streets are kept off the whole footprint of a
+/// raised road's bank, its side slope and a margin, rather than run up to it.
+const STREET_CLEAR: f32 = 6.0;
+/// The shortest piece of a street left standing after it is cut back.
+const STREET_STUB: f32 = 25.0;
 
 // ------------------------------------------------------------- road ink
 
@@ -576,4 +401,310 @@ pub fn planet_colour(lat: f32, nt: f32, nm: f32, elev: f32, slope: f32,
         }
     }
     (c[0], c[1], c[2])
+}
+
+// ------------------------------------------------------------- painted roads
+//
+// The roads are drawn into the ground's own material, not laid over it as
+// strips of geometry. As strips they were shapes: where two met they fought
+// over the same pixels, a street's kerb ran across the road it joined, and
+// wherever the terrain mesh bent between two of its samples it came up through
+// the carriageway. Painted, a junction is a union -- the asphalt of the two is
+// one surface -- the kerb is wherever the asphalt is not, and nothing can come
+// through the road because the road is the ground.
+
+/// One straight piece of carriageway to paint: a leg of road, or the part of a
+/// street's leg that is drawn (see `street_spans`). Round at an end that meets
+/// more road, square at one cut short -- at the foot of a bank, or where it
+/// runs into a road it meets.
+#[derive(Clone, Copy)]
+struct Piece {
+    ax: f32,
+    az: f32,
+    ux: f32,
+    uz: f32,
+    len: f32,
+    half: f32,
+    round_a: bool,
+    round_b: bool,
+}
+
+static PIECES: std::sync::RwLock<Vec<Piece>> = std::sync::RwLock::new(Vec::new());
+
+/// The kerb's outer edge, as a share of the half width.
+const KERB_OUT: f32 = 1.55;
+
+/// Where along a street leg it is drawn: the spans of t, 0 to 1, that are not
+/// up the bank of a road it does not climb, with the ends found to a few
+/// centimetres.
+fn street_spans(c: &Corridor, ax: f32, az: f32, bx: f32, bz: f32, half: f32,
+        deck: u8) -> Vec<(f32, f32)> {
+    let w = world();
+    let (dx, dz) = (bx - ax, bz - az);
+    let len = (dx * dx + dz * dz).sqrt().max(1e-3);
+    let (nx, nz) = (-dz / len, dx / len);
+    let gone = |t: f32| -> bool {
+        let px = ax + dx * t;
+        let pz = az + dz * t;
+        // 3: an approach to a road it climbs to; 4: already laid clear of
+        // every bank by the planner (`Scenery._streets_clear_of_bridges`)
+        if deck == 3 || deck == 4 {
+            return false;
+        }
+        // across the carriageway and out past its kerbs: a street keeps clear
+        // of a bank's footprint, not only of the ground under its own wheels
+        let wide = (half + STREET_CLEAR) / half;
+        [-wide, -1.0f32, -0.5, 0.0, 0.5, 1.0, wide].iter().any(|o| {
+            let qx = px + nx * half * o;
+            let qz = pz + nz * half * o;
+            let made = carve_built(w, base(qx, qz), qx, qz, G_ALL).0;
+            (ground_at(w, c, qx, qz, G_ALL) - made).abs() > STREET_RAISED
+        })
+    };
+    let steps = ((len / 4.0).ceil() as i32).max(1);
+    let mut spans = Vec::new();
+    let mut was = gone(0.0);
+    let mut from = if was { -1.0 } else { 0.0 };
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let now = gone(t);
+        if now != was {
+            let (mut lo, mut hi) = ((i - 1) as f32 / steps as f32, t);
+            for _ in 0..10 {
+                let mid = (lo + hi) * 0.5;
+                if gone(mid) == was {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            if was {
+                from = hi;
+            } else if from >= 0.0 {
+                spans.push((from, lo));
+                from = -1.0;
+            }
+        }
+        was = now;
+    }
+    if !was && from >= 0.0 {
+        spans.push((from, 1.0));
+    }
+    // and no stub left between a bank and whatever else cut the street: a
+    // whole leg stays whatever its length, but a few metres of street running
+    // up to a ramp's side and stopping there is not a street
+    spans.retain(|&(t0, t1)| (t0 <= 0.0 && t1 >= 1.0) || (t1 - t0) * len >= STREET_STUB);
+    spans
+}
+
+/// Where a street is clear of every bank: `street_spans` for one street, as
+/// a flat run of t0, t1 pairs. The street planner cuts back from what is not.
+pub fn street_clear(ax: f32, az: f32, bx: f32, bz: f32, half: f32) -> Vec<f32> {
+    street_spans(corridor(), ax, az, bx, bz, half, 0)
+        .into_iter()
+        .flat_map(|(a, b)| [a, b])
+        .collect()
+}
+
+/// Take the network to paint: a flat run of eight a leg, as the ribbons were
+/// given it -- ax, az, bx, bz, half width, design a, design b, and the end
+/// flag (3 for a street's approach to a road it climbs to meet). How many
+/// pieces that came to.
+pub fn publish_road_pieces(legs: &[f32]) -> usize {
+    let c = corridor();
+    let out: Vec<Piece> = legs
+        .par_chunks_exact(8)
+        .flat_map_iter(|q| {
+            let (ax, az, bx, bz, half) = (q[0], q[1], q[2], q[3], q[4]);
+            let (dx, dz) = (bx - ax, bz - az);
+            let len = (dx * dx + dz * dz).sqrt();
+            let mut v = Vec::new();
+            if len < 0.5 {
+                return v.into_iter();
+            }
+            let (ux, uz) = (dx / len, dz / len);
+            let spans = if half > 6.0 {
+                vec![(0.0, 1.0)]
+            } else {
+                street_spans(c, ax, az, bx, bz, half, q[7].round() as u8)
+            };
+            for (t0, t1) in spans {
+                if (t1 - t0) * len < 0.05 {
+                    continue;
+                }
+                v.push(Piece {
+                    ax: ax + dx * t0,
+                    az: az + dz * t0,
+                    ux,
+                    uz,
+                    len: (t1 - t0) * len,
+                    half,
+                    round_a: t0 <= 0.0,
+                    round_b: t1 >= 1.0,
+                });
+            }
+            v.into_iter()
+        })
+        .collect();
+    let n = out.len();
+    *PIECES.write().unwrap() = out;
+    n
+}
+
+/// Paint the roads into a square `n` texels across, `half` metres either side
+/// of (`cx`, `cz`): RGBA8, red the asphalt, green the kerb, blue the paint of
+/// the markings (only with `lines`), alpha unused. Each channel is a signed
+/// distance to its edge, 0.5 on it, rising inward and falling outward across
+/// two texels either side -- so 0.5 is the edge wherever it is asked.
+///
+/// At a junction the widest road there owns the texel and only its markings
+/// are drawn; its edge line is not drawn across the mouth of a road that meets
+/// it at an angle, and nor is anyone's centre line but a wider road's over a
+/// narrower one. The kerb is the band outside any road's edge, wherever no
+/// road's asphalt is -- so it stops at every mouth on its own.
+pub fn road_paint(n: usize, half: f32, cx: f32, cz: f32, lines: bool) -> Vec<u8> {
+    let mut out = vec![0u8; n * n * 4];
+    let pieces = PIECES.read().unwrap();
+    if pieces.is_empty() || n == 0 {
+        return out;
+    }
+    let tpm = n as f32 / (half * 2.0);
+    let px = 1.0 / tpm;
+    // which pieces reach each row
+    let mut rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut xr: Vec<(f32, f32)> = Vec::with_capacity(pieces.len());
+    for (i, p) in pieces.iter().enumerate() {
+        let r = p.half * KERB_OUT + px * 2.0;
+        let (bx, bz) = (p.ax + p.ux * p.len, p.az + p.uz * p.len);
+        let (x0, x1) = (p.ax.min(bx) - r, p.ax.max(bx) + r);
+        let (z0, z1) = (p.az.min(bz) - r, p.az.max(bz) + r);
+        xr.push((x0, x1));
+        if x1 < cx - half || x0 > cx + half || z1 < cz - half || z0 > cz + half {
+            continue;
+        }
+        let j0 = (((z0 - cz + half) * tpm).floor() as i64).clamp(0, n as i64 - 1) as usize;
+        let j1 = (((z1 - cz + half) * tpm).ceil() as i64).clamp(0, n as i64 - 1) as usize;
+        for r in rows.iter_mut().take(j1 + 1).skip(j0) {
+            r.push(i as u32);
+        }
+    }
+    // What is stored is not how much of a texel is covered but how far its
+    // centre is inside the edge -- of the asphalt, the kerb, each line -- out
+    // to two texels either way. Interpolated between texels a distance is
+    // still a distance, so the shader finds the edge between them, straight
+    // and sharp at any angle; coverage, interpolated, stepped from texel to
+    // texel, and a line along the road at a slant was a saw.
+    let range = px * 4.0;
+    let enc = |sd: f32| ((0.5 + sd / range).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    out.par_chunks_mut(n * 4).enumerate().for_each(|(j, row)| {
+        let bucket = &rows[j];
+        if bucket.is_empty() {
+            for o in (0..n * 4).step_by(4) {
+                row[o] = 0;
+                row[o + 1] = 0;
+                row[o + 2] = 0;
+                row[o + 3] = 255;
+            }
+            return;
+        }
+        let wz = (j as f32 + 0.5) / tpm - half + cz;
+        // each piece's say at a texel: how far inside its asphalt, its half
+        // width, lateral offset, length along
+        let mut hits: Vec<(f32, f32, f32, f32, u32)> = Vec::with_capacity(8);
+        for i in 0..n {
+            let wx = (i as f32 + 0.5) / tpm - half + cx;
+            hits.clear();
+            let mut asphalt = -1e9f32;
+            let mut outer = -1e9f32;
+            for &pi in bucket {
+                let (x0, x1) = xr[pi as usize];
+                if wx < x0 || wx > x1 {
+                    continue;
+                }
+                let p = &pieces[pi as usize];
+                let (rx, rz) = (wx - p.ax, wz - p.az);
+                let along = rx * p.ux + rz * p.uz;
+                let lat = rx * -p.uz + rz * p.ux;
+                // inside the carriageway by how much, and inside its kerb,
+                // with the ends round or square
+                let (sd, sk) = if along < 0.0 && p.round_a {
+                    let d = (along * along + lat * lat).sqrt();
+                    (p.half - d, p.half * KERB_OUT - d)
+                } else if along > p.len && p.round_b {
+                    let o = along - p.len;
+                    let d = (o * o + lat * lat).sqrt();
+                    (p.half - d, p.half * KERB_OUT - d)
+                } else {
+                    let ends = along.min(p.len - along);
+                    (
+                        (p.half - lat.abs()).min(ends),
+                        (p.half * KERB_OUT - lat.abs()).min(ends),
+                    )
+                };
+                asphalt = asphalt.max(sd);
+                outer = outer.max(sk);
+                if sd > -range {
+                    hits.push((sd, p.half, lat, along, pi));
+                }
+            }
+            // the kerb is inside some road's kerb line and outside every
+            // road's asphalt
+            let kerb = outer.min(-asphalt);
+            let mut paint = -1e9f32;
+            if lines && asphalt > -range {
+                // the widest road here, nearest its own centreline
+                let mut own: Option<&(f32, f32, f32, f32, u32)> = None;
+                for h in &hits {
+                    if h.0 < 0.0 {
+                        continue;
+                    }
+                    own = match own {
+                        Some(o) if o.1 > h.1 + 0.01 => Some(o),
+                        Some(o) if (o.1 - h.1).abs() <= 0.01 && o.2.abs() <= h.2.abs() => Some(o),
+                        _ => Some(h),
+                    };
+                }
+                if let Some(o) = own {
+                    let po = &pieces[o.4 as usize];
+                    // crossed by another road here, at an angle, and how wide
+                    let mut crossed = 0.0f32;
+                    for h in &hits {
+                        if h.4 == o.4 || h.0 < 0.0 {
+                            continue;
+                        }
+                        let ph = &pieces[h.4 as usize];
+                        if (ph.ux * po.ux + ph.uz * po.uz).abs() < 0.94 {
+                            crossed = crossed.max(ph.half);
+                        }
+                    }
+                    let a = o.2.abs();
+                    // a dashed centre line, six on and six off; a wider road
+                    // keeps its own across a narrower one's mouth
+                    if crossed == 0.0 || po.half > crossed + 0.5 {
+                        let w = 0.16;
+                        // along the line through the piece, taken from the
+                        // world so the pieces of a straight road agree
+                        let v = (wx * po.ux + wz * po.uz).rem_euclid(12.0);
+                        let dash = if v < 6.0 { v.min(6.0 - v) } else { -(v - 6.0).min(12.0 - v) };
+                        paint = paint.max((w - a).min(dash));
+                    }
+                    // a solid line just in from each edge of a trunk road,
+                    // broken across a mouth
+                    if po.half > 6.0 && crossed == 0.0 {
+                        let e0 = po.half - 0.55;
+                        let e1 = po.half - 0.22;
+                        paint = paint.max((a - e0).min(e1 - a));
+                    }
+                }
+                // and never off the asphalt
+                paint = paint.min(asphalt);
+            }
+            let o = i * 4;
+            row[o] = enc(asphalt);
+            row[o + 1] = enc(kerb);
+            row[o + 2] = enc(paint);
+            row[o + 3] = 255;
+        }
+    });
+    out
 }

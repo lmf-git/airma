@@ -901,9 +901,10 @@ func _tick_walk_p(delta: float) -> void:
 	# on a road he is on the road.
 	var gx: float = global_position.x
 	var gz: float = global_position.z
-	var drawn: float = Terrain.drawn_ground(gx, gz,
+	# ...and whatever is within a step of his feet on top of it: see
+	# `Terrain.foot_ground`.
+	var ground: float = Terrain.foot_ground(gx, gz, global_position.y,
 		cam.global_position if is_instance_valid(cam) else global_position)
-	var ground := maxf(drawn, Obstacles.floor_under(gx, gz, global_position.y))
 	if global_position.y <= ground:
 		global_position.y = ground
 		if not on_floor and _fall_peak < -13.0 and not chute:

@@ -155,9 +155,9 @@ func _clear_parts() -> Array:
 ## What is wrong with something of radius `r` and height `h` standing at `p`:
 ## "deck" when it is under a deck with less room than it needs, "ramp" when it
 ## is on a ramp, "" when it is clear of both.
-func _clear_verdict(parts: Array, p: Vector3, r: float, h: float) -> String:
+func _clear_verdict(parts: Array, p: Vector3, r: float, h: float, ramps := true) -> String:
 	var q := Vector2(p.x, p.z)
-	for rp in parts[1]:
+	for rp in (parts[1] if ramps else []):
 		var ramp: PackedVector2Array = rp
 		for i in ramp.size() - 1:
 			if Geometry2D.get_closest_point_to_segment(q, ramp[i], ramp[i + 1]) \
@@ -262,14 +262,17 @@ func _run_prop_clear() -> void:
 		for k in steps + 1:
 			var q: Vector2 = a.lerp(b, float(k) / float(steps))
 			st_n += 1
+			# A street meets a ramp in its own way now -- climbs to it, or is
+			# drawn to the foot of its bank (`Scenery._plan_junctions`) -- so it
+			# is only a deck it must keep clear of: see --junctions for the rest.
 			var v3 := _clear_verdict(parts, Vector3(q.x, Sim.height_at(q.x, q.y), q.y),
-				7.75, 5.0)
+				7.75, 5.0, false)
 			if v3 != "":
 				st_bad += 1
 				any = true
 		if any:
 			st_hit += 1
-	print("[propclear] streets: %d legs drawn, %d of them run under a deck with less than 5 m or across a ramp (%d of %d points)" % [
+	print("[propclear] streets: %d legs drawn, %d of them run under a deck with less than 5 m (%d of %d points)" % [
 		drawn.size(), st_hit, st_bad, st_n])
 	# Piers standing in a road or a street.
 	var pier_bad := 0
@@ -749,21 +752,6 @@ func tick_road() -> bool:
 				if a.length() > 1.0 and b.length() > 1.0 \
 						and a.normalized().dot(b.normalized()) < -0.5:
 					lp_reversals += 1
-		# Cutting the ribbons into buckets must not lose any of them. Both
-		# forms are built from the same legs and the totals compared: a
-		# triangle that falls between two cells is a hole in the road.
-		var legs2 := PackedFloat32Array(Sim.road_draw)
-		var whole: Array = Sim.native.road_ribbons(legs2)
-		var whole_n: int = int(((whole[0] as PackedVector3Array).size()
-			+ (whole[1] as PackedVector3Array).size()) / 3.0)
-		var cut: Array = Sim.native.road_ribbons_bucketed(legs2,
-			Scenery.ROAD_BUCKET)
-		var bucket_n := 0
-		for ci in range(0, cut.size(), 5):
-			bucket_n += int(((cut[ci + 2] as PackedVector3Array).size()
-				+ (cut[ci + 3] as PackedVector3Array).size()) / 3.0)
-		print("[roads] the ribbons are %d triangles whole and %d cut into %d buckets" % [
-			whole_n, bucket_n, int(cut.size() / 5.0)])
 		print("[roads] %d routes; the worst walks %.2fx the distance between its ends (from %s); %d walk more than twice it" % [
 			lp_lines.size(), lp_detour, str(lp_at.round()), lp_loops])
 		print("[roads] %d of %d bends turn back on themselves by more than 120 deg" % [

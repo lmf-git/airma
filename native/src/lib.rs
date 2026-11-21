@@ -1207,19 +1207,60 @@ impl Terra {
     }
 
     /// The corridor: every leg as (ax, az, bx, bz, made a, made b, natural a,
-    /// natural b, which ends are an abutment). Stamped into a grid here, once,
+    /// natural b, which ends are an abutment, half width or 0 for a trunk
+    /// road's), and every deck end as (x, z, the deck's direction x and z, its
+    /// design height): see `world::Abut`. Stamped into a grid here, once,
     /// rather than walked per query.
     #[func]
-    fn set_corridor(&self, data: PackedFloat32Array) {
-        let mut legs = Vec::with_capacity(data.len() / 9);
-        for q in data.as_slice().chunks_exact(9) {
+    fn set_corridor(&self, data: PackedFloat32Array, abuts: PackedFloat32Array) {
+        let ends: Vec<world::Abut> = abuts.as_slice().chunks_exact(5)
+            .map(|q| world::Abut { x: q[0], z: q[1], ux: q[2], uz: q[3], y: q[4] })
+            .collect();
+        let mut legs = Vec::with_capacity(data.len() / 10);
+        for q in data.as_slice().chunks_exact(10) {
             legs.push(Leg {
                 ax: q[0], az: q[1], bx: q[2], bz: q[3],
                 ya: q[4], yb: q[5], na: q[6], nb: q[7],
                 ends: q[8] as u8,
+                half: if q[9] > 0.0 { q[9] } else { world::ROAD_HALF },
             });
         }
-        publish_corridor(legs);
+        publish_corridor(legs, ends);
+    }
+
+    /// Take the road network to paint into the ground: see
+    /// `raster::publish_road_pieces`. How many pieces it came to.
+    #[func]
+    fn publish_road_pieces(&self, legs: PackedFloat32Array) -> i64 {
+        raster::publish_road_pieces(legs.as_slice()) as i64
+    }
+
+    /// The roads painted into an `n` texel square, `half` metres either side of
+    /// `centre`, RGBA8: asphalt, kerb, paint. See `raster::road_paint`.
+    #[func]
+    fn road_paint(&self, n: i64, half: f64, centre: Vector2, lines: bool) -> PackedByteArray {
+        PackedByteArray::from(raster::road_paint(n.max(1) as usize, half as f32,
+            centre.x, centre.y, lines).as_slice())
+    }
+
+    /// Where a street from `a` to `b` is clear of every bank, as t0, t1 pairs:
+    /// see `raster::street_clear`.
+    #[func]
+    fn street_clear(&self, a: Vector2, b: Vector2, half: f64) -> PackedFloat32Array {
+        PackedFloat32Array::from(raster::street_clear(a.x, a.y, b.x, b.y, half as f32).as_slice())
+    }
+
+    /// How far (x, z) is from the nearest road of the network, out to 200 m.
+    #[func]
+    fn trunk_distance(&self, x: f64, z: f64) -> f64 {
+        world::trunk_distance(corridor(), x as f32, z as f32, 200.0) as f64
+    }
+
+    /// Where every street meets a road of the network: see
+    /// `world::street_crossings`. Eight floats a meeting.
+    #[func]
+    fn street_crossings(&self, streets: PackedFloat32Array) -> PackedFloat32Array {
+        PackedFloat32Array::from(world::street_crossings(streets.as_slice()).as_slice())
     }
 
     /// Every road and street on the map, as a flat run of ax, az, bx, bz, for
@@ -1508,103 +1549,7 @@ impl Terra {
         PackedByteArray::from(bake_take(&CLIMATE).as_slice())
     }
 
-    /// Carriageways and kerbs for every road and street on the map, as two
-    /// vertex lists. `legs` is a flat run of ax, az, bx, bz, half width.
-    #[func]
-    fn road_ribbons(&self, legs: PackedFloat32Array) -> Array<Variant> {
-        let r = raster::ribbons(legs.as_slice());
-        let to_v = |src: &[[f32; 3]]| -> PackedVector3Array {
-            let v: Vec<Vector3> =
-                src.iter().map(|q| Vector3::new(q[0], q[1], q[2])).collect();
-            PackedVector3Array::from(v.as_slice())
-        };
-        let mut out: Array<Variant> = Array::new();
-        out.push(&to_v(&r.surf).to_variant());
-        out.push(&to_v(&r.kerb).to_variant());
-        out
-    }
 
-    /// The same ribbons, cut into square buckets so the frustum can drop them.
-    ///
-    /// `road_ribbons` returns the whole network as two meshes, and a mesh is
-    /// culled as one object: any part of the road network on screen submits all
-    /// of it. Measured, those two meshes cost 4.15 ms of the 6.20 ms the frame
-    /// spends drawing -- two thirds of it, for two objects out of eighteen
-    /// hundred, most of which is behind the camera or over the horizon.
-    ///
-    /// Cut here rather than in GDScript because a packed array taken out of a
-    /// dictionary and put back is copied both ways, so bucketing a million
-    /// triangles a triangle at a time is quadratic.
-    ///
-    #[func]
-    fn road_ribbons_bucketed(&self, legs: PackedFloat32Array, cell: f64)
-            -> Array<Variant> {
-        type Cells = index::Map<i64, (Vec<Vector3>, Vec<Vector3>, Vec<Vector3>)>;
-        let parts = raster::ribbon_parts(legs.as_slice());
-        let cell = (cell as f32).max(1.0);
-        // Sorted straight out of the per-leg ribbons, across every core.
-        //
-        // Joined into one pair of lists first and then sorted -- which is what
-        // this did -- a million triangles are copied twice over on one thread
-        // before any of them reaches a bucket. Each core sorts a run of legs
-        // into a map of its own and the maps are merged in order afterwards, so
-        // the answer does not depend on which core finished first.
-        let sort = |src: &[[f32; 3]], which: u8, b: &mut Cells| {
-            for tri in src.chunks_exact(3) {
-                let cx = (tri[0][0] + tri[1][0] + tri[2][0]) / 3.0;
-                let cz = (tri[0][2] + tri[1][2] + tri[2][2]) / 3.0;
-                // Keyed on the triangle's own centre, so a triangle belongs to
-                // one bucket and no seam can open between two.
-                let key = index::key((cx / cell).floor() as i32,
-                    (cz / cell).floor() as i32);
-                let e = b.entry(key).or_default();
-                let dst = match which {
-                    0 => &mut e.0,
-                    1 => &mut e.1,
-                    _ => &mut e.2,
-                };
-                for q in tri {
-                    dst.push(Vector3::new(q[0], q[1], q[2]));
-                }
-            }
-        };
-        let runs: Vec<Cells> = parts
-            .par_chunks(256)
-            .map(|run| {
-                let mut b = Cells::default();
-                for r in run {
-                    sort(&r.surf, 0, &mut b);
-                    sort(&r.kerb, 1, &mut b);
-                    sort(&r.wall, 2, &mut b);
-                }
-                b
-            })
-            .collect();
-        let mut buckets = Cells::default();
-        for run in runs {
-            for (k, (surf, kerb, wall)) in run {
-                let e = buckets.entry(k).or_default();
-                e.0.extend_from_slice(&surf);
-                e.1.extend_from_slice(&kerb);
-                e.2.extend_from_slice(&wall);
-            }
-        }
-        // Comes back flat: cell x, cell z, surface, kerb, wall, for each non-empty
-        // cell. In a settled order, because the meshes are named after the
-        // cell and a harness finds them by name.
-        let mut keys: Vec<i64> = buckets.keys().copied().collect();
-        keys.sort_unstable();
-        let mut out: Array<Variant> = Array::new();
-        for k in keys {
-            let (surf, kerb, wall) = &buckets[&k];
-            out.push(&((k >> 32) as i32 as i64).to_variant());
-            out.push(&((k & 0xffff_ffff) as u32 as i32 as i64).to_variant());
-            out.push(&PackedVector3Array::from(surf.as_slice()).to_variant());
-            out.push(&PackedVector3Array::from(kerb.as_slice()).to_variant());
-            out.push(&PackedVector3Array::from(wall.as_slice()).to_variant());
-        }
-        out
-    }
 
     /// The tactical map's background: hill-shaded relief in biome colour with
     /// the road network over it, as RGB8.

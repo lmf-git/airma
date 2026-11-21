@@ -144,15 +144,46 @@ pub struct Leg {
     pub na: f32,
     pub nb: f32,
     /// Which ends are an abutment: 1 for `a`, 2 for `b`. Past one of those is
-    /// the first span of a bridge, not more road.
+    /// the first span of a bridge, not more road. 4: this is not a road of the
+    /// network at all but a street's approach, graded up to meet one where it
+    /// crosses it raised (see `street_crossings`).
     pub ends: u8,
+    /// Half the carriageway, which is what the bank's top is carried out from.
+    pub half: f32,
 }
+
+/// `Leg::ends` for a street's approach to a raised road.
+pub const LEG_APPROACH: u8 = 4;
 
 #[derive(Default)]
 pub struct Corridor {
     pub legs: Vec<Leg>,
     pub grid: HashMap<i64, Vec<u32>>,
+    /// Every bridge abutment, for the terrain tree: see `Ground::abutment_in`.
+    pub abutments: Vec<(f32, f32)>,
+    /// Every deck end: where, which way the deck leaves it, and its height.
+    pub abuts: Vec<Abut>,
+    /// The deck ends again, by cell, out to `ABUT_REACH`.
+    pub abut_grid: HashMap<i64, Vec<u32>>,
 }
+
+/// One end of a bridge's deck: the abutment's station, the direction the deck
+/// runs from it (unit, in plan), and the design height there. The bank at a
+/// bridge end is shaped from this -- the deck's line and the deck's height --
+/// not from the leg of road that happens to arrive there, which may come in at
+/// an angle or belong to another road altogether.
+#[derive(Clone, Copy)]
+pub struct Abut {
+    pub x: f32,
+    pub z: f32,
+    pub ux: f32,
+    pub uz: f32,
+    pub y: f32,
+}
+
+/// How far from a deck end its seat, head and spill are worked out: out as far
+/// as a broad bank's shoulders reach.
+const ABUT_REACH: f32 = CORR_REACH + 4.0;
 
 /// Same reasoning as `WORLD_P`.
 static CORR_P: AtomicPtr<Corridor> = AtomicPtr::new(std::ptr::null_mut());
@@ -166,11 +197,28 @@ pub fn corridor() -> &'static Corridor {
     unsafe { &*p }
 }
 
-/// Build the lookup grid over a set of legs and publish it.
-pub fn publish_corridor(legs: Vec<Leg>) {
+/// Build the lookup grid over a set of legs and the deck ends, and publish
+/// them.
+pub fn publish_corridor(legs: Vec<Leg>, abuts: Vec<Abut>) {
+    let abutments: Vec<(f32, f32)> = abuts.iter().map(|a| (a.x, a.z)).collect();
+    let mut abut_grid: HashMap<i64, Vec<u32>> = HashMap::new();
+    for (i, a) in abuts.iter().enumerate() {
+        let i0 = ((a.x - ABUT_REACH) / CORR_CELL).floor() as i32;
+        let i1 = ((a.x + ABUT_REACH) / CORR_CELL).floor() as i32;
+        let j0 = ((a.z - ABUT_REACH) / CORR_CELL).floor() as i32;
+        let j1 = ((a.z + ABUT_REACH) / CORR_CELL).floor() as i32;
+        for ci in i0..=i1 {
+            for cj in j0..=j1 {
+                abut_grid.entry(key(ci, cj)).or_default().push(i as u32);
+            }
+        }
+    }
     let mut c = Corridor {
         legs,
         grid: HashMap::new(),
+        abutments,
+        abuts,
+        abut_grid,
     };
     let pad = CORR_REACH;
     // cells enough to cover `pad` either side of every point on the leg
@@ -256,6 +304,35 @@ const TOWN_TOP: f32 = 1.6;
 /// below the girder, as a spill slope.
 const DECK_DEPTH: f32 = 2.3;
 const SPILL: f32 = 0.6;
+/// ...but not until it has carried on under the deck for one mesh cell: the
+/// seat the girder rests on. The ground met the deck exactly at the abutment's
+/// line, and then fell away at once -- which the terrain mesh, a height every
+/// fifteen metres drawn flat between, could not draw. The vertex on the far
+/// side of the line was down the spill slope, the triangle between the two cut
+/// the corner, and the drawn ramp ended a metre or three under the deck: the
+/// road was lifted off it for the last few metres, on skirts, with daylight
+/// under it from the side. Held at the deck for as far as one cell reaches
+/// along the bridge -- fifteen metres square on, the diagonal of a cell at
+/// forty-five degrees -- every triangle that touches the abutment's line has
+/// all its corners up at the deck, so the mesh is at the deck there whatever
+/// way the bridge lies on the grid. A girder buried in its own bank for the
+/// width of one cell is what a bridge seat is; for twenty metres at full
+/// width, as it was, it was not.
+const SEAT_PAD: f32 = 1.0;
+/// How far the seat stands under the deck's running surface, so the two are
+/// not drawn in the same plane and fight for the pixels. Eased in from the
+/// abutment's line, where the ramp is at the deck.
+const SEAT_SINK: f32 = 0.2;
+/// The same is true across the deck. The bank's top was carried flat a little
+/// past the kerbs and then fell away down its side, and the vertex beside the
+/// deck's edge was out on that slope: the drawn ramp sagged under the corners
+/// of the deck, a half metre and more, the end panel open over it. So the top
+/// of the bank widens over its last cell to the deck's half width and one cell
+/// more each side -- the head of the bank, square across under the deck end
+/// -- and only falls away beyond that.
+///
+/// How far across from a bridge's line its head can reach, for finding it.
+const HEAD_REACH: f32 = 60.0;
 /// Half the deck's width: `Scenery.DECK_HALF`.
 const DECK_HALF: f32 = 8.5;
 /// Everything the corridor says about a point.
@@ -301,15 +378,59 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
     let mut best = 1e9f32;
     let mut near_y = 0.0f32;
     let mut near_g = 0.0f32;
-    let mut past = 0.0f32;
+    let mut near_half = ROAD_HALF;
     for idx in bucket {
         let l = &c.legs[*idx as usize];
-        let (d, t, p) = foot_past(l, x, z);
+        let (d, t) = foot(l, x, z);
         if d < best {
             best = d;
             near_y = lerp(l.ya, l.yb, t);
             near_g = lerp(l.na, l.nb, t);
-            past = p;
+            near_half = l.half;
+        }
+    }
+    // The nearest deck end at this road's height, if one is within reach:
+    // along the deck's line from it (positive under the deck), across it, and
+    // how far a mesh cell reaches along that line, for the seat.
+    let mut ab: Option<(f32, f32, f32, f32)> = None;
+    if let Some(cands) = c.abut_grid.get(&k) {
+        let mut ab_d = ABUT_REACH;
+        for &ai in cands {
+            let a = &c.abuts[ai as usize];
+            if (a.y - near_y).abs() > AGREE {
+                continue;              // another road's bridge, over or under
+            }
+            let (rx, rz) = (x - a.x, z - a.z);
+            let dist = (rx * rx + rz * rz).sqrt();
+            if dist >= ab_d {
+                continue;
+            }
+            ab_d = dist;
+            let s = rx * a.ux + rz * a.uz;
+            let lat = (rx * a.uz - rz * a.ux).abs();
+            let cell = crate::chunk::BASE_CELL * (a.ux.abs() + a.uz.abs());
+            ab = Some((s, lat, cell, a.y));
+        }
+    }
+    // How near the head of a bank this is: 1 from a cell short of the
+    // abutment's line onwards, easing to 0 a cell further back. See `HEAD`.
+    let mut head = 0.0f32;
+    let mut head_cell = crate::chunk::BASE_CELL;
+    // and how far past the deck end, under the deck
+    let mut past = 0.0f32;
+    let mut past_lat = 0.0f32;
+    let mut cell_along = crate::chunk::BASE_CELL;
+    if let Some((s, lat, cell, ay)) = ab {
+        if lat < HEAD_REACH {
+            head = 1.0 - smoothstep(cell + SEAT_PAD, 2.0 * cell + SEAT_PAD, -s);
+            head_cell = cell;
+        }
+        if s > 0.05 {
+            past = s;
+            past_lat = lat;
+            cell_along = cell;
+            // under the deck the bank is carried from the deck end's own height
+            near_y = ay;
         }
     }
     // The shoulder is as wide as the bank is high, four and a half times: a road
@@ -319,40 +440,52 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
     // only a raised road closes in: one at the town's own level keeps its
     // shoulder, which the town platform overrides anyway
     let walled = town.clamp(0.0, 1.0) * smoothstep(1.0, 3.0, fill);
-    let inner = lerp(ROAD_HALF, ROAD_HALF * TOWN_TOP, walled);
+    let inner = lerp(near_half, near_half * TOWN_TOP, walled);
+    let head_half = DECK_HALF + head_cell + SEAT_PAD;
+    let inner = lerp(inner, inner.max(head_half), head);
     let town_side = (fill * TOWN_BATTER).clamp(TOWN_SHOULDER_MIN, TOWN_SHOULDER_MAX);
     let reach = inner + lerp(open, town_side, walled);
-    if best > reach {
-        return none;
-    }
-    let w = 1.0 - smoothstep(inner, reach, best);
+    // Beyond the abutment the bank spills out under the first span from below
+    // the deck rather than carrying on at the level of it -- under the deck
+    // only, and only once it is past the seat (see `SEAT_PAD`). Off to the
+    // side it rounds off as it always did: cut along the abutment's line, a
+    // broad bank's shoulders got a step a hundred metres long. A ramp through
+    // a town does the same; it used to end square on a shelf and drop sheer to
+    // the street, which the fifteen metre mesh drew as a slope that whatever
+    // walked onto it fell through.
+    //
     // (a few centimetres of tolerance, so a point on the abutment's own line
     // does not flicker between the two sides of it)
+    let mut under = 0.0f32;
+    let mut spill_run = 0.0f32;
+    let mut d = best;
     if past > 0.05 {
-        // Beyond the abutment the bank spills out under the first span from
-        // below the deck rather than carrying on at the level of it -- under
-        // the deck only. Off to the side it rounds off as it always did: cut
-        // along the abutment's line, a broad bank's shoulders got a step a
-        // hundred metres long. A ramp through a town does the same; it used
-        // to end square on a shelf and drop sheer to the street, which the
-        // fifteen metre mesh drew as a slope that whatever walked onto it fell
-        // through.
-        let lat = (best * best - past * past).max(0.0).sqrt();
-        {
-            let under = 1.0 - smoothstep(DECK_HALF + 2.0, DECK_HALF + 25.0, lat);
-            if under > 0.0 {
-                return Made {
-                    // eased in over the first few metres rather than a step
-                    // at the abutment's line: this is ground people stand on
-                    y: near_y - (DECK_DEPTH * smoothstep(0.0, 6.0, past)
-                        + past * SPILL) * under,
-                    w,
-                    g: near_g,
-                    walled,
-                    spill: under,
-                };
-            }
+        let lat = past_lat;
+        under = 1.0 - smoothstep(head_half, head_half + 23.0, lat);
+        if under > 0.0 {
+            // Over the seat the bank is the ramp's own cross-section carried
+            // on, so it is measured from the side of the road and not from
+            // its end; after it, from where the seat stops.
+            spill_run = (past - (cell_along + SEAT_PAD) * under).max(0.0);
+            d = (lat * lat + spill_run * spill_run).sqrt();
         }
+    }
+    if d > reach {
+        return none;
+    }
+    let w = 1.0 - smoothstep(inner, reach, d);
+    if under > 0.0 {
+        return Made {
+            // eased in over the first few metres rather than a step at the end
+            // of the seat: this is ground people stand on
+            y: near_y - (SEAT_SINK * smoothstep(0.0, 3.0, past)
+                + DECK_DEPTH * smoothstep(0.0, 6.0, spill_run)
+                + spill_run * SPILL) * under,
+            w,
+            g: near_g,
+            walled,
+            spill: under,
+        };
     }
     let mut ysum = 0.0;
     let mut gsum = 0.0;
@@ -376,6 +509,123 @@ pub fn road_made(c: &Corridor, x: f32, z: f32, town: f32) -> Made {
         return Made { y: near_y, w, g: near_g, walled, spill: 0.0 };
     }
     Made { y: ysum / wsum, w, g: gsum / wsum, walled, spill: 0.0 }
+}
+
+// ------------------------------------------------------------ street junctions
+
+/// How far a point is from the nearest road of the network -- the trunk roads,
+/// not the streets' approaches -- out to `reach`, beyond which it answers
+/// `reach`.
+pub fn trunk_distance(c: &Corridor, x: f32, z: f32, reach: f32) -> f32 {
+    let k = key((x / CORR_CELL).floor() as i32, (z / CORR_CELL).floor() as i32);
+    let mut best = reach;
+    if let Some(bucket) = c.grid.get(&k) {
+        for idx in bucket {
+            let l = &c.legs[*idx as usize];
+            if l.ends & LEG_APPROACH != 0 {
+                continue;
+            }
+            let (d, _) = foot(l, x, z);
+            best = best.min(d);
+        }
+    }
+    best
+}
+
+/// Where each street meets a road of the network: crossing it, or ending on
+/// it. `streets` is a flat run of ax, az, bx, bz; what comes back is a flat
+/// run of eight for every meeting: which street, how far along it (0 to 1),
+/// where, the road's made height there, the made ground of the town under it,
+/// and the road's direction.
+///
+/// What a street does at one depends on the difference: at a road on the
+/// town's own level it is a crossroads; at one a little up on its bank it
+/// climbs to meet it; at a ramp to a bridge it ends at the foot of the bank.
+pub fn street_crossings(streets: &[f32]) -> Vec<f32> {
+    let c = corridor();
+    let w = world();
+    let mut out = Vec::new();
+    for (si, q) in streets.chunks_exact(4).enumerate() {
+        let (ax, az, bx, bz) = (q[0], q[1], q[2], q[3]);
+        let (dx, dz) = (bx - ax, bz - az);
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1.0 {
+            continue;
+        }
+        // every leg within reach of the street, once
+        let mut seen: Vec<u32> = Vec::new();
+        let steps = (len / (CORR_CELL * 0.5)).ceil() as i32;
+        for k in 0..=steps {
+            let t = k as f32 / steps.max(1) as f32;
+            let (px, pz) = (ax + dx * t, az + dz * t);
+            if let Some(b) = c.grid.get(&key((px / CORR_CELL).floor() as i32,
+                    (pz / CORR_CELL).floor() as i32)) {
+                for &i in b {
+                    if !seen.contains(&i) {
+                        seen.push(i);
+                    }
+                }
+            }
+        }
+        let mut found: Vec<(f32, f32, f32, &Leg, f32)> = Vec::new();
+        for &i in &seen {
+            let l = &c.legs[i as usize];
+            if l.ends & LEG_APPROACH != 0 {
+                continue;
+            }
+            let (ex, ez) = (l.bx - l.ax, l.bz - l.az);
+            let den = dx * ez - dz * ex;
+            let hit = if den.abs() > 1e-6 {
+                let fx = l.ax - ax;
+                let fz = l.az - az;
+                let t = (fx * ez - fz * ex) / den;
+                let u = (fx * dz - fz * dx) / den;
+                if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                    Some((t, u))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let (t, u) = match hit {
+                Some(h) => h,
+                None => {
+                    // ...or ending on it, short of the centreline or over it
+                    let mut end = None;
+                    for (te, px, pz) in [(0.0f32, ax, az), (1.0f32, bx, bz)] {
+                        let (d, u) = foot(l, px, pz);
+                        if d < ROAD_HALF * 1.55 {
+                            end = Some((te, u));
+                        }
+                    }
+                    match end {
+                        Some(e) => e,
+                        None => continue,
+                    }
+                }
+            };
+            let (px, pz) = (l.ax + ex * u, l.az + ez * u);
+            if found.iter().any(|f| (f.1 - px).hypot(f.2 - pz) < 3.0) {
+                continue;
+            }
+            found.push((t, px, pz, l, u));
+        }
+        for (t, px, pz, l, u) in found {
+            let el = ((l.bx - l.ax).powi(2) + (l.bz - l.az).powi(2)).sqrt().max(1e-3);
+            out.extend_from_slice(&[
+                si as f32,
+                t,
+                px,
+                pz,
+                lerp(l.ya, l.yb, u),
+                carve_built(w, base(px, pz), px, pz, G_ALL).0,
+                (l.bx - l.ax) / el,
+                (l.bz - l.az) / el,
+            ]);
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ decks
@@ -457,6 +707,21 @@ pub struct Ground {
 }
 
 impl Ground {
+    /// Is a bridge abutment within `pad` of this square?
+    ///
+    /// The terrain tree asks, so that the ground at the end of every bridge is
+    /// drawn at the finest cell there is. Its own measure of how far a node is
+    /// off the field samples one point in every two cells, and a town's ground
+    /// is levelled flat: a ramp seventeen metres wide that ended between two
+    /// samples read as no error at all, and the end of the bridge was drawn on
+    /// thirty and sixty metre cells -- which cannot hold the seat under the
+    /// deck (see `SEAT_PAD`), so the drawn ramp ended metres under it.
+    pub fn abutment_in(&self, x0: f32, z0: f32, span: f32, pad: f32) -> bool {
+        self.corr.abutments.iter().any(|&(x, z)| {
+            x >= x0 - pad && x <= x0 + span + pad && z >= z0 - pad && z <= z0 + span + pad
+        })
+    }
+
     /// The same ground, as the terrain mesh draws it: see `G_DRAWN`. Everything
     /// that builds or measures the mesh asks this one, so the mesh, the
     /// quadtree's idea of how far the mesh is off, and `surfaces_at` agree.
@@ -551,6 +816,18 @@ impl Ground {
     #[inline]
     pub fn sea(&self, x: f32, z: f32) -> f32 {
         crate::field::WATER_LEVEL - self.drop(x, z)
+    }
+
+    /// Sea level here, in the frame `at` answers in: the frame the mesh is
+    /// built in, which on the planet carries the curve and on the flat world
+    /// does not.
+    #[inline]
+    pub fn sea_drawn(&self, x: f32, z: f32) -> f32 {
+        if self.globe {
+            self.sea(x, z)
+        } else {
+            crate::field::WATER_LEVEL
+        }
     }
 
     /// `world_y` worked out in the width the game above works it out in.

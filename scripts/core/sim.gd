@@ -233,6 +233,17 @@ func rechart_world(o: Vector3, e: Vector3, s2: Vector3) -> void:
 			for p2 in pts:
 				np.append(move.call(p2))
 			b["pts"] = np
+			var ramps: Array = b.get("ramps", [])
+			for ri in ramps.size():
+				var rp: PackedVector2Array = ramps[ri]
+				var nr := PackedVector2Array()
+				for p3 in rp:
+					nr.append(move.call(p3))
+				ramps[ri] = nr
+	# The decks are indexed off the list, which has just been moved in place:
+	# the same list, so nothing asking about a deck knew to look again, and
+	# every deck was stood on where it had been in the old chart.
+	_deck_src = []
 	# The town streets, which are pushed to the extension with the trunk roads
 	# and were pushed again here unmoved: after a chart move the street stain
 	# and the clearance the buildable test keeps from a kerb were both still
@@ -240,6 +251,10 @@ func rechart_world(o: Vector3, e: Vector3, s2: Vector3) -> void:
 	for si in _segments.size():
 		var sg: Array = _segments[si]
 		_segments[si] = [move.call(sg[0]), move.call(sg[1])]
+	for ap in _street_corr:
+		ap[0] = move.call(ap[0] as Vector2)
+		ap[1] = move.call(ap[1] as Vector2)
+	_box_approaches()
 	_index_corridor()
 	_push_segments()
 	_push_world()
@@ -2311,12 +2326,25 @@ const BRIDGE_LAP := 2.5             # the end panels reach this far past the sta
 ## How far above something a deck can be and still be stepped onto: anything
 ## further below it is underneath the bridge, not on it.
 const BRIDGE_STEP := 0.6
+## Points across an end panel's outer edge: `Scenery.LAP_N`.
+const LAP_N := 9
+
+## How far an end panel falls at `across` (0 the deck's left edge, 1 its
+## right), from the LAP_N heights starting at `at` in `laps`.
+static func _lap_dy(laps: PackedFloat32Array, at: int, across: float) -> float:
+	var f: float = clampf(across * float(LAP_N - 1), 0.0, float(LAP_N - 1))
+	var k: int = mini(int(f), LAP_N - 2)
+	return lerpf(laps[at + k], laps[at + k + 1], f - float(k))
 ## How deep the deck is: the box girder under the running surface, which is
 ## what anything passing underneath has to clear.
 const BRIDGE_GIRDER := 1.9          # matches the girder `Scenery` draws
 ## Half the width of a ramp onto a deck, out to the foot of its side slope:
 ## `RAMP_EDGE` in world.rs, which is where the made ground meets the town.
 const RAMP_HALF := 20.0
+## ...and round the end of one, where the bank's top widens under the deck end
+## to a cell either side of it (`HEAD_REACH` in world.rs): the head's half
+## width at its widest, 31 m, and its side slope.
+const RAMP_HEAD := 40.0
 var _deck_src: Array = []
 var _deck_idx: Array = []           # {lo, hi, pts, ys, ramps}
 
@@ -2339,9 +2367,34 @@ func _index_bridge_decks() -> void:
 		hi += Vector2(m, m)
 		for r in ramps:
 			for q2 in (r as PackedVector2Array):
-				lo = Vector2(minf(lo.x, q2.x - RAMP_HALF), minf(lo.y, q2.y - RAMP_HALF))
-				hi = Vector2(maxf(hi.x, q2.x + RAMP_HALF), maxf(hi.y, q2.y + RAMP_HALF))
-		_deck_idx.append({"lo": lo, "hi": hi, "pts": pts, "ys": ys, "ramps": ramps})
+				lo = Vector2(minf(lo.x, q2.x - RAMP_HEAD), minf(lo.y, q2.y - RAMP_HEAD))
+				hi = Vector2(maxf(hi.x, q2.x + RAMP_HEAD), maxf(hi.y, q2.y + RAMP_HEAD))
+		# How far the end panels fall to meet the road at their outer edge:
+		# `Scenery._deck_lap`, which draws them, and the same numbers.
+		# ...at LAP_N points across its outer edge, as it is drawn, so what a
+		# foot or a wheel stands on there is the panel that is seen: for each
+		# end, from the deck's left edge (looking along it from the first
+		# station to the last) to its right
+		var laps := PackedFloat32Array()
+		var along0: Vector2 = (pts[1] - pts[0]).normalized()
+		var left0 := Vector2(-along0.y, along0.x)
+		var along1: Vector2 = (pts[pts.size() - 1] - pts[pts.size() - 2]).normalized()
+		var left1 := Vector2(-along1.y, along1.x)
+		for e in 2:
+			var st: Vector2 = pts[0] if e == 0 else pts[pts.size() - 1]
+			var nx: Vector2 = pts[1] if e == 0 else pts[pts.size() - 2]
+			var tip: Vector2 = st + (st - nx).normalized() * BRIDGE_LAP
+			var lf: Vector2 = left0 if e == 0 else left1
+			var top: float = (ys[0] if e == 0 else ys[ys.size() - 1]) - planet_drop(st.x, st.y)
+			var edge := PackedVector2Array()
+			for k in LAP_N:
+				edge.append(tip + lf * BRIDGE_HALF * (1.0 - 2.0 * float(k) / float(LAP_N - 1)))
+			var got: PackedFloat32Array = native.surfaces_at(edge, Terrain.BASE_CELL)
+			for k in LAP_N:
+				var dy: float = got[k] + 0.03 - top if got.size() > k else 0.0
+				laps.append(clampf(dy, -BRIDGE_STEP, BRIDGE_STEP))
+		_deck_idx.append({"lo": lo, "hi": hi, "pts": pts, "ys": ys, "ramps": ramps,
+			"laps": laps})
 
 ## Build the deck index now, on this thread, so that workers can read it. It is
 ## otherwise built by whoever asks first, and two workers asking at once would
@@ -2375,12 +2428,21 @@ func near_bridges(lo: Vector2, hi: Vector2, r: float) -> bool:
 ## in a town's streets were all laid out as if the deck were not there: in the
 ## carriageway of the approach, up through the deck, across the foot of the
 ## ramp. `ground` is the height the thing stands at, when the caller has it.
-func bridge_headroom(x: float, z: float, r: float, ground := NAN) -> float:
+##
+## `banks` false asks about the decks alone: a street meets a ramp or crosses
+## it in its own way (`Scenery.plan_finish`), and does not want to be cut back
+## from it here. With it, a street's approach to a raised road is a bank too.
+func bridge_headroom(x: float, z: float, r: float, ground := NAN, banks := true) -> float:
+	var q := Vector2(x, z)
+	if banks and not _street_corr.is_empty() and _approach_box.grow(r).has_point(q):
+		for ap in _street_corr:
+			var half: float = float(ap[7]) * 1.6 + 8.0
+			if _seg_dist(q, ap[0], ap[1]) < half + r:
+				return 0.0
 	if road_bridges.is_empty():
 		return INF
 	index_bridges()
 	var best := INF
-	var q := Vector2(x, z)
 	for b in _deck_idx:
 		var lo: Vector2 = b["lo"]
 		var hi: Vector2 = b["hi"]
@@ -2388,6 +2450,11 @@ func bridge_headroom(x: float, z: float, r: float, ground := NAN) -> float:
 			continue
 		for rp in (b["ramps"] as Array):
 			var ramp: PackedVector2Array = rp
+			if not banks:
+				continue
+			# the head of the bank, wider than the rest of it
+			if q.distance_to(ramp[0]) < RAMP_HEAD + r:
+				return 0.0
 			for i in ramp.size() - 1:
 				if _seg_dist(q, ramp[i], ramp[i + 1]) < RAMP_HALF + r:
 					return 0.0
@@ -2450,6 +2517,17 @@ func bridge_floor(x: float, z: float, y_ref: float) -> float:
 			# along the station-to-station profile, as the deck is drawn
 			var f: float = clampf((t - (a.distance_to(a2))) / run, 0.0, 1.0)
 			var y: float = lerpf(ys[i], ys[i + 1], f) - planet_drop(x, z)
+			# ...and on an end panel, falling to the road at its outer edge,
+			# corner by corner across it
+			var laps: PackedFloat32Array = b["laps"]
+			var lead: float = a.distance_to(a2)
+			# 0 on the deck's left edge, 1 on its right
+			var across: float = clampf(0.5 - (q - a2).dot(Vector2(-dir.y, dir.x))
+				/ (BRIDGE_HALF * 2.0), 0.0, 1.0)
+			if i == 0 and t < lead:
+				y += _lap_dy(laps, 0, across) * (lead - t) / BRIDGE_LAP
+			elif i == last and t > lead + run:
+				y += _lap_dy(laps, LAP_N, across) * (t - lead - run) / BRIDGE_LAP
 			if y <= y_ref + BRIDGE_STEP and y > best:
 				best = y
 	return best
@@ -2475,6 +2553,18 @@ var _corr: Array = []            # [a, b, ya, yb]
 
 func _index_corridor() -> void:
 	_corr = []
+	# Every deck end, and which way the deck leaves it. A road whose own line
+	# stops at an abutment -- one that joins another there -- has no bridge
+	# station of its own to say so, and its approach was graded as a plain road
+	# ending: no seat under the deck and no head to the bank, and the drawn
+	# ramp stopped most of a metre under the deck.
+	var deck_ends: Array = []
+	for br in road_bridges:
+		var bp: PackedVector2Array = br.get("pts", PackedVector2Array())
+		if bp.size() >= 2:
+			deck_ends.append([bp[0], (bp[1] - bp[0]).normalized()])
+			deck_ends.append([bp[bp.size() - 1],
+				(bp[bp.size() - 2] - bp[bp.size() - 1]).normalized()])
 	for li in _road_lines.size():
 		var pl: PackedVector2Array = _road_lines[li]
 		var prof: PackedFloat32Array = _road_prof[li]
@@ -2499,18 +2589,32 @@ func _index_corridor() -> void:
 			# Which end of it is an abutment. Past that end is the first span,
 			# and the bank stops there instead of rounding off underneath it.
 			var ends := 0
-			if _bridge_end(li, i):
+			if _bridge_end(li, i) or _runs_onto_deck(pl[i + 1], pl[i], deck_ends):
 				ends |= 1
-			if _bridge_end(li, i + 1):
+			if _bridge_end(li, i + 1) or _runs_onto_deck(pl[i], pl[i + 1], deck_ends):
 				ends |= 2
 			_corr.append([pl[i], pl[i + 1], prof[i], prof[i + 1],
 				nat[i], nat[i + 1], ends])
 	_push_corridor()
 
-## Hand the corridor to the extension, which is where its index lives.
+## Does a leg running from `from` to `to` arrive at a deck end and carry on
+## straight onto the deck? `deck_ends` is what `_index_corridor` gathered.
+static func _runs_onto_deck(from: Vector2, to: Vector2, deck_ends: Array) -> bool:
+	var run := from.distance_to(to)
+	if run < 1.0:
+		return false
+	var dir := (to - from) / run
+	for de in deck_ends:
+		if (de[0] as Vector2).distance_to(to) < 1.0 and dir.dot(de[1] as Vector2) > 0.7:
+			return true
+	return false
+
+## Hand the corridor to the extension, which is where its index lives: the
+## network's legs and the streets' approaches to it, ten floats each (the last
+## the half width, 0 for a trunk road's).
 func _push_corridor() -> void:
 	var flat := PackedFloat32Array()
-	for leg in _corr:
+	for leg in _corr + _street_corr:
 		var la: Vector2 = leg[0]
 		var lb: Vector2 = leg[1]
 		flat.append(la.x)
@@ -2522,7 +2626,52 @@ func _push_corridor() -> void:
 		flat.append(float(leg[4]))
 		flat.append(float(leg[5]))
 		flat.append(float(leg[6]) if leg.size() > 6 else 0.0)
-	native.set_corridor(flat)
+		flat.append(float(leg[7]) if leg.size() > 7 else 0.0)
+	# Every deck end, the way the deck leaves it and its design height: the
+	# bank at a bridge end is shaped from these (`world::Abut`), whatever angle
+	# the road arrives at.
+	var ends := PackedFloat32Array()
+	for br in road_bridges:
+		var bp: PackedVector2Array = br.get("pts", PackedVector2Array())
+		var by: PackedFloat32Array = br.get("ys", PackedFloat32Array())
+		if bp.size() < 2 or by.size() != bp.size():
+			continue
+		var last := bp.size() - 1
+		for e in [[bp[0], bp[1], by[0]], [bp[last], bp[last - 1], by[last]]]:
+			var at: Vector2 = e[0]
+			var d: Vector2 = ((e[1] as Vector2) - at).normalized()
+			ends.append_array(PackedFloat32Array([at.x, at.y, d.x, d.y, float(e[2])]))
+	native.set_corridor(flat, ends)
+
+## Where a street climbs to meet a road a little up on its bank, the street's
+## own approach, graded into the ground like the road's: each [a, b, made a,
+## made b, ground a, ground b, LEG_APPROACH, half width]. Laid out by
+## `Scenery.plan_finish` once the streets exist; not part of the bake, because
+## the streets are not.
+var _street_corr: Array = []
+const LEG_APPROACH := 4
+
+func set_street_approaches(legs: Array) -> void:
+	_street_corr = legs
+	_box_approaches()
+	_push_corridor()
+
+## Everything the approaches reach, so a question asked anywhere else -- a
+## tree, a lamp post, most of the map -- is turned away at once.
+var _approach_box := Rect2()
+
+func _box_approaches() -> void:
+	_approach_box = Rect2()
+	for i in _street_corr.size():
+		var ap: Array = _street_corr[i]
+		var r := Rect2(ap[0] as Vector2, Vector2.ZERO).expand(ap[1] as Vector2)
+		_approach_box = r if i == 0 else _approach_box.merge(r)
+	_approach_box = _approach_box.grow(40.0)
+
+## The streets' approaches, for whatever has to keep off them as it keeps off
+## a ramp.
+func street_approaches() -> Array:
+	return _street_corr
 
 ## The land as it was before any road was built on it. The corridor is the only
 ## thing `_in_survey` switches off, which is exactly the difference between the
@@ -2650,7 +2799,11 @@ func load_road_state(d: Dictionary) -> void:
 	_natural = d.get("natural", [])
 	# The corridor's grid is not baked -- it is stamped inside the extension,
 	# so a run that loads the network from disk has to hand the legs over just
-	# as a run that surveyed them does.
+	# as a run that surveyed them does. And the town platforms with them:
+	# without, everything asked of the ground straight after a load -- the
+	# streets' junctions with the roads among it -- read the towns as though
+	# they had never been levelled.
+	_push_world()
 	_push_corridor()
 	_push_segments()
 

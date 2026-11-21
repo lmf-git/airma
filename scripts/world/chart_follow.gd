@@ -153,8 +153,10 @@ func _carry_fixed() -> void:
 		world.scenery.rechart()
 	Obstacles.recharted()
 	if is_instance_valid(world.obstacles):
-		# the few real bodies near the eye are rebuilt on the next look round
+		# the few real bodies near the eye are rebuilt on the next look round,
+		# and the bridge spans' from the moved decks
 		world.obstacles._near_at = Vector3(1e12, 0.0, 1e12)
+		world.obstacles._span_src = []
 	for i in mini(world._mask_spots.size(), _mask_laid.size()):
 		var m: Vector2 = _mask_laid[i]
 		var w: Vector3 = Sim.boot_to_world(Vector3(m.x, 0.0, m.y))

@@ -158,6 +158,21 @@ uniform float mask_half = 18000.0;
 // actually in.
 uniform vec2 mask_centre = vec2(0.0, 0.0);
 uniform vec3 tarmac : source_color = vec3(0.135, 0.133, 0.140);
+// The roads themselves, painted sharp round the eye (`Terrain.follow_roads`):
+// red the asphalt, green the kerb, blue the markings, each as a distance to its
+// edge with the edge at 0.5 (`road_paint` in raster.rs). Two squares, the near one
+// fine enough for the lines and the far one only for the asphalt and kerbs;
+// past both, the coarse mask above. Off while `_on` is 0.
+uniform sampler2D road_near : filter_linear_mipmap, repeat_disable;
+uniform vec2 road_near_centre = vec2(0.0);
+uniform float road_near_half = 256.0;
+uniform float road_near_on = 0.0;
+uniform sampler2D road_mid : filter_linear_mipmap, repeat_disable;
+uniform vec2 road_mid_centre = vec2(0.0);
+uniform float road_mid_half = 1024.0;
+uniform float road_mid_on = 0.0;
+uniform vec3 kerb_col : source_color = vec3(0.46, 0.45, 0.43);
+uniform vec3 paint_col : source_color = vec3(0.86, 0.85, 0.80);
 // Concrete and hardstanding, not wet earth. At 0.335 this was darker than the
 // grass it replaced, so every town read as a stain on the map rather than as a
 // built-up place.
@@ -416,9 +431,48 @@ void fragment() {
 		road_amt = mk.r;
 		town_amt = mk.g;
 	}
+	// The painted roads, where there are any: they take over from the coarse
+	// mask's smear, which was a road's worth of stain thirty metres wide.
+	float kerb_amt = 0.0;
+	float paint_amt = 0.0;
+	float cam_d = length(VERTEX);
+	if (road_mid_on > 0.5) {
+		vec2 ruv = (wpos.xz - road_mid_centre) / (road_mid_half * 2.0) + vec2(0.5);
+		float edge = max(abs(ruv.x - 0.5), abs(ruv.y - 0.5)) * 2.0;
+		if (edge < 1.0) {
+			float w = 1.0 - smoothstep(0.85, 1.0, edge);
+			// each channel a distance to its edge, which is at 0.5: cut it
+			// there, as soft as a pixel on the screen and no softer
+			vec4 r = texture(road_mid, ruv);
+			vec4 fw = max(fwidth(r), vec4(0.004)) * 0.75;
+			vec4 cv = smoothstep(vec4(0.5) - fw, vec4(0.5) + fw, r);
+			road_amt = mix(road_amt, cv.r, w);
+			kerb_amt = mix(kerb_amt, cv.g, w);
+		}
+	}
+	if (road_near_on > 0.5) {
+		vec2 ruv = (wpos.xz - road_near_centre) / (road_near_half * 2.0) + vec2(0.5);
+		float edge = max(abs(ruv.x - 0.5), abs(ruv.y - 0.5)) * 2.0;
+		if (edge < 1.0) {
+			float w = 1.0 - smoothstep(0.8, 1.0, edge);
+			vec4 r = texture(road_near, ruv);
+			vec4 fw = max(fwidth(r), vec4(0.004)) * 0.75;
+			vec4 cv = smoothstep(vec4(0.5) - fw, vec4(0.5) + fw, r);
+			road_amt = mix(road_amt, cv.r, w);
+			kerb_amt = mix(kerb_amt, cv.g, w);
+			// the lines only as near as they can be made out
+			paint_amt = cv.b * w * (1.0 - smoothstep(160.0, 300.0, cam_d));
+		}
+	}
 	float grit = (grain - 0.5) * 0.09;
 	base = mix(base, pow(made_ground, vec3(2.2)) * (1.0 + grit), town_amt * 0.78);
-	base = mix(base, pow(tarmac, vec3(2.2)) * (1.0 + grit * 0.5), road_amt * 0.88);
+	// (A `source_color` uniform is already linear: raised to 2.2 again, as
+	// the tarmac was, a road came out all but black, and the deck's road --
+	// the same colour, given once -- did not match the one it ran on from.)
+	base = mix(base, tarmac * (1.0 + grit * 0.5), road_amt * 0.94);
+	base = mix(base, kerb_col * (1.0 + grit), kerb_amt * 0.9);
+	// worn: a little of the road through the paint
+	base = mix(base, paint_col, paint_amt * (0.75 + 0.25 * grain));
 	ALBEDO = base;
 	ROUGHNESS = 0.95 - 0.12 * grain;
 	METALLIC = 0.0;
@@ -754,7 +808,14 @@ static func in_root(x: float, z: float) -> bool:
 ## ground stands on this.
 static func drawn_ground(x: float, z: float, eye: Vector3) -> float:
 	# a carrier's deck is not terrain: on one, the deck
-	if Sim.globe or not in_root(x, z) or (not Sim.decks.is_empty() and Sim.deck_height(x, z) > -1e8):
+	#
+	# The planet too. It is drawn by the same tree of flat chunks -- the field
+	# already carries the curve there, so nothing bends them afterwards -- and
+	# left out, a man in a town on the globe stood on the true ground while the
+	# fifteen or thirty metre mesh was drawn over it: by the bank of a bridge
+	# ramp, a metre or two of grass closed over his boots and he was seen to
+	# fall through ground he was walking on.
+	if not in_root(x, z) or (not Sim.decks.is_empty() and Sim.deck_height(x, z) > -1e8):
 		return Sim.height_at(x, z)
 	var depth: int = Sim.native.terrain_depth_at(x, z, eye)
 	if depth <= 0:
@@ -762,6 +823,116 @@ static func drawn_ground(x: float, z: float, eye: Vector3) -> float:
 	var cell: float = ROOT_SPAN / (pow(2.0, float(depth)) * float(CELLS))
 	var got: PackedFloat32Array = Sim.native.surfaces_at(PackedVector2Array([Vector2(x, z)]), cell)
 	return got[0] if got.size() > 0 else Sim.height_at(x, z)
+
+## What a foot comes down on at (x, z), for a body whose feet are at `y`: the
+## drawn ground, and above it anything solid whose top is within a step of the
+## feet -- a crate, a roof, a bridge deck (see `Obstacles.floor_under`). The
+## walker stands on this and his legs reach for it, so the two agree.
+static func foot_ground(x: float, z: float, y: float, eye: Vector3) -> float:
+	return maxf(drawn_ground(x, z, eye), Obstacles.floor_under(x, z, y))
+
+# ------------------------------------------------------------- painted roads
+## The roads are painted into the ground's material (`road_paint` in raster.rs)
+## in two squares round the eye: a near one at a quarter of a metre a texel
+## with the markings, and a far one at a metre with the asphalt and the kerbs.
+## Each is painted again, on a worker, once the eye has gone a quarter of the
+## way to its edge, and swapped in when it is ready -- the old one stays up
+## meanwhile, so falling behind costs sharpness and never a hole. Too high off
+## the ground to see one, it is not painted at all.
+const ROAD_LEVELS := [
+	# texels, half width, markings, how high the eye may be, its uniform prefix
+	[2048, 256.0, true, 900.0, "road_near"],
+	[2048, 1024.0, false, 4000.0, "road_mid"],
+]
+var _road_lv: Array = []
+## Painted at least once since the roads were last handed over -- for the
+## harness, and to know the near square is worth sampling.
+var roads_painted := 0
+## The last near square painted, un-mipmapped, for the harness.
+var road_near_img: Image = null
+
+func roads_changed() -> void:
+	for lv in _road_lv:
+		lv["centre"] = Vector2.INF
+
+func follow_roads(eye: Vector3) -> void:
+	if _mat == null:
+		return
+	if _road_lv.is_empty():
+		for spec in ROAD_LEVELS:
+			_road_lv.append({"n": spec[0], "half": spec[1], "lines": spec[2],
+				"ceiling": spec[3], "u": spec[4], "centre": Vector2.INF,
+				"task": -1, "want": Vector2.INF, "img": null, "tex": null})
+	var agl: float = eye.y - Sim.height_at(eye.x, eye.z)
+	for lv in _road_lv:
+		_collect_paint(lv)
+		if agl > float(lv["ceiling"]) or int(lv["task"]) >= 0:
+			continue
+		var half: float = lv["half"]
+		# snapped to whole texels' worth of ground, so a repaint draws the
+		# same road in the same texels and nothing crawls
+		var snap: float = half / 16.0
+		var c := Vector2(snappedf(eye.x, snap), snappedf(eye.z, snap))
+		var at: Vector2 = lv["centre"]
+		if at.x != INF and at.distance_to(c) < half * 0.25:
+			continue
+		_paint_roads(lv, c)
+
+## Paint one square on a worker.
+func _paint_roads(lv: Dictionary, c: Vector2) -> void:
+	var nat = Sim.native
+	var n: int = lv["n"]
+	var half: float = lv["half"]
+	var lines: bool = lv["lines"]
+	lv["want"] = c
+	lv["task"] = WorkerThreadPool.add_task(func() -> void:
+		var buf: PackedByteArray = nat.road_paint(n, half, c, lines)
+		var img := Image.create_from_data(n, n, false, Image.FORMAT_RGBA8, buf)
+		var raw: Image = img.duplicate() if lines else null
+		img.generate_mipmaps()
+		lv["img"] = img
+		lv["raw"] = raw, true, "road paint")
+
+## Swap a finished square in.
+func _collect_paint(lv: Dictionary) -> void:
+	var task: int = lv["task"]
+	if task < 0 or not WorkerThreadPool.is_task_completed(task):
+		return
+	WorkerThreadPool.wait_for_task_completion(task)
+	lv["task"] = -1
+	_finish_paint(lv)
+
+func _finish_paint(lv: Dictionary) -> void:
+	var img: Image = lv["img"]
+	if img == null:
+		return
+	lv["img"] = null
+	if lv["tex"] == null:
+		lv["tex"] = ImageTexture.create_from_image(img)
+	else:
+		(lv["tex"] as ImageTexture).update(img)
+	lv["centre"] = lv["want"]
+	var u: String = lv["u"]
+	_mat.set_shader_parameter(u, lv["tex"])
+	_mat.set_shader_parameter(u + "_centre", lv["centre"])
+	_mat.set_shader_parameter(u + "_half", lv["half"])
+	_mat.set_shader_parameter(u + "_on", 1.0)
+	if lv["lines"]:
+		road_near_img = lv.get("raw")
+		roads_painted += 1
+
+## Paint every square now, for `eye`, and wait for it: for the harness.
+func paint_roads_now(eye: Vector3) -> void:
+	follow_roads(eye)
+	for lv in _road_lv:
+		if int(lv["task"]) >= 0:
+			WorkerThreadPool.wait_for_task_completion(int(lv["task"]))
+			lv["task"] = -1
+		var snap: float = float(lv["half"]) / 16.0
+		_paint_roads(lv, Vector2(snappedf(eye.x, snap), snappedf(eye.z, snap)))
+		WorkerThreadPool.wait_for_task_completion(int(lv["task"]))
+		lv["task"] = -1
+		_finish_paint(lv)
 
 func depth_at(x: float, z: float, eye: Vector3) -> int:
 	return Sim.native.terrain_depth_at(x, z, eye)

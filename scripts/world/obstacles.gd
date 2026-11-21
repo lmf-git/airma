@@ -717,7 +717,45 @@ const NEAR_MAX := 64
 var _near: Array = []
 var _near_at := Vector3(1e12, 0, 1e12)
 
+## The road bridges' decks, the same way: a box for each span between two
+## stations -- the running surface and the girder under it, as `Scenery` draws
+## them -- for the spans within reach of the viewer, and nothing for the rest.
+## Nothing that walks or drives needs them; men and vehicles stand on a deck
+## by `Sim.bridge_floor`, which is exact. What needs them is the physics: a man
+## killed on a viaduct went down as a ragdoll onto a patch of ground laid at
+## the height of the valley floor, and fell through the deck to it.
+const SPAN_NEAR := 320.0
+const SPAN_MAX := 48
+var _spans: Array = []
+## Every span on the map as [centre, basis, length], worked out once per set of
+## bridges: the pool only picks from it.
+var _span_all: Array = []
+var _span_src: Array = []
+## Where a test has put the viewer for the pools, whatever the camera says:
+## off while x is out at 1e12.
+var _pin := Vector3(1e12, 0.0, 1e12)
+
+## Hold the pools at `eye` (a test's, not the camera's); `unpin` lets go.
+func pin(eye: Vector3) -> void:
+	_pin = eye
+	follow(eye)
+
+func unpin() -> void:
+	_pin = Vector3(1e12, 0.0, 1e12)
+
 func _ready() -> void:
+	for i in SPAN_MAX:
+		var sb := StaticBody3D.new()
+		sb.name = "Span%d" % i
+		sb.collision_layer = 4
+		sb.collision_mask = 0
+		var cs := CollisionShape3D.new()
+		cs.shape = BoxShape3D.new()
+		sb.add_child(cs)
+		sb.process_mode = Node.PROCESS_MODE_DISABLED
+		sb.position = Vector3(0.0, -100000.0, 0.0)
+		add_child(sb)
+		_spans.append(sb)
 	for i in NEAR_MAX:
 		var sb := StaticBody3D.new()
 		# the layer the ragdolls are on, so a body thrown down a street has the
@@ -732,10 +770,13 @@ func _ready() -> void:
 		_near.append(sb)
 
 ## Move the pool to wherever the viewer is. Cheap and idempotent.
-func follow(eye: Vector3) -> void:
-	if _near_at.distance_squared_to(eye) < 2500.0:
+func follow(eye_in: Vector3) -> void:
+	var eye: Vector3 = _pin if _pin.x < 1e11 else eye_in
+	var decks_moved: bool = not is_same(_span_src, Sim.road_bridges)
+	if _near_at.distance_squared_to(eye) < 2500.0 and not decks_moved:
 		return
 	_near_at = eye
+	_follow_spans(eye)
 	var found: Array = []
 	for id in _ids_in(Vector2(eye.x - NEAR, eye.z - NEAR), Vector2(eye.x + NEAR, eye.z + NEAR)):
 		var b: int = id * STRIDE
@@ -758,3 +799,69 @@ func follow(eye: Vector3) -> void:
 		sb.position = Vector3(_ent[b2], _ent[b2 + 1], _ent[b2 + 2])
 		sb.rotation = Vector3(0.0, atan2(-_ent[b2 + 7], _ent[b2 + 6]), 0.0)
 		sb.process_mode = Node.PROCESS_MODE_INHERIT
+
+## Every span of every road bridge as a box: [centre, basis, length]. The deck
+## is drawn station to station, each end panel lapping `Sim.BRIDGE_LAP` past
+## its abutment, and sloped with the profile -- the same panels `Scenery`
+## builds, so the body is where the deck is seen.
+func _index_spans() -> void:
+	_span_src = Sim.road_bridges
+	_span_all = []
+	for br in Sim.road_bridges:
+		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
+		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
+		if pts.size() < 2 or ys.size() != pts.size():
+			continue
+		var last := pts.size() - 2
+		for i in pts.size() - 1:
+			var a2: Vector2 = pts[i]
+			var c2: Vector2 = pts[i + 1]
+			var run := a2.distance_to(c2)
+			if run < 0.5:
+				continue
+			var dir := (c2 - a2) / run
+			if i == 0:
+				a2 -= dir * Sim.BRIDGE_LAP
+			if i == last:
+				c2 += dir * Sim.BRIDGE_LAP
+			var ta := Vector3(a2.x, ys[i] - Sim.planet_drop(a2.x, a2.y), a2.y)
+			var tc := Vector3(c2.x, ys[i + 1] - Sim.planet_drop(c2.x, c2.y), c2.y)
+			var fwd := (tc - ta).normalized()
+			var across := Vector3(dir.y, 0.0, -dir.x)
+			var up := fwd.cross(across).normalized()
+			var turn := Basis(across, up, fwd)
+			var centre := (ta + tc) * 0.5 - up * (Sim.BRIDGE_GIRDER * 0.5)
+			_span_all.append([centre, turn, ta.distance_to(tc)])
+
+## The spans nearest the viewer get the bodies; the rest are switched off.
+func _follow_spans(eye: Vector3) -> void:
+	if not is_same(_span_src, Sim.road_bridges):
+		_index_spans()
+	var found: Array = []
+	for k in _span_all.size():
+		var sp: Array = _span_all[k]
+		var c: Vector3 = sp[0]
+		# to the nearer end of the span, on the flat
+		var d: float = maxf(Vector2(c.x - eye.x, c.z - eye.z).length() - float(sp[2]) * 0.5, 0.0)
+		if d < SPAN_NEAR:
+			found.append([d, k])
+	found.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+	for i in SPAN_MAX:
+		var sb: StaticBody3D = _spans[i]
+		if i >= found.size():
+			sb.process_mode = Node.PROCESS_MODE_DISABLED
+			sb.position = Vector3(0.0, -100000.0, 0.0)
+			continue
+		var sp2: Array = _span_all[found[i][1]]
+		var box := (sb.get_child(0) as CollisionShape3D).shape as BoxShape3D
+		box.size = Vector3(Sim.BRIDGE_HALF * 2.0, Sim.BRIDGE_GIRDER, float(sp2[2]))
+		sb.global_transform = Transform3D(sp2[1], sp2[0])
+		sb.process_mode = Node.PROCESS_MODE_INHERIT
+
+## How many deck spans have a body right now, for the tests.
+func live_spans() -> int:
+	var n := 0
+	for sb in _spans:
+		if (sb as StaticBody3D).process_mode != Node.PROCESS_MODE_DISABLED:
+			n += 1
+	return n

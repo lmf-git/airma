@@ -1221,9 +1221,12 @@ func _plant_feet(delta: float) -> void:
 
 ## How far above or below his own origin the floor is at a point.
 func _floor_under(at: Vector3) -> float:
-	var y: float = Sim.height_at(at.x, at.z)
-	# a roof counts only if he could be standing on it
-	y = maxf(y, Obstacles.floor_under(at.x, at.z, global_position.y + 0.1))
+	# What his body stands on, so the feet and the body agree: the drawn
+	# ground, not the sampled one, and a roof, a deck or the road up to one
+	# only if he could be standing on it. On the true ground his feet went
+	# into the grass or hung over it wherever the mesh cut a corner.
+	var y: float = Terrain.foot_ground(at.x, at.z, global_position.y + 0.1,
+		global_position + Vector3(0.0, 1.7, 0.0))
 	return clampf(y - global_position.y, -0.45, 0.45)
 
 ## Where the weapon goes: built in the eye's frame, so that wherever he looks
