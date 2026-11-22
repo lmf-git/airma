@@ -323,11 +323,11 @@ func _ready() -> void:
 	# -- four keys that had all moved, on the first screen anybody sees.
 	help.text = "W/S pitch  ·  A/D roll  ·  Q/E rudder  ·  SHIFT/CTRL throttle  ·  G gear  ·  F flaps  ·  X brakes\n" \
 		+ "B bay doors  ·  1-8 pick weapon  ·  %s cycle  ·  %s target  ·  SPACE fire  ·  %s gun  ·  %s flares  ·  %s chaff\n" % [
-			Sim.key_label(&"cycle_weapon"), Sim.key_label(&"cycle_target"),
-			Sim.key_label(&"gun"), Sim.key_label(&"flare"), Sim.key_label(&"chaff")] \
+			Sim.keys.label(&"cycle_weapon"), Sim.keys.label(&"cycle_target"),
+			Sim.keys.label(&"gun"), Sim.keys.label(&"flare"), Sim.keys.label(&"chaff")] \
 		+ "%s camera (cockpit / chase / orbit)  ·  %s night vision  ·  %s mouse stick  ·  %s fly-by-wire  ·  ESC menu" % [
-			Sim.key_label(&"camera"), Sim.key_label(&"night_vision"),
-			Sim.key_label(&"mouse_fly"), Sim.key_label(&"assist")]
+			Sim.keys.label(&"camera"), Sim.keys.label(&"night_vision"),
+			Sim.keys.label(&"mouse_fly"), Sim.keys.label(&"assist")]
 	help.add_theme_font_size_override("font_size", 13)
 	help.add_theme_color_override("font_color", Color(0.55, 0.62, 0.7))
 	root.add_child(help)
@@ -343,7 +343,7 @@ func _select_faction(f: String) -> void:
 		_faction_btns[k].modulate = Color(1, 1, 1) if k != f else Color(0.55, 1.0, 0.75)
 	_rebuild_cards()
 	if f == "ground":
-		_select("veh:" + str(Tank.KINDS.keys()[0]))
+		_select("veh:" + str(VehicleSpec.KINDS.keys()[0]))
 		return
 	if f == "sea":
 		_select("sea:" + _crewable_ships()[0])
@@ -455,7 +455,7 @@ func _rebuild_cards() -> void:
 	var ground_ids := _ground_for(faction)
 	if not ground_ids.is_empty():
 		for k in ground_ids:
-			var kd: Dictionary = Tank.KINDS[k]
+			var kd: Dictionary = VehicleSpec.KINDS[k]
 			var vb := Button.new()
 			vb.custom_minimum_size = Vector2(152, 62)
 			vb.text = "%s\n%s" % [str(kd["name"]), VCLASS_NAMES.get(
@@ -590,7 +590,7 @@ func _select(id: String) -> void:
 	if id.begins_with("veh:"):
 		for k in _cards:
 			_cards[k].modulate = Color(1, 1, 1) if k != id else Color(0.55, 1.0, 0.75)
-		var kd: Dictionary = Tank.KINDS[id.substr(4)]
+		var kd: Dictionary = VehicleSpec.KINDS[id.substr(4)]
 		var vcl: String = String(kd.get("class", "mbt"))
 		var indirect: bool = vcl == "spg" or vcl == "mlrs" or vcl == "tel"
 		var how := "Direct fire. Put the crosshair on it and pull."
@@ -656,24 +656,7 @@ func _select(id: String) -> void:
 		["LOW OBSERVABLE", clampf(1.0 - s["stealth"] / 1.3, 0.0, 1.0), "%s" % ("internal bays" if s["bays"][0]["kind"] == "internal" else "external pylons")],
 	]
 	for r in rows:
-		var h := HBoxContainer.new()
-		var l := Label.new()
-		l.text = r[0]
-		l.custom_minimum_size = Vector2(160, 0)
-		l.add_theme_font_size_override("font_size", 13)
-		l.add_theme_color_override("font_color", Color(0.6, 0.7, 0.8))
-		h.add_child(l)
-		var bar := ProgressBar.new()
-		bar.custom_minimum_size = Vector2(110, 14)
-		bar.show_percentage = false
-		bar.value = clampf(r[1], 0.05, 1.0) * 100.0
-		h.add_child(bar)
-		var v := Label.new()
-		v.text = " " + str(r[2])
-		v.add_theme_font_size_override("font_size", 13)
-		v.add_theme_color_override("font_color", Color(0.85, 0.92, 1.0))
-		h.add_child(v)
-		_stats.add_child(h)
+		_stats.add_child(_stat_row(String(r[0]), float(r[1]), str(r[2])))
 	jet_changed.emit(id)
 
 ## What each ground vehicle class is called on its card and in the stats page.
@@ -685,7 +668,7 @@ const VCLASS_NAMES := {
 }
 
 func vclass_of(id: String) -> String:
-	var kd: Dictionary = Tank.KINDS[id.substr(4)]
+	var kd: Dictionary = VehicleSpec.KINDS[id.substr(4)]
 	return String(VCLASS_NAMES.get(String(kd.get("class", "mbt")), "Vehicle")).to_lower()
 
 ## The hulls on show under the current tab. Ships carry a faction now, so a
@@ -707,9 +690,9 @@ func _ground_for(f: String) -> Array:
 	var out: Array = []
 	if f == "sea":
 		return out
-	for k in Tank.KINDS:
+	for k in VehicleSpec.KINDS:
 		if f == "" or f == "ground" \
-				or String(Tank.KINDS[k].get("faction", "")) == f:
+				or String(VehicleSpec.KINDS[k].get("faction", "")) == f:
 			out.append(k)
 	return out
 

@@ -853,7 +853,7 @@ func _run_globe_world_test() -> void:
 			var q0 := Vector2(cos(a0), sin(a0)) * (float(km0) * 1000.0)
 			spots.append([Sim.chart_to_dir(q0.x, q0.y),
 				Sim.climate_lat(q0.x, q0.y),
-				Sim.biome_kind(q0.x, q0.y, Sim.height_at(q0.x, q0.y), 1.0),
+				Sim.biomes.kind(q0.x, q0.y, Sim.height_at(q0.x, q0.y), 1.0),
 				Sim.height_at(q0.x, q0.y) - Sim.sea_at(q0.x, q0.y)])
 	# The whole move, as the game does it: the chart and the world's works with
 	# it. Moving the chart alone leaves the roads and the aerodrome behind and
@@ -880,7 +880,7 @@ func _run_globe_world_test() -> void:
 		# ground under it does not is the thresholding, not the world.
 		var h2: float = Sim.height_at(q2.x, q2.y) - Sim.sea_at(q2.x, q2.y)
 		hgt_worst = maxf(hgt_worst, absf(h2 - float(spp[3])))
-		if Sim.biome_kind(q2.x, q2.y, Sim.height_at(q2.x, q2.y), 1.0) \
+		if Sim.biomes.kind(q2.x, q2.y, Sim.height_at(q2.x, q2.y), 1.0) \
 				!= String(spp[2]) and absf(h2 - float(spp[3])) > 0.5:
 			biome_moved += 1
 	print("[globeworld] read from the moved chart, the same ground stands within %.2f m of where it did" % [
@@ -1497,7 +1497,7 @@ func _run_patch_test() -> void:
 				int((uv.y - w2[2]) / maxf(w2[3] - w2[2], 1e-9) * float(m.PATCH_RES)))
 		# A point the network actually runs through, near the middle of the
 		# window, and its neighbour well off the road.
-		for ln in Sim.road_lines():
+		for ln in Sim.roads.road_lines():
 			var pl: PackedVector2Array = ln
 			for pt in pl:
 				var px: Vector2i = to_px.call(pt)
@@ -1735,7 +1735,7 @@ func _run_sun_test() -> void:
 		# snow. Asked of `Sim`, which is the copy the game stands on.
 		for m in 60:
 			var h: float = float(m) * 60.0
-			var w: PackedFloat32Array = Sim.biome_weights(0.0, 0.0, h, 1.0)
+			var w: PackedFloat32Array = Sim.biomes.weights(0.0, 0.0, h, 1.0)
 			if w.size() > 0 and w[0] > 0.5:
 				line = h
 				break
@@ -3105,7 +3105,7 @@ func _run_culltest() -> void:
 		root.queue_free()
 	# and the same for the things you drive and sail, which are built out of the
 	# same helpers
-	for kind in Tank.KINDS.keys():
+	for kind in VehicleSpec.KINDS.keys():
 		var tv := Tank.new()
 		tv.setup(0, str(kind))
 		world.add_child(tv)

@@ -19,273 +19,6 @@ const DRIVE_MAX := 240000.0       # traction limit, roughly 0.4 g on 62 tonnes
 const BRAKE := 420000.0
 const ROLL_RESIST := 0.035
 
-const KINDS := {
-	"m1a2": {"faction": "usa", "name": "M1A2 Abrams", "class": "mbt", "hull": Color(0.31, 0.33, 0.27),
-			 "mass": 62000.0, "hp": 300.0, "power": 1_100_000.0, "top": 18.0, "gun": 520.0,
-			 "muzzle": 1580.0, "reload": 6.5, "blast": 11.0},
-	"t90": {"faction": "russia", "name": "T-90M Proryv", "class": "mbt", "hull": Color(0.26, 0.30, 0.22),
-			"mass": 46000.0, "hp": 250.0, "power": 840_000.0, "top": 16.5, "gun": 560.0,
-			"muzzle": 1660.0, "reload": 7.5, "blast": 11.5},
-	"type99": {"faction": "china", "name": "ZTZ-99A", "class": "mbt", "hull": Color(0.29, 0.31, 0.26),
-			   "mass": 58000.0, "hp": 260.0, "power": 1_000_000.0, "top": 17.5, "gun": 540.0,
-			   "muzzle": 1600.0, "reload": 7.0, "blast": 11.0},
-	"m109": {"faction": "usa", "name": "M109A7 Paladin", "class": "spg", "hull": Color(0.30, 0.32, 0.26),
-			 "mass": 28000.0, "hp": 190.0, "power": 520_000.0, "top": 13.5, "gun": 900.0,
-			 "muzzle": 560.0, "reload": 9.0, "blast": 26.0},
-	"msta": {"faction": "russia", "name": "2S19 Msta-S", "class": "spg", "hull": Color(0.25, 0.29, 0.21),
-			 "mass": 42000.0, "hp": 185.0, "power": 626_000.0, "top": 13.0, "gun": 940.0,
-			 "muzzle": 590.0, "reload": 10.0, "blast": 27.0},
-	# `muzzle` is the launch speed the ballistic solution is worked out from, and
-	# for a rocket it has to stand in for the whole boost -- a rocket is not a
-	# shell that leaves at its top speed and coasts. At 420 m/s the arc closes
-	# at v^2/g, which is eighteen kilometres, so an M270 could not reach twenty:
-	# these are set from the reach the launcher is supposed to have.
-	"m270": {"faction": "usa", "name": "M270 MLRS", "class": "mlrs", "hull": Color(0.28, 0.31, 0.25),
-			 "mass": 25000.0, "hp": 160.0, "power": 480_000.0, "top": 15.0, "gun": 420.0,
-			 "muzzle": 630.0, "reload": 26.0, "blast": 19.0, "salvo": 12, "ripple": 0.55},
-	"bm30": {"faction": "russia", "name": "BM-30 Smerch", "class": "mlrs", "hull": Color(0.24, 0.28, 0.20),
-			 "mass": 43700.0, "hp": 150.0, "power": 440_000.0, "top": 14.0, "gun": 470.0,
-			 "muzzle": 780.0, "reload": 30.0, "blast": 21.0, "salvo": 12, "ripple": 0.6},
-	# Transporter erector launchers. These do not shoot: they raise a canister
-	# and send a missile, and the missile does the rest. Everything that makes
-	# them worth having is in the round, so the vehicle is a chassis and a
-	# reload time.
-	"tel_kalibr": {"faction": "russia", "name": "Kalibr TEL", "class": "tel", "hull": Color(0.26, 0.29, 0.24),
-			 "hp": 130.0, "power": 400_000.0, "top": 16.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 34.0, "blast": 10.0,
-			 "missile": "kalibr", "rounds": 4},
-	"tel_zircon": {"faction": "russia", "name": "Zircon TEL", "class": "tel", "hull": Color(0.24, 0.26, 0.28),
-			 "hp": 130.0, "power": 400_000.0, "top": 16.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 40.0, "blast": 10.0,
-			 "missile": "zircon", "rounds": 2},
-	"tel_fattah": {"faction": "iran", "name": "Fattah TEL", "class": "tel", "hull": Color(0.34, 0.36, 0.28),
-			 "hp": 130.0, "power": 380_000.0, "top": 15.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 46.0, "blast": 10.0,
-			 "missile": "fattah", "rounds": 2},
-	"tel_khorram": {"faction": "iran", "name": "Khorramshahr TEL", "class": "tel",
-			 "hull": Color(0.30, 0.32, 0.26),
-			 "hp": 150.0, "power": 470_000.0, "top": 13.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 95.0, "blast": 10.0,
-			 "missile": "khorram", "rounds": 1},
-	"tel_oreshnik": {"faction": "russia", "name": "Oreshnik TEL", "class": "tel",
-			 "hull": Color(0.28, 0.28, 0.26),
-			 "hp": 150.0, "power": 460_000.0, "top": 13.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 90.0, "blast": 10.0,
-			 "missile": "oreshnik", "rounds": 1},
-	# Strategic. Three stages and a bus of warheads, off a road-mobile
-	# launcher: one round, and a very long time to put another on the erector.
-	"tel_yars": {"faction": "russia", "name": "RS-24 Yars ICBM", "class": "tel",
-			 "hull": Color(0.25, 0.28, 0.22),
-			 "hp": 170.0, "power": 600_000.0, "top": 11.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 240.0, "blast": 10.0,
-			 "missile": "yars", "rounds": 1},
-	"tel_df41": {"faction": "china", "name": "DF-41 ICBM", "class": "tel",
-			 "hull": Color(0.27, 0.30, 0.24),
-			 "hp": 170.0, "power": 600_000.0, "top": 11.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 240.0, "blast": 10.0,
-			 "missile": "df41", "rounds": 1},
-	"tel_minuteman": {"faction": "usa", "name": "Minuteman III ICBM", "class": "tel",
-			 "hull": Color(0.31, 0.33, 0.27),
-			 "hp": 170.0, "power": 600_000.0, "top": 11.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 240.0, "blast": 10.0,
-			 "missile": "minuteman", "rounds": 1},
-	# ------------------------------------------------- more of what exists
-	# Filling the holes in the order of battle. Britain and France had no
-	# artillery of any kind, China had no gun or rocket artillery, and Iran had
-	# no tank — so three of the six factions could not put a fire mission on the
-	# map at all.
-	"challenger2": {"faction": "uk", "name": "Challenger 2", "class": "mbt",
-			 "hull": Color(0.30, 0.32, 0.27),
-			 "mass": 64000.0, "hp": 290.0, "power": 890_000.0, "top": 16.0, "gun": 540.0,
-			 "muzzle": 1600.0, "reload": 7.0, "blast": 11.0},
-	"leclerc": {"faction": "france", "name": "AMX-56 Leclerc", "class": "mbt",
-			 "hull": Color(0.32, 0.34, 0.28),
-			 "mass": 56000.0, "hp": 255.0, "power": 1_100_000.0, "top": 19.0, "gun": 530.0,
-			 "muzzle": 1620.0, "reload": 5.5, "blast": 11.0},
-	"karrar": {"faction": "iran", "name": "Karrar", "class": "mbt",
-			 "hull": Color(0.34, 0.34, 0.26),
-			 "mass": 51000.0, "hp": 220.0, "power": 810_000.0, "top": 17.0, "gun": 500.0,
-			 "muzzle": 1580.0, "reload": 8.0, "blast": 10.5},
-	"as90": {"faction": "uk", "name": "AS-90 Braveheart", "class": "spg",
-			 "hull": Color(0.29, 0.31, 0.26),
-			 "mass": 45000.0, "hp": 185.0, "power": 490_000.0, "top": 14.0, "gun": 890.0,
-			 "muzzle": 570.0, "reload": 9.5, "blast": 26.0},
-	# The obvious French gun is the CAESAR, and the CAESAR is a lorry with a
-	# howitzer on the back — 79 km/h on road wheels. Built on the tracked hull
-	# this class actually models it could only make 9.4 m/s of its own 22, so it
-	# is the AUF1 instead, which is tracked and belongs on this chassis.
-	"auf1": {"faction": "france", "name": "AUF1 155", "class": "spg",
-			 "hull": Color(0.33, 0.34, 0.27),
-			 "mass": 42000.0, "hp": 180.0, "power": 500_000.0, "top": 13.5, "gun": 880.0,
-			 "muzzle": 600.0, "reload": 8.5, "blast": 26.0},
-	"plz05": {"faction": "china", "name": "PLZ-05", "class": "spg",
-			 "hull": Color(0.28, 0.30, 0.25),
-			 "mass": 35000.0, "hp": 190.0, "power": 520_000.0, "top": 14.0, "gun": 900.0,
-			 "muzzle": 580.0, "reload": 9.0, "blast": 26.5},
-	"phl03": {"faction": "china", "name": "PHL-03", "class": "mlrs",
-			 "hull": Color(0.26, 0.29, 0.24),
-			 "mass": 43000.0, "hp": 155.0, "power": 460_000.0, "top": 14.5, "gun": 460.0,
-			 "muzzle": 760.0, "reload": 28.0, "blast": 20.0, "salvo": 12, "ripple": 0.58},
-	"df21": {"faction": "china", "name": "DF-21D TEL", "class": "tel",
-			 "hull": Color(0.27, 0.29, 0.25),
-			 "hp": 145.0, "power": 450_000.0, "top": 14.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 85.0, "blast": 10.0,
-			 "missile": "df21d", "rounds": 1},
-	# ------------------------------------------------ anti-satellite
-	# A direct-ascent launcher. It shoots at nothing in the atmosphere: the only
-	# thing it can engage is in orbit, and the round is most of a space launch
-	# vehicle. One tube, one round, and a very long reload.
-	"asat_usa": {"faction": "usa", "name": "GMD-A ASAT launcher", "class": "asat",
-			 "hull": Color(0.30, 0.32, 0.28),
-			 "hp": 140.0, "power": 430_000.0, "top": 13.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 150.0, "blast": 10.0,
-			 "missile": "asat", "rounds": 1, "reach": 700000.0},
-	"asat_ru": {"faction": "russia", "name": "Nudol ASAT launcher", "class": "asat",
-			 "hull": Color(0.25, 0.28, 0.23),
-			 "hp": 140.0, "power": 430_000.0, "top": 13.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 150.0, "blast": 10.0,
-			 "missile": "asat", "rounds": 1, "reach": 700000.0},
-	"asat_cn": {"faction": "china", "name": "SC-19 ASAT launcher", "class": "asat",
-			 "hull": Color(0.27, 0.30, 0.25),
-			 "hp": 140.0, "power": 430_000.0, "top": 13.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 150.0, "blast": 10.0,
-			 "missile": "asat", "rounds": 1, "reach": 700000.0},
-	# ------------------------------------------------------ air defence
-	# There have always been surface-to-air batteries shooting at you and no way
-	# to be the one doing the shooting. A battery is a lorry with a radar and
-	# four rounds on it: it does not lay a gun, it acquires an aircraft and
-	# sends a missile, and everything that makes it dangerous is in the round.
-	"patriot": {"faction": "usa", "name": "MIM-104 Patriot", "class": "sam",
-			 "hull": Color(0.31, 0.33, 0.28),
-			 "radar": 78000.0, "hp": 130.0, "power": 400_000.0, "top": 15.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 6.0, "blast": 10.0,
-			 "missile": "sam_med", "rounds": 4, "reach": 65000.0},
-	"s400": {"faction": "russia", "name": "S-400 Triumf", "class": "sam",
-			 "hull": Color(0.26, 0.29, 0.23),
-			 "radar": 84000.0, "hp": 135.0, "power": 420_000.0, "top": 15.5, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 6.0, "blast": 10.0,
-			 "missile": "sam_med", "rounds": 4, "reach": 70000.0},
-	"hq9": {"faction": "china", "name": "HQ-9B", "class": "sam",
-			 "hull": Color(0.28, 0.30, 0.26),
-			 "radar": 74000.0, "hp": 130.0, "power": 410_000.0, "top": 15.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 6.5, "blast": 10.0,
-			 "missile": "sam_med", "rounds": 4, "reach": 62000.0},
-	"bavar": {"faction": "iran", "name": "Bavar-373", "class": "sam",
-			 "hull": Color(0.34, 0.35, 0.27),
-			 "radar": 62000.0, "hp": 120.0, "power": 380_000.0, "top": 14.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 8.0, "blast": 10.0,
-			 "missile": "sam_med", "rounds": 3, "reach": 52000.0},
-	"skysabre": {"faction": "uk", "name": "Sky Sabre", "class": "sam",
-			 "hull": Color(0.30, 0.32, 0.27),
-			 "radar": 54000.0, "hp": 115.0, "power": 380_000.0, "top": 16.0, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 5.5, "blast": 10.0,
-			 "missile": "sam_med", "rounds": 4, "reach": 45000.0},
-	"sampt": {"faction": "france", "name": "SAMP/T Mamba", "class": "sam",
-			 "hull": Color(0.32, 0.33, 0.28),
-			 "radar": 70000.0, "hp": 125.0, "power": 390_000.0, "top": 15.5, "gun": 400.0,
-			 "muzzle": 400.0, "reload": 6.0, "blast": 10.0,
-			 "missile": "sam_med", "rounds": 4, "reach": 58000.0},
-	# ------------------------------------------------ infantry fighting vehicles
-	# The gap between a 4x4 and sixty-two tonnes of tank. An autocannon rather
-	# than a main gun: it fires fast, it will not trouble frontal armour, and it
-	# ruins anything softer.
-	"bradley": {"faction": "usa", "name": "M2A3 Bradley", "class": "ifv",
-			 "hull": Color(0.31, 0.33, 0.27),
-			 "hp": 160.0, "power": 447_000.0, "top": 18.0, "gun": 95.0,
-			 "muzzle": 1100.0, "reload": 0.42, "blast": 4.5},
-	"bmp3": {"faction": "russia", "name": "BMP-3", "class": "ifv",
-			 "hull": Color(0.26, 0.30, 0.22),
-			 "hp": 145.0, "power": 373_000.0, "top": 19.0, "gun": 105.0,
-			 "muzzle": 1050.0, "reload": 0.46, "blast": 5.0},
-	"zbd04": {"faction": "china", "name": "ZBD-04A", "class": "ifv",
-			 "hull": Color(0.28, 0.31, 0.25),
-			 "hp": 150.0, "power": 440_000.0, "top": 18.5, "gun": 100.0,
-			 "muzzle": 1070.0, "reload": 0.45, "blast": 4.8},
-	"warrior": {"faction": "uk", "name": "Warrior FV510", "class": "ifv",
-			 "hull": Color(0.30, 0.32, 0.27),
-			 "hp": 155.0, "power": 410_000.0, "top": 17.5, "gun": 90.0,
-			 "muzzle": 1080.0, "reload": 0.44, "blast": 4.4},
-	"vbci": {"faction": "france", "name": "VBCI", "class": "ifv",
-			 "hull": Color(0.32, 0.34, 0.28),
-			 "hp": 140.0, "power": 405_000.0, "top": 20.0, "gun": 88.0,
-			 "muzzle": 1090.0, "reload": 0.44, "blast": 4.3},
-	"boragh": {"faction": "iran", "name": "Boragh", "class": "ifv",
-			 "hull": Color(0.34, 0.35, 0.26),
-			 "hp": 120.0, "power": 330_000.0, "top": 17.0, "gun": 78.0,
-			 "muzzle": 1000.0, "reload": 0.50, "blast": 4.0},
-	# ------------------------------------------- self propelled anti-aircraft
-	# Short range air defence with a gun rather than a round. Nothing else on
-	# the field can touch a helicopter at two kilometres.
-	"avenger": {"faction": "usa", "name": "M-SHORAD Stryker", "class": "spaag",
-			 "hull": Color(0.31, 0.33, 0.28),
-			 "radar": 16000.0, "sam_rounds": 8, "sam_reach": 9000.0, "sam_missile": "manpads", "hp": 120.0, "power": 260_000.0, "top": 26.0, "gun": 70.0,
-			 "muzzle": 1100.0, "reload": 0.10, "blast": 3.0, "reach": 4000.0},
-	"shilka": {"faction": "russia", "name": "ZSU-23-4 Shilka", "class": "spaag",
-			 "hull": Color(0.26, 0.29, 0.23),
-			 "radar": 11000.0, "sam_rounds": 4, "sam_reach": 5500.0, "sam_missile": "manpads", "hp": 110.0, "power": 205_000.0, "top": 14.0, "gun": 55.0,
-			 "muzzle": 970.0, "reload": 0.06, "blast": 2.4, "reach": 2600.0},
-	"gepard": {"faction": "france", "name": "Gepard 1A2", "class": "spaag",
-			 "hull": Color(0.32, 0.33, 0.28),
-			 "radar": 18000.0, "sam_rounds": 6, "sam_reach": 8000.0, "sam_missile": "manpads", "hp": 135.0, "power": 610_000.0, "top": 18.0, "gun": 90.0,
-			 "muzzle": 1200.0, "reload": 0.11, "blast": 3.4, "reach": 5500.0},
-	"pgz09": {"faction": "china", "name": "PGZ-09", "class": "spaag",
-			 "hull": Color(0.28, 0.30, 0.25),
-			 "radar": 17000.0, "sam_rounds": 6, "sam_reach": 8000.0, "sam_missile": "manpads", "hp": 130.0, "power": 520_000.0, "top": 16.0, "gun": 85.0,
-			 "muzzle": 1150.0, "reload": 0.11, "blast": 3.2, "reach": 5000.0},
-	# ------------------------------------------------------- light 4x4s
-	# Protected patrol vehicles. Not armour: a chassis, a crew cab, four coil
-	# sprung wheels that steer, and whatever is bolted to the roof. They are
-	# here to move about quickly and to get somewhere a tank cannot, and they
-	# lose any argument with something that has a gun on it.
-	"humvee": {"faction": "usa", "name": "M1151 HMMWV", "class": "lav",
-			 "hull": Color(0.33, 0.35, 0.29),
-			 "hp": 70.0, "power": 142_000.0, "top": 31.0, "gun": 34.0, "reach": 1800.0,
-			 "muzzle": 890.0, "reload": 0.0, "blast": 0.0,
-			 "mass": 5400.0,
-			 "mg_rate": 0.11, "mg_damage": 34.0,
-			 "chassis": {"len": 4.90, "wide": 2.20, "tall": 1.42, "wb": 3.30,
-					 "track": 0.92, "r": 0.47, "mount": "ring"}},
-	"jackal": {"faction": "uk", "name": "Jackal 2 MWMIK", "class": "lav",
-			 "hull": Color(0.42, 0.38, 0.27),
-			 "hp": 62.0, "power": 138_000.0, "top": 36.0, "gun": 32.0, "reach": 1800.0,
-			 "muzzle": 890.0, "reload": 0.0, "blast": 0.0,
-			 "mass": 7100.0,
-			 "mg_rate": 0.10, "mg_damage": 32.0,
-			 "chassis": {"len": 5.40, "wide": 2.10, "tall": 1.28, "wb": 3.05,
-					 "track": 0.90, "r": 0.52, "mount": "open"}},
-	"vbl": {"faction": "france", "name": "Panhard VBL", "class": "lav",
-			 "hull": Color(0.29, 0.32, 0.28),
-			 "hp": 78.0, "power": 71_000.0, "top": 26.0, "gun": 28.0, "reach": 1600.0,
-			 "muzzle": 860.0, "reload": 0.0, "blast": 0.0,
-			 "mass": 4000.0,
-			 "mg_rate": 0.12, "mg_damage": 28.0,
-			 "chassis": {"len": 3.95, "wide": 2.02, "tall": 1.58, "wb": 2.50,
-					 "track": 0.84, "r": 0.45, "mount": "ring"}},
-	"tigr": {"faction": "russia", "name": "GAZ-2330 Tigr", "class": "lav",
-			 "hull": Color(0.27, 0.30, 0.23),
-			 "hp": 76.0, "power": 153_000.0, "top": 35.0, "gun": 34.0, "reach": 1800.0,
-			 "muzzle": 890.0, "reload": 0.0, "blast": 0.0,
-			 "mass": 7800.0,
-			 "mg_rate": 0.11, "mg_damage": 34.0,
-			 "chassis": {"len": 5.70, "wide": 2.30, "tall": 1.55, "wb": 3.30,
-					 "track": 0.96, "r": 0.50, "mount": "ring"}},
-	"mengshi": {"faction": "china", "name": "CSK-131 Mengshi", "class": "lav",
-			 "hull": Color(0.28, 0.31, 0.26),
-			 "hp": 74.0, "power": 160_000.0, "top": 37.0, "gun": 32.0, "reach": 1800.0,
-			 "muzzle": 890.0, "reload": 0.0, "blast": 0.0,
-			 "mass": 7500.0,
-			 "mg_rate": 0.11, "mg_damage": 32.0,
-			 "chassis": {"len": 5.05, "wide": 2.12, "tall": 1.60, "wb": 3.20,
-					 "track": 0.92, "r": 0.48, "mount": "ring"}},
-	"safir": {"faction": "iran", "name": "Safir 4x4", "class": "lav",
-			 "hull": Color(0.38, 0.37, 0.26),
-			 "hp": 48.0, "power": 78_000.0, "top": 30.0, "gun": 24.0, "reach": 1500.0,
-			 "muzzle": 840.0, "reload": 0.0, "blast": 0.0,
-			 "mass": 2400.0,
-			 "mg_rate": 0.13, "mg_damage": 24.0,
-			 "chassis": {"len": 3.80, "wide": 1.74, "tall": 1.24, "wb": 2.40,
-					 "track": 0.78, "r": 0.42, "mount": "open"}},
-}
 
 var kind := "m1a2"
 var team := 0
@@ -342,6 +75,7 @@ var _fire: GPUParticles3D
 var _wreck_smoke: GPUParticles3D
 var _mantlet: Node3D
 var _muzzle: Node3D
+var _model := TankModel.new(self)
 ## Something left the vehicle. The weapon camera rides whatever comes out of
 ## this; only aircraft and ships had it, so a launcher's round had nothing to
 ## follow and the view stayed on the lorry.
@@ -380,10 +114,6 @@ var _steer := 0.0                 # where they are now
 var _drive_max := DRIVE_MAX
 var _brake_max := BRAKE
 var _wheel_r := WHEEL_R           # the radius the visual spin is worked out from
-## Where a launcher's canisters sit, so a round leaves from inside one.
-var _tube_lanes: Array = []
-var _tube_len := 3.0
-var _tube_rise := 0.9      # {node, side, index, rest_y, spin}
 var _wheel_spin := 0.0
 var rounds_left := 1              # rounds on the rails, refilled on resupply
 ## A gun vehicle's missiles, counted separately: `rounds_left` belongs to the
@@ -454,8 +184,8 @@ func _plan_wheels() -> void:
 
 func setup(t := 0, k := "m1a2") -> void:
 	team = t
-	kind = k if KINDS.has(k) else "m1a2"
-	var kd: Dictionary = KINDS[kind]
+	kind = k if VehicleSpec.KINDS.has(k) else "m1a2"
+	var kd: Dictionary = VehicleSpec.KINDS[kind]
 	_cls = String(kd.get("class", "mbt"))
 	_indirect = _cls == "spg" or _cls == "mlrs" or _cls == "tel"
 	_air_def = _cls == "sam" or _cls == "spaag"
@@ -525,8 +255,8 @@ func setup(t := 0, k := "m1a2") -> void:
 			_drive_max = 150000.0
 			_brake_max = 260000.0
 		"lav":
-			var ch: Dictionary = KINDS[kind].get("chassis", {})
-			mass = float(KINDS[kind].get("mass", 5400.0))
+			var ch: Dictionary = VehicleSpec.KINDS[kind].get("chassis", {})
+			mass = float(VehicleSpec.KINDS[kind].get("mass", 5400.0))
 			inertia = Vector3(mass * 0.55, mass * 0.62, mass * 0.24)
 			_travel = 0.30
 			_damp = 0.80
@@ -547,7 +277,7 @@ func setup(t := 0, k := "m1a2") -> void:
 			# skid-steer even once the lateral resistance was right: the thrust
 			# difference needed scales with the weight, and they did not have
 			# it. Inertia follows the mass rather than staying fixed too.
-			mass = float(KINDS[kind].get("mass", 62000.0))
+			mass = float(VehicleSpec.KINDS[kind].get("mass", 62000.0))
 			var f: float = mass / 62000.0
 			inertia = Vector3(120000.0, 140000.0, 60000.0) * f
 			_mu_lat = 0.85
@@ -574,21 +304,21 @@ func setup(t := 0, k := "m1a2") -> void:
 		"ifv", "spaag":
 			box.size = Vector3(3.3, 1.9, 6.6)
 		"lav":
-			var cb: Dictionary = KINDS[kind].get("chassis", {})
+			var cb: Dictionary = VehicleSpec.KINDS[kind].get("chassis", {})
 			box.size = Vector3(float(cb.get("wide", 2.2)), float(cb.get("tall", 1.4)),
 				float(cb.get("len", 4.9)))
 		_:
 			box.size = Vector3(3.7, 2.0, 7.9)
 	shape.shape = box
 	add_child(shape)
-	_build()
+	_model.build()
 	_cache_bounds()
 	add_to_group("hittable")
 	add_to_group("vehicles")
 	# An air defence vehicle carries its own search set — the battery has the
 	# panel modelled on the back of it — so it contributes to what its side can
 	# see, the same way an early warning aircraft does.
-	if float(KINDS[kind].get("radar", 0.0)) > 0.0:
+	if float(VehicleSpec.KINDS[kind].get("radar", 0.0)) > 0.0:
 		add_to_group("air_radar")
 	add_to_group("boardable")
 	cam = Camera3D.new()
@@ -598,159 +328,6 @@ func setup(t := 0, k := "m1a2") -> void:
 	cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	add_child(cam)
 
-# --------------------------------------------------------------------------
-func _build() -> void:
-	var body := MeshKit.panelled(KINDS[kind]["hull"], 0.92, 0.10, 1.1)
-	var dark := MeshKit.mat(Color(0.11, 0.11, 0.12), 0.85, 0.2)
-
-	var st := MeshKit.begin()
-	if vclass() == "tel" or vclass() == "asat":
-		_build_tel_chassis(st, body, dark)
-		return
-	if vclass() == "lav":
-		_build_light_chassis(st, body, dark)
-		return
-	if vclass() == "sam":
-		_build_battery(st, body, dark)
-		return
-	# lower hull, glacis and side skirts. An infantry vehicle and a gun tank
-	# share the running gear but not the size of it: `k` is how much of a main
-	# battle tank this one is.
-	var k: float = 0.86 if vclass() == "ifv" or vclass() == "spaag" else 1.0
-	MeshKit.box(st, Vector3(3.5 * k, 0.85, 7.3 * k), Vector3(0, 0.10, 0))
-	var glacis := PackedVector2Array([
-		Vector2(-1.75 * k, -3.65 * k), Vector2(1.75 * k, -3.65 * k),
-		Vector2(1.75 * k, -1.30 * k), Vector2(-1.75 * k, -1.30 * k)])
-	MeshKit.prism(st, glacis, Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0),
-		PackedFloat32Array([0.06, 0.06, 0.40, 0.40]), Vector3(0, 0.72, 0))
-	MeshKit.box(st, Vector3(3.42 * k, 0.62, 4.9 * k), Vector3(0, 0.86, 0.9 * k))
-	for sx in [-1.0, 1.0]:
-		MeshKit.box(st, Vector3(0.16, 0.72, 7.0 * k), Vector3(sx * 1.79 * k, 0.62, 0.1))
-		MeshKit.box(st, Vector3(0.55, 0.30, 1.5), Vector3(sx * 1.5 * k, 1.30, 2.9 * k))
-	MeshKit.box(st, Vector3(1.2, 0.45, 1.1), Vector3(0, 1.28, 3.2 * k))   # engine deck
-	if vclass() == "spg":
-		MeshKit.box(st, Vector3(2.6, 0.35, 1.2), Vector3(0, 0.30, 4.1))   # recoil spade
-	add_child(MeshKit.mi(MeshKit.finish(st, body), "Hull"))
-
-	# tracks: belt shell plus separate road wheels that follow the suspension
-	var tst := MeshKit.begin()
-	for sx in [-1.0, 1.0]:
-		var belt := PackedVector2Array([
-			Vector2(-3.9 * k, 0.06), Vector2(-3.35 * k, 0.95), Vector2(3.35 * k, 0.95),
-			Vector2(3.9 * k, 0.06), Vector2(3.35 * k, -0.30), Vector2(-3.35 * k, -0.30)])
-		MeshKit.prism(tst, belt, Vector3(0, 0, 1), Vector3(0, 1, 0), Vector3(1, 0, 0),
-			PackedFloat32Array([0.30, 0.30, 0.30, 0.30, 0.30, 0.30]),
-			Vector3(sx * TRACK_HALF * k, 0.02, 0))
-	add_child(MeshKit.mi(MeshKit.finish(tst, dark), "Tracks"))
-
-	for sx in [-1.0, 1.0]:
-		for i in WHEELS_PER_SIDE:
-			var z := lerpf(-2.95 * k, 2.95 * k, float(i) / float(WHEELS_PER_SIDE - 1))
-			var w := MeshInstance3D.new()
-			var cyl := CylinderMesh.new()
-			cyl.top_radius = WHEEL_R * k
-			cyl.bottom_radius = WHEEL_R * k
-			cyl.height = 0.34
-			cyl.radial_segments = 10
-			w.mesh = cyl
-			w.material_override = MeshKit.mat(Color(0.17, 0.18, 0.17), 0.9, 0.1)
-			w.rotation_degrees = Vector3(0, 0, 90)
-			w.position = Vector3(sx * TRACK_HALF * k, -0.18, z)
-			add_child(w)
-			_road_wheels.append({"node": w, "side": sx, "lat": sx * TRACK_HALF * k,
-				"z": z, "rest_y": -0.18, "r": WHEEL_R, "comp": 0.0})
-
-	# turret and gun
-	_turret = Node3D.new()
-	_turret.name = "Turret"
-	_turret.position = Vector3(0, 1.20, 0.55)
-	add_child(_turret)
-	var tu := MeshKit.begin()
-	match vclass():
-		"ifv":
-			# a small two-man turret with an autocannon and a missile box
-			MeshKit.box(tu, Vector3(1.35, 0.62, 1.65), Vector3(0, 0.32, 0))
-			MeshKit.box(tu, Vector3(0.42, 0.36, 0.70), Vector3(0.86, 0.46, 0.15))
-			MeshKit.box(tu, Vector3(0.30, 0.24, 0.34), Vector3(-0.72, 0.72, -0.20))
-		"spaag":
-			# a wide radar-topped mount: two barrels and a dish
-			MeshKit.box(tu, Vector3(2.30, 0.72, 1.85), Vector3(0, 0.36, 0))
-			MeshKit.cone(tu, 0.46, 0.46, -0.10, 0.10, Vector3(0, 0.92, 0.55), 12)
-			MeshKit.box(tu, Vector3(0.10, 0.62, 0.62), Vector3(0, 1.24, 0.55))
-		"mlrs":
-			# armoured cab up front, rotating launcher cradle behind it
-			MeshKit.box(tu, Vector3(2.9, 1.05, 2.3), Vector3(0, 0.50, -1.4))
-			MeshKit.box(tu, Vector3(2.5, 0.35, 0.9), Vector3(0, 1.05, -0.3))
-		"spg":
-			var plan_spg := PackedVector2Array([Vector2(-1.45, -1.60), Vector2(-1.60, 0.30),
-				Vector2(-1.35, 2.20), Vector2(1.35, 2.20), Vector2(1.60, 0.30), Vector2(1.45, -1.60)])
-			MeshKit.prism(tu, plan_spg, Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0),
-				PackedFloat32Array([0.52, 0.58, 0.58, 0.58, 0.58, 0.52]), Vector3(0, 0.52, 0))
-			MeshKit.box(tu, Vector3(2.4, 0.55, 0.7), Vector3(0, 0.60, 2.35))   # ammo bustle
-			MeshKit.box(tu, Vector3(0.55, 0.35, 0.55), Vector3(-0.85, 1.15, 0.4))
-		_:
-			var plan := PackedVector2Array([Vector2(-1.30, -1.85), Vector2(-1.55, -0.20),
-				Vector2(-1.25, 1.75), Vector2(1.25, 1.75), Vector2(1.55, -0.20), Vector2(1.30, -1.85)])
-			MeshKit.prism(tu, plan, Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0),
-				PackedFloat32Array([0.34, 0.40, 0.40, 0.40, 0.40, 0.34]), Vector3(0, 0.34, 0))
-			MeshKit.box(tu, Vector3(0.75, 0.30, 0.85), Vector3(-0.55, 0.80, 0.55))
-			MeshKit.box(tu, Vector3(0.42, 0.22, 0.60), Vector3(0.72, 0.78, 0.30))
-			MeshKit.box(tu, Vector3(1.9, 0.42, 0.28), Vector3(0, 0.42, 1.80))
-	_turret.add_child(MeshKit.mi(MeshKit.finish(tu, body), "TurretShell"))
-
-	_mantlet = Node3D.new()
-	_mantlet.name = "Mantlet"
-	if vclass() == "mlrs":
-		_mantlet.position = Vector3(0, 1.25, 1.0)
-	else:
-		_mantlet.position = Vector3(0, 0.36, -1.55)
-	_turret.add_child(_mantlet)
-	var gst := MeshKit.begin()
-	match vclass():
-		"mlrs":
-			# two pods of six tubes on an elevating cradle
-			for px in [-0.62, 0.62]:
-				for row in 2:
-					for col in 3:
-						var cy := 0.30 + float(row) * 0.44
-						var cx: float = float(px) + (float(col) - 1.0) * 0.42
-						MeshKit.cone(gst, 0.19, 0.19, -1.9, 1.9, Vector3(cx, cy, 0), 8)
-			MeshKit.box(gst, Vector3(2.9, 0.22, 0.5), Vector3(0, 0.05, 1.2))
-		"spg":
-			MeshKit.box(gst, Vector3(1.15, 0.72, 0.62), Vector3(0, 0, 0.1))
-			MeshKit.cone(gst, 0.19, 0.155, -7.4, 0.0, Vector3.ZERO, 10)
-			MeshKit.cone(gst, 0.30, 0.30, -2.4, -1.2, Vector3.ZERO, 10)   # fume extractor
-			MeshKit.cone(gst, 0.27, 0.27, -7.7, -7.2, Vector3.ZERO, 10)   # muzzle brake
-		"ifv":
-			MeshKit.box(gst, Vector3(0.42, 0.34, 0.44), Vector3(0, 0, 0.1))
-			MeshKit.cone(gst, 0.055, 0.048, -2.35, 0.0, Vector3.ZERO, 8)
-			# the coaxial, beside the cannon rather than inside it
-			MeshKit.cone(gst, 0.024, 0.024, -0.62, 0.0, Vector3(0.15, 0, 0), 6)
-		"spaag":
-			# twin barrels side by side, which is what one of these looks like
-			MeshKit.box(gst, Vector3(0.85, 0.38, 0.50), Vector3(0, 0, 0.1))
-			for bx in [-0.30, 0.30]:
-				MeshKit.cone(gst, 0.052, 0.045, -2.75, 0.0, Vector3(bx, 0, 0), 8)
-		_:
-			MeshKit.box(gst, Vector3(1.05, 0.62, 0.55), Vector3(0, 0, 0.1))
-			MeshKit.cone(gst, 0.135, 0.115, -5.6, 0.0, Vector3.ZERO, 10)
-			MeshKit.cone(gst, 0.030, 0.030, -0.80, 0.0, Vector3(0.36, 0, 0), 6)
-			MeshKit.cone(gst, 0.20, 0.20, -4.3, -3.3, Vector3.ZERO, 10)
-			MeshKit.cone(gst, 0.19, 0.19, -5.75, -5.35, Vector3.ZERO, 10)
-	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst, dark), "Gun"))
-	_muzzle = Node3D.new()
-	match vclass():
-		"spg":
-			_muzzle.position = Vector3(0, 0, -8.0)
-		"mlrs":
-			_muzzle.position = Vector3(0, 0.55, -2.1)
-		"ifv":
-			_muzzle.position = Vector3(0, 0, -2.45)
-		"spaag":
-			_muzzle.position = Vector3(0, 0, -2.85)
-		_:
-			_muzzle.position = Vector3(0, 0, -5.9)
-	_mantlet.add_child(_muzzle)
 
 # --------------------------------------------------------------------------
 ## Where the crew has been sent: a sector to take, or the other side's end of the
@@ -800,15 +377,15 @@ func _way_clear(from: Vector3, ground: float, dir: Vector3) -> bool:
 	# for as far up as the road could have climbed by then -- asked at the
 	# hull's own height, a deck twenty metres up a six per cent approach is a
 	# metre too high to count, and the drop under it turned him back every time.
-	var h1: float = Sim.drive_height(near.x, near.z, ground + 0.6 + 22.0 * 0.12)
+	var h1: float = Sim.roads.drive_height(near.x, near.z, ground + 0.6 + 22.0 * 0.12)
 	if h1 < Sim.sea_at(near.x, near.z) + 1.0 or absf(h1 - ground) > 10.0:
 		return false
-	var h2: float = Sim.drive_height(far.x, far.z, h1 + 0.6 + 23.0 * 0.12)
+	var h2: float = Sim.roads.drive_height(far.x, far.z, h1 + 0.6 + 23.0 * 0.12)
 	return h2 >= Sim.sea_at(far.x, far.z) + 1.0 and absf(h2 - ground) <= 18.0
 
 func _pick_way(to_goal: Vector3) -> void:
 	var from: Vector3 = global_position
-	var ground: float = Sim.drive_height(from.x, from.z, from.y)
+	var ground: float = Sim.roads.drive_height(from.x, from.z, from.y)
 	var nose := -global_transform.basis.z
 	nose.y = 0.0
 	_nav_nose_shut = nose.length_squared() > 0.01 \
@@ -819,7 +396,7 @@ func _pick_way(to_goal: Vector3) -> void:
 	# believes it, or he turns back into the bay he has just driven out of.
 	if _way_clear(from, ground, to_goal):
 		var beyond: Vector3 = from + to_goal * 110.0
-		if _nav_hold <= 0.0 or Sim.drive_height(beyond.x, beyond.z, ground + 0.6 + 110.0 * 0.12) \
+		if _nav_hold <= 0.0 or Sim.roads.drive_height(beyond.x, beyond.z, ground + 0.6 + 110.0 * 0.12) \
 				>= Sim.sea_at(beyond.x, beyond.z) + 1.0:
 			_nav_way = to_goal
 			if _nav_hold <= 0.0:
@@ -960,9 +537,9 @@ func _ai_think(delta: float) -> void:
 		_ai_target = null
 		var best := 1e9
 		var reach: float = 22000.0 if _indirect \
-			else float(KINDS[kind].get("reach", 2600.0))
+			else float(VehicleSpec.KINDS[kind].get("reach", 2600.0))
 		if _air_def:
-			reach = float(KINDS[kind].get("reach", 30000.0))
+			reach = float(VehicleSpec.KINDS[kind].get("reach", 30000.0))
 		# From the picture `Sim` keeps for the tick: where everything is and
 		# whose, as plain arrays. This walked both groups and asked each thing
 		# in them seven questions before it looked at how far away it was; now
@@ -1062,7 +639,7 @@ func _ai_think(delta: float) -> void:
 	if not flying_t:
 		tp.y += 1.0                       # the middle of it, not where it stands
 	var from: Vector3 = _mantlet.global_position
-	var v0: float = maxf(float(KINDS[kind].get("muzzle", 1500.0)), 100.0)
+	var v0: float = maxf(float(VehicleSpec.KINDS[kind].get("muzzle", 1500.0)), 100.0)
 	var drag: float = shell_drag()
 	var mark: Vector3 = tp
 	var tof := 0.0
@@ -1159,7 +736,7 @@ func mount(on: bool) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func display_name() -> String:
-	return String(KINDS[kind]["name"])
+	return String(VehicleSpec.KINDS[kind]["name"])
 
 func _unhandled_input(e: InputEvent) -> void:
 	if Sim.menu_open:
@@ -1212,7 +789,7 @@ func _drive_input(delta: float) -> void:
 		# lay the barrel at the live firing solution so what you see is what the
 		# gun will actually do
 		var aim := ground_aim()
-		var sol := fire_solution(aim, float(KINDS[kind]["muzzle"])) if aim != Vector3.INF else {}
+		var sol := fire_solution(aim, float(VehicleSpec.KINDS[kind]["muzzle"])) if aim != Vector3.INF else {}
 		turret_pitch = float(sol["elev"]) if not sol.is_empty() else deg_to_rad(40.0)
 		if map_target != Vector3.INF:
 			turret_yaw = atan2(map_target.x - global_position.x,
@@ -1390,7 +967,7 @@ func _tick_tank_p(delta: float) -> void:
 	# launcher does not: it carries the canisters it was loaded with, and when
 	# they have gone it has to go back for more. Without this exception an
 	# Oreshnik with one round on the vehicle had an unlimited supply of them.
-	if _gun_cd <= 0.0 and int(KINDS[kind].get("salvo", 1)) <= 1 \
+	if _gun_cd <= 0.0 and int(VehicleSpec.KINDS[kind].get("salvo", 1)) <= 1 \
 			and vclass() != "tel" and vclass() != "sam" and vclass() != "asat":
 		rounds_left = 1
 	if not alive:
@@ -1477,15 +1054,15 @@ const HULL_R := 1.9
 ## everyone else, so a garrison can be equipped out of the right shed instead of
 ## every sector on the map fielding the same two tanks.
 static func team_of(k: String) -> int:
-	var f := String(KINDS.get(k, {}).get("faction", "usa"))
+	var f := String(VehicleSpec.KINDS.get(k, {}).get("faction", "usa"))
 	var bloc := String(JetSpec.FACTIONS.get(f, {}).get("bloc", "nato"))
 	return 0 if bloc == "nato" else 1
 
 ## Every vehicle of one class that a side fields, in declaration order.
 static func kinds_of(cls: String, side := -1) -> PackedStringArray:
 	var out := PackedStringArray()
-	for k in KINDS:
-		if String(KINDS[k].get("class", "mbt")) != cls:
+	for k in VehicleSpec.KINDS:
+		if String(VehicleSpec.KINDS[k].get("class", "mbt")) != cls:
 			continue
 		if side >= 0 and team_of(String(k)) != side:
 			continue
@@ -1687,10 +1264,10 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 	# and a bridge deck under any wheel that is up at its level: the field
 	# does not know about decks, so without this a tank that reached the
 	# abutment drove off into the air and down to the valley floor
-	if not Sim.road_bridges.is_empty():
+	if not Sim.roads.road_bridges.is_empty():
 		for wi in _w_wp.size():
 			var wq: Vector3 = _w_wp[wi]
-			var deck: float = Sim.bridge_floor(wq.x, wq.z, wq.y)
+			var deck: float = Sim.roads.bridge_floor(wq.x, wq.z, wq.y)
 			if deck > gnd[wi * 5]:
 				gnd[wi * 5] = deck
 				gnd[wi * 5 + 1] = 0.0
@@ -1778,290 +1355,10 @@ func _forces_tank(state: PhysicsDirectBodyState3D) -> void:
 	# hard as a tank's simply cancelled the steering.
 	state.apply_torque(-Vector3(0, state.angular_velocity.y, 0) * mass * _yaw_damp)
 
-# --------------------------------------------------------------------------
-## A surface-to-air battery: the launcher lorry with four rounds canted up on
-## the back and a search radar behind the cab. It does not lay a gun — it
-## acquires an aircraft and sends a round — so the "turret" carries the rail
-## pack and the elevation is a launch angle, not an aiming one.
-func _build_battery(st: SurfaceTool, body: Material, dark: Material) -> void:
-	# chassis and cab, the same lorry a launcher rides on
-	MeshKit.box(st, Vector3(3.0, 0.42, 9.6), Vector3(0, 0.95, 0.4))
-	MeshKit.box(st, Vector3(2.7, 0.34, 8.6), Vector3(0, 1.28, 0.4))
-	MeshKit.box(st, Vector3(2.80, 1.55, 2.9), Vector3(0, 1.62, -3.9))
-	MeshKit.box(st, Vector3(2.50, 0.62, 0.12), Vector3(0, 2.15, -5.30))
-	for sx in [-1.0, 1.0]:
-		MeshKit.box(st, Vector3(0.9, 0.22, 0.6), Vector3(sx * 1.70, 0.72, 3.4))
-		MeshKit.box(st, Vector3(0.9, 0.22, 0.6), Vector3(sx * 1.70, 0.72, -1.8))
-	# the search radar: a flat panel on a mast behind the cab, which is the one
-	# thing that tells you what this lorry is from a distance
-	MeshKit.box(st, Vector3(0.34, 1.30, 0.34), Vector3(0, 2.20, -2.20))
-	MeshKit.box(st, Vector3(2.30, 1.70, 0.16), Vector3(0, 3.45, -2.10))
-	add_child(MeshKit.mi(MeshKit.finish(st, body), "Chassis"))
-	var axles := [-4.3, -3.1, 0.6, 1.9, 3.2]
-	for sx2 in [-1.0, 1.0]:
-		for i in axles.size():
-			var z: float = float(axles[i])
-			var w := MeshInstance3D.new()
-			var cyl := CylinderMesh.new()
-			cyl.top_radius = TEL_WHEEL_R
-			cyl.bottom_radius = TEL_WHEEL_R
-			cyl.height = 0.46
-			cyl.radial_segments = 12
-			w.mesh = cyl
-			w.material_override = MeshKit.mat(Color(0.09, 0.09, 0.10), 0.95, 0.0)
-			w.rotation_degrees = Vector3(0, 0, 90)
-			w.position = Vector3(sx2 * 1.40, TEL_WHEEL_R, z)
-			add_child(w)
-			_road_wheels.append({"node": w, "side": sx2, "lat": sx2 * 1.40, "z": z,
-				"rest_y": TEL_WHEEL_R, "r": TEL_WHEEL_R, "comp": 0.0,
-				"steer": i < 2})
-	_turret = Node3D.new()
-	_turret.name = "Turret"
-	_turret.position = Vector3(0, 1.55, 1.6)
-	add_child(_turret)
-	var tu := MeshKit.begin()
-	MeshKit.box(tu, Vector3(2.2, 0.32, 2.4), Vector3(0, 0.08, 0))
-	_turret.add_child(MeshKit.mi(MeshKit.finish(tu, dark), "Deck"))
-	_mantlet = Node3D.new()
-	_mantlet.name = "Mantlet"
-	_mantlet.position = Vector3(0, 0.36, 2.2)
-	_turret.add_child(_mantlet)
-	# four rounds in their tubes, in a two by two pack
-	var gst := MeshKit.begin()
-	var tube := 2.9
-	MeshKit.box(gst, Vector3(1.90, 0.24, tube * 1.9), Vector3(0, 0.06, -tube * 0.85))
-	_tube_lanes = []
-	for cx in [-0.52, 0.52]:
-		for cy in [0.44, 1.06]:
-			MeshKit.cone(gst, 0.26, 0.26, -tube * 1.85, 0.05,
-				Vector3(cx, cy, 0), 10)
-			MeshKit.cone(gst, 0.29, 0.29, -tube * 1.9, -tube * 1.78,
-				Vector3(cx, cy, 0), 10)
-			_tube_lanes.append(cx)
-	_tube_len = tube
-	_tube_rise = 0.75
-	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst, dark), "Gun"))
-	_muzzle = Node3D.new()
-	_muzzle.position = Vector3(0, 0.75, -tube * 1.9)
-	_mantlet.add_child(_muzzle)
-
-# --------------------------------------------------------------------------
-## A light 4x4: ladder chassis, crew cab, load bed and four independently
-## sprung wheels, the front pair of which steer. Nothing about a tank's hull
-## fits one of these -- there are no tracks to build, the body is a metre and
-## a half tall rather than three, and what is on the roof is a ring mount with
-## a machine gun on it, not a turret.
-func _build_light_chassis(st: SurfaceTool, body: Material, dark: Material) -> void:
-	var ch: Dictionary = KINDS[kind].get("chassis", {})
-	var ln: float = float(ch.get("len", 4.9))
-	var wd: float = float(ch.get("wide", 2.2))
-	var ht: float = float(ch.get("tall", 1.42))
-	var wb: float = float(ch.get("wb", 3.30))
-	var tk: float = float(ch.get("track", wd * 0.42))
-	var wr: float = float(ch.get("r", 0.47))
-	var open_top: bool = String(ch.get("mount", "ring")) == "open"
-	# The body origin sits at the axle line, so the wheels hang either side of
-	# it and rest_height() has something square to work from.
-	var deck: float = wr + 0.22                      # top of the chassis rails
-	var sill: float = deck + 0.16
-
-	# ladder chassis
-	for sx in [-1.0, 1.0]:
-		MeshKit.box(st, Vector3(0.16, 0.20, ln * 0.94), Vector3(sx * tk * 0.55, deck - 0.12, 0))
-	MeshKit.box(st, Vector3(tk * 1.1, 0.14, 0.5), Vector3(0, deck - 0.12, -wb * 0.5))
-	MeshKit.box(st, Vector3(tk * 1.1, 0.14, 0.5), Vector3(0, deck - 0.12, wb * 0.5))
-	# hull tub, with the nose and tail cut back so it does not overhang the tyres
-	MeshKit.box(st, Vector3(wd, 0.44, ln * 0.90), Vector3(0, sill, 0))
-	# bonnet: a flat deck over the engine, sloped up to the windscreen
-	var nose_z: float = -ln * 0.30
-	MeshKit.box(st, Vector3(wd * 0.92, 0.30, ln * 0.30), Vector3(0, sill + 0.34, nose_z))
-	var scuttle := PackedVector2Array([
-		Vector2(-wd * 0.46, nose_z + ln * 0.15), Vector2(wd * 0.46, nose_z + ln * 0.15),
-		Vector2(wd * 0.46, nose_z + ln * 0.30), Vector2(-wd * 0.46, nose_z + ln * 0.30)])
-	MeshKit.prism(st, scuttle, Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0),
-		PackedFloat32Array([0.06, 0.06, 0.34, 0.34]), Vector3(0, sill + 0.49, 0))
-	# radiator grille and a brush guard, which is the front of one of these
-	MeshKit.box(st, Vector3(wd * 0.80, 0.42, 0.14), Vector3(0, sill + 0.30, nose_z - ln * 0.16))
-	MeshKit.box(st, Vector3(wd * 0.86, 0.12, 0.12), Vector3(0, sill + 0.52, nose_z - ln * 0.20))
-	MeshKit.box(st, Vector3(wd * 0.86, 0.12, 0.12), Vector3(0, sill + 0.08, nose_z - ln * 0.20))
-	# crew compartment: sides and a rear bulkhead, roofed unless it is open
-	var cab_z: float = -ln * 0.02
-	var cab_l: float = ln * 0.40
-	var cab_h: float = ht * 0.66
-	for sx in [-1.0, 1.0]:
-		MeshKit.box(st, Vector3(0.12, cab_h, cab_l), Vector3(sx * wd * 0.44, sill + 0.22 + cab_h * 0.5, cab_z))
-	MeshKit.box(st, Vector3(wd * 0.88, cab_h, 0.12), Vector3(0, sill + 0.22 + cab_h * 0.5, cab_z + cab_l * 0.5))
-	if not open_top:
-		MeshKit.box(st, Vector3(wd * 0.90, 0.10, cab_l), Vector3(0, sill + 0.22 + cab_h, cab_z))
-		# A pillars, so the windscreen reads as glass in a frame
-		for sx in [-1.0, 1.0]:
-			MeshKit.box(st, Vector3(0.10, cab_h, 0.10),
-				Vector3(sx * wd * 0.42, sill + 0.22 + cab_h * 0.5, cab_z - cab_l * 0.5))
-	# load bed behind the cab
-	var bed_z: float = ln * 0.30
-	MeshKit.box(st, Vector3(wd * 0.94, 0.34, ln * 0.30), Vector3(0, sill + 0.28, bed_z))
-	for sx in [-1.0, 1.0]:
-		MeshKit.box(st, Vector3(0.10, 0.30, ln * 0.30), Vector3(sx * wd * 0.46, sill + 0.52, bed_z))
-	# spare wheel on the tail, jerry cans on the flank
-	MeshKit.box(st, Vector3(0.30, 0.34, 0.22), Vector3(wd * 0.30, sill + 0.62, bed_z + ln * 0.10))
-	# arches over each wheel, or the tyres cut straight through the body side
-	for sx in [-1.0, 1.0]:
-		for zz in [-wb * 0.5, wb * 0.5]:
-			MeshKit.box(st, Vector3(0.10, 0.44, wr * 2.5),
-				Vector3(sx * (tk + 0.22), deck + 0.10, zz))
-			MeshKit.box(st, Vector3(tk * 0.6, 0.10, wr * 2.5),
-				Vector3(sx * (tk * 0.7 + 0.22), deck + 0.30, zz))
-	add_child(MeshKit.mi(MeshKit.finish(st, body), "Chassis"))
-
-	# glass: windscreen and door windows, dark so they read as glazing
-	if not open_top:
-		var gst := MeshKit.begin()
-		var wind := PackedVector2Array([
-			Vector2(-wd * 0.40, nose_z + ln * 0.16), Vector2(wd * 0.40, nose_z + ln * 0.16),
-			Vector2(wd * 0.40, nose_z + ln * 0.29), Vector2(-wd * 0.40, nose_z + ln * 0.29)])
-		MeshKit.prism(gst, wind, Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0),
-			PackedFloat32Array([0.05, 0.05, 0.30, 0.30]), Vector3(0, sill + 0.52, 0))
-		for sx in [-1.0, 1.0]:
-			MeshKit.box(gst, Vector3(0.05, cab_h * 0.52, cab_l * 0.58),
-				Vector3(sx * wd * 0.45, sill + 0.28 + cab_h * 0.66, cab_z - cab_l * 0.10))
-		add_child(MeshKit.mi(MeshKit.finish(gst,
-			MeshKit.mat(Color(0.07, 0.09, 0.10), 0.18, 0.5)), "Glass"))
-
-	# four wheels on coils, the front pair steered
-	var tyre := MeshKit.mat(Color(0.08, 0.08, 0.09), 0.95, 0.0)
-	for sx in [-1.0, 1.0]:
-		for zz in [-wb * 0.5, wb * 0.5]:
-			var w := MeshInstance3D.new()
-			var cyl := CylinderMesh.new()
-			cyl.top_radius = wr
-			cyl.bottom_radius = wr
-			cyl.height = wr * 0.62
-			cyl.radial_segments = 14
-			w.mesh = cyl
-			w.material_override = tyre
-			w.rotation_degrees = Vector3(0, 0, 90)
-			w.position = Vector3(sx * tk, wr, zz)
-			add_child(w)
-			_road_wheels.append({"node": w, "side": sx, "lat": sx * tk, "z": zz,
-				"rest_y": wr, "r": wr, "comp": 0.0, "steer": zz < 0.0})
-
-	# the ring mount stands in for the turret, so laying and elevating work
-	# exactly as they do on everything else
-	_turret = Node3D.new()
-	_turret.name = "Turret"
-	_turret.position = Vector3(0, sill + 0.22 + (cab_h if not open_top else cab_h * 0.55),
-		cab_z + (0.0 if not open_top else -cab_l * 0.10))
-	add_child(_turret)
-	var tu := MeshKit.begin()
-	MeshKit.cone(tu, 0.46, 0.46, -0.09, 0.09, Vector3(0, 0.10, 0), 12)
-	MeshKit.box(tu, Vector3(0.62, 0.22, 0.14), Vector3(0, 0.28, 0.34))   # gun shield mount
-	MeshKit.box(tu, Vector3(0.72, 0.34, 0.06), Vector3(0, 0.44, -0.22))  # shield plate
-	_turret.add_child(MeshKit.mi(MeshKit.finish(tu, dark), "Ring"))
-
-	_mantlet = Node3D.new()
-	_mantlet.name = "Mantlet"
-	_mantlet.position = Vector3(0, 0.34, 0.06)
-	_turret.add_child(_mantlet)
-	var gst2 := MeshKit.begin()
-	MeshKit.box(gst2, Vector3(0.16, 0.20, 0.62), Vector3(0, 0, 0.16))    # receiver
-	MeshKit.cone(gst2, 0.045, 0.038, -0.92, -0.10, Vector3.ZERO, 8)      # barrel
-	MeshKit.box(gst2, Vector3(0.10, 0.10, 0.22), Vector3(0, 0.13, 0.10)) # ammo box
-	MeshKit.box(gst2, Vector3(0.06, 0.14, 0.06), Vector3(0, -0.14, -0.30))
-	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst2,
-		MeshKit.mat(Color(0.10, 0.10, 0.11), 0.85, 0.25)), "Gun"))
-	_muzzle = Node3D.new()
-	_muzzle.position = Vector3(0, 0, -0.95)
-	_mantlet.add_child(_muzzle)
-
-# --------------------------------------------------------------------------
-## A launcher is a lorry, not a tank. It was being given the tracked hull, the
-## glacis, the side skirts and the road wheels of an armoured vehicle, so a
-## TEL came out looking exactly like everything else on the field with a
-## canister balanced on top of it.
-func _build_tel_chassis(st: SurfaceTool, body: Material, dark: Material) -> void:
-	# a long flat load bed on a chassis
-	MeshKit.box(st, Vector3(3.1, 0.42, 11.6), Vector3(0, 0.95, 0.6))
-	MeshKit.box(st, Vector3(2.7, 0.34, 10.4), Vector3(0, 1.28, 0.6))
-	# the cab, forward and separate, with glass in it
-	MeshKit.box(st, Vector3(2.85, 1.55, 3.0), Vector3(0, 1.62, -4.6))
-	MeshKit.box(st, Vector3(2.55, 0.62, 0.12), Vector3(0, 2.15, -6.05))
-	# outriggers, which is what holds it down when it launches
-	for sx in [-1.0, 1.0]:
-		MeshKit.box(st, Vector3(0.9, 0.22, 0.6), Vector3(sx * 1.75, 0.72, 3.9))
-		MeshKit.box(st, Vector3(0.9, 0.22, 0.6), Vector3(sx * 1.75, 0.72, -2.2))
-	add_child(MeshKit.mi(MeshKit.finish(st, body), "Chassis"))
-	# eight wheels a side on a proper wheelbase, not a track run
-	var axles := [-5.1, -3.9, -0.6, 0.7, 2.0, 3.3]
-	for sx2 in [-1.0, 1.0]:
-		for i in axles.size():
-			var z: float = float(axles[i])
-			var w := MeshInstance3D.new()
-			var cyl := CylinderMesh.new()
-			cyl.top_radius = 0.72
-			cyl.bottom_radius = 0.72
-			cyl.height = 0.46
-			cyl.radial_segments = 12
-			w.mesh = cyl
-			w.material_override = MeshKit.mat(Color(0.09, 0.09, 0.10), 0.95, 0.0)
-			w.rotation_degrees = Vector3(0, 0, 90)
-			w.position = Vector3(sx2 * 1.42, TEL_WHEEL_R, z)
-			add_child(w)
-			# the front bogie steers, as it does on the real lorry
-			_road_wheels.append({"node": w, "side": sx2, "lat": sx2 * 1.42, "z": z,
-				"rest_y": TEL_WHEEL_R, "r": TEL_WHEEL_R, "comp": 0.0,
-				"steer": i < 2})
-	# the erector and its canisters live on the turret node, as with everything
-	# else, so laying and elevating work unchanged
-	_turret = Node3D.new()
-	_turret.name = "Turret"
-	_turret.position = Vector3(0, 1.55, 1.1)
-	add_child(_turret)
-	var tu := MeshKit.begin()
-	MeshKit.box(tu, Vector3(2.2, 0.36, 2.0), Vector3(0, 0.10, 0))
-	add_child_turret_mesh(tu, dark)
-
-func add_child_turret_mesh(tu: SurfaceTool, dark: Material) -> void:
-	_turret.add_child(MeshKit.mi(MeshKit.finish(tu, dark), "Deck"))
-	_mantlet = Node3D.new()
-	_mantlet.name = "Mantlet"
-	# At the back of the load bed, where a launcher's erector is actually
-	# hinged.
-	_mantlet.position = Vector3(0, 0.45, 4.0)
-	_turret.add_child(_mantlet)
-	var gst := MeshKit.begin()
-	# One canister or two, and how big, follows the round it carries. Every
-	# launcher was given the same twin tubes, so an Oreshnik — fourteen and a
-	# half metres of it — rode in the same pair of pipes as a Kalibr.
-	var mid: Dictionary = WeaponSpec.get_spec(
-		String(KINDS[kind].get("missile", "kalibr")))
-	var bore: float = maxf(float(mid.get("dia", 0.5)) * 0.62, 0.30)
-	var tube: float = maxf(float(mid.get("length", 6.0)) * 0.5, 2.4)
-	var twin: bool = float(mid.get("dia", 0.5)) < 0.7
-	# The whole load sits *forward* of the hinge rather than straddling it. Built
-	# centred on the pivot, raising the canister swung its back half down
-	# through the chassis at the same rate as its nose went up -- the missiles
-	# rotated through the vehicle they were sitting on.
-	var back: float = -tube * 0.94
-	MeshKit.box(gst, Vector3(bore * 4.2, 0.30, tube * 1.9), Vector3(0, 0.10, 0.4 + back))
-	var lanes: Array = [-bore * 1.15, bore * 1.15] if twin else [0.0]
-	for cx in lanes:
-		MeshKit.cone(gst, bore, bore, -tube + back, tube * 0.94 + back,
-			Vector3(cx, bore + 0.3, 0), 12)
-		MeshKit.cone(gst, bore * 1.11, bore * 1.11, -tube - 0.1 + back,
-			-tube + 0.2 + back, Vector3(cx, bore + 0.3, 0), 12)
-	MeshKit.box(gst, Vector3(bore * 4.6, 0.5, 0.5),
-		Vector3(0, 0.30, tube * 0.82 + back))
-	_tube_lanes = lanes
-	_tube_len = tube
-	_tube_rise = bore + 0.3
-	_mantlet.add_child(MeshKit.mi(MeshKit.finish(gst, dark), "Gun"))
-	_muzzle = Node3D.new()
-	_muzzle.position = Vector3(0, _tube_rise, -_tube_len - tube * 0.94)
-	_mantlet.add_child(_muzzle)
 
 ## How far this vehicle's search radar reaches, for the side's picture.
 func radar_range() -> float:
-	return float(KINDS[kind].get("radar", 0.0))
+	return float(VehicleSpec.KINDS[kind].get("radar", 0.0))
 
 ## Settled once in `setup`. It was read out of the table every time it was
 ## asked -- a dictionary lookup, a default and a string made from it -- and a
@@ -2134,7 +1431,7 @@ func weapon_label() -> String:
 			return "COAXIAL"
 		"missile":
 			return "%s  %d ON THE ERECTOR" % [
-				String(KINDS[kind].get("missile", "missile")).to_upper(), rounds_left]
+				String(VehicleSpec.KINDS[kind].get("missile", "missile")).to_upper(), rounds_left]
 		"rockets":
 			return "ROCKETS  %d IN THE POD" % rounds_left
 		_:
@@ -2151,7 +1448,7 @@ func cycle_weapon() -> void:
 	set_weapon((sel_weapon + 1) % weapons().size())
 
 func is_ripple() -> bool:
-	return int(KINDS[kind].get("salvo", 1)) > 1
+	return int(VehicleSpec.KINDS[kind].get("salvo", 1)) > 1
 
 ## Pieces that are laid by bearing and range rather than pointed at what they
 ## are shooting. A light vehicle's machine gun is neither of those: it is aimed
@@ -2283,7 +1580,7 @@ func aim_at(point: Vector3) -> void:
 	turret_pitch = atan2(to.y, maxf(flat, 0.1))
 
 func fire_main(world: Node) -> bool:
-	var kd: Dictionary = KINDS[kind]
+	var kd: Dictionary = VehicleSpec.KINDS[kind]
 	if vclass() == "lav":
 		# There is no breech to reload: pulling the trigger runs the roof gun.
 		return fire_coax(world)
@@ -2409,7 +1706,7 @@ func warhead_marks() -> Array:
 
 ## How many warheads the round on the rail carries; nought for a single one.
 func warheads() -> int:
-	return int(WeaponSpec.get_spec(String(KINDS[kind].get("missile", "kalibr"))).get("mirv", 0))
+	return int(WeaponSpec.get_spec(String(VehicleSpec.KINDS[kind].get("missile", "kalibr"))).get("mirv", 0))
 
 ## Is there anything worth standing the canister up for? It goes back down when
 ## there is not, because a launcher sitting on the road with its tube in the air
@@ -2739,7 +2036,7 @@ func lay_error() -> float:
 	var aim := ground_aim()
 	if aim == Vector3.INF:
 		return PI
-	var sol := fire_solution(aim, float(KINDS[kind]["muzzle"]))
+	var sol := fire_solution(aim, float(VehicleSpec.KINDS[kind]["muzzle"]))
 	if sol.is_empty():
 		return PI
 	var want_yaw: float = float(sol["yaw"]) if sol.has("yaw") \
@@ -2820,6 +2117,15 @@ func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 var shots_main := 0
 var shots_coax := 0
 
+## A picture of a vehicle simulated on another machine: moved by the network
+## on the physics tick, not driven, not falling, and not boardable.
+func make_picture() -> void:
+	ai = false
+	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	freeze = true
+	gravity_scale = 0.0
+	remove_from_group("boardable")
+
 ## A picture of a vehicle the host is driving fired: the same round from the
 ## same muzzle -- flash, report, streak, burst -- hurting nothing. Whatever it
 ## hit was hit on the host, and that comes over on its own. Without this a
@@ -2828,7 +2134,7 @@ var shots_coax := 0
 func ghost_fire(world: Node, main: bool) -> void:
 	if not alive or _muzzle == null or not is_inside_tree():
 		return
-	var kd: Dictionary = KINDS[kind]
+	var kd: Dictionary = VehicleSpec.KINDS[kind]
 	var dir := -_muzzle.global_transform.basis.z
 	if not main or vclass() == "lav":
 		var port: Vector3 = _muzzle.global_position - dir * 1.5
@@ -2854,12 +2160,12 @@ func ghost_fire(world: Node, main: bool) -> void:
 			randf_range(0.94, 1.06), 2400.0)
 		return
 	# A main gun's shell, a rocket and a missile are not counted here: each is
-	# sent as it leaves, with where it is going (`NetLink.share_launch`).
+	# sent as it leaves, with where it is going (`NetLaunches.share`).
 
 func fire_coax(world: Node) -> bool:
 	if _coax_cd > 0.0 or not alive:
 		return false
-	var kd: Dictionary = KINDS[kind]
+	var kd: Dictionary = VehicleSpec.KINDS[kind]
 	# A .50 on a ring mount is slower and hits harder than a tank's coax.
 	_coax_cd = float(kd.get("mg_rate", 0.09))
 	var spread: float = 0.006 if vclass() != "lav" else 0.009
@@ -2901,28 +2207,10 @@ func is_alive() -> bool:
 ## This cannot use global_transform the way an aircraft does, because setup()
 ## runs before the vehicle is in the tree.
 func _cache_bounds() -> void:
-	var box := AABB()
-	var first := true
-	for c in find_children("*", "MeshInstance3D", true, false):
-		var mi := c as MeshInstance3D
-		var xf: Transform3D = mi.transform
-		var up: Node = mi.get_parent()
-		while up != null and up != self:
-			if up is Node3D:
-				xf = (up as Node3D).transform * xf
-			up = up.get_parent()
-		var t: AABB = xf * mi.get_aabb()
-		box = t if first else box.merge(t)
-		first = false
-	bounds = box
+	bounds = MeshKit.local_bounds(self)
 
 func hull_distance(p: Vector3) -> float:
-	var lp: Vector3 = global_transform.affine_inverse() * p
-	var mn := bounds.position
-	var mx := bounds.end
-	var q := Vector3(clampf(lp.x, mn.x, mx.x), clampf(lp.y, mn.y, mx.y),
-		clampf(lp.z, mn.z, mx.z))
-	return lp.distance_to(q)
+	return MeshKit.box_distance(bounds, global_transform.affine_inverse() * p)
 
 ## Who hit it last and with what, for the kill feed.
 var last_by: Node = null
@@ -2942,7 +2230,7 @@ func take_hit(amount: float, from: Node = null) -> void:
 		Sim.net.report_ground_damage(self, amount)
 		return
 	if Sim.net != null and Sim.net.active and not Sim.net.is_host and has_meta("net_unit"):
-		Sim.net.report_unit_hit(self, amount, last_cause)
+		Sim.net.units.report_hit(self, amount, last_cause)
 		return
 	apply_damage(amount)
 

@@ -506,7 +506,7 @@ static func top_at(x: float, z: float) -> float:
 ## underneath a scaffold -- it puts him on top of it.
 static func floor_under(x: float, z: float, y: float) -> float:
 	# a bridge deck is a floor too, for whoever is up at its level
-	var best: float = Sim.bridge_floor(x, z, y)
+	var best: float = Sim.roads.bridge_floor(x, z, y)
 	var cell: Variant = _cells.get(_key(int(floor(x / CELL)), int(floor(z / CELL))))
 	if cell == null:
 		return best
@@ -764,7 +764,7 @@ var _near_at := Vector3(1e12, 0, 1e12)
 ## stations -- the running surface and the girder under it, as `Scenery` draws
 ## them -- for the spans within reach of the viewer, and nothing for the rest.
 ## Nothing that walks or drives needs them; men and vehicles stand on a deck
-## by `Sim.bridge_floor`, which is exact. What needs them is the physics: a man
+## by `Sim.roads.bridge_floor`, which is exact. What needs them is the physics: a man
 ## killed on a viaduct went down as a ragdoll onto a patch of ground laid at
 ## the height of the valley floor, and fell through the deck to it.
 const SPAN_NEAR := 320.0
@@ -815,7 +815,7 @@ func _ready() -> void:
 ## Move the pool to wherever the viewer is. Cheap and idempotent.
 func follow(eye_in: Vector3) -> void:
 	var eye: Vector3 = _pin if _pin.x < 1e11 else eye_in
-	var decks_moved: bool = not is_same(_span_src, Sim.road_bridges)
+	var decks_moved: bool = not is_same(_span_src, Sim.roads.road_bridges)
 	if _near_at.distance_squared_to(eye) < 2500.0 and not decks_moved:
 		return
 	_near_at = eye
@@ -844,13 +844,13 @@ func follow(eye_in: Vector3) -> void:
 		sb.process_mode = Node.PROCESS_MODE_INHERIT
 
 ## Every span of every road bridge as a box: [centre, basis, length]. The deck
-## is drawn station to station, each end panel lapping `Sim.BRIDGE_LAP` past
+## is drawn station to station, each end panel lapping `Sim.roads.BRIDGE_LAP` past
 ## its abutment, and sloped with the profile -- the same panels `Scenery`
 ## builds, so the body is where the deck is seen.
 func _index_spans() -> void:
-	_span_src = Sim.road_bridges
+	_span_src = Sim.roads.road_bridges
 	_span_all = []
-	for br in Sim.road_bridges:
+	for br in Sim.roads.road_bridges:
 		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
 		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
 		if pts.size() < 2 or ys.size() != pts.size():
@@ -864,21 +864,21 @@ func _index_spans() -> void:
 				continue
 			var dir := (c2 - a2) / run
 			if i == 0:
-				a2 -= dir * Sim.BRIDGE_LAP
+				a2 -= dir * Sim.roads.BRIDGE_LAP
 			if i == last:
-				c2 += dir * Sim.BRIDGE_LAP
+				c2 += dir * Sim.roads.BRIDGE_LAP
 			var ta := Vector3(a2.x, ys[i] - Sim.planet_drop(a2.x, a2.y), a2.y)
 			var tc := Vector3(c2.x, ys[i + 1] - Sim.planet_drop(c2.x, c2.y), c2.y)
 			var fwd := (tc - ta).normalized()
 			var across := Vector3(dir.y, 0.0, -dir.x)
 			var up := fwd.cross(across).normalized()
 			var turn := Basis(across, up, fwd)
-			var centre := (ta + tc) * 0.5 - up * (Sim.BRIDGE_GIRDER * 0.5)
+			var centre := (ta + tc) * 0.5 - up * (Sim.roads.BRIDGE_GIRDER * 0.5)
 			_span_all.append([centre, turn, ta.distance_to(tc)])
 
 ## The spans nearest the viewer get the bodies; the rest are switched off.
 func _follow_spans(eye: Vector3) -> void:
-	if not is_same(_span_src, Sim.road_bridges):
+	if not is_same(_span_src, Sim.roads.road_bridges):
 		_index_spans()
 	var found: Array = []
 	for k in _span_all.size():
@@ -897,7 +897,7 @@ func _follow_spans(eye: Vector3) -> void:
 			continue
 		var sp2: Array = _span_all[found[i][1]]
 		var box := (sb.get_child(0) as CollisionShape3D).shape as BoxShape3D
-		box.size = Vector3(Sim.BRIDGE_HALF * 2.0, Sim.BRIDGE_GIRDER, float(sp2[2]))
+		box.size = Vector3(Sim.roads.BRIDGE_HALF * 2.0, Sim.roads.BRIDGE_GIRDER, float(sp2[2]))
 		sb.global_transform = Transform3D(sp2[1], sp2[0])
 		sb.process_mode = Node.PROCESS_MODE_INHERIT
 

@@ -21,6 +21,8 @@ const PATH := "user://world_bake.dat"
 ## terrain that looks right and is not, so err towards listing too many.
 const SOURCES := [
 	"res://scripts/core/sim.gd",
+	"res://scripts/world/road_net.gd",
+	"res://scripts/world/biomes.gd",
 	"res://scripts/world/terrain.gd",
 	"res://scripts/world/scenery.gd",
 	"res://scripts/world/planet.gd",

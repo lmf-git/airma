@@ -210,7 +210,7 @@ float vnoise(vec2 p) {
 			   mix(h21(i + vec2(0.0, 1.0)), h21(i + vec2(1.0, 1.0)), u.x), u.y);
 }
 
-// The palette, and the biome rule itself, transcribed from Sim.biome_weights.
+// The palette, and the biome rule itself, transcribed from Sim.biomes.weights.
 // It lives here as well as there because the two need to agree exactly: the
 // scatter asks the CPU which biome a point is in to choose a species, and the
 // ground under those trees is painted by this.
@@ -230,7 +230,7 @@ vec3 biome_at(vec2 xz, float y_in, float upness, vec2 cl) {
 	// The two are the same on a flat world and are not on a planet: the ground
 	// falls away from the middle of the chart, so a place's height -- and with
 	// it its snow line, its treeline and its beaches -- depended on where the
-	// chart happened to be centred. `Sim.biome_weights` makes the same
+	// chart happened to be centred. `Sim.biomes.weights` makes the same
 	// correction, and the two have to agree or the ground is not the colour the
 	// game thinks it is.
 	float y = y_in;
@@ -634,7 +634,7 @@ func _bake_ground_mask() -> ImageTexture:
 	# the extension buckets the shapes by row and fills the rows across every
 	# core, where this was a pair of nested loops per capsule in script.
 	var discs := PackedFloat32Array()      # x, z, solid, fade, channel
-	for pad in Sim._town_pads:
+	for pad in Sim.roads.town_pads:
 		var pc: Vector2 = pad["c"]
 		var pr: float = pad["r"]
 		if not _in_box(pc, pr * 1.4):
@@ -642,7 +642,7 @@ func _bake_ground_mask() -> ImageTexture:
 		discs.append_array(PackedFloat32Array([pc.x, pc.y, pr * 1.02, pr * 1.32, 1.0]))
 	var caps := PackedFloat32Array()       # ax, az, bx, bz, solid, fade, channel
 	# the network: trunk roads wide, streets narrow
-	for src in [[Sim.ROADS, 9.0, 30.0, 40.0], [Sim._segments, 5.0, 13.0, 20.0]]:
+	for src in [[Sim.roads.ROADS, 9.0, 30.0, 40.0], [Sim.roads.segments, 5.0, 13.0, 20.0]]:
 		var solid: float = src[1]
 		var fade: float = src[2]
 		var reach: float = src[3]

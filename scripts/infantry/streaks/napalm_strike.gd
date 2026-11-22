@@ -6,7 +6,7 @@ extends Node3D
 
 var from := Vector3.ZERO
 var to := Vector3.ZERO
-## Only the look of it: see `CqbMatch.call_picture`.
+## Only the look of it: see `Killstreaks.call_picture`.
 var picture := false
 ## Who called it, for the kill feed and the credit.
 var owner_node: Node = null

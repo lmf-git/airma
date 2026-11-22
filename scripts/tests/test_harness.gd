@@ -21,6 +21,9 @@ var weapon_tests: WeaponTests
 var ground_tests: GroundTests
 var naval_tests: NavalTests
 var infantry_tests: InfantryTests
+var streak_tests: StreakTests
+var range_tests: RangeTests
+var town_ground_tests: TownGroundTests
 var terrain_tests: TerrainTests
 var planet_tests: PlanetTests
 var session_tests: SessionTests
@@ -34,10 +37,13 @@ func _init(w: World) -> void:
 	ground_tests = GroundTests.new(w, self)
 	naval_tests = NavalTests.new(w, self)
 	infantry_tests = InfantryTests.new(w, self)
+	streak_tests = StreakTests.new(w, self)
+	range_tests = RangeTests.new(w, self)
+	town_ground_tests = TownGroundTests.new(w, self)
 	terrain_tests = TerrainTests.new(w, self)
 	planet_tests = PlanetTests.new(w, self)
 	session_tests = SessionTests.new(w, self)
-	suites = [dev_options, flight_tests, weapon_tests, ground_tests, naval_tests, infantry_tests, terrain_tests, planet_tests, session_tests]
+	suites = [dev_options, flight_tests, weapon_tests, ground_tests, naval_tests, infantry_tests, streak_tests, range_tests, town_ground_tests, terrain_tests, planet_tests, session_tests]
 
 
 func parse_arg(a: String) -> bool:
@@ -340,14 +346,14 @@ func tick_after_street(delta: float) -> void:
 	infantry_tests.tick_zoom()
 	infantry_tests.tick_arms()
 	infantry_tests.tick_cqb_fix()
-	infantry_tests.tick_streak()
-	infantry_tests.tick_heli_streak(delta)
+	streak_tests.tick_streak()
+	streak_tests.tick_heli_streak(delta)
 	infantry_tests.tick_ladder_fall()
 	infantry_tests.tick_wreck_test()
-	infantry_tests.tick_drop()
+	streak_tests.tick_drop()
 	infantry_tests.tick_zero()
 	infantry_tests.tick_holdfire()
-	infantry_tests.tick_sentry()
+	streak_tests.tick_sentry()
 	infantry_tests.tick_steady()
 	infantry_tests.tick_ball()
 	flight_tests.tick_hf()
@@ -355,15 +361,15 @@ func tick_after_street(delta: float) -> void:
 	flight_tests.tick_hgear(delta)
 	dev_options.tick_cqb_view()
 	infantry_tests.tick_sight()
-	infantry_tests.tick_ground_probe()
-	infantry_tests.tick_bridge_probe()
-	infantry_tests.tick_bridge_drive()
-	infantry_tests.tick_ramp_ground()
-	infantry_tests.tick_span_bodies()
-	infantry_tests.tick_junctions()
-	infantry_tests.tick_range_listen()
-	infantry_tests.tick_range_cam()
-	infantry_tests.tick_range()
+	town_ground_tests.tick_ground_probe()
+	town_ground_tests.tick_bridge_probe()
+	town_ground_tests.tick_bridge_drive()
+	town_ground_tests.tick_ramp_ground()
+	town_ground_tests.tick_span_bodies()
+	town_ground_tests.tick_junctions()
+	range_tests.tick_range_listen()
+	range_tests.tick_range_cam()
+	range_tests.tick_range()
 	infantry_tests.tick_aim(delta)
 	flight_tests.tick_seat(delta)
 	ground_tests.tick_key(delta)
@@ -414,7 +420,7 @@ func _press(code: Key, unicode := 0) -> void:
 	e.physical_keycode = code
 	e.unicode = unicode
 	e.pressed = true
-	world._shell_input(e)
+	world.controls.shell_input(e)
 
 func _take_shot() -> void:
 	await RenderingServer.frame_post_draw

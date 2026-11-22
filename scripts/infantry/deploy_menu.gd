@@ -398,7 +398,7 @@ func _build_streak_page() -> Control:
 	var page := VBoxContainer.new()
 	page.add_theme_constant_override("separation", 10)
 	page.add_child(_label("Carry up to %d. They are earned by kills without dying, cheapest first, and spent with 4 to 7." \
-		% CqbMatch.MAX_STREAKS, 13, DIM))
+		% Killstreaks.MAX_STREAKS, 13, DIM))
 	_streak_note = _label("", 13, ACCENT)
 	page.add_child(_streak_note)
 	var scroll := ScrollContainer.new()
@@ -411,7 +411,7 @@ func _build_streak_page() -> Control:
 	grid.add_theme_constant_override("v_separation", 10)
 	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(grid)
-	var pool: Array = CqbMatch.STREAK_POOL.duplicate()
+	var pool: Array = Killstreaks.STREAK_POOL.duplicate()
 	pool.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["at"]) < int(b["at"]))
 	for k in pool:
 		var id := String(k["id"])
@@ -575,8 +575,8 @@ func open(takes: String, first: bool, faction: String, points := -1) -> void:
 		# his own country's first.
 		var mine: Array = []
 		var theirs: Array = []
-		for k in Tank.KINDS:
-			var kd: Dictionary = Tank.KINDS[k]
+		for k in VehicleSpec.KINDS:
+			var kd: Dictionary = VehicleSpec.KINDS[k]
 			if String(kd.get("class", "")) in ["tel", "asat", "sam", "mlrs", "spg"]:
 				continue            # nothing that fights from twenty kilometres away
 			if String(kd.get("faction", "")) == faction:
@@ -585,17 +585,17 @@ func open(takes: String, first: bool, faction: String, points := -1) -> void:
 				theirs.append(k)
 		var order := ["mbt", "ifv", "spaag", "lav"]
 		var by_class := func(x, y) -> bool:
-			return order.find(String(Tank.KINDS[x].get("class", ""))) \
-				< order.find(String(Tank.KINDS[y].get("class", "")))
+			return order.find(String(VehicleSpec.KINDS[x].get("class", ""))) \
+				< order.find(String(VehicleSpec.KINDS[y].get("class", "")))
 		mine.sort_custom(by_class)
 		theirs.sort_custom(by_class)
 		var tags := {"mbt": "tank", "ifv": "fighting vehicle", "spaag": "anti-air gun", "lav": "scout car"}
 		for k in mine + theirs:
-			var kd2: Dictionary = Tank.KINDS[k]
+			var kd2: Dictionary = VehicleSpec.KINDS[k]
 			_add_ride("veh:" + String(k), "%s — %s" % [String(kd2["name"]),
 				String(tags.get(String(kd2.get("class", "")), ""))])
 	# In the air from the start if it was chosen before the match; earned with
-	# points once it has begun (see `CqbMatch.ride_cost`).
+	# points once it has begun (see `Killstreaks.ride_cost`).
 	if takes == "any" and (first or points >= 0):
 		for id in JetSpec.ids_for(faction):
 			var sp0 := JetSpec.get_spec(id)
@@ -619,7 +619,7 @@ func open(takes: String, first: bool, faction: String, points := -1) -> void:
 var _points := -1
 
 func _add_ride(id: String, text: String) -> void:
-	var cost: int = CqbMatch.ride_cost(id) if _points >= 0 else 0
+	var cost: int = Killstreaks.ride_cost(id) if _points >= 0 else 0
 	if cost > 0:
 		text += "   [%d pts]" % cost
 	_rides.add_item(text)
@@ -775,9 +775,9 @@ func _bar(k: String, v: float, txt: String) -> void:
 func _streak_toggled(on: bool, id: String) -> void:
 	if _filling:
 		return
-	var pick: Array = CqbMatch.streak_pick
+	var pick: Array = Killstreaks.streak_pick
 	if on and not pick.has(id):
-		if pick.size() >= CqbMatch.MAX_STREAKS:
+		if pick.size() >= Killstreaks.MAX_STREAKS:
 			_filling = true
 			(_streak_ticks[id] as CheckButton).button_pressed = false
 			_filling = false
@@ -797,7 +797,7 @@ func _streak_toggled(on: bool, id: String) -> void:
 func _show_streaks() -> void:
 	_filling = true
 	for id in _streak_ticks:
-		var on: bool = CqbMatch.streak_pick.has(id)
+		var on: bool = Killstreaks.streak_pick.has(id)
 		(_streak_ticks[id] as CheckButton).button_pressed = on
 		var card: PanelContainer = _streak_cards[id][0]
 		card.add_theme_stylebox_override("panel", _box(CARD_HI if on else CARD, GOOD if on else EDGE, 8, 2 if on else 1))
@@ -806,7 +806,7 @@ func _show_streaks() -> void:
 		icon.queue_redraw()
 	_filling = false
 	var keys := PackedStringArray()
-	for k in CqbMatch.chosen_streaks():
+	for k in Killstreaks.chosen_streaks():
 		keys.append("%d  %s" % [int(k["key"]), String(k["name"])])
 	_streak_note.text = "Carried:   " + "      ".join(keys)
 	_refresh_summary()
@@ -825,7 +825,7 @@ func _refresh_summary() -> void:
 		String(Firearm.spec(String(c["second"]))["name"])]
 	for ch in _sum_streaks.get_children():
 		ch.queue_free()
-	for k in CqbMatch.chosen_streaks():
+	for k in Killstreaks.chosen_streaks():
 		var box := VBoxContainer.new()
 		box.add_theme_constant_override("separation", 0)
 		var ic := StreakIcon.new()

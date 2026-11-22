@@ -27,7 +27,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 
 	# the ground, or a bridge's deck if it is under the skids (see
 	# `Aircraft._gear_forces`)
-	var ground := maxf(Sim.height_at(pos.x, pos.z), Sim.bridge_floor(pos.x, pos.z, pos.y))
+	var ground := maxf(Sim.height_at(pos.x, pos.z), Sim.roads.bridge_floor(pos.x, pos.z, pos.y))
 	agl = pos.y - ground
 	vspeed = vel.y
 	var rho: float = RHO0 * exp(-maxf(pos.y, 0.0) / 8500.0)

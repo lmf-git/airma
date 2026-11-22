@@ -1949,18 +1949,47 @@ start breaking the aircraft.
 
 ## How it is put together
 
+**Split by job.** The five biggest scripts had grown to hold several jobs each,
+and are now one file per job (see the layout below). `world.gd` (was ~4,000
+lines) keeps building the world, starting a mission and running the frame;
+boarding and vehicles, the multiplayer match flow, the restart sweep, mission
+setup, the world's keys, the admin desk and the command line each have their own
+file. `sim.gd` hands the road network, the biomes and the key bindings out as
+`Sim.roads`, `Sim.biomes` and `Sim.keys`. `net_link.gd` keeps the session and
+hands ships, the host's units and shared launches to child nodes of its own (so
+their RPCs have the same path on every machine). `cqb.gd` keeps the fight; its
+killstreaks are `CqbMatch.streaks`, and every streak's actor is a file in
+`infantry/streaks/`. `tank.gd` lost its model building and its vehicle table
+(`VehicleSpec.KINDS`). Code that had been copied between files is shared: the
+sphere every globe is built from, the bounds of a model, the target ladder of
+the player's aircraft, the AI's foe cache, a stats row, a satellite pick, the
+fire and smoke shaders' noise.
+
 ```
-scripts/core/       sim.gd           autoload: terrain field, input map, scoring
-                    meshkit.gd       procedural mesh helpers (lofts, prisms, boxes)
+scripts/core/       sim.gd           autoload: the planet and chart, terrain queries, scoring, input state
+                    key_bindings.gd  the input map and key names (Sim.keys)
+                    meshkit.gd       procedural mesh helpers (lofts, prisms, boxes, globes, batches)
                     chase_camera.gd  cockpit / chase / orbit
 scripts/aircraft/   jet_spec.gd      the airframe database (all tuning lives here)
                     jet_factory.gd   builds an airframe + its moving parts
                     aircraft.gd      flight model, gear, bays, stores, damage
                     player_jet.gd    human pilot + the scripted test pilot
+scripts/vehicles/   vehicle_spec.gd  the ground vehicle database (VehicleSpec.KINDS)
+                    tank_model.gd    builds a vehicle's hull, chassis and turret
+                    tank.gd          driving, gunnery, the AI crew, damage
 scripts/weapons/    weapon_spec.gd   store database and store meshes
                     missile.gd       separation, boost, PN guidance, fuse
                     effects.gd       tracers, explosions, smoke, embers
-scripts/world/      world.gd         main scene: env, missions, vehicles, input, CLI
+scripts/world/      world.gd         main scene: building the world, starting a mission, the frame
+                    mission_setup.gd each mission's own pieces: battle, strike, ramp, rocket, threats
+                    match_session.gd hosting, joining, REDEPLOY and where each mode starts you
+                    match_sweep.gd   clearing one match away before the next
+                    crew.gd          boarding, getting in and out of things, the man on foot
+                    world_controls.gd the world's own keys, the action menu, pause and resume
+                    admin_desk.gd    the admin menu: populate the world, call in traffic
+                    command_line.gd  presets and switches read at boot
+                    road_net.gd      the trunk road network, bridges, town pads (Sim.roads)
+                    biomes.gd        what grows where (Sim.biomes)
                     vision_fx.gd     underwater tint, night vision, sonar, nuke flash
                     fleet_yard.gd    deep water, the carrier and the fleets
                     country_bases.gd the other countries' airfields, satellites
@@ -1972,12 +2001,22 @@ scripts/world/      world.gd         main scene: env, missions, vehicles, input,
                     pilot.gd         posable aircrew figure
                     ragdoll.gd       jointed rigid-body crew
 scripts/infantry/   street_fight.gd  the CQB match and firing range as the world runs them
+                    cqb.gd           the street fight itself: ground, routes, men, armour, plans
+                    killstreaks.gd   streaks: earned, picked on the map, called in, pictured
+                    streaks/         one file per streak's actor (gun run, mortar round, drone...)
+scripts/net/        net_link.gd      the session: peers, roster, sides, ghosts, the match
+                    net_ships.gd     the fleet over the wire (NetLink.ships)
+                    net_units.gd     the host's men, armour and shipping (NetLink.units)
+                    net_launches.gd  rounds and strikes drawn on every machine (NetLink.launches)
+                    net_man.gd       another player on foot, as the AI and rounds see him
 scripts/tests/      test_harness.gd  the --xxxtest flags: parsing and per-frame dispatch
                     *_tests.gd       the tests themselves, one file per area
                     dev_options.gd   --shot, --auto, --view and the other dev switches
 scripts/ai/         ai_plane.gd      patrol / engage / extend / defend
                     ground_target.gd hangars, radars, fuel, shooting SAM sites
 scripts/ui/         hud.gd           world-referenced HUD
+                    cqb_map.gd       the street fight's map panel
+                    key_card.gd      the F2 key card
                     menu.gd          hangar screen
 
 native/src/         field.rs         the land before anything is built on it
@@ -2468,7 +2507,7 @@ harness rather than off the screen:
   takes the world space footprint of every vehicle, aircraft and structure, and
   names any two that overlap. It immediately found two: the airbase parked four
   hangars along x=150, which is exactly the line the ramp start parks its
-  aircraft on, so a jet spawned inside a hangar; and `_clear_mission`
+  aircraft on, so a jet spawned inside a hangar; and `MatchSweep.clear_mission`
   deliberately skipped the aircraft you were flying, so swapping type and
   restarting left the old one standing on the apron for the next mission to park
   a fresh one through. Both fixed; three restarts in a row now leave four
@@ -3525,7 +3564,7 @@ between them they went on naming `N` and `B` for the countermeasures, `V` for a
 gun that is on `K`, `C` for a camera that is on `P` and `M` for a mouse stick
 that is on `;`.
 
-Labels are read off the bindings now, through `Sim.key_label()`, so a key that
+Labels are read off the bindings now, through `KeyBindings.label()`, so a key that
 moves takes its label with it. `--hudtest` also walks the help page and compares
 every control it names against the action it is really bound to, which is the
 check that was missing when this drifted the first time.

@@ -1676,7 +1676,7 @@ func _mortar(start: Vector3, look: Vector3) -> bool:
 	if flat < 70.0:
 		Sim.report("mortar: too close — seventy metres at least", Sim.Ev.BAD)
 		return false
-	var mr := CqbMatch.MortarRound.new()
+	var mr := MortarRound.new()
 	mr.arena = arena as CqbMatch if is_instance_valid(arena) and arena is CqbMatch else null
 	mr.shooter = self
 	mr.from = global_position + Vector3(0.0, 1.0, 0.0)
@@ -1686,7 +1686,7 @@ func _mortar(start: Vector3, look: Vector3) -> bool:
 	mr.delay = 0.0
 	get_tree().current_scene.add_child(mr)
 	if Sim.net != null:
-		Sim.net.share_round(mr)
+		Sim.net.launches.share_round(mr)
 	Sim.report("round out — %d m, %.0f seconds" % [int(flat), mr.flight], Sim.Ev.INFO)
 	return true
 
@@ -1850,7 +1850,7 @@ func _throw() -> void:
 	f.global_position = hand if hand.distance_to(body.eye_pos()) < 1.2 \
 		else body.eye_pos() + look * 0.5
 	if Sim.net != null:
-		Sim.net.share_round(f)
+		Sim.net.launches.share_round(f)
 	Sfx.play_at(world, "cloth", f.global_position, -8.0, 1.3, 30.0)
 
 ## A round of yours landed.

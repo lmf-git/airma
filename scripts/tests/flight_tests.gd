@@ -248,7 +248,7 @@ func tick_gunner(delta: float) -> void:
 	if _gunner_test and is_instance_valid(world.player):
 		_gt += delta
 		if _gt > 2.0 and not world.gunning:
-			world.toggle_gunner()
+			world.crew.toggle_gunner()
 		elif world.gunning and _gt > 3.0 and world.pod.mode == SensorPod.SLEW:
 			# hold a spot on the ground, the way a gunner does before shooting:
 			# it is the area track the rounds have to land on
@@ -860,7 +860,7 @@ func tick_ad(delta: float) -> bool:
 ## edges at that station; a lamp when it is at the tip.
 ## Rounds a launcher has sent, which is its magazine minus what is left.
 func KINDS_ROUNDS_FIRED(t: Tank) -> int:
-	var kd: Dictionary = Tank.KINDS[t.kind]
+	var kd: Dictionary = VehicleSpec.KINDS[t.kind]
 	return maxi(int(kd.get("rounds", kd.get("salvo", 1))) - t.rounds_left, 0)
 #endregion
 
@@ -1140,7 +1140,7 @@ func _run_light_test() -> void:
 	print("[light] %d lamp(s) burning with the navigation lights on" % lit)
 	if lit < 5:
 		bad += 1                    # three lights and at least two bulbs
-	world._do_action("nav")
+	world.controls.do_action("nav")
 	var still := 0
 	for l in world.player._nav:
 		if is_instance_valid(l) and (l as Node3D).visible:
@@ -1151,13 +1151,13 @@ func _run_light_test() -> void:
 	print("[light] %d still burning after switching them off" % still)
 	if still != 0 or world.player.nav_on:
 		bad += 1
-	world._do_action("nav")
+	world.controls.do_action("nav")
 	if not world.player.nav_on:
 		bad += 1
 		print("[light] they would not come back on")
 	# and the landing lamp, which had a key but no menu entry
 	var was: bool = world.player.lights_on
-	world._do_action("lamp")
+	world.controls.do_action("lamp")
 	if world.player.lights_on == was:
 		bad += 1
 		print("[light] the landing lamp did not answer the menu")
@@ -1207,7 +1207,7 @@ func _check_hud_keys() -> void:
 				continue
 			seen += 1
 			var shown := String(row[0])
-			var real: String = Sim.key_label(want[desc])
+			var real: String = Sim.keys.label(want[desc])
 			var ok: bool = shown == real
 			if not ok:
 				bad += 1
@@ -1313,7 +1313,7 @@ func tick_seat(delta: float) -> void:
 	if _seat_test and is_instance_valid(world.player) and is_instance_valid(world.pilot):
 		_seat_t += delta
 		# only once he is actually down on the pan, not part way down the rail
-		if _seat_t > 1.0 and world.pilot.global_position.distance_to(world._board_seat) < 0.02:
+		if _seat_t > 1.0 and world.pilot.global_position.distance_to(world.crew._board_seat) < 0.02:
 			_seat_test = false
 			var inv := world.player.global_transform.affine_inverse()
 			var seat: Vector3 = world.player.seat_offset()
@@ -1362,7 +1362,7 @@ func _tick_heli_deck(delta: float) -> void:
 	var p: Node = world.player
 	if _hd_t == 0.0:
 		var best: Dictionary = {}
-		for br in Sim.road_bridges:
+		for br in Sim.roads.road_bridges:
 			var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
 			if pts.size() >= 3:
 				best = br
@@ -1398,7 +1398,7 @@ func _tick_heli_deck(delta: float) -> void:
 		var gp: Vector3 = p.global_position
 		print("[helideck]   t=%.0f %.2f m over the deck, vs %+.1f, on the ground %s, alive %s; gear %.2f, deck under it %.2f (the wheel's height %.2f), agl %.2f" % [
 			_hd_t, gp.y - _hd_at.y, p.linear_velocity.y, str(p.on_ground), str(p.alive),
-			p.gear_anim, Sim.bridge_floor(gp.x, gp.z, gp.y - 1.6) - _hd_at.y, gp.y - 1.62 - _hd_at.y, p.agl])
+			p.gear_anim, Sim.roads.bridge_floor(gp.x, gp.z, gp.y - 1.6) - _hd_at.y, gp.y - 1.62 - _hd_at.y, p.agl])
 	if _hd_t > 10.0:
 		var y: float = p.global_position.y
 		print("[helideck] after ten seconds: %.2f m over the deck, on the ground %s, alive %s" % [

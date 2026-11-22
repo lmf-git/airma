@@ -201,7 +201,7 @@ func flatten(at: Vector3, r: float) -> int:
 ## of the ramp and a market stall stood up through the deck.
 func _room(x: float, z: float, r: float, over := ROOM_OVER) -> bool:
 	var g: float = _ground(x, z)
-	if Sim.bridge_headroom(x, z, r, g) < over:
+	if Sim.roads.bridge_headroom(x, z, r, g) < over:
 		return false
 	# Not inside a ruin either. Its walls are obstacles but its floor is not,
 	# so something small enough to miss the walls was set down in a room.
@@ -224,7 +224,7 @@ const CRANE_REACH := 44.0
 ## Can a crane stand here: thirty metres of mast and forty of jib, swinging,
 ## with no road bridge anywhere under the sweep of it?
 func _crane_clear(at: Vector2) -> bool:
-	return Sim.bridge_headroom(at.x, at.y, CRANE_REACH) >= 40.0
+	return Sim.roads.bridge_headroom(at.x, at.y, CRANE_REACH) >= 40.0
 
 func _snap(v: float) -> float:
 	return snappedf(v - CELL * 0.5, CELL) + CELL * 0.5
@@ -1020,7 +1020,7 @@ func _build(at: Vector2, of_site: Dictionary) -> void:
 	faction = String(site.get("faction", ""))
 	if faction == "":
 		faction = Sim.region_faction(centre.x, centre.y)
-	biome = Sim.biome_kind(centre.x, centre.y, c3.y, Sim.normal_at(centre.x, centre.y).y)
+	biome = Sim.biomes.kind(centre.x, centre.y, c3.y, Sim.normal_at(centre.x, centre.y).y)
 	tone = Sim.faction_colour(faction)
 	stats["faction"] = faction
 	stats["biome"] = biome

@@ -338,53 +338,24 @@ func _ring_angles() -> PackedFloat32Array:
 	out.append(PI)
 	return out
 
+## Clockwise seen from outside, which is Godot's front face -- the moon's
+## winding, not the air's. This was wound the other way, so `cull_back` threw
+## away the whole near side of the planet and what was drawn was the INSIDE of
+## the far side: the picture of the wrong hemisphere, lit from behind, and only
+## as far as the far plane reaches. Looking down from a few hundred kilometres
+## the far wall under you is past the far plane, so there was a hole round the
+## point below the eye with the sky showing through it and the cloud and air --
+## which find the planet by arithmetic -- still painted over the gap. It went
+## wherever the camera went. The air and cloud shells draw `cull_disabled`, so
+## their winding never mattered and they are left alone.
+##
+## No tangents: there are no UVs to make them from and nothing sampling a
+## normal map. Asking for them is an error, not a no-op.
 func _sphere() -> ArrayMesh:
-	var rings := _ring_angles()
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var r: float = Sim.PLANET_R
-	for i in range(rings.size() - 1):
-		var t0: float = rings[i]
-		var t1: float = rings[i + 1]
-		for j in SEGS:
-			var p0: float = TAU * float(j) / float(SEGS)
-			var p1: float = TAU * float(j + 1) / float(SEGS)
-			var a := _on(t0, p0, r)
-			var b := _on(t0, p1, r)
-			var c := _on(t1, p1, r)
-			var d := _on(t1, p0, r)
-			# The pole rings are a fan, not a strip: two of the four corners are
-			# the same point and the degenerate triangle is not worth emitting.
-			#
-			# Clockwise seen from outside, which is Godot's front face -- the
-			# moon's winding, not the air's. This was wound the other way, so
-			# `cull_back` threw away the whole near side of the planet and what
-			# was drawn was the INSIDE of the far side: the picture of the
-			# wrong hemisphere, lit from behind, and only as far as the far
-			# plane reaches. Looking down from a few hundred kilometres the
-			# far wall under you is past the far plane, so there was a hole
-			# round the point below the eye with the sky showing through it
-			# and the cloud and air -- which find the planet by arithmetic --
-			# still painted over the gap. It went wherever the camera went.
-			# The air and cloud shells draw `cull_disabled`, so their winding
-			# never mattered and they are left alone.
-			if i > 0:
-				_tri(st, a, c, b)
-			_tri(st, a, d, c)
-	# No tangents: there are no UVs to make them from and nothing sampling a
-	# normal map. Asking for them is an error, not a no-op.
-	return st.commit()
-
-func _on(theta: float, phi: float, r: float) -> Vector3:
-	var s := sin(theta)
-	return Vector3(s * cos(phi) * r, cos(theta) * r, s * sin(phi) * r)
-
-## Outward normals, taken from the sphere itself rather than the face, so the
-## shading is smooth however coarse the rings get.
-func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
-	for v in [a, b, c]:
-		st.set_normal((v as Vector3).normalized())
-		st.add_vertex(v)
+	var rings := PackedFloat64Array()
+	for th in _ring_angles():
+		rings.append(th)
+	return MeshKit.globe(rings, SEGS, Sim.PLANET_R, true).commit()
 
 ## Called every frame with the eye. Works out how much planet and how much
 ## ground there should be, tells the ground, and moves the far plane out far

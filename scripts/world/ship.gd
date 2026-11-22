@@ -551,7 +551,7 @@ func fire_vls(at_node: Node3D = null) -> bool:
 	if ghost:
 		vls_cd = 1.6
 		if Sim.net != null and Sim.net.active:
-			Sim.net.request_ship_fire(fleet_idx, 1, aim_yaw, aim_pitch)
+			Sim.net.ships.request_fire(fleet_idx, 1, aim_yaw, aim_pitch)
 		return true
 	var tgt: Node3D = at_node
 	# What the sensor is holding, if anything. Firing the tubes from the conn
@@ -1125,7 +1125,7 @@ func fire_gun() -> bool:
 	if ghost:
 		# the hull belongs to the host; ask, and watch the round come back
 		if Sim.net != null and Sim.net.active:
-			Sim.net.request_ship_fire(fleet_idx, 0, aim_yaw, aim_pitch)
+			Sim.net.ships.request_fire(fleet_idx, 0, aim_yaw, aim_pitch)
 		return true
 	var muzzle: Vector3 = _gun.global_position + Vector3(0, 1.0, 0) \
 		+ Vector3(sin(aim_yaw), 0, -cos(aim_yaw)) * 4.0
@@ -1144,7 +1144,7 @@ func fire_gun() -> bool:
 	Effects.muzzle_flash(get_tree().current_scene, muzzle,
 		Vector3(sin(aim_yaw), 0, -cos(aim_yaw)), 3.2)
 	if Sim.net != null and Sim.net.active and Sim.net.is_host and fleet_idx >= 0:
-		Sim.net.rpc("net_ship_shot", fleet_idx, aim_yaw, aim_pitch)
+		Sim.net.ships.share_shot(fleet_idx, aim_yaw, aim_pitch)
 	return true
 
 func is_broken() -> bool:
@@ -1488,7 +1488,7 @@ func take_hit(amount: float, from: Node = null) -> void:
 	# reports the hit and waits to be told.
 	if ghost:
 		if Sim.net != null and Sim.net.active:
-			Sim.net.report_ship_damage(self, amount)
+			Sim.net.ships.report_damage(self, amount)
 		return
 	health -= amount
 	_hit_ago = 0.0

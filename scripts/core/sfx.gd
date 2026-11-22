@@ -523,7 +523,5 @@ static func play_at(world: Node, id: String, pos: Vector3, db := 0.0, pitch := 1
 		# 16-bit samples, so two bytes each
 		var secs: float = (float(w.data.size()) * 0.5) / maxf(float(w.mix_rate), 1.0)
 		var t := world.get_tree().create_timer(maxf(secs / maxf(pitch, 0.05), 0.05))
-		t.timeout.connect(func():
-			if is_instance_valid(p):
-				p.queue_free())
+		t.timeout.connect(p.queue_free)      # dropped if it goes first
 	p.play()

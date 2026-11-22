@@ -47,18 +47,26 @@ var _obj_acc := 0.0
 var _ai_acc := 0.0
 var _gnd_acc := 0.0
 var _ai_seen := {}
-var _ship_acc := 0.0
 var _wx_acc := 0.0
-var ship_conn := -1           # fleet index this peer has the conn of, -1 none
 var verbose := false
 var upnp_ready := false           # the router forwarded the port
 var upnp_external := ""           # the address other people should use
 var _upnp: UPNP = null
 var _upnp_thread: Thread = null
 var tx := 0
-
 var rx := 0
 var status := "offline"
+
+## The parts of the session kept in their own scripts; see each class. They
+## are children, so their RPCs have the same path on every peer.
+var ships := NetShips.new(self)
+var units := NetUnits.new(self)
+var launches := NetLaunches.new(self)
+
+func _init() -> void:
+	add_child(ships)
+	add_child(units)
+	add_child(launches)
 
 # --------------------------------------------------------------------------
 ## Where the game is listening. Always PORT; kept as a variable only so the
@@ -347,41 +355,20 @@ func leave() -> void:
 		multiplayer.peer_connected.disconnect(_on_peer_joined)
 	if multiplayer.peer_disconnected.is_connected(_on_peer_left):
 		multiplayer.peer_disconnected.disconnect(_on_peer_left)
-	for id in ghosts:
-		if is_instance_valid(ghosts[id]):
-			ghosts[id].queue_free()
-	for id in foot_ghosts:
-		if is_instance_valid(foot_ghosts[id]):
-			foot_ghosts[id].queue_free()
-	for id in veh_ghosts:
-		if is_instance_valid(veh_ghosts[id]):
-			veh_ghosts[id].queue_free()
-	for id in ai_ghosts:
-		if is_instance_valid(ai_ghosts[id]):
-			ai_ghosts[id].queue_free()
-	ai_ghosts.clear()
-	if not is_host:
-		for k in units:
-			if is_instance_valid(units[k]):
-				(units[k] as Node).queue_free()
-	units.clear()
-	_units_seen.clear()
-	_unit_shots.clear()
+	for d in [ghosts, foot_ghosts, veh_ghosts, ai_ghosts]:
+		_free_all(d)
+	units.clear(not is_host)
 	_gen_loaded = -1
 	match_gen = 0
-	set_fleet_ghosts(false)
-	ship_conn = -1
+	ships.reset()
 	ai_kinds.clear()
 	_ai_seen.clear()
-	veh_ghosts.clear()
-	foot_ghosts.clear()
-	ghosts.clear()
 	roster.clear()
 	active = false
 	is_host = false
 	if side == 1:
 		side = 0
-		_side_the_fleet()
+		ships.side_fleet()
 	status = "offline"
 	roster_changed.emit()
 
@@ -430,8 +417,8 @@ func _on_connected(jet_id: String) -> void:
 		my_name = callsign()
 	rpc("net_announce", my_id, jet_id, abs_side, my_name)
 	net_announce(my_id, jet_id, abs_side, my_name)
-	_side_the_fleet()
-	set_fleet_ghosts(true)
+	ships.side_fleet()
+	ships.set_ghosts(true)
 
 func _on_failed() -> void:
 	status = "connection failed"
@@ -543,7 +530,7 @@ func _make_ghost(id: int, jet_id: String, team: int) -> void:
 	g.set_meta("jet", jet_id)
 	# Another player's transport can be walked into when its ramp is down --
 	# it is offered to a man on foot for that and nothing else (see
-	# `Walker._scan` and `World._board`).
+	# `Walker._scan` and `Crew.board`).
 	if g.has_hold():
 		g.add_to_group("boardable")
 	g.team = team
@@ -565,7 +552,7 @@ func _make_ghost(id: int, jet_id: String, team: int) -> void:
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func net_state(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, thr: float, flags: int) -> void:
 	rx += 1
-	var g: Aircraft = _live(ghosts, id) as Aircraft
+	var g: Aircraft = live(ghosts, id) as Aircraft
 	if g == null or not is_instance_valid(g):
 		return
 	if not g.has_meta("t_rx"):
@@ -635,7 +622,7 @@ func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int,
 		g = pil
 	var want_parent: Node = world
 	if in_hold_of != 0:
-		var carrier_jet: Aircraft = _live(ghosts, in_hold_of) as Aircraft
+		var carrier_jet: Aircraft = live(ghosts, in_hold_of) as Aircraft
 		if in_hold_of == my_id and world.get("player") != null:
 			carrier_jet = world.get("player")
 		if carrier_jet and is_instance_valid(carrier_jet) and carrier_jet.has_hold():
@@ -782,7 +769,7 @@ func net_ai_state(idx: PackedInt32Array, pos: PackedVector3Array,
 	if is_host or world == null:
 		return
 	for i in idx.size():
-		var g: Aircraft = _live(ai_ghosts, idx[i]) as Aircraft
+		var g: Aircraft = live(ai_ghosts, idx[i]) as Aircraft
 		if g == null or not is_instance_valid(g):
 			continue
 		if alive[i] == 0:
@@ -807,7 +794,7 @@ func net_ai_gone(idx: PackedInt32Array) -> void:
 	if is_host or world == null:
 		return
 	for key in idx:
-		var g: Aircraft = _live(ai_ghosts, key) as Aircraft
+		var g: Aircraft = live(ai_ghosts, key) as Aircraft
 		ai_ghosts.erase(key)
 		ai_kinds.erase(key)
 		if g != null and is_instance_valid(g):
@@ -863,187 +850,6 @@ func say(text: String) -> void:
 	rpc("net_chat", who, text.substr(0, 140), team)
 	# (absolute: see `side`)
 
-# ---------------------------------------------------------------- ships
-## Ships do not need a spawn roster. Every peer builds the same fleet from the
-## same plan at load, so a hull is addressed by its index in that plan and the
-## host only has to say where it is and what state it is in. Clients hold theirs
-## as ghosts: posed, not simulated, so the two ends cannot diverge.
-## A client hands the whole fleet over to the host. They are built identically
-## on both ends at load, long before anyone connects, so this flips them rather
-## than trying to decide at construction time.
-func set_fleet_ghosts(on: bool) -> void:
-	if world == null:
-		return
-	for n in world.get_tree().get_nodes_in_group("ships"):
-		if is_instance_valid(n) and n is Ship:
-			(n as Ship).ghost = on
-
-func _ship_by_index(i: int) -> Ship:
-	if world == null:
-		return null
-	for n in world.get_tree().get_nodes_in_group("ships"):
-		if is_instance_valid(n) and n is Ship and (n as Ship).fleet_idx == i:
-			return n as Ship
-	return null
-
-@rpc("authority", "call_remote", "unreliable_ordered")
-func net_ships(idx: PackedInt32Array, pos: PackedVector3Array,
-		yaw: PackedFloat32Array, hp: PackedFloat32Array,
-		dmg: PackedFloat32Array, flags: PackedInt32Array) -> void:
-	if is_host or world == null:
-		return
-	rx += 1
-	var seen := {}
-	for i in idx.size():
-		seen[idx[i]] = true
-		var sh := _ship_by_index(idx[i])
-		if sh == null:
-			continue
-		sh.net_apply(pos[i], yaw[i], hp[i], dmg[i * 3], dmg[i * 3 + 1],
-			dmg[i * 3 + 2], flags[i])
-	# A hull the host has stopped publishing has gone to the bottom and been
-	# cleaned up there. A client never runs the sinking clock itself, so without
-	# this it keeps every wreck it has ever seen: measured, a host with seven
-	# ships afloat and a client holding ten.
-	for n in world.get_tree().get_nodes_in_group("ships"):
-		if not is_instance_valid(n) or not (n is Ship):
-			continue
-		var s2 := n as Ship
-		if s2.fleet_idx >= 0 and not seen.has(s2.fleet_idx) and not s2.alive:
-			s2.queue_free()
-
-## The conn changes hands. The host stops letting the AI captain steer that
-## hull and starts taking its wheel and telegraph from the peer instead.
-@rpc("any_peer", "call_local", "reliable")
-func net_ship_conn(i: int, taken: bool) -> void:
-	if not is_host:
-		return
-	var sh := _ship_by_index(i)
-	if sh == null or not sh.alive:
-		return
-	var who := multiplayer.get_remote_sender_id()
-	if taken:
-		if sh.remote_conn != 0 and sh.remote_conn != who:
-			return                      # somebody already has her
-		sh.remote_conn = who
-		sh.ai = false
-	elif sh.remote_conn == who:
-		sh.remote_conn = 0
-		sh.ai = true
-
-@rpc("any_peer", "call_remote", "unreliable_ordered")
-func net_ship_orders(i: int, helm: float, telegraph: float,
-		yaw: float, pitch: float) -> void:
-	if not is_host:
-		return
-	var sh := _ship_by_index(i)
-	if sh == null or sh.remote_conn != multiplayer.get_remote_sender_id():
-		return
-	sh.net_orders(helm, telegraph, yaw, pitch)
-
-## A request to shoot, and the round everyone else sees. `what` is 0 for the
-## main battery and 1 for the tubes.
-@rpc("any_peer", "call_remote", "reliable")
-func net_ship_fire(i: int, what: int, yaw: float, pitch: float) -> void:
-	if not is_host:
-		return
-	var sh := _ship_by_index(i)
-	if sh == null or not sh.alive:
-		return
-	if sh.remote_conn != multiplayer.get_remote_sender_id():
-		return
-	sh.aim_yaw = yaw
-	sh.aim_pitch = pitch
-	if what == 1:
-		sh.fire_vls()
-	else:
-		sh.fire_gun()
-
-## The host telling everyone a ship's battery went off, so the flash and the
-## tracer are on every screen and not only on the hull that fired.
-@rpc("authority", "call_remote", "reliable")
-func net_ship_shot(i: int, yaw: float, pitch: float) -> void:
-	if is_host or world == null:
-		return
-	var sh := _ship_by_index(i)
-	if sh == null:
-		return
-	sh.show_shot(yaw, pitch)
-
-func request_ship_fire(i: int, what: int, yaw: float, pitch: float) -> void:
-	if not active or i < 0:
-		return
-	rpc_id(1, "net_ship_fire", i, what, yaw, pitch)
-
-func take_ship_conn(i: int, taken: bool) -> void:
-	if not active:
-		return
-	ship_conn = i if taken else -1
-	if is_host:
-		var sh := _ship_by_index(i)
-		if sh != null:
-			sh.remote_conn = 0
-			sh.ai = not taken
-		return
-	rpc_id(1, "net_ship_conn", i, taken)
-
-@rpc("any_peer", "call_remote", "reliable")
-func net_ship_hit(i: int, amount: float) -> void:
-	if not is_host:
-		return
-	var sh := _ship_by_index(i)
-	if sh != null and sh.alive:
-		sh.take_hit(amount, null)
-
-## A client's weapon reached a hull the host owns. The client's copy is a
-## picture and has no standing to decide whether it just sank.
-func report_ship_damage(sh: Node, amount: float) -> void:
-	if not active or not (sh is Ship):
-		return
-	if sh.has_meta("net_unit") and not is_host:
-		report_unit_hit(sh, amount, "")
-		return
-	var i: int = (sh as Ship).fleet_idx
-	if i < 0:
-		return
-	if is_host:
-		(sh as Ship).take_hit(amount, null)
-	else:
-		rpc_id(1, "net_ship_hit", i, amount)
-
-## Host side: one packet for the whole fleet, five times a second. A ship is
-## slow and there are a dozen of them, so this is cheaper than treating each
-## hull as its own replicated actor.
-func _publish_ships() -> void:
-	var idx := PackedInt32Array()
-	var pos := PackedVector3Array()
-	var yaw := PackedFloat32Array()
-	var hp := PackedFloat32Array()
-	var dmg := PackedFloat32Array()
-	var flags := PackedInt32Array()
-	for n in world.get_tree().get_nodes_in_group("ships"):
-		if not is_instance_valid(n) or not (n is Ship):
-			continue
-		var sh := n as Ship
-		if sh.fleet_idx < 0:
-			continue
-		idx.append(sh.fleet_idx)
-		pos.append(sh.global_position)
-		yaw.append(sh.heading)
-		hp.append(sh.health)
-		dmg.append(sh.flood)
-		dmg.append(sh.fires)
-		dmg.append(sh.list_side)
-		var f := 0
-		if sh.alive:
-			f |= 1
-		if sh.is_sinking():
-			f |= 2
-			f |= int(clampf(sh.sink_fraction(), 0.0, 1.0) * 255.0) << 8
-		flags.append(f)
-	if idx.size() > 0:
-		tx += 1
-		rpc("net_ships", idx, pos, yaw, hp, dmg, flags)
 
 ## Ground vehicles replicate the same way as aircraft: a kinematic stand-in
 ## eased onto the last reported pose on the physics tick.
@@ -1052,15 +858,12 @@ func net_vehicle(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, turret: f
 		barrel: float, flags: int = 1) -> void:
 	if id == my_id:
 		return                 # our own, passed back to us by the host
-	var t: Tank = _live(veh_ghosts, id) as Tank
+	var t: Tank = live(veh_ghosts, id) as Tank
 	if t == null or not is_instance_valid(t):
 		t = Tank.new()
 		t.setup(peer_team(id))
 		t.name = "Armour %d" % id
-		t.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-		t.freeze = true
-		t.gravity_scale = 0.0
-		t.remove_from_group("boardable")
+		t.make_picture()
 		t.set_meta("net_id", id)
 		world.add_child(t)
 		veh_ghosts[id] = t
@@ -1085,7 +888,7 @@ func net_fire(id: int, weapon: String, origin: Vector3, basis_q: Quaternion, vel
 		return
 	var m := Missile.new()
 	var xf := Transform3D(Basis(basis_q), origin)
-	var shooter: Node = _live(ghosts, id)
+	var shooter: Node = live(ghosts, id)
 	m.launch(weapon, xf, vel, shooter if shooter else self, null)
 	world.add_child(m)
 	if is_host:
@@ -1109,14 +912,24 @@ func net_ai_hit(key: int, amount: float) -> void:
 		_apply_ai_hit(key, amount)
 
 func _apply_ai_hit(key: int, amount: float) -> void:
+	var n := ai_by_key(key)
+	if n == null:
+		return
+	n.take_hit(amount)
+	if verbose:
+		print("[net] ai %d took %.0f from a client, hp=%s alive=%s" % [
+			key, amount, str(n.get("health")), str(n.is_alive())])
+
+## The number an AI aircraft goes by on the wire.
+static func ai_key(n: Node) -> int:
+	return n.get_instance_id() % 100000
+
+## Host: the AI aircraft that number names, or null.
+func ai_by_key(key: int) -> Node3D:
 	for n in world.get_tree().get_nodes_in_group("bandits"):
-		if is_instance_valid(n) and not n.is_in_group("remote") \
-				and n.get_instance_id() % 100000 == key:
-			n.take_hit(amount)
-			if verbose:
-				print("[net] ai %d took %.0f from a client, hp=%s alive=%s" % [
-					key, amount, str(n.get("health")), str(n.is_alive())])
-			return
+		if is_instance_valid(n) and not n.is_in_group("remote") and ai_key(n) == key:
+			return n
+	return null
 
 ## Garrison armour drives itself, so unlike a structure its pose has to be
 ## replicated or a client ends up aiming at where its own copy wandered off to.
@@ -1134,7 +947,7 @@ func _publish_ground() -> void:
 			var a = z.assets[i]
 			if not is_instance_valid(a) or not (a is Tank) or not a.alive:
 				continue
-			watch_launcher(a)
+			launches.watch(a)
 			labels.append(String(z.label))
 			slots.append(i)
 			pos.append(a.global_position)
@@ -1195,18 +1008,21 @@ func report_ground_damage(n: Node, amount: float) -> void:
 func net_asset_hit(zone_label: String, idx: int, amount: float) -> void:
 	if not is_host or world == null:
 		return
+	var a := zone_asset(zone_label, idx)
+	if a != null and a.has_method("apply_damage"):
+		a.apply_damage(amount)
+		if verbose:
+			print("[net] %s asset %d took %.0f from a client, alive=%s" % [
+				zone_label, idx, amount, str(a.get("alive"))])
+
+## A sector's asset by the sector's label and its slot: both ends built the
+## same garrison in the same order.
+func zone_asset(label: String, idx: int) -> Node3D:
 	for z in world.get_tree().get_nodes_in_group("zones"):
-		if not is_instance_valid(z) or String(z.label) != zone_label:
-			continue
-		if idx < 0 or idx >= z.assets.size():
-			return
-		var a = z.assets[idx]
-		if is_instance_valid(a) and a.has_method("apply_damage"):
-			a.apply_damage(amount)
-			if verbose:
-				print("[net] %s asset %d took %.0f from a client, alive=%s" % [
-					zone_label, idx, amount, str(a.get("alive"))])
-		return
+		if is_instance_valid(z) and String(z.label) == label and idx >= 0 and idx < z.assets.size():
+			var a: Variant = z.assets[idx]
+			return a as Node3D if is_instance_valid(a) else null
+	return null
 
 ## Damage that landed on a ghost. A ghost is a picture of somebody else's
 ## aircraft, so it cannot decide whether it just died: the hit goes to whoever
@@ -1239,7 +1055,7 @@ func _physics_process(delta: float) -> void:
 	var _pn := Sim.prof_at()
 	_tick_net(delta)
 	_tick_foot_ghosts(delta)
-	_tick_units(delta)
+	units.tick(delta)
 	Sim.prof_end(&"net.total", _pn)
 
 func _tick_net(delta: float) -> void:
@@ -1269,50 +1085,11 @@ func _tick_net(delta: float) -> void:
 	# the last reported velocity and ease onto the last reported pose, then let
 	# Godot's physics interpolation smooth it out for the renderer.
 	for id in veh_ghosts:
-		var v: Tank = veh_ghosts[id]
-		if not v.has_meta("target_pos"):
-			continue
-		if _stale(v):
-			continue
-		var vp: Vector3 = v.get_meta("target_pos") \
-			+ (v.get_meta("net_vel", Vector3.ZERO) as Vector3) * delta
-		v.set_meta("target_pos", vp)
-		var vr: Quaternion = v.get_meta("target_rot")
-		var vk: float = clampf(delta * 10.0, 0.0, 1.0)
-		var vxf := v.global_transform
-		v.global_transform = Transform3D(
-			Basis(vxf.basis.get_rotation_quaternion().slerp(vr, vk)),
-			vxf.origin.lerp(vp, vk))
+		_ease_ghost(veh_ghosts[id], delta, 10.0)
 	for id in ai_ghosts:
-		var a: Aircraft = ai_ghosts[id]
-		if not a.has_meta("target_pos"):
-			continue
-		if _stale(a):
-			continue
-		var ap: Vector3 = a.get_meta("target_pos") \
-			+ (a.get_meta("net_vel", Vector3.ZERO) as Vector3) * delta
-		a.set_meta("target_pos", ap)
-		var ar: Quaternion = a.get_meta("target_rot")
-		var ak: float = clampf(delta * 30.0, 0.0, 1.0)
-		var axf := a.global_transform
-		a.global_transform = Transform3D(
-			Basis(axf.basis.get_rotation_quaternion().slerp(ar, ak)),
-			axf.origin.lerp(ap, ak))
+		_ease_ghost(ai_ghosts[id], delta, 30.0)
 	for id in ghosts:
-		var g: Aircraft = ghosts[id]
-		if not g.has_meta("target_pos"):
-			continue
-		if _stale(g):
-			continue
-		var tp: Vector3 = g.get_meta("target_pos")
-		tp += (g.get_meta("net_vel", Vector3.ZERO) as Vector3) * delta
-		g.set_meta("target_pos", tp)
-		var want_rot: Quaternion = g.get_meta("target_rot")
-		var k: float = clampf(delta * 10.0, 0.0, 1.0)
-		var xf := g.global_transform
-		g.global_transform = Transform3D(
-			Basis(xf.basis.get_rotation_quaternion().slerp(want_rot, k)),
-			xf.origin.lerp(tp, k))
+		_ease_ghost(ghosts[id], delta, 10.0)
 	Sim.prof_end(&"net.ghosts", _pg)
 	_acc += delta
 	if _acc < RATE:
@@ -1326,7 +1103,7 @@ func _tick_net(delta: float) -> void:
 ## freed. A freed object handed to a typed variable is an error, and anything
 ## held here can be freed under us: a passenger with his aircraft, a ghost
 ## rebuilt as another type.
-static func _live(d: Dictionary, k: Variant) -> Node:
+static func live(d: Dictionary, k: Variant) -> Node:
 	var v: Variant = d.get(k)
 	return v as Node if is_instance_valid(v) else null
 
@@ -1348,6 +1125,13 @@ static func _prune(d: Dictionary) -> void:
 	for id in d.keys():
 		if not is_instance_valid(d[id]):
 			d.erase(id)
+
+## Free everything a dictionary holds, and empty it.
+static func _free_all(d: Dictionary) -> void:
+	for k in d:
+		if is_instance_valid(d[k]):
+			(d[k] as Node).queue_free()
+	d.clear()
 
 ## What goes out on the wire, at `RATE`.
 ##
@@ -1372,11 +1156,8 @@ func _send(_delta: float) -> void:
 		if _gnd_acc >= 0.1:
 			_gnd_acc = 0.0
 			_publish_ground()
-			_publish_units()
-		_ship_acc += RATE
-		if _ship_acc >= 0.2:
-			_ship_acc = 0.0
-			_publish_ships()
+			units.publish()
+		ships.publish(RATE)
 		_wx_acc += RATE
 		if _wx_acc >= 2.0:      # the clock drifts slowly; so can the packet
 			_wx_acc = 0.0
@@ -1407,24 +1188,19 @@ func _send(_delta: float) -> void:
 				rpc("net_kills", int(mode.kills.get(0, 0)), int(mode.kills.get(1, 0)))
 	# A gunship called in and on its way, before he is on its guns: it is his
 	# aircraft as far as everybody else is concerned (see `set_jet`).
-	var gs = world.get("_cqb_gunship")
+	var gs = world.get("called_gunship")
 	if gs != null and is_instance_valid(gs) and gs != world.get("player"):
 		tx += 1
 		rpc("net_state", my_id, gs.global_position,
 			gs.global_transform.basis.get_rotation_quaternion(), gs.linear_velocity,
 			gs.throttle, 0)
 	# holding the conn of a ship: the orders go over, the hull comes back
-	if ship_conn >= 0 and not is_host:
-		var sh := _ship_by_index(ship_conn)
-		if sh != null and sh.occupied:
-			tx += 1
-			rpc_id(1, "net_ship_orders", ship_conn, sh.helm, sh.telegraph,
-				sh.aim_yaw, sh.aim_pitch)
+	if ships.send_orders():
 		return
 	# in a vehicle: send the hull and turret instead
 	var tk = world.get("tank")
 	if tk != null and is_instance_valid(tk):
-		watch_launcher(tk)
+		launches.watch(tk)
 		rpc("net_vehicle", my_id, tk.global_position,
 			tk.global_transform.basis.get_rotation_quaternion(), tk.linear_velocity,
 			tk.turret_yaw, tk.turret_pitch, 1 if tk.alive else 0)
@@ -1469,6 +1245,21 @@ func _send(_delta: float) -> void:
 		p.global_transform.basis.get_rotation_quaternion(), p.linear_velocity,
 		p.throttle, flags)
 
+## A ghost moved one physics tick: dead reckoned along its last reported
+## velocity and eased onto its last reported pose, `rate` being how hard.
+func _ease_ghost(g: Node3D, delta: float, rate: float) -> void:
+	if not g.has_meta("target_pos") or _stale(g):
+		return
+	var tp: Vector3 = g.get_meta("target_pos")
+	tp += (g.get_meta("net_vel", Vector3.ZERO) as Vector3) * delta
+	g.set_meta("target_pos", tp)
+	var want_rot: Quaternion = g.get_meta("target_rot")
+	var k: float = clampf(delta * rate, 0.0, 1.0)
+	var xf := g.global_transform
+	g.global_transform = Transform3D(
+		Basis(xf.basis.get_rotation_quaternion().slerp(want_rot, k)),
+		xf.origin.lerp(tp, k))
+
 ## True once a ghost has gone a second without an update. Extrapolating past
 ## that walks it off the map: a dropped peer left one 1.8e9 m from the field.
 func _stale(n: Node3D) -> bool:
@@ -1480,7 +1271,7 @@ func _publish_ai() -> void:
 	var now := {}
 	for n in world.get_tree().get_nodes_in_group("bandits"):
 		if is_instance_valid(n) and not n.is_in_group("remote") and n.is_alive():
-			now[n.get_instance_id() % 100000] = n
+			now[ai_key(n)] = n
 	# anything that has left the live set is dead or despawned; say so once,
 	# reliably, or the clients keep a frozen ghost of it for ever
 	var gone := PackedInt32Array()
@@ -1502,7 +1293,7 @@ func _publish_ai() -> void:
 	var alive := PackedByteArray()
 	for key in now:
 		var n: Node3D = now[key]
-		watch_launcher(n)
+		launches.watch(n)
 		if not _ai_seen.has(key):
 			_ai_seen[key] = true
 			new_idx.append(key)
@@ -1685,16 +1476,12 @@ func _retag_players() -> void:
 func _flip_frame() -> void:
 	if world == null:
 		return
-	for d in [ai_ghosts, units]:
-		for k in d:
-			if is_instance_valid(d[k]):
-				(d[k] as Node).queue_free()
-		d.clear()
+	_free_all(ai_ghosts)
+	units.clear(true)
 	ai_kinds.clear()
-	_unit_shots.clear()
 	if active and not is_host:
 		rpc_id(1, "net_resync")
-	_side_the_fleet()
+	ships.side_fleet()
 	for z in world.get_tree().get_nodes_in_group("zones"):
 		if is_instance_valid(z) and int(z.owner_team) in [0, 1]:
 			z.owner_team = 1 - int(z.owner_team)
@@ -1707,16 +1494,6 @@ func _flip_frame() -> void:
 		m.tickets[0] = m.tickets.get(1, 0)
 		m.tickets[1] = t0
 
-func _side_the_fleet() -> void:
-	if world == null:
-		return
-	for n in world.get_tree().get_nodes_in_group("ships"):
-		var sh := n as Ship
-		if sh == null or sh.fleet_idx < 0:
-			continue
-		if not sh.has_meta("abs_team"):
-			sh.set_meta("abs_team", sh.team)
-		sh.team = lt(int(sh.get_meta("abs_team")))
 ## The generation this client last loaded, so a repeat of the same message
 ## (a join racing a restart) does not start it twice.
 var _gen_loaded := -1
@@ -1753,7 +1530,7 @@ func net_match(mission: String, gen: int, cfg: Dictionary) -> void:
 	CqbMatch.size_them = int(cfg.get("them", CqbMatch.size_them))
 	CqbMatch.kill_goal = int(cfg.get("goal", CqbMatch.kill_goal))
 	Sim.report("host started %s" % mission, Sim.Ev.INFO)
-	world.call_deferred("_start_from_host", mission)
+	world.session.start_from_host.call_deferred(mission)
 
 ## Everything this machine was holding for the last match, let go of as the
 ## next one starts. The AI the host was flying, the armour and men it was
@@ -1761,16 +1538,11 @@ func net_match(mission: String, gen: int, cfg: Dictionary) -> void:
 ## packets; left alone they hung frozen over the new match, because the
 ## mission sweep rightly does not touch what the network layer owns.
 func match_reset() -> void:
-	for d in [ai_ghosts, veh_ghosts, units, foot_ghosts]:
-		for k in d:
-			if is_instance_valid(d[k]):
-				(d[k] as Node).queue_free()
-		d.clear()
+	for d in [ai_ghosts, veh_ghosts, foot_ghosts]:
+		_free_all(d)
+	units.clear(true)
 	ai_kinds.clear()
 	_ai_seen.clear()
-	_units_seen.clear()
-	_unit_fate.clear()
-	_unit_shots.clear()
 	# A client that started again on its own -- taking an aeroplane from the
 	# deploy screen rebuilds its copy of the match -- has just thrown away
 	# every picture, and the host only describes a unit once. Ask again.
@@ -1780,7 +1552,7 @@ func match_reset() -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func net_resync() -> void:
 	if is_host:
-		_units_seen.clear()
+		units.resend()
 		_ai_seen.clear()
 
 ## Host: the match's result, so it ends on every screen at once and for the
@@ -1872,679 +1644,3 @@ func net_down(victim: String, killer: String, cause: String, head: bool, vside :
 	if sender != 0:
 		Sim.kill(killer, 1 - vside, victim, vside, cause, head)
 	broadcast_feed(killer, 1 - vside, victim, vside, cause, head, sender)
-
-# ------------------------------------------------------------- host's units
-## What the host simulates on the ground and is not a sector's garrison: the
-## men of a street fight, the armour that drives about in it, and a strike's
-## columns and shipping. Keyed by a number the host hands out the first time it
-## publishes each one; a client builds a picture of each from the roster and
-## moves it from the state packets. Every hit a client lands on a picture goes
-## back to the host, which decides, and the death comes back in the next packet.
-var units := {}                 # key -> Node: the host's real ones, a client's pictures
-var _units_seen := {}           # host: keys every client has been told about
-var _unit_fate := {}            # host: key -> 2 head shot, 1 killed
-var _unit_shots := {}           # client: key -> last shot count seen
-var _unit_seq := 0
-## Host: the peer whose reported hit is being applied, so a kill it makes is
-## credited to the man who made it.
-var crediting := 0
-
-func _unit_key(n: Node) -> int:
-	if not n.has_meta("net_unit"):
-		_unit_seq += 1
-		n.set_meta("net_unit", _unit_seq)
-		if n is Soldier:
-			var key := _unit_seq
-			(n as Soldier).died.connect(func(_w, _k, head) -> void:
-				_unit_fate[key] = 2 if head else 1)
-	return int(n.get_meta("net_unit"))
-
-func _unit_kind(n: Node) -> String:
-	if n is Soldier:
-		return "man:%s:%s" % [(n as Soldier).kit, (n as Soldier).launcher]
-	if n is Tank:
-		return "tank:%s" % (n as Tank).kind
-	if n is Ship:
-		return "ship:%s" % (n as Ship).kind
-	return ""
-
-func _host_units() -> Array:
-	var out: Array = []
-	var fight = world.get("cqb")
-	if fight != null and is_instance_valid(fight):
-		for s in fight.soldiers:
-			if is_instance_valid(s) and (s as Soldier).alive:
-				out.append(s)
-	for v in world.get_tree().get_nodes_in_group("vehicles"):
-		var t := v as Tank
-		if t == null or not is_instance_valid(t) or t.is_in_group("remote") \
-				or t.has_meta("net_id") or t.has_meta("zone_asset") \
-				or t == world.get("tank"):
-			continue
-		if t.ai or t.has_meta("strike"):
-			out.append(t)
-	for s2 in world.get_tree().get_nodes_in_group("ships"):
-		if is_instance_valid(s2) and s2 is Ship and s2.has_meta("strike") \
-				and (s2 as Ship).fleet_idx < 0:
-			out.append(s2)
-	return out
-
-func _publish_units() -> void:
-	var now := {}
-	for n in _host_units():
-		now[_unit_key(n)] = n
-	var gone := PackedInt32Array()
-	var how := PackedByteArray()
-	for key in _units_seen.keys():
-		if not now.has(key):
-			gone.append(key)
-			how.append(int(_unit_fate.get(key, 0)))
-			_units_seen.erase(key)
-			_unit_fate.erase(key)
-			units.erase(key)
-	if gone.size() > 0:
-		rpc("net_units_gone", gone, how)
-	var nk := PackedInt32Array()
-	var nkind := PackedStringArray()
-	var nteam := PackedInt32Array()
-	var nname := PackedStringArray()
-	var keys := PackedInt32Array()
-	var pos := PackedVector3Array()
-	var ang := PackedFloat32Array()
-	var flags := PackedByteArray()
-	# rounds fired, main gun in the low half and machine gun in the high
-	var fire := PackedInt32Array()
-	for key in now:
-		var n: Node3D = now[key]
-		units[key] = n
-		watch_launcher(n)
-		if not _units_seen.has(key):
-			_units_seen[key] = true
-			nk.append(key)
-			nkind.append(_unit_kind(n))
-			nteam.append(int(n.get("team")))
-			nname.append(String(n.get("callsign")) if n is Soldier else String(n.name))
-		keys.append(key)
-		pos.append(n.global_position)
-		var f := 0
-		if n is Soldier:
-			var s := n as Soldier
-			ang.append(s.yaw)
-			ang.append(s.pitch)
-			ang.append(float(s.shots % 256))
-			f = 1 | (2 if s.crouching else 0) | (4 if s.state == Soldier.FIGHT else 0)
-		elif n is Tank:
-			var t := n as Tank
-			ang.append(t.rotation.y)
-			ang.append(t.turret_yaw)
-			ang.append(t.turret_pitch)
-			f = 1 if t.alive else 0
-			fire.resize(keys.size())
-			fire[keys.size() - 1] = (t.shots_main & 0xFFFF) | ((t.shots_coax & 0x7FFF) << 16)
-		else:
-			var sh := n as Ship
-			ang.append(sh.heading)
-			ang.append(sh.health)
-			ang.append(sh.sink_fraction() if sh.is_sinking() else 0.0)
-			f = (1 if sh.alive else 0) | (2 if sh.is_sinking() else 0)
-		flags.append(f)
-	if nk.size() > 0:
-		rpc("net_units_roster", nk, nkind, nteam, nname)
-	if keys.size() > 0:
-		fire.resize(keys.size())
-		rpc("net_units", keys, pos, ang, flags, fire)
-
-@rpc("authority", "call_remote", "reliable")
-func net_units_roster(keys: PackedInt32Array, kinds: PackedStringArray,
-		teams: PackedInt32Array, names: PackedStringArray) -> void:
-	if is_host or world == null:
-		return
-	for i in keys.size():
-		var key := keys[i]
-		if units.has(key) and is_instance_valid(units[key]):
-			continue
-		var bits := kinds[i].split(":")
-		var n: Node3D = null
-		match bits[0]:
-			"man":
-				var s := Soldier.new()
-				s.team = lt(teams[i])
-				s.kit = bits[1] if bits.size() > 1 else "carbine"
-				s.launcher = bits[2] if bits.size() > 2 else ""
-				s.callsign = names[i]
-				s.name = names[i]
-				s.ghost = true
-				var fight = world.get("cqb")
-				if fight != null and is_instance_valid(fight):
-					s.arena = fight
-					fight.add_child(s)
-					fight.adopt_ghost(s)
-				else:
-					world.add_child(s)
-				n = s
-			"tank":
-				var t := Tank.new()
-				t.setup(lt(teams[i]), bits[1] if bits.size() > 1 else "m1a2")
-				t.name = names[i]
-				t.ai = false
-				t.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-				t.freeze = true
-				t.gravity_scale = 0.0
-				t.remove_from_group("boardable")
-				world.add_child(t)
-				n = t
-			"ship":
-				var sh := Ship.new()
-				sh.setup(bits[1] if bits.size() > 1 else "cargo", lt(teams[i]))
-				sh.name = names[i]
-				sh.ghost = true
-				sh.set_meta("strike", true)
-				world.add_child(sh)
-				n = sh
-		if n == null:
-			continue
-		n.set_meta("net_unit", key)
-		n.set_meta("t_rx", 0)
-		n.visible = false
-		units[key] = n
-
-@rpc("authority", "call_remote", "unreliable_ordered")
-func net_units(keys: PackedInt32Array, pos: PackedVector3Array, ang: PackedFloat32Array,
-		flags: PackedByteArray, fire := PackedInt32Array()) -> void:
-	if is_host or world == null:
-		return
-	for i in keys.size():
-		var n: Variant = units.get(keys[i])
-		if n == null or not is_instance_valid(n):
-			continue
-		var u := n as Node3D
-		var first: bool = int(u.get_meta("t_rx", 0)) == 0
-		u.set_meta("t_rx", Time.get_ticks_msec())
-		u.set_meta("target_pos", pos[i])
-		if first:
-			u.global_position = pos[i]
-			u.visible = true
-		var a0: float = ang[i * 3]
-		var a1: float = ang[i * 3 + 1]
-		var a2: float = ang[i * 3 + 2]
-		var f: int = flags[i]
-		if u is Soldier:
-			var s := u as Soldier
-			s.set_meta("net_yaw", a0)
-			s.pitch = a1
-			s.crouching = (f & 2) != 0
-			s.state = Soldier.FIGHT if (f & 4) != 0 else Soldier.ROAM
-			var shots := int(a2)
-			var was: int = int(_unit_shots.get(keys[i], shots))
-			_unit_shots[keys[i]] = shots
-			if shots != was and not first:
-				s.ghost_shot()
-		elif u is Tank:
-			var t := u as Tank
-			t.set_meta("target_rot", Quaternion(Vector3.UP, a0))
-			t.turret_yaw = a1
-			t.turret_pitch = a2
-			if (f & 1) == 0 and t.alive:
-				t.apply_damage(1.0e6)
-			elif i < fire.size():
-				_vehicle_shots(keys[i], t, fire[i], first)
-		elif u is Ship:
-			var sh := u as Ship
-			sh.net_apply(pos[i], a0, a1, 0.0, 0.0, 0.0,
-				(f & 1) | ((f & 2)) | (int(clampf(a2, 0.0, 1.0) * 255.0) << 8))
-
-@rpc("authority", "call_remote", "reliable")
-func net_units_gone(keys: PackedInt32Array, how: PackedByteArray) -> void:
-	if is_host or world == null:
-		return
-	for i in keys.size():
-		var n: Variant = units.get(keys[i])
-		units.erase(keys[i])
-		_unit_shots.erase(keys[i])
-		if n == null or not is_instance_valid(n):
-			continue
-		if n is Soldier and how[i] > 0:
-			(n as Soldier).ghost_die(how[i] == 2)
-		else:
-			(n as Node).queue_free()
-
-## What a vehicle picture has fired since the last packet, drawn. A packet
-## comes ten times a second and a machine gun fires about as often, so a few
-## rounds can be owed at once; more than that is a packet lost, and is not
-## made up all at once.
-## Main-gun and machine-gun rounds drawn for vehicle pictures, for the harness.
-var vehicle_rounds_drawn := Vector2i.ZERO
-
-func _vehicle_shots(key: int, t: Tank, packed: int, first: bool) -> void:
-	var main := packed & 0xFFFF
-	var coax := (packed >> 16) & 0x7FFF
-	var was: Variant = _unit_shots.get(key)
-	_unit_shots[key] = Vector2i(main, coax)
-	if first or was == null or not (was is Vector2i):
-		return
-	var dm: int = (main - (was as Vector2i).x) & 0xFFFF
-	var dc: int = (coax - (was as Vector2i).y) & 0x7FFF
-	for i in mini(dm, 2):
-		t.ghost_fire(world, true)
-		vehicle_rounds_drawn.x += 1
-	for i in mini(dc, 3):
-		t.ghost_fire(world, false)
-		vehicle_rounds_drawn.y += 1
-
-## Client side, every physics tick: each picture eased onto where it was said
-## to be.
-func _tick_units(delta: float) -> void:
-	if is_host:
-		return
-	var k: float = clampf(delta * 10.0, 0.0, 1.0)
-	for key in units:
-		var n: Variant = units[key]
-		if not is_instance_valid(n):
-			continue
-		var u := n as Node3D
-		if not u.has_meta("target_pos") or u is Ship:
-			continue
-		var want: Vector3 = u.get_meta("target_pos")
-		if u is Tank:
-			var rot: Quaternion = u.get_meta("target_rot", Quaternion.IDENTITY)
-			u.global_transform = Transform3D(Basis(
-				u.global_transform.basis.get_rotation_quaternion().slerp(rot, k)),
-				u.global_position.lerp(want, k))
-		# a man is moved by his own `_process`, so his legs see the step
-
-## A client hit one of the host's units.
-func report_unit_hit(n: Node, amount: float, cause: String, head := false) -> void:
-	if not active or not n.has_meta("net_unit"):
-		return
-	rpc_id(1, "net_unit_hit", int(n.get_meta("net_unit")), amount, cause, head)
-
-@rpc("any_peer", "call_remote", "reliable")
-func net_unit_hit(key: int, amount: float, cause: String, head: bool) -> void:
-	if not is_host or world == null:
-		return
-	var n: Variant = units.get(key)
-	if n == null or not is_instance_valid(n):
-		return
-	var sender := multiplayer.get_remote_sender_id()
-	var from: Node = null
-	for m in world.get_tree().get_nodes_in_group("net_men"):
-		if is_instance_valid(m) and int(m.peer) == sender:
-			from = m
-	if from == null and veh_ghosts.has(sender) and is_instance_valid(veh_ghosts[sender]):
-		from = veh_ghosts[sender]
-	var was_cause := KillFeed.cause
-	KillFeed.cause = cause
-	crediting = sender
-	if n is Soldier:
-		(n as Soldier)._last_head = head
-		(n as Soldier).take_hit(amount, from)
-	elif n is Tank:
-		(n as Tank).apply_damage(amount)
-	elif n is Ship:
-		(n as Ship).take_hit(amount, null)
-	crediting = 0
-	KillFeed.cause = was_cause
-
-## Host: a kill made by somebody on another machine, for his streaks and score.
-func credit_kill(peer: int, victim: String, head: bool) -> void:
-	if active and is_host and peer > 1:
-		rpc_id(peer, "net_credit", victim, head)
-
-@rpc("authority", "call_remote", "reliable")
-func net_credit(victim: String, head: bool) -> void:
-	var fight = world.get("cqb") if world != null else null
-	if fight != null and is_instance_valid(fight):
-		fight.credit_kill(victim, head)
-
-# --------------------------------------------------- rounds off the ground
-## Every round a vehicle or a site fires that flies far enough to matter -- a
-## tank's shell, a rocket battery's ripple, a SAM, a cruise or ballistic
-## missile -- shown on every other machine. Only the machine that owns the
-## launcher simulates the real one; everyone else is sent where it left, how
-## fast, and what it is after, and flies a copy of it that homes, warns and goes
-## off the same way and hurts nothing. Without this a client was shot down by a
-## battery that never visibly fired, and a rocket ripple landed out of nowhere.
-
-## Start sharing what this launcher fires. Safe to call every frame.
-func watch_launcher(t: Node) -> void:
-	if not is_instance_valid(t) or t.has_meta("net_watch") or not t.has_signal("store_released"):
-		return
-	t.set_meta("net_watch", true)
-	t.store_released.connect(func(r: Node) -> void: share_launch(t, r))
-
-## Who fired, as every machine can name it.
-func _who_of(n: Node) -> String:
-	if not is_instance_valid(n):
-		return "x"
-	if n.has_meta("net_unit"):
-		return "u:%d" % int(n.get_meta("net_unit"))
-	if n.has_meta("zone_asset"):
-		var k: Array = n.get_meta("zone_asset")
-		return "z:%s:%d" % [String(k[0]), int(k[1])]
-	if n == world.get("tank") or n == world.get("player") or n == world.get("walker"):
-		return "p:%d" % my_id
-	if n.is_in_group("bandits") and not n.is_in_group("remote"):
-		return "a:%d" % (n.get_instance_id() % 100000)
-	return "x"
-
-func _who_node(who: String) -> Node3D:
-	var bits := who.split(":")
-	match bits[0]:
-		"u":
-			var u: Variant = units.get(int(bits[1]))
-			return u as Node3D if is_instance_valid(u) else null
-		"z":
-			return _zone_asset(bits[1], int(bits[2]))
-		"a":
-			var ag: Variant = ai_ghosts.get(int(bits[1]))
-			return ag as Node3D if is_instance_valid(ag) else null
-		"p":
-			var pid := int(bits[1])
-			if veh_ghosts.has(pid) and is_instance_valid(veh_ghosts[pid]):
-				return veh_ghosts[pid]
-			if ghosts.has(pid) and is_instance_valid(ghosts[pid]):
-				return ghosts[pid]
-	return null
-
-func _zone_asset(label: String, idx: int) -> Node3D:
-	for z in world.get_tree().get_nodes_in_group("zones"):
-		if is_instance_valid(z) and String(z.label) == label and idx >= 0 and idx < z.assets.size():
-			var a: Variant = z.assets[idx]
-			return a as Node3D if is_instance_valid(a) else null
-	return null
-
-## What a round is after, as every machine can find it.
-func _target_ref(n: Variant) -> Dictionary:
-	if n == null or not is_instance_valid(n) or not (n is Node3D):
-		return {}
-	var t := n as Node3D
-	if t.has_meta("net_unit"):
-		return {"u": int(t.get_meta("net_unit"))}
-	if t.has_meta("net_id"):
-		return {"p": int(t.get_meta("net_id"))}
-	if t == world.get("player") or t == world.get("tank"):
-		return {"p": my_id}
-	if t.has_meta("net_ai"):
-		return {"a": int(t.get_meta("net_ai"))}
-	if t.is_in_group("bandits") and not t.is_in_group("remote"):
-		return {"a": t.get_instance_id() % 100000}
-	if t.has_meta("zone_asset"):
-		var k: Array = t.get_meta("zone_asset")
-		return {"z": String(k[0]), "zi": int(k[1]), "m": t.global_position}
-	if t.is_in_group("satellites"):
-		return {"sat": String(t.name), "m": t.global_position}
-	return {"m": t.global_position}
-
-func _target_node(r: Dictionary) -> Node3D:
-	if r.has("u"):
-		var u: Variant = units.get(int(r["u"]))
-		if is_instance_valid(u):
-			return u
-	if r.has("p"):
-		var pid := int(r["p"])
-		if pid == my_id:
-			var mine: Variant = world.get("tank")
-			if mine == null or not is_instance_valid(mine):
-				mine = world.get("player")
-			if mine != null and is_instance_valid(mine):
-				return mine
-		else:
-			var g := _who_node("p:%d" % pid)
-			if g != null:
-				return g
-	if r.has("a"):
-		var key := int(r["a"])
-		if not is_host and ai_ghosts.has(key) and is_instance_valid(ai_ghosts[key]):
-			return ai_ghosts[key]
-		if is_host:
-			for b in world.get_tree().get_nodes_in_group("bandits"):
-				if is_instance_valid(b) and not b.is_in_group("remote") \
-						and b.get_instance_id() % 100000 == key:
-					return b
-	if r.has("z"):
-		var za := _zone_asset(String(r["z"]), int(r["zi"]))
-		if za != null:
-			return za
-	if r.has("sat"):
-		for s in world.get_tree().get_nodes_in_group("satellites"):
-			if is_instance_valid(s) and String(s.name) == String(r["sat"]):
-				return s
-	if r.has("m"):
-		# a place: a mark of its own, gone with the round
-		var mk := _Mark.new()
-		world.add_child(mk)
-		mk.global_position = r["m"]
-		return mk
-	return null
-
-## A spot on the ground for a copied round to go to: what a launcher's own
-## aiming mark is on the machine that fired it.
-class _Mark extends Node3D:
-	var team := -1
-	func _ready() -> void:
-		add_to_group("no_lock")
-	func hit_radius() -> float:
-		return 6.0
-	func is_alive() -> bool:
-		return true
-	func take_hit(_a: float, _f: Node = null) -> void:
-		pass
-
-## The launcher here fired `r`: tell everyone else.
-func share_launch(by: Node, r: Node) -> void:
-	if not active or not is_instance_valid(r) or r.get("harmless") == true:
-		return
-	var tm: int = 1
-	if is_instance_valid(by):
-		tm = int(by.get("team")) if "team" in by else (int(by.get("side")) if "side" in by else 1)
-	var d := {"by": _who_of(by), "team": lt(tm)}
-	if r is Aircraft.Shell:
-		var sh := r as Aircraft.Shell
-		d["k"] = "shell"
-		d["o"] = sh.global_position
-		d["v"] = sh.vel
-		d["b"] = sh.blast
-		d["r"] = sh.rocket
-		d["d"] = sh.drag
-	elif r is Missile:
-		var m := r as Missile
-		d["k"] = "missile"
-		d["w"] = m.wid
-		d["o"] = m.global_position
-		d["q"] = m.global_transform.basis.get_rotation_quaternion()
-		d["v"] = m.vel
-		d["t"] = _target_ref(m.target)
-		var prog: Array = []
-		for p in m.programmed:
-			if p is Vector3:
-				prog.append(p)
-			elif is_instance_valid(p) and p is Node3D:
-				prog.append((p as Node3D).global_position)
-		d["prog"] = prog
-	elif r is Icbm:
-		var ic := r as Icbm
-		d["k"] = "icbm"
-		d["w"] = ic.wid
-		d["o"] = ic.global_position
-		var marks: Array = []
-		for mk in ic.marks:
-			if mk is Vector3:
-				marks.append(mk)              # already a direction on the planet
-			elif is_instance_valid(mk) and mk is Node3D:
-				var gp: Vector3 = (mk as Node3D).global_position
-				marks.append(Sim.chart_to_dir(gp.x, gp.z))
-		d["marks"] = marks
-	else:
-		return
-	launches_sent += 1
-	if is_host:
-		rpc("net_launch", d)
-	else:
-		rpc_id(1, "net_launch", d)
-
-## A man's round -- a grenade, a rocket off the shoulder, a 40 mm, a mortar
-## bomb -- sent to everyone else as it leaves, the way a vehicle's are. Only
-## his bullets used to go: a grenade or a flashbang he threw went off on his
-## own screen and nowhere else.
-func share_round(r: Node) -> void:
-	if not active or not is_instance_valid(r) or r.get("harmless") == true \
-			or r.get("picture") == true:
-		return
-	var d := {}
-	if r is Firearm.Frag:
-		var f := r as Firearm.Frag
-		d = {"k": "frag", "o": f.global_position, "v": f.vel, "fuse": f.fuse,
-			"flash": f.flash, "team": lt(f.team)}
-	elif r is Firearm.Rocket:
-		var k := r as Firearm.Rocket
-		d = {"k": "rkt", "o": k.global_position, "v": k.vel, "fall": k.fall,
-			"blast": k.blast, "arm": k.arm, "small": k.small, "life": k.life,
-			"team": lt(k.team)}
-	elif r is CqbMatch.MortarRound:
-		var mr := r as CqbMatch.MortarRound
-		d = {"k": "mortar", "from": mr.from, "to": mr.to, "flight": mr.flight,
-			"delay": mr.delay}
-	else:
-		return
-	d["by"] = _who_of(world.get("walker"))
-	launches_sent += 1
-	if is_host:
-		rpc("net_launch", d)
-	else:
-		rpc_id(1, "net_launch", d)
-
-## A strike called here, for everyone else to see: what it was, where, and
-## where the man who called it was standing and facing -- which is where the
-## run comes in from. See `CqbMatch.call_picture`.
-func share_streak(which: String, at: Vector3, x: Dictionary) -> void:
-	if not active:
-		return
-	var d := {"k": "streak", "call": which, "at": at, "x": x, "team": lt(0),
-		"by": "p:%d" % my_id}
-	launches_sent += 1
-	if is_host:
-		rpc("net_launch", d)
-	else:
-		rpc_id(1, "net_launch", d)
-
-## The ATTACK HELICOPTER for a player on another machine is flown by the host,
-## on that player's side, so it is one aircraft on every screen (it reaches
-## the others as AI, like any other the host flies).
-func request_heli(back: Vector3) -> void:
-	if active and not is_host:
-		rpc_id(1, "net_heli", back, side)
-
-@rpc("any_peer", "call_remote", "reliable")
-func net_heli(back: Vector3, host_side: int) -> void:
-	if not is_host or world == null:
-		return
-	var fight = world.get("cqb")
-	if fight != null and is_instance_valid(fight):
-		fight.spawn_streak_heli(host_side, back)
-
-## Launches shared from here and copies drawn here, for the harness.
-var launches_sent := 0
-var launches_drawn := 0
-
-@rpc("any_peer", "call_remote", "reliable")
-func net_launch(d: Dictionary) -> void:
-	if world == null:
-		return
-	if is_host:
-		var sender := multiplayer.get_remote_sender_id()
-		for pid in multiplayer.get_peers():
-			if pid != sender:
-				rpc_id(pid, "net_launch", d)
-	var who := String(d.get("by", "x"))
-	if who == "p:%d" % my_id:
-		return                        # our own, passed back
-	if String(d.get("k", "")) == "streak":
-		var fight = world.get("cqb")
-		if fight != null and is_instance_valid(fight):
-			var pid := int(who.split(":")[1]) if who.begins_with("p:") else 0
-			fight.call_picture(String(d["call"]), d.get("at", Vector3.ZERO), d.get("x", {}),
-				name_of(pid), lt(int(d.get("team", 0))) == 0)
-			launches_drawn += 1
-		return
-	var by := _who_node(who)
-	var team := lt(int(d.get("team", 1)))
-	var at: Vector3 = d.get("o", Vector3.ZERO)
-	var scn: Node = world
-	launches_drawn += 1
-	match String(d.get("k", "")):
-		"shell":
-			var sh := Aircraft.Shell.new()
-			sh.harmless = true
-			sh.vel = d.get("v", Vector3.ZERO)
-			sh.blast = float(d.get("b", 8.0))
-			sh.damage = 0.0
-			sh.rocket = bool(d.get("r", false))
-			sh.drag = float(d.get("d", 0.0))
-			sh.team = team
-			sh.shooter = by
-			scn.add_child(sh)
-			sh.global_position = at
-			var dir: Vector3 = (sh.vel as Vector3).normalized()
-			Effects.muzzle_flash(scn, at, dir, 2.2 if sh.rocket else 3.4)
-			Effects.dust(scn, at, 4.5)
-			Sfx.play_at(scn, "launch" if sh.rocket else "boom", at, -2.0,
-				1.0 if sh.rocket else 0.7, 4000.0)
-		"missile":
-			var tgt := _target_node(d.get("t", {}))
-			var m := Missile.new()
-			m.harmless = true
-			var q: Quaternion = d.get("q", Quaternion.IDENTITY)
-			m.launch(String(d["w"]), Transform3D(Basis(q), at), d.get("v", Vector3.ZERO),
-				by, tgt)
-			m.team = team
-			for p in d.get("prog", []):
-				m.programmed.append(p)
-			scn.add_child(m)
-			if tgt is _Mark:
-				m.tree_exiting.connect(tgt.queue_free)
-			Effects.dust(scn, at, 3.0)
-			Sfx.play_at(scn, "launch", at, 0.0, 1.0, 3000.0)
-		"frag":
-			var fg := Firearm.Frag.new()
-			fg.harmless = true
-			fg.flash = bool(d.get("flash", false))
-			fg.fuse = float(d.get("fuse", 2.9))
-			fg.team = team
-			fg.vel = d.get("v", Vector3.ZERO)
-			scn.add_child(fg)
-			fg.global_position = at
-		"rkt":
-			var rk := Firearm.Rocket.new()
-			rk.harmless = true
-			rk.team = team
-			rk.dmg = 0.0
-			rk.vel = d.get("v", Vector3.ZERO)
-			rk.fall = float(d.get("fall", 3.0))
-			rk.blast = float(d.get("blast", 4.6))
-			rk.arm = float(d.get("arm", 0.0))
-			rk.small = bool(d.get("small", false))
-			rk.life = float(d.get("life", 3.5))
-			scn.add_child(rk)
-			rk.global_position = at
-			Sfx.play_at(scn, "launch", at, -2.0 if rk.small else 2.0, 2.3 if rk.small else 1.5, 900.0)
-		"mortar":
-			var mo := CqbMatch.MortarRound.new()
-			mo.picture = true
-			mo.from = d.get("from", Vector3.ZERO)
-			mo.to = d.get("to", Vector3.ZERO)
-			mo.flight = float(d.get("flight", 12.0))
-			mo.delay = float(d.get("delay", 0.0))
-			scn.add_child(mo)
-		"icbm":
-			var ic := Icbm.new()
-			ic.harmless = true
-			ic.wid = String(d["w"])
-			ic.ws = WeaponSpec.get_spec(ic.wid)
-			ic.shooter = by
-			ic.team = team
-			for mk in d.get("marks", []):
-				ic.marks.append(mk)
-			var p: Vector3 = Sim.world_to_space(at)
-			ic._s = Orbit.make(p, p.normalized() * 4.0)
-			scn.add_child(ic)
-			ic.global_position = at

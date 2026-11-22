@@ -11,7 +11,7 @@ func parse_arg(a: String) -> bool:
 	elif a.begins_with("--artyoff="):
 		_arty_off = float(a.substr(10))
 	elif a.begins_with("--artytest="):
-		world._arty_test = a.substr(11)
+		world.arty_test = a.substr(11)
 	elif a == "--mirvlocktest":
 		_mirv_lock_test = true
 	elif a == "--maplocktest":
@@ -86,7 +86,7 @@ var _arty_fired := false
 var _arty_aim := Vector3.ZERO
 
 func tick_arty(delta: float) -> void:
-	if world._arty_test != "" and is_instance_valid(world.tank):
+	if world.arty_test != "" and is_instance_valid(world.tank):
 		_arty_t += delta
 		if _arty_t > 2.0 and _arty_aim == Vector3.ZERO:
 			# designate well off the current bearing: the whole point is to make
@@ -368,11 +368,11 @@ func tick_launch() -> void:
 func _run_launch_test() -> void:
 	world._start("f16", "launch")
 	# the picture, if one was asked for, is taken when the flight says so
-	world._shot_frames = 1 << 30
+	world.shot_frames = 1 << 30
 	for i in 30:
 		await world.get_tree().physics_frame
 	var bad := PackedStringArray()
-	if not world._in_rocket():
+	if not world.missions.in_rocket():
 		print("[launch] RESULT: FAILED — not in the rocket")
 		world.get_tree().quit()
 		return
@@ -407,7 +407,7 @@ func _run_launch_test() -> void:
 		# a picture from orbit, and no further
 		Engine.time_scale = 1.0
 		r.throttle = 0.0
-		world._shot_frames = 90
+		world.shot_frames = 90
 		return
 	# once round, on time warp: does it come back to the orbit it left on
 	Sim.space_warp = 100.0
@@ -489,10 +489,10 @@ func tick_moon() -> void:
 func _run_moon_test() -> void:
 	world._start("f16", "moon")
 	# the picture, if one was asked for, is taken when the flight says so
-	world._shot_frames = 1 << 30
+	world.shot_frames = 1 << 30
 	for i in 30:
 		await world.get_tree().physics_frame
-	if not world._in_rocket():
+	if not world.missions.in_rocket():
 		print("[moon] RESULT: FAILED — not in the rocket")
 		world.get_tree().quit()
 		return
@@ -560,7 +560,7 @@ func _run_moon_test() -> void:
 		"ok" if bad.is_empty() else "FAILED — " + "; ".join(bad),
 		float(Time.get_ticks_msec() - wall) * 0.001])
 	if world._shot != "":
-		world._shot_frames = 30
+		world.shot_frames = 30
 		return
 	world.get_tree().quit()
 #endregion
@@ -681,7 +681,7 @@ func _run_icbm_test(arg: String) -> void:
 	var kind: String = parts[0] if parts[0] != "" else "tel_yars"
 	var km: float = float(parts[1]) if parts.size() > 1 else 8000.0
 	Sim.debug_weapons = true
-	world._shot_frames = 1 << 30
+	world.shot_frames = 1 << 30
 	var t := world._spawn_tank(Vector3(1400.0, 0.0, -2600.0), 0.0, 0, kind)
 	t.ai = false
 	for i in 120:
@@ -701,7 +701,7 @@ func _run_icbm_test(arg: String) -> void:
 		return
 	if world._shot != "":
 		# ridden on the weapon camera, with a picture at each stage of it
-		world._shot_frames = 1 << 30
+		world.shot_frames = 1 << 30
 		var ridden: Icbm = null
 		for n0 in world.get_tree().get_nodes_in_group("icbm"):
 			ridden = n0 as Icbm
@@ -776,7 +776,7 @@ func _run_icbm_test(arg: String) -> void:
 	for d in done:
 		worst = maxf(worst, float(d))
 	Engine.time_scale = 1.0
-	var want: int = int(WeaponSpec.get_spec(String(Tank.KINDS[kind]["missile"])).get("mirv", 1))
+	var want: int = int(WeaponSpec.get_spec(String(VehicleSpec.KINDS[kind]["missile"])).get("mirv", 1))
 	print("[icbm] %s over %.0f km: %d warheads released, %d detonated, worst %.0f m off its mark, peak %.0f km, %.0f s of wall clock" % [
 		kind, km, count, done.size(), worst, peak * 0.001,
 		float(Time.get_ticks_msec() - t0) * 0.001])
@@ -1612,8 +1612,8 @@ func tick_tel(delta: float) -> bool:
 		# a picture from the ride, when one was asked for: --shot with --frames,
 		# counted from the launch rather than from the start of the test
 		if world._shot != "" and _tel_cam:
-			world._shot_frames -= 1
-			if world._shot_frames == 0:
+			world.shot_frames -= 1
+			if world.shot_frames == 0:
 				harness._take_shot()
 		return true
 	return false
@@ -1644,7 +1644,7 @@ func tick_susp(delta: float) -> bool:
 ## the launchers had.
 func _run_suspension_test() -> void:
 	var bad := 0
-	for kind in Tank.KINDS.keys():
+	for kind in VehicleSpec.KINDS.keys():
 		var t := world._spawn_tank(Vector3(3200.0, 0.0, -3200.0), 0.4, 0, String(kind))
 		await world.get_tree().physics_frame
 		var rest: float = t.global_position.y
@@ -1688,14 +1688,14 @@ func _run_suspension_test() -> void:
 					break
 				turned += absf(wrapf(t.rotation.y - head0, -PI, PI))
 				head0 = t.rotation.y
-		var want: float = float(Tank.KINDS[kind]["top"])
+		var want: float = float(VehicleSpec.KINDS[kind]["top"])
 		# What counts as "it came round" depends on what it is. A jeep on its
 		# front axle turns smartly; a six-axle launcher fourteen metres long
 		# does not, and a tracked hull has to drag a track sideways against a
 		# lot of lateral bite and barely turns at all at road speed -- which is
 		# how armour has always behaved here, so that only asks that it turns.
 		var need := 0.5
-		match String(Tank.KINDS[kind].get("class", "mbt")):
+		match String(VehicleSpec.KINDS[kind].get("class", "mbt")):
 			"mbt", "spg", "mlrs", "ifv", "spaag":
 				need = 0.05          # tracked: it turns by dragging a track
 			"tel", "asat":
@@ -1750,8 +1750,8 @@ func _run_tanksensor() -> void:
 		tk = world._spawn_tank(Vector3(here.x + 60.0, 0, here.z + 60.0), 0.0, 0, "m109")
 	print("[tanksensor] vehicle %s, indirect=%s" % [tk.display_name(), str(tk.is_indirect())])
 	world.running = true          # the harness fires before the menu hands over
-	world._enter_tank(tk)
-	world._do_action("sensor")
+	world.crew.enter_tank(tk)
+	world.controls.do_action("sensor")
 	for _f in 12:
 		world._process(0.016)
 	print("[tanksensor] on %s: pod active=%s, carrier=%s (running=%s on_foot=%s occupied=%s)" % [
@@ -1819,7 +1819,7 @@ func _run_tanksensor() -> void:
 	print("[tanksensor] %d contacts in sight range (platform is %s, aircraft is %s)" % [
 		painted, Sim.label_of(world.pod.platform), "null" if world.pod.platform == null else "set"])
 	# and dismounting puts the sight away
-	world._leave_tank()
+	world.crew.leave_tank()
 	world._process(0.016)
 	print("[tanksensor] after dismount: pod active=%s, host=%s" % [
 		str(world.pod.active), "null" if world.pod.platform == null else str(world.pod.platform)])
@@ -1842,22 +1842,22 @@ func tick_key(delta: float) -> void:
 			var ev := InputEventKey.new()
 			ev.physical_keycode = KEY_M
 			ev.pressed = true
-			world._shell_input(ev)
+			world.controls.shell_input(ev)
 			var map_open: bool = world.map.visible
-			world._shell_input(ev)                     # and close it again
+			world.controls.shell_input(ev)                     # and close it again
 			# right click with freelook held must NOT raise the sensor camera
 			Input.action_press(&"freelook")
 			var mb := InputEventMouseButton.new()
 			mb.button_index = MOUSE_BUTTON_RIGHT
 			mb.pressed = true
-			world._shell_input(mb)
+			world.controls.shell_input(mb)
 			Input.action_release(&"freelook")
 			# the side panels and radar range are on the same handler
 			var before: int = Sim.panel_left
 			var pv := InputEventKey.new()
 			pv.physical_keycode = KEY_BRACKETLEFT
 			pv.pressed = true
-			world._shell_input(pv)
+			world.controls.shell_input(pv)
 			# left click must fire, and weapon select must swap main/coax
 			var w0: String = world.tank.current_weapon()
 			world.tank.cycle_weapon()
@@ -1958,7 +1958,7 @@ func _tick_ram(delta: float) -> void:
 		return
 	if not is_instance_valid(_ram_tank):
 		for v in world.get_tree().get_nodes_in_group("vehicles"):
-			world._enter_tank(v as Tank)
+			world.crew.enter_tank(v as Tank)
 			if world.tank == null:
 				continue
 			_ram_tank = world.tank
@@ -2129,7 +2129,7 @@ func tick_tank(delta: float) -> void:
 	if _tank_test:
 		if world.tank == null and not world.parked.is_empty():
 			for v in world.get_tree().get_nodes_in_group("vehicles"):
-				world._enter_tank(v as Tank)
+				world.crew.enter_tank(v as Tank)
 				world.tank.scripted = true
 				break
 		elif is_instance_valid(world.tank):

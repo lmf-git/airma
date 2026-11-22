@@ -915,7 +915,7 @@ static func rocket(world: Node, shooter: Node, team: int, g: Dictionary, from: V
 	Effects.watch(r, shooter)
 	Sfx.play_at(world, "launch", from, 2.0, 1.5, 900.0)
 	if Sim.net != null:
-		Sim.net.share_round(r)
+		Sim.net.launches.share_round(r)
 	Effects.dust(world, from - dir * 1.4, 1.6)        # the backblast
 
 ## A 40 mm grenade out of the drum: a round that arcs, arms after ten metres
@@ -937,7 +937,7 @@ static func grenade40(world: Node, shooter: Node, team: int, g: Dictionary, from
 	Effects.watch(r, shooter)
 	Sfx.play_at(world, "launch", from, -4.0, 2.3, 300.0)
 	if Sim.net != null:
-		Sim.net.share_round(r)
+		Sim.net.launches.share_round(r)
 
 ## Which way to send something at `speed` so it falls onto `to` under `fall`:
 ## the low arc, or zero if it cannot get there at all. A rifle round at a
@@ -970,5 +970,5 @@ static func sam(world: Node, shooter: Node, team: int, from: Vector3, dir: Vecto
 	Effects.watch(m, shooter)
 	Sfx.play_at(world, "launch", from, 2.0, 1.1, 1400.0)
 	if Sim.net != null:
-		Sim.net.share_launch(shooter, m)
+		Sim.net.launches.share(shooter, m)
 	Effects.dust(world, from - dir * 1.4, 1.8)

@@ -3,6 +3,99 @@ class_name MeshKit
 ## forced to point away from a supplied hull centre, so faceted airframes shade
 ## correctly no matter which order the section rings were authored in.
 
+## Bounds of every mesh under `root`, in `root`'s own frame. Each mesh's offset
+## is carried up through its parents rather than read off the global transform,
+## so the answer is the same before `root` is in the tree as after: taking the
+## mesh's own transform alone threw away every offset above it, and a turret a
+## metre and a fifth up left a tank's roof below its own turret ring.
+static func local_bounds(root: Node3D) -> AABB:
+	var out := AABB()
+	var first := true
+	for c in root.find_children("*", "MeshInstance3D", true, false):
+		var m := c as MeshInstance3D
+		var xf: Transform3D = m.transform
+		var up: Node = m.get_parent()
+		while up != null and up != root:
+			if up is Node3D:
+				xf = (up as Node3D).transform * xf
+			up = up.get_parent()
+		var t: AABB = xf * m.get_aabb()
+		out = t if first else out.merge(t)
+		first = false
+	return out
+
+## Distance from a point to a box in the box's own frame: nought inside it.
+static func box_distance(b: AABB, p: Vector3) -> float:
+	var mn := b.position
+	var mx := b.end
+	return p.distance_to(Vector3(clampf(p.x, mn.x, mx.x), clampf(p.y, mn.y, mx.y),
+		clampf(p.z, mn.z, mx.z)))
+
+## A sphere of radius `r`, its rings at the polar angles in `rings` (nought at
+## the north pole, PI at the south) and `segs` segments round, with smooth
+## normals taken from the sphere itself rather than the faces. The fan round
+## the north pole leaves out its degenerate triangle; `skip_south` leaves out
+## the south pole's too.
+##
+## `outward` winds it clockwise seen from outside, which is Godot's front face,
+## for a body drawn with back faces culled (the planet, the moon). The air and
+## cloud shells draw both sides, and are wound the other way.
+static func globe(rings: PackedFloat64Array, segs: int, r: float, outward: bool,
+		skip_south := false) -> SurfaceTool:
+	var st := begin()
+	var last := rings.size() - 2
+	for i in rings.size() - 1:
+		var t0: float = rings[i]
+		var t1: float = rings[i + 1]
+		for j in segs:
+			var p0: float = TAU * float(j) / float(segs)
+			var p1: float = TAU * float(j + 1) / float(segs)
+			var a := _on_globe(t0, p0, r)
+			var b := _on_globe(t0, p1, r)
+			var c := _on_globe(t1, p1, r)
+			var d := _on_globe(t1, p0, r)
+			var south: bool = not (skip_south and i == last)
+			if outward:
+				if i > 0:
+					_globe_tri(st, a, c, b)
+				if south:
+					_globe_tri(st, a, d, c)
+			else:
+				if i > 0:
+					_globe_tri(st, a, b, c)
+				if south:
+					_globe_tri(st, a, c, d)
+	return st
+
+## `n` rings evenly spaced from pole to pole, for `globe`.
+static func even_rings(n: int) -> PackedFloat64Array:
+	var out := PackedFloat64Array()
+	for i in n + 1:
+		out.append(PI * float(i) / float(n))
+	return out
+
+static func _on_globe(theta: float, phi: float, r: float) -> Vector3:
+	var s := sin(theta)
+	return Vector3(s * cos(phi) * r, cos(theta) * r, s * sin(phi) * r)
+
+static func _globe_tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+	for v in [a, b, c]:
+		st.set_normal((v as Vector3).normalized())
+		st.add_vertex(v)
+
+## One mesh drawn at every transform in `xforms`, as a single batch.
+static func multimesh(mesh: Mesh, xforms: Array, nm: String) -> MultiMeshInstance3D:
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = nm
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = mesh
+	mm.instance_count = xforms.size()
+	for i in xforms.size():
+		mm.set_instance_transform(i, xforms[i])
+	mmi.multimesh = mm
+	return mmi
+
 static func begin() -> SurfaceTool:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)

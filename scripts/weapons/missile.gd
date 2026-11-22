@@ -229,7 +229,7 @@ var _deck := 0.0
 var programmed: Array = []
 ## A picture of a round somebody else's machine fired: it flies, homes,
 ## warns and goes off like the real one and hurts nothing. The real one, on
-## the machine that fired it, does the damage. See `NetLink.share_launch`.
+## the machine that fired it, does the damage. See `NetLaunches.share`.
 var harmless := false
 ## The last flare and chaff salvo this round has been shown, by the target's
 ## own count, so each salvo is judged once.

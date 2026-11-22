@@ -905,6 +905,11 @@ func _pick_satellite(at: Vector2) -> bool:
 		if d < best:
 			best = d
 			hit = sat
+	return _toggle_sat_target(hit)
+
+## A satellite clicked on the map: held as the orbital target, or let go if it
+## already was. False when the click found none.
+func _toggle_sat_target(hit: Node) -> bool:
 	if hit == null:
 		return false
 	sat_target = null if sat_target == hit else hit
@@ -924,7 +929,7 @@ func _draw_inbound(org: Vector2, ppm: float) -> void:
 	if world == null or not is_instance_valid(world):
 		return
 	var arena: Variant = world.get("cqb")
-	if arena == null or not is_instance_valid(arena) or not arena.has_method("inbound"):
+	if arena == null or not is_instance_valid(arena) or not (arena is CqbMatch):
 		return
 	var now: float = float(Time.get_ticks_msec()) * 0.001
 	var blink: float = 0.55 + 0.45 * absf(sin(now * 6.0))
@@ -935,7 +940,7 @@ func _draw_inbound(org: Vector2, ppm: float) -> void:
 	# than appearing at the moment it arrives.
 	var vp := get_viewport_rect().size
 	var box := Rect2(Vector2(28.0, 78.0), vp - Vector2(56.0, 170.0))
-	for it in (arena.call("inbound") as Array):
+	for it in (arena as CqbMatch).streaks.inbound():
 		var d: Dictionary = it
 		var at: Vector3 = d["at"]
 		var q := _w2s(Vector2(at.x, at.z), org, ppm)
@@ -1084,7 +1089,7 @@ func _draw() -> void:
 	_label(_w2s(Vector2(0, rw + 400.0), org, ppm), "RWY 18/36", Color(0.9, 0.95, 1.0))
 
 	# trunk roads over the top so the network reads at any zoom
-	for r in Sim.ROADS:
+	for r in Sim.roads.ROADS:
 		draw_line(_w2s(r[0], org, ppm), _w2s(r[1], org, ppm), Color(0.55, 0.5, 0.42, 0.8), 1.6)
 
 	# Close in, the buildings themselves. The sheet underneath is a picture
@@ -2122,13 +2127,7 @@ func _pick_satellite_globe(at: Vector2) -> bool:
 		if d < best:
 			best = d
 			hit = sat
-	if hit == null:
-		return false
-	sat_target = null if sat_target == hit else hit
-	Sim.sat_target = sat_target
-	Sim.report("orbital target: %s" % (String(hit.call("display_name"))
-		if sat_target != null else "released"), Sim.Ev.INFO)
-	return true
+	return _toggle_sat_target(hit)
 
 ## Where a direction from the planet's centre falls on the planet sheet.
 ##

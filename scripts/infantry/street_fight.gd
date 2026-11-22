@@ -46,7 +46,7 @@ func _init(w: World) -> void:
 ## `kind` "ac130" is the AC-130 high over the town; "chopper" is the CHOPPER
 ## GUNNER, an Apache in a low, tight orbit with the gunner on its door gun.
 func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
-	if is_instance_valid(world._cqb_gunship) or not is_instance_valid(world.walker) or not world.on_foot:
+	if is_instance_valid(world.called_gunship) or not is_instance_valid(world.walker) or not world.on_foot:
 		return false
 	var j: Aircraft
 	if kind == "chopper":
@@ -68,7 +68,7 @@ func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 		world.net.set_jet("ah64g" if kind == "chopper" else "ac130")
 		j.store_released.connect(func(m: Node) -> void:
 			if world.net != null:
-				world.net.share_launch(j, m))
+				world.net.launches.share(j, m))
 	if kind == "chopper":
 		# Flown in, not conjured. It was put down already on its circle over
 		# the town and the gunner was in its seat the same frame: a gunship
@@ -94,8 +94,8 @@ func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 		h.orbit_speed = float(j.spec.get("orbit_speed", 22.0))
 		h.auto = "inbound"
 		world._reset_interp.call_deferred(j)
-		world._cqb_gunship = j
-		world._cqb_gun_t = CQB_GUNSHIP_TIME
+		world.called_gunship = j
+		world.cqb_gun_t = CQB_GUNSHIP_TIME
 		_gun_inbound = true
 		_gun_centre = centre
 		Sim.report("chopper gunner inbound from behind you — on station in about %d seconds" % int(
@@ -110,8 +110,8 @@ func cqb_gunship(centre: Vector3, kind := "ac130") -> bool:
 	j.throttle = 0.6
 	j.power = 0.6
 	world._reset_interp.call_deferred(j)
-	world._cqb_gunship = j
-	world._cqb_gun_t = CQB_GUNSHIP_TIME
+	world.called_gunship = j
+	world.cqb_gun_t = CQB_GUNSHIP_TIME
 	_board_gunship(j, centre, kind)
 	return true
 
@@ -124,9 +124,9 @@ var _gun_centre := Vector3.ZERO
 
 ## On the guns: the gunship has arrived, or (the AC-130) is already up there.
 func _board_gunship(j: Aircraft, centre: Vector3, kind: String) -> void:
-	world._cqb_parked = world.player
+	world.cqb_parked = world.player
 	world.cqb.set_away(true)
-	world._take_hold_station(j)
+	world.crew.take_hold_station(j)
 	# laid on the middle of the fight to begin with; the mouse takes it from there
 	world.pod.mode = SensorPod.AREA
 	world.pod.area_point = centre
@@ -148,27 +148,27 @@ func _cqb_gunship_done() -> void:
 	if _shared_jet != "" and world.net != null and world.net.active:
 		world.net.set_jet(_shared_jet)
 	_shared_jet = ""
-	if is_instance_valid(world._station_walker):
-		world._leave_hold_station()
-	if is_instance_valid(world._cqb_parked):
-		world.player = world._cqb_parked
+	if is_instance_valid(world.crew.station_walker):
+		world.crew.leave_hold_station()
+	if is_instance_valid(world.cqb_parked):
+		world.player = world.cqb_parked
 		world.pod.platform = world.player
 		world.map.aircraft = world.player
 		if world.audio:
 			world.audio.aircraft = world.player
-	if is_instance_valid(world._cqb_gunship):
-		var ears := world._cqb_gunship.get_node_or_null("GunnerEars") as AudioListener3D
+	if is_instance_valid(world.called_gunship):
+		var ears := world.called_gunship.get_node_or_null("GunnerEars") as AudioListener3D
 		if ears != null:
 			ears.clear_current()
 		# Off station: it flies away and is gone once it is well off, rather
 		# than vanishing from over the town between one frame and the next.
-		var gs: Aircraft = world._cqb_gunship
+		var gs: Aircraft = world.called_gunship
 		if "auto" in gs:
 			gs.set("auto", "depart")
 		else:
 			gs.queue_free()
-	world._cqb_gunship = null
-	world._cqb_gun_t = 0.0
+	world.called_gunship = null
+	world.cqb_gun_t = 0.0
 	if is_instance_valid(world.cqb):
 		world.cqb.set_away(false)
 	Sim.report("gunship off station", Sim.Ev.INFO)
@@ -179,34 +179,34 @@ func _cqb_gunship_done() -> void:
 ## fired the way one driven by a player is -- so the round takes as long to
 ## arrive as it takes, and comes in from where the launcher actually is.
 func cqb_fire_mission(mark: Vector3) -> bool:
-	if world._cqb_tel_t > 0.0:
+	if world.cqb_tel_t > 0.0:
 		Sim.report("fire mission: the battery is already working", Sim.Ev.BAD)
 		return false
-	if not is_instance_valid(world._cqb_tel) or not world._cqb_tel.alive:
+	if not is_instance_valid(world.cqb_tel) or not world.cqb_tel.alive:
 		var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
-		world._cqb_tel = world._spawn_tank(Vector3(mark.x + 350.0, 0.0, mark.z + 2700.0), 0.0, 0,
+		world.cqb_tel = world._spawn_tank(Vector3(mark.x + 350.0, 0.0, mark.z + 2700.0), 0.0, 0,
 			"m270" if nato else "tel_kalibr")
-		world._cqb_tel.name = "Fire support"
+		world.cqb_tel.name = "Fire support"
 	# what it fires is seen on every screen
 	if world.net != null:
-		world.net.watch_launcher(world._cqb_tel)
-	world._cqb_tel.map_target = mark
-	world._cqb_tel_t = 45.0
+		world.net.launches.watch(world.cqb_tel)
+	world.cqb_tel.map_target = mark
+	world.cqb_tel_t = 45.0
 	_cqb_tel_fired = false
 	Sim.report("fire mission accepted — %s laying on your mark, keep clear of it"
-		% world._cqb_tel.display_name(), Sim.Ev.GOOD)
+		% world.cqb_tel.display_name(), Sim.Ev.GOOD)
 	return true
 
 
 func tick_cqb_support(delta: float) -> void:
 	_tick_air()
 	if _gun_inbound:
-		var g: Aircraft = world._cqb_gunship
+		var g: Aircraft = world.called_gunship
 		if not is_instance_valid(g) or not g.is_alive() or not is_instance_valid(world.cqb):
 			# shot down on the way in
 			_gun_inbound = false
-			world._cqb_gunship = null
-			world._cqb_gun_t = 0.0
+			world.called_gunship = null
+			world.cqb_gun_t = 0.0
 			if is_instance_valid(g):
 				Sim.report("chopper gunner lost on the way in", Sim.Ev.BAD)
 		elif String(g.get("auto")) == "orbit" and world.on_foot \
@@ -216,37 +216,37 @@ func tick_cqb_support(delta: float) -> void:
 			_gun_inbound = false
 			_board_gunship(g, _gun_centre, "chopper")
 		return
-	if is_instance_valid(world._cqb_gunship):
-		world._cqb_gun_t -= delta
+	if is_instance_valid(world.called_gunship):
+		world.cqb_gun_t -= delta
 		# time up, or he has stepped away from the guns himself
-		if world._cqb_gun_t <= 0.0 or not is_instance_valid(world._station_walker):
+		if world.cqb_gun_t <= 0.0 or not is_instance_valid(world.crew.station_walker):
 			_cqb_gunship_done()
-	if world._cqb_tel_t > 0.0:
-		world._cqb_tel_t -= delta
-		if not is_instance_valid(world._cqb_tel):
-			world._cqb_tel_t = 0.0
+	if world.cqb_tel_t > 0.0:
+		world.cqb_tel_t -= delta
+		if not is_instance_valid(world.cqb_tel):
+			world.cqb_tel_t = 0.0
 			return
 		# Nobody is sitting in it to lay the tubes, so the mission does: the
 		# bearing to the mark and the elevation that carries that far.
-		if world._cqb_tel.vclass() != "tel" and world._cqb_tel.map_target != Vector3.INF:
-			var mk: Vector3 = world._cqb_tel.map_target
-			world._cqb_tel.turret_yaw = atan2(mk.x - world._cqb_tel.global_position.x,
-				-(mk.z - world._cqb_tel.global_position.z))
-			var sol: Dictionary = world._cqb_tel.fire_solution(mk, float(Tank.KINDS[world._cqb_tel.kind]["muzzle"]))
+		if world.cqb_tel.vclass() != "tel" and world.cqb_tel.map_target != Vector3.INF:
+			var mk: Vector3 = world.cqb_tel.map_target
+			world.cqb_tel.turret_yaw = atan2(mk.x - world.cqb_tel.global_position.x,
+				-(mk.z - world.cqb_tel.global_position.z))
+			var sol: Dictionary = world.cqb_tel.fire_solution(mk, float(VehicleSpec.KINDS[world.cqb_tel.kind]["muzzle"]))
 			if not sol.is_empty():
-				world._cqb_tel.turret_pitch = float(sol["elev"])
-				world._cqb_tel.turret_yaw = float(sol.get("yaw", world._cqb_tel.turret_yaw))
-		if world._cqb_tel.lay_error() < 0.04 and world._cqb_tel.fire_main(world):
+				world.cqb_tel.turret_pitch = float(sol["elev"])
+				world.cqb_tel.turret_yaw = float(sol.get("yaw", world.cqb_tel.turret_yaw))
+		if world.cqb_tel.lay_error() < 0.04 and world.cqb_tel.fire_main(world):
 			if not _cqb_tel_fired:
 				_cqb_tel_fired = true
-				world._cqb_tel_t = minf(world._cqb_tel_t, 22.0)    # long enough for a ripple to land
-		if _cqb_tel_fired and _cqb_test and world._cqb_tel.map_target != Vector3.INF:
-			var fall: float = Sim.last_burst.distance_to(world._cqb_tel.map_target)
+				world.cqb_tel_t = minf(world.cqb_tel_t, 22.0)    # long enough for a ripple to land
+		if _cqb_tel_fired and _cqb_test and world.cqb_tel.map_target != Vector3.INF:
+			var fall: float = Sim.last_burst.distance_to(world.cqb_tel.map_target)
 			if fall < 400.0 and fall != _cqb_fall:
 				_cqb_fall = fall
 				print("[cqb] fire mission: a round down %.0f m from the mark" % fall)
-		if world._cqb_tel_t <= 0.0 and is_instance_valid(world._cqb_tel):
-			world._cqb_tel.map_target = Vector3.INF
+		if world.cqb_tel_t <= 0.0 and is_instance_valid(world.cqb_tel):
+			world.cqb_tel.map_target = Vector3.INF
 
 
 ## Hide every piece of scenery that lies wholly beyond `reach` of the fight:
@@ -359,7 +359,7 @@ func tick_bounds(delta: float) -> void:
 		return
 	var who: Node3D = null
 	var r: float = _bounds_ground
-	if is_instance_valid(world._station_walker) or world.gunning:
+	if is_instance_valid(world.crew.station_walker) or world.gunning:
 		who = null
 	elif world.on_foot and is_instance_valid(world.walker) and not world.walker.dead and not world.walker.sheltered:
 		who = world.walker
@@ -472,18 +472,18 @@ func setup_cqb(kind := "cqb") -> void:
 		return
 	if world._drive_kind != "":
 		var start: Vector3 = _cqb_vehicle_spot(c3, 0)
-		world._cqb_parked_at.append(start)
+		world.cqb_parked_at.append(start)
 		var mine := world._spawn_tank(start, 0.0, 0, world._drive_kind)
 		mine.died.connect(_on_cqb_vehicle_down)
 		world._drive_kind = ""
-		world._enter_tank(mine)
+		world.crew.enter_tank(mine)
 		Sim.report("you are crewing the %s — the fight is up the street; U to get out and go on foot"
 			% mine.display_name(), Sim.Ev.INFO)
 		return
 	if kind == "range":
 		_setup_range(c3)
 		return
-	world._spawn_walker(world.cqb.spawn_point(0, 0))
+	world.crew.spawn_walker(world.cqb.spawn_point(0, 0))
 	world.walker.yaw = 0.0                       # facing up the street, at them
 	world.cqb.set_player(world.walker)
 	Sim.report("SPACE vaults low cover and climbs what is taller; F picks up a dropped weapon; F2 for the keys",
@@ -509,7 +509,7 @@ func _setup_range(c3: Vector3) -> void:
 	world.add_child(world.firing_range)
 	# the edges are round the range, not the town
 	world._bounds_c = at + facing * FiringRange.LANE_LEN * 0.5
-	world._spawn_walker(at - facing * 1.5)
+	world.crew.spawn_walker(at - facing * 1.5)
 	world.walker.yaw = atan2(-facing.x, -facing.z)
 	world.cqb.set_player(world.walker)
 	cqb_deploy(true)
@@ -610,7 +610,7 @@ func cqb_deploy(first: bool) -> void:
 	if world.net != null and world.net.active:
 		fac = world.net.side_faction(fac)
 	world.deploy_ui.open(takes, first, fac,
-		world.cqb.points if takes != "none" else -1)
+		world.cqb.streaks.points if takes != "none" else -1)
 	# which side, in a session
 	if world.net != null and world.net.active:
 		world.deploy_ui.show_sides(world.net.abs_side, world.net.side_counts())
@@ -647,14 +647,14 @@ func _on_cqb_deploy(what: String) -> void:
 			world.walker.activate()
 		world.cqb.set_away(false)
 		return
-	var cost: int = CqbMatch.ride_cost(what)
-	if cost > world.cqb.points:
+	var cost: int = Killstreaks.ride_cost(what)
+	if cost > world.cqb.streaks.points:
 		# not earned yet: on foot instead
 		_on_cqb_deploy("foot")
 		return
-	world.cqb.points -= cost
+	world.cqb.streaks.points -= cost
 	if cost > 0:
-		Sim.report("%d points spent — %d left" % [cost, world.cqb.points], Sim.Ev.INFO)
+		Sim.report("%d points spent — %d left" % [cost, world.cqb.streaks.points], Sim.Ev.INFO)
 	if what.begins_with("veh:"):
 		var at: Vector3 = _cqb_vehicle_spot(Vector3(world.cqb.centre.x,
 			Sim.height_at(world.cqb.centre.x, world.cqb.centre.y), world.cqb.centre.y), 0)
@@ -662,7 +662,7 @@ func _on_cqb_deploy(what: String) -> void:
 		world.cqb.set_player(null)
 		var mine := world._spawn_tank(at, 0.0, 0, what.substr(4))
 		mine.died.connect(_on_cqb_vehicle_down)
-		world._enter_tank(mine)
+		world.crew.enter_tank(mine)
 		Sim.report("you are crewing the %s — U to get out and go on foot" % mine.display_name(),
 			Sim.Ev.INFO)
 		return
@@ -679,7 +679,7 @@ func cqb_fly(id: String) -> void:
 		return
 	var c3 := Vector3(fight.centre.x, Sim.height_at(fight.centre.x, fight.centre.y), fight.centre.y)
 	var old: Aircraft = world.player
-	if is_instance_valid(old) and old != world._cqb_gunship:
+	if is_instance_valid(old) and old != world.called_gunship:
 		world.parked.erase(old)
 		old.queue_free()
 	if is_instance_valid(world.walker):
@@ -722,11 +722,11 @@ func _cqb_armour(c3: Vector3) -> void:
 		var kit: Array = ours if team == 0 else theirs
 		var z_sign: float = 1.0 if team == 0 else -1.0
 		for i in kit.size():
-			if not Tank.KINDS.has(kit[i]):
+			if not VehicleSpec.KINDS.has(kit[i]):
 				continue
 			var at := _cqb_vehicle_spot(c3, team)
 			var t := world._spawn_tank(at, 0.0 if team == 0 else PI, team, String(kit[i]))
-			world._cqb_parked_at.append(at)
+			world.cqb_parked_at.append(at)
 			t.ai = true
 			# the match routes it there by the streets; see `_drive_armour`
 			t.set_meta("cqb_goal", c3 + Vector3(-30.0 + i * 60.0, 0.0, -z_sign * 110.0))
@@ -750,7 +750,7 @@ func _on_cqb_air_down(_who: Variant = null) -> void:
 		# got out in time: he is already on the ground somewhere
 		fight.set_player(world.walker)
 		return
-	world._spawn_walker(fight.spawn_point(0, 0))
+	world.crew.spawn_walker(fight.spawn_point(0, 0))
 	world.walker.yaw = 0.0
 	fight.set_player(world.walker)
 	world.hud.aircraft = null
@@ -774,7 +774,7 @@ func _cqb_vehicle_spot(c3: Vector3, team: int) -> Vector3:
 		if Obstacles.hit(p + Vector3(0, 1.5, 0), 4.5) >= 0:
 			continue
 		var crowded := false
-		for q in world._cqb_parked_at:
+		for q in world.cqb_parked_at:
 			if (q as Vector3).distance_to(p) < 16.0:
 				crowded = true
 		if crowded:
@@ -787,7 +787,7 @@ func _cqb_vehicle_spot(c3: Vector3, team: int) -> Vector3:
 			if Obstacles.segment(p + Vector3(0, 2.2, 0),
 					Vector3(fx, Sim.height_at(fx, far_z) + 2.2, far_z)) >= 1.0:
 				score += 1.0
-		for q2 in world._cqb_parked_at:
+		for q2 in world.cqb_parked_at:
 			if absf((q2 as Vector3).z - z) > 60.0 and Obstacles.segment(p + Vector3(0, 2.2, 0),
 					(q2 as Vector3) + Vector3(0, 2.2, 0)) >= 1.0:
 				score += 50.0
@@ -809,10 +809,10 @@ func _on_cqb_vehicle_down(who: Node) -> void:
 		if not is_instance_valid(fight) or fight != world.cqb:
 			return
 		if is_instance_valid(world.tank):
-			world._leave_tank()
+			world.crew.leave_tank()
 		if is_instance_valid(world.walker):
 			world.walker.queue_free()
-		world._spawn_walker(fight.spawn_point(0, 0))
+		world.crew.spawn_walker(fight.spawn_point(0, 0))
 		world.walker.yaw = 0.0
 		fight.set_player(world.walker)
 		cqb_deploy(false)
@@ -889,8 +889,8 @@ func _on_cqb_air_lost(_who: Variant, team: int) -> void:
 ## are the same flights, shifted.
 func _cqb_air(c3: Vector3) -> void:
 	var before: Array = world.get_tree().get_nodes_in_group("hittable")
-	world._spawn_threats(2)
-	world._spawn_allies()
+	world.missions.spawn_threats(2)
+	world.missions._spawn_allies()
 	var shift: Vector3 = c3 - Vector3(-1084.0, 256.0, -6414.0)
 	for n in world.get_tree().get_nodes_in_group("hittable"):
 		if before.has(n) or not (n is Aircraft):

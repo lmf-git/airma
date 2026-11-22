@@ -22,7 +22,7 @@ func parse_arg(a: String) -> bool:
 	elif a.begins_with("--dist="):
 		world._dist = float(a.substr(7))
 	elif a.begins_with("--frames="):
-		world._shot_at = int(a.substr(9))
+		world.shot_at = int(a.substr(9))
 	elif a == "--holdgun":
 		_hold_gun = true
 	elif a == "--zoom":
@@ -39,9 +39,9 @@ func parse_arg(a: String) -> bool:
 	elif a.begins_with("--at="):
 		var av := a.substr(5).split(",")
 		if av.size() == 3:
-			world._at = Vector3(float(av[0]), float(av[1]), float(av[2]))
+			world.start_at = Vector3(float(av[0]), float(av[1]), float(av[2]))
 	elif a == "--noboard":
-		world._skip_board = true
+		world.skip_board = true
 	elif a == "--cqbquiet":
 		CqbMatch.quiet = true
 		CqbMatch.plain = true
@@ -102,8 +102,8 @@ func parse_arg(a: String) -> bool:
 
 func tick_shot() -> void:
 	if world._shot != "":
-		world._shot_frames -= 1
-		if world._shot_frames <= 0:
+		world.shot_frames -= 1
+		if world.shot_frames <= 0:
 			harness._take_shot()
 #endregion
 
@@ -441,11 +441,11 @@ func tick_road_probe() -> void:
 		_road_probe = Vector2.INF
 
 func _run_road_probe() -> void:
-	Sim.resurvey_roads()
+	Sim.roads.resurvey_roads()
 	var at := _road_probe
 	print("[probe] limits: grade %.3f, max %.3f, hairpin %.3f" % [
-		Sim.road_grade_max, Sim.road_grade_max, Sim.road_grade_hairpin])
-	for r in Sim.ROADS:
+		Sim.roads.road_grade_max, Sim.roads.road_grade_max, Sim.roads.road_grade_hairpin])
+	for r in Sim.roads.ROADS:
 		var a: Vector2 = r[0]
 		var b: Vector2 = r[1]
 		var seg_d: float = a.distance_to(b)
@@ -460,7 +460,7 @@ func _run_road_probe() -> void:
 		for k in steps + 1:
 			var q: Vector2 = a.lerp(b, float(k) / maxf(float(steps), 1.0))
 			var g: float = Sim.survey_height_at(q.x, q.y)
-			var made: Vector3 = Sim.road_surface(q.x, q.y)
+			var made: Vector3 = Sim.roads.road_surface(q.x, q.y)
 			var dsg: float = made.x + Sim.planet_drop(q.x, q.y)
 			var line := "[probe]   %5.1f m  ground %8.3f" % [float(k) * seg_d / maxf(float(steps), 1.0), g]
 			if prev_g != INF:
@@ -539,7 +539,7 @@ func _tick_phantom() -> void:
 	if _ph_step == 0 and _sl_t > 3.0:
 		_ph_step = 1
 		if world.boarding:
-			world._end_boarding()
+			world.crew.end_boarding()
 		for i in p.weapon_types.size():
 			if String(WeaponSpec.get_spec(String(p.weapon_types[i])).get("kind", "")) == "bomb":
 				p.selected = i
@@ -547,7 +547,7 @@ func _tick_phantom() -> void:
 	elif _ph_step == 1 and _sl_t > 20.0:
 		_ph_step = 2
 		print("[phantom] ejecting")
-		world._eject()
+		world.crew.eject()
 
 func tick_sound_log(delta: float) -> void:
 	if not _sound_log or not world.running:
@@ -640,7 +640,7 @@ func tick_uexit(delta: float) -> void:
 	_ux_t += delta
 	if _ux_step == 0 and _ux_t > 3.0:
 		if world.boarding:
-			world._end_boarding()
+			world.crew.end_boarding()
 		world.player.linear_velocity = Vector3.ZERO
 		world.player.throttle = 0.0
 		_ux_step = 1

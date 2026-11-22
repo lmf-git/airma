@@ -134,7 +134,7 @@ var _anim_acc := 0.0
 var _anim_n := 0
 ## A picture of a man the host is running, on a client in a session: posed
 ## from the host's packets, never thinking for himself, and anything that hits
-## him is sent to the host to decide. See `NetLink.net_units`.
+## him is sent to the host to decide. See `NetUnits.net_units`.
 var ghost := false
 ## Rounds fired, counted so a client can see each burst: see `ghost_shot`.
 var shots := 0
@@ -191,7 +191,7 @@ func take_hit(amount: float, from: Node = null) -> void:
 		return
 	if ghost:
 		if amount > 0.0 and Sim.net != null and Sim.net.active:
-			Sim.net.report_unit_hit(self, amount, KillFeed.weapon_of(from), _last_head)
+			Sim.net.units.report_hit(self, amount, KillFeed.weapon_of(from), _last_head)
 		_last_head = false
 		return
 	last_cause = KillFeed.weapon_of(from)
@@ -600,7 +600,7 @@ func _move(delta: float) -> void:
 	# reach for (see `Pilot._floor_under`), so they do not fold into the grass
 	# or hang over it.
 	p.y = maxf(Terrain.drawn_ground(p.x, p.z, was + Vector3(0.0, 1.7, 0.0)),
-		Sim.bridge_floor(p.x, p.z, was.y))
+		Sim.roads.bridge_floor(p.x, p.z, was.y))
 	if Obstacles.blocks(p, BODY_R) >= 0:
 		var try_x := Vector3(p.x, p.y, was.z)
 		var try_z := Vector3(was.x, p.y, p.z)
@@ -751,7 +751,7 @@ func _shoot(delta: float) -> void:
 	err *= 1.0 + d / 80.0
 	# his sight dead under an EMP: shooting over the irons he has left, or
 	# along the barrel
-	if float(CqbMatch.emp_t.get(team, 0.0)) > 0.0:
+	if float(Killstreaks.emp_t.get(team, 0.0)) > 0.0:
 		err *= 2.6
 	if vel.length() > 1.0:
 		err *= 1.6

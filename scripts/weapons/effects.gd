@@ -570,6 +570,23 @@ static func nuke(world: Node, pos: Vector3, lethal: float) -> void:
 	# they are just a swarm of dark quads crawling up through it, each one
 	# turning to face the camera. The volume is the smoke now.
 
+## Value noise for the fire and smoke shaders, shared by both.
+const NOISE_GLSL := """
+float h31(vec3 p) {
+	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float vnoise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(mix(h31(i), h31(i + vec3(1, 0, 0)), f.x),
+			mix(h31(i + vec3(0, 1, 0)), h31(i + vec3(1, 1, 0)), f.x), f.y),
+		mix(mix(h31(i + vec3(0, 0, 1)), h31(i + vec3(1, 0, 1)), f.x),
+			mix(h31(i + vec3(0, 1, 1)), h31(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+"""
+
 ## Have the cloud's shaders built before they are needed.
 ##
 ## They are written here and compiled the first time something wearing them is
@@ -631,20 +648,7 @@ uniform float t = 0.0;
 uniform float heat = 1.0;
 varying vec3 lp;
 
-float h31(vec3 p) {
-	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-}
-
-float vnoise(vec3 p) {
-	vec3 i = floor(p);
-	vec3 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-	return mix(mix(mix(h31(i), h31(i + vec3(1, 0, 0)), f.x),
-			mix(h31(i + vec3(0, 1, 0)), h31(i + vec3(1, 1, 0)), f.x), f.y),
-		mix(mix(h31(i + vec3(0, 0, 1)), h31(i + vec3(1, 0, 1)), f.x),
-			mix(h31(i + vec3(0, 1, 1)), h31(i + vec3(1, 1, 1)), f.x), f.y), f.z);
-}
-
+""" + NOISE_GLSL + """
 void vertex() {
 	lp = VERTEX;
 }
@@ -715,20 +719,7 @@ uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
 
 varying vec3 wpos;
 
-float h31(vec3 p) {
-	return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-}
-
-float vnoise(vec3 p) {
-	vec3 i = floor(p);
-	vec3 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-	return mix(mix(mix(h31(i), h31(i + vec3(1, 0, 0)), f.x),
-			mix(h31(i + vec3(0, 1, 0)), h31(i + vec3(1, 1, 0)), f.x), f.y),
-		mix(mix(h31(i + vec3(0, 0, 1)), h31(i + vec3(1, 0, 1)), f.x),
-			mix(h31(i + vec3(0, 1, 1)), h31(i + vec3(1, 1, 1)), f.x), f.y), f.z);
-}
-
+""" + NOISE_GLSL + """
 float fbm(vec3 p) {
 	float v = 0.0;
 	float a = 0.5;
@@ -1184,9 +1175,10 @@ static func _one_shot(world: Node, p: GPUParticles3D, extra := 2.0) -> void:
 	if tree == null:
 		return
 	var t := tree.create_timer(p.lifetime + extra, false)
-	t.timeout.connect(func() -> void:
-		if is_instance_valid(p):
-			p.queue_free())
+	# Bound to the emitter itself, not a lambda holding it: a match sweep frees
+	# it first as often as not, and a freed capture is an engine error each
+	# time; a connection to a freed object is simply dropped.
+	t.timeout.connect(p.queue_free)
 
 # ----------------------------------------------------------------- re-entry
 ## How hot the air is being made by something going `speed` through it at

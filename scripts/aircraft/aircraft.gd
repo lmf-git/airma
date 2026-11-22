@@ -275,28 +275,60 @@ func setup(id: String) -> void:
 ## Local half extents of the whole model, used to work out how close somebody on
 ## foot actually is to the machine rather than to the point it is measured from.
 func _cache_bounds() -> void:
-	var box := AABB()
-	var first := true
-	for c in find_children("*", "MeshInstance3D", true, false):
-		var mi := c as MeshInstance3D
-		var ab: AABB = mi.get_aabb()
-		var xf: Transform3D = global_transform.affine_inverse() * mi.global_transform \
-			if is_inside_tree() else mi.transform
-		var t := xf * ab
-		box = t if first else box.merge(t)
-		first = false
-	bounds = box
+	bounds = MeshKit.local_bounds(self)
+
+## The marks our own sensor is holding, inside `reach`.
+func _own_spots(reach: float) -> Array:
+	var out: Array = []
+	for sp in get_tree().get_nodes_in_group("laser_spots"):
+		if is_instance_valid(sp) and bool(sp.get("on")) and int(sp.get("team")) == team \
+				and global_position.distance_to((sp as Node3D).global_position) < reach:
+			out.append(sp)
+	return out
+
+## Who to fight (for the AI pilots), looked for a few times a second rather than on every tick.
+## Every AI pilot walked every contact on the map at 120 Hz -- twice a tick for
+## a wingman, which asks once to decide whether to formate and again to fight
+## -- to find a nearest that cannot change in a hundredth of a second. What is
+## held is let go at once if it dies or goes away.
+var _foe_at := {}
+
+func _held(kind: String, scan: Callable) -> Node3D:
+	var c: Variant = _foe_at.get(kind)
+	if c != null and _life_t < float(c[0]):
+		var n: Variant = c[1]
+		if n == null:
+			return null
+		if is_instance_valid(n) and (not n.has_method("is_alive") or n.is_alive()):
+			return n
+	var got: Node3D = scan.call()
+	_foe_at[kind] = [_life_t + 0.25 + randf() * 0.1, got]
+	return got
+
+## T: the next target from `cand`. Two orders, deliberately. Which contact to
+## take when nothing is held is a question about the here and now, so that one
+## is ranked on `cost`. Which contact comes *next* must not be: cost is
+## boresight angle plus range, you turn toward whatever you just locked, that
+## makes it rank first again, and the next press hands back the same neighbour.
+## T walked between two contacts for ever and never reached the third -- which
+## is exactly what "it works sometimes" looks like from the cockpit.
+func _next_target(cand: Array, cost: Callable) -> void:
+	var order := cand.duplicate()
+	order.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
+	var i := order.find(target)
+	if i < 0:
+		# nothing held, or what was held is gone: take the best one there is
+		cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
+		target = cand[0]
+	else:
+		target = order[(i + 1) % order.size()]
+	lock_time = 0.0
 
 ## Distance from a world point to this machine's hull, not to its origin. A
 ## transport measured from the centre reads as fifteen metres away while you are
 ## standing under the wing.
 func hull_distance(p: Vector3) -> float:
-	var lp: Vector3 = global_transform.affine_inverse() * p
-	var mn := bounds.position
-	var mx := bounds.end
-	var q := Vector3(clampf(lp.x, mn.x, mx.x), clampf(lp.y, mn.y, mx.y),
-		clampf(lp.z, mn.z, mx.z))
-	return lp.distance_to(q)
+	return MeshKit.box_distance(bounds, global_transform.affine_inverse() * p)
 
 func _refresh_mass() -> void:
 	var m: float = spec["mass"] + fuel
@@ -1089,7 +1121,7 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 	var right := b.x
 
 	# the ground, or a bridge's deck if it is under the wheels
-	var ground := maxf(Sim.height_at(pos.x, pos.z), Sim.bridge_floor(pos.x, pos.z, pos.y))
+	var ground := maxf(Sim.height_at(pos.x, pos.z), Sim.roads.bridge_floor(pos.x, pos.z, pos.y))
 	agl = pos.y - ground
 	# The engine pulls a rigid body straight down; the planet pulls it toward
 	# its centre. Over this world those differ by up to eight tenths of a
@@ -1481,9 +1513,9 @@ func _gear_forces(state: PhysicsDirectBodyState3D, _force: Vector3, _torque: Vec
 		var wp: Vector3 = xf * lp
 		var gh := Sim.height_at(wp.x, wp.z)
 		# A road bridge's deck is ground to a wheel or a skid at its level, as
-		# it is to a vehicle (`Sim.bridge_floor`). Without it a helicopter set
+		# it is to a vehicle (`Sim.roads.bridge_floor`). Without it a helicopter set
 		# down on a viaduct went through the deck to the valley floor.
-		var deck: float = Sim.bridge_floor(wp.x, wp.z, wp.y)
+		var deck: float = Sim.roads.bridge_floor(wp.x, wp.z, wp.y)
 		var on_deck: bool = deck > gh
 		if on_deck:
 			gh = deck
@@ -1961,9 +1993,9 @@ func fire_gunship(world: Node, aim: Vector3) -> bool:
 	shell.set_meta("origin", muzzle)
 	world.add_child(shell)
 	shell.global_position = muzzle
-	# a gunship's shells on every screen: see `NetLink.share_launch`
+	# a gunship's shells on every screen: see `NetLaunches.share`
 	if Sim.net != null and Sim.net.active:
-		Sim.net.share_launch(self, shell)
+		Sim.net.launches.share(self, shell)
 	Effects.muzzle_flash(world, muzzle, dir, 2.6 if float(g["rpm"]) < 40.0 else 1.3)
 	Effects.dust(world, muzzle, 1.6)
 	Sfx.play_at(world, "boom" if float(g["rpm"]) < 40.0 else "rifle", muzzle,

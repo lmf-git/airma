@@ -141,7 +141,7 @@ func _build_settings(parent: Control) -> void:
 	_section(body, "FLIGHT")
 	_assist = _check(body, "FLIGHT ASSIST", _set_assist)
 	_assist.tooltip_text = "Fly-by-wire on aeroplanes, the stability system on helicopters. %s toggles it in the air." \
-		% Sim.key_label(&"assist")
+		% Sim.keys.label(&"assist")
 	var rh := _row(body, "RADAR RANGE")
 	_radar = OptionButton.new()
 	_radar.add_theme_font_size_override("font_size", 14)

@@ -335,32 +335,14 @@ func cycle_target() -> void:
 	cand = cand.filter(func(n): return \
 		global_position.distance_to(n.global_position) < reach)
 	# and our own laser spot, which the hostile test above passes over
-	for sp in ([] if air_only else get_tree().get_nodes_in_group("laser_spots")):
-		if is_instance_valid(sp) and bool(sp.get("on")) and int(sp.get("team")) == team \
-				and global_position.distance_to((sp as Node3D).global_position) < reach \
-				and not cand.has(sp):
+	for sp in ([] if air_only else _own_spots(reach)):
+		if not cand.has(sp):
 			cand.append(sp)
 	if cand.is_empty():
 		say("no targets")
 		target = null
 		return
-	# Two orders, deliberately. Which contact to take when the radar is empty is
-	# a question about the here and now, so that one is ranked on cost. Which
-	# contact comes *next* must not be: cost is boresight angle plus range, you
-	# turn toward whatever you just locked, that makes it rank first again, and
-	# the next press hands back the same neighbour. T walked between two
-	# contacts for ever and never reached the third — which is exactly what
-	# "it works sometimes" looks like from the cockpit.
-	var order := cand.duplicate()
-	order.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
-	var i := order.find(target)
-	if i < 0:
-		# nothing held, or what was held is gone: take the best one there is
-		cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
-		target = cand[0]
-	else:
-		target = order[(i + 1) % order.size()]
-	lock_time = 0.0
+	_next_target(cand, cost)
 
 func say(t: String) -> void:
 	msg = t

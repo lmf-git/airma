@@ -169,7 +169,7 @@ func _physics_process(delta: float) -> void:
 			m.team = team
 			get_tree().current_scene.add_child(m)
 			if Sim.net != null:
-				Sim.net.share_launch(self, m)
+				Sim.net.launches.share(self, m)
 			Effects.dust(get_tree().current_scene, global_position + Vector3(0, 2, 0), 4.0)
 			return
 
@@ -213,7 +213,7 @@ func _manpads(delta: float) -> void:
 		m.team = team
 		get_tree().current_scene.add_child(m)
 		if Sim.net != null:
-			Sim.net.share_launch(self, m)
+			Sim.net.launches.share(self, m)
 		Effects.dust(get_tree().current_scene, global_position + Vector3(0, 1.2, 0), 2.2)
 		Sfx.play_at(get_tree().current_scene, "launch", global_position, -4.0, 1.1, 1400.0)
 		return

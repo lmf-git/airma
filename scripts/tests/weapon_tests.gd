@@ -939,7 +939,7 @@ func tick_tfr() -> bool:
 		print("[cruise] launch: %s" % str(t.fire_main(world)))
 		var shot: Missile = null
 		var near := 1e18
-		var want_id := String(Tank.KINDS[_tfr_kind]["missile"])
+		var want_id := String(VehicleSpec.KINDS[_tfr_kind]["missile"])
 		for m in world.get_tree().get_nodes_in_group("missiles"):
 			if is_instance_valid(m) and String(m.wid) == want_id:
 				var d: float = (m as Node3D).global_position.distance_to(t.global_position)
@@ -1619,7 +1619,7 @@ func tick_nuke(delta: float) -> bool:
 				_nuke_test = false
 				world.get_tree().quit()
 				return true
-			world._enter_ship(_nuke_boat)
+			world.crew.enter_ship(_nuke_boat)
 			# aim it the way a player would: right click on the map
 			# at a town, so the result means something
 			var bp: Vector3 = _nuke_boat.global_position
@@ -1638,7 +1638,7 @@ func tick_nuke(delta: float) -> bool:
 		elif _nuke_boat != null and _nuke_step == 0 and _nuke_t > 4.0:
 			_nuke_step = 1
 			var before: int = _nuke_boat.missiles_left
-			world._strategic_strike()
+			world.missions.strategic_strike()
 			print("[nuke] strike ordered: rounds %d -> %d" % [
 				before, _nuke_boat.missiles_left])
 		elif _nuke_step == 1:
@@ -1731,7 +1731,7 @@ func tick_lag(delta: float) -> bool:
 			for i in mini(6, rows.size()):
 				print("[lag]   particles: %4d x %s" % [rows[i][0], rows[i][1]])
 			# and what a frame costs on foot afterwards
-			world._leave_tank()
+			world.crew.leave_tank()
 			await world.get_tree().process_frame
 			var t0 := Time.get_ticks_usec()
 			for _f in 30:
@@ -2453,7 +2453,7 @@ func tick_trig(delta: float) -> void:
 			var ev := InputEventMouseButton.new()
 			ev.button_index = MOUSE_BUTTON_RIGHT
 			ev.pressed = true
-			world._shell_input(ev)
+			world.controls.shell_input(ev)
 			world.player._pilot(0.016)
 			var n1 := world.player.count_remaining("aim120")
 			var opened: bool = world.pod.active
@@ -2472,7 +2472,7 @@ func tick_trig(delta: float) -> void:
 			var ev2 := InputEventMouseButton.new()
 			ev2.button_index = MOUSE_BUTTON_RIGHT
 			ev2.pressed = true
-			world._shell_input(ev2)
+			world.controls.shell_input(ev2)
 			print("[trigger] with the map up: fired=%s, sensor toggled=%s" % [
 				str(world.player.count_remaining("aim120") < nm0), str(world.pod.active)])
 			world.map.visible = false

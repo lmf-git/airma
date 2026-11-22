@@ -87,23 +87,8 @@ var _mi: MeshInstance3D
 var _mat: ShaderMaterial
 
 func build() -> void:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for i in RINGS:
-		var t0: float = PI * float(i) / float(RINGS)
-		var t1: float = PI * float(i + 1) / float(RINGS)
-		for j in SEGS:
-			var p0: float = TAU * float(j) / float(SEGS)
-			var p1: float = TAU * float(j + 1) / float(SEGS)
-			var a := _on(t0, p0)
-			var b := _on(t0, p1)
-			var c := _on(t1, p1)
-			var d := _on(t1, p0)
-			# wound to face outwards
-			if i > 0:
-				_tri(st, a, c, b)
-			if i < RINGS - 1:
-				_tri(st, a, d, c)
+	# wound to face outwards, a unit ball scaled where it is drawn
+	var st := MeshKit.globe(MeshKit.even_rings(RINGS), SEGS, 1.0, true, true)
 	_mat = ShaderMaterial.new()
 	var sh := Shader.new()
 	sh.code = SHADER
@@ -115,15 +100,6 @@ func build() -> void:
 	_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_mi.extra_cull_margin = 16384.0
 	add_child(_mi)
-
-func _on(theta: float, phi: float) -> Vector3:
-	var s := sin(theta)
-	return Vector3(s * cos(phi), cos(theta), s * sin(phi))
-
-func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
-	for v in [a, b, c]:
-		st.set_normal(v as Vector3)
-		st.add_vertex(v)
 
 ## Put it in the sky for this camera, lit from `sun` (the direction the light
 ## comes from, in the world's frame).

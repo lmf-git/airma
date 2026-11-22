@@ -355,7 +355,7 @@ static func _dry_spot(at: Vector3, r0: float, r1: float) -> Vector3:
 		# and not in a town, where a column put down among the buildings spent
 		# the match pressed against them
 		var in_town := false
-		for pad in Sim._town_pads:
+		for pad in Sim.roads.town_pads:
 			if Vector2(p.x, p.z).distance_to(pad["c"] as Vector2) < float(pad["r"]) * 1.3:
 				in_town = true
 				break
@@ -525,12 +525,13 @@ func _strike_wave() -> void:
 	# hundreds of kilometres from the column -- were the last two of every wave,
 	# off the chart and nowhere near anything else.
 	var centre: Vector3 = from if from != Vector3.INF else Vector3(0, 0, -9000)
-	if world.has_method("_deep_water_near"):
+	var missions = world.get("missions")
+	if missions != null:
 		var ships: int = mini(1 + int(wave / 2.0), 3)
-		var sea: Vector3 = world.call("_deep_water_near", centre, 14)
+		var sea: Vector3 = missions.deep_water_near(centre, 14)
 		if Sim.height_at(sea.x, sea.z) < Sim.sea_at(sea.x, sea.z) - 40.0:
 			for i in ships:
-				var at: Vector3 = world.call("_deep_water_near",
+				var at: Vector3 = missions.deep_water_near(
 					sea + Vector3(float(i) * 500.0, 0.0, float(i) * 300.0), 2)
 				var sh := Ship.new()
 				sh.setup("cargo" if i % 2 == 0 else "patrol", 1)

@@ -69,7 +69,7 @@ func tick_carrier_conn(delta: float) -> void:
 
 func _run_carrier_conn_test() -> void:
 	var bad := PackedStringArray()
-	if not world._at_conn():
+	if not world.crew.at_conn():
 		print("[conn] RESULT: FAILED — not at the carrier's conn (start with --jet=sea:carrier)")
 		world.get_tree().quit()
 		return
@@ -77,7 +77,7 @@ func _run_carrier_conn_test() -> void:
 	var rmb := InputEventMouseButton.new()
 	rmb.button_index = MOUSE_BUTTON_RIGHT
 	rmb.pressed = true
-	world._shell_input(rmb)
+	world.controls.shell_input(rmb)
 	if world.pod.active:
 		bad.append("right click opened a sensor page instead of zooming")
 	await world.get_tree().create_timer(0.8).timeout
@@ -86,7 +86,7 @@ func _run_carrier_conn_test() -> void:
 	var rup := InputEventMouseButton.new()
 	rup.button_index = MOUSE_BUTTON_RIGHT
 	rup.pressed = false
-	world._shell_input(rup)
+	world.controls.shell_input(rup)
 	await world.get_tree().create_timer(0.8).timeout
 	if world.carrier.cam.fov < World.HULL_FOV * 0.9:
 		bad.append("letting go did not bring the view back out (fov %.0f)" % world.carrier.cam.fov)
@@ -107,7 +107,7 @@ func _run_carrier_conn_test() -> void:
 	if is_instance_valid(world.cam) and world.cam.mode != mode0:
 		bad.append("P cycled the parked jet's camera")
 	harness._press(KEY_U)
-	if world.on_foot or not world._at_conn():
+	if world.on_foot or not world.crew.at_conn():
 		bad.append("U climbed out of the parked jet")
 	harness._press(KEY_TAB)
 	var ids := PackedStringArray()
@@ -121,11 +121,11 @@ func _run_carrier_conn_test() -> void:
 		bad.append("the key card is not the conn's (sig %d)" % world.hud._card_sig)
 	# and the menu still works from here: all stop, then hand over
 	world.carrier.telegraph = 0.6
-	world._do_action("allstop")
+	world.controls.do_action("allstop")
 	if absf(world.carrier.telegraph) > 0.001:
 		bad.append("all stop left the telegraph at %.2f" % world.carrier.telegraph)
-	world._do_action("dismount")
-	if world._at_conn() or not world.on_foot:
+	world.controls.do_action("dismount")
+	if world.crew.at_conn() or not world.on_foot:
 		bad.append("hand over did not put you on the deck")
 	for b in bad:
 		print("[conn]   ", b)
@@ -698,7 +698,7 @@ func tick_carrier() -> bool:
 		print("[carrier] port deck overhang carried at %d of %d stations" % [
 			supported, checked])
 		# and take the conn
-		world._enter_carrier()
+		world.crew.enter_carrier()
 		await world.get_tree().process_frame
 		var conned: bool = world.carrier.occupied and world.carrier.cam != null and world.carrier.cam.current
 		print("[carrier] took the conn: occupied=%s camera=%s" % [
@@ -709,7 +709,7 @@ func tick_carrier() -> bool:
 		print("[carrier] under way at %.1f kts after 4 s of full ahead" % (world.carrier.speed * 1.94384))
 		var moves: bool = world.carrier.speed > 0.5 \
 			and absf(got_deck - want_deck) < 0.05
-		world._leave_carrier()
+		world.crew.leave_carrier()
 		var listed: bool = false
 		for k in world.menu._cards:
 			if String(k) == "sea:carrier":
@@ -740,7 +740,7 @@ func tick_conn(delta: float) -> bool:
 				world.get_tree().quit()
 				return true
 			print("[conn] on the bridge of %s" % world.ship.display_name())
-			world._leave_ship()
+			world.crew.leave_ship()
 		elif _conn_step == 1 and _conn_t > 1.5:
 			_conn_test = false
 			var w_ok: bool = world.on_foot and is_instance_valid(world.walker)
@@ -980,7 +980,7 @@ func tick_boat(delta: float) -> bool:
 				print("[boat] no submarine on our side")
 				world.get_tree().quit()
 				return true
-			world._enter_ship(sub)
+			world.crew.enter_ship(sub)
 			print("[boat] %s: guns=%d tubes=%d, mast %.1f m" % [
 				sub.display_name(), int(Ship.KINDS[sub.kind]["guns"]), sub.tubes(),
 				sub.mast_height()])
@@ -1345,7 +1345,7 @@ func tick_navsensor(delta: float) -> bool:
 				print("[navsensor] no friendly warship")
 				world.get_tree().quit()
 				return true
-			world._enter_ship(boat)
+			world.crew.enter_ship(boat)
 			world.pod.platform = boat
 			if not world.pod.active:
 				world.pod.toggle()

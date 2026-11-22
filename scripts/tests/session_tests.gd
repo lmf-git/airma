@@ -21,12 +21,12 @@ func parse_arg(a: String) -> bool:
 		_restart_test = true
 	elif a.begins_with("--restartmodes="):
 		# each mode in turn, fought for a while, then the next: what is left
-		# standing after each change is counted (see `_sweep_match`)
+		# standing after each change is counted (see `MatchSweep.sweep`)
 		_restart_test = true
 		_restart_modes = a.substr(15).split(",")
-		world.sweep_log = true
+		world.sweep.verbose = true
 	elif a == "--sweeplog":
-		world.sweep_log = true
+		world.sweep.verbose = true
 	elif a == "--chattest":
 		_chat_test = true
 	elif a == "--warlordstest":
@@ -80,7 +80,7 @@ func tick_pause() -> bool:
 ## it; CHANGE MODE is the hangar and ESC from there is the pause page again;
 ## and a slider reaches its bus. Nothing is left changed in the settings file.
 func _run_pause_test() -> void:
-	world._start(world._jet_arg if world._jet_arg != "" else "f16", "free")
+	world._start(world.jet_arg if world.jet_arg != "" else "f16", "free")
 	for i in 30:
 		await world.get_tree().physics_frame
 	var bad: Array = []
@@ -98,7 +98,7 @@ func _run_pause_test() -> void:
 	harness._press(KEY_ESCAPE)
 	if not world.pause_menu.visible or world.pause_menu._settings.visible:
 		bad.append("ESC on the settings page did not step back to the pause page")
-	world._pause_to_hangar()
+	world.controls.pause_to_hangar()
 	if not world.menu.visible or world.pause_menu.visible:
 		bad.append("CHANGE MODE did not bring up the hangar")
 	harness._press(KEY_ESCAPE)
@@ -122,7 +122,7 @@ var _admin_from := ""
 func tick_admin(delta: float) -> void:
 	if _admin_test:
 		_admin_t += delta
-		if _admin_t > 3.0 and world._traffic.is_empty():
+		if _admin_t > 3.0 and world.admin_desk.traffic.is_empty():
 			# optionally get out of the aeroplane first: the report is that
 			# traffic only flies its approach while the player is in one
 			if _admin_from != "":
@@ -130,25 +130,25 @@ func tick_admin(delta: float) -> void:
 					for sh in world.get_tree().get_nodes_in_group("ships"):
 						var v := sh as Ship
 						if v != null and v.has_gun() and v.team == 0:
-							world._enter_ship(v)
+							world.crew.enter_ship(v)
 							break
 				elif _admin_from == "tank":
 					for v in world.get_tree().get_nodes_in_group("vehicles"):
 						if v is Tank and (v as Tank).alive:
-							world._enter_tank(v as Tank)
+							world.crew.enter_tank(v as Tank)
 							break
 				elif _admin_from == "foot":
-					world._try_dismount()
+					world.crew.try_dismount()
 				print("[admin] player is now in: %s (aeroplane valid=%s active=%s)" % [
 					_admin_from, str(is_instance_valid(world.player)),
 					str(world.player.active) if is_instance_valid(world.player) else "-"])
 			world.admin.jet_id = "f16"
-			world._do_admin("flight")
+			world.admin_desk.do_admin("flight")
 			if _admin_from != "":
-				world._do_admin("follow")     # and watch them, from wherever we are
-			print("[admin] called a flight of %d" % world._traffic.size())
+				world.admin_desk.do_admin("follow")     # and watch them, from wherever we are
+			print("[admin] called a flight of %d" % world.admin_desk.traffic.size())
 		elif _admin_t > 8.0 and fmod(_admin_t, 25.0) < delta:
-			for t in world._traffic:
+			for t in world.admin_desk.traffic:
 				if not is_instance_valid(t):
 					continue
 				var view := "none"
@@ -166,7 +166,7 @@ func tick_admin(delta: float) -> void:
 			_admin_test = false
 			var down := 0
 			var flying := 0
-			for t in world._traffic:
+			for t in world.admin_desk.traffic:
 				if not is_instance_valid(t):
 					continue
 				if t.on_ground:
@@ -346,9 +346,9 @@ func tick_restart(delta: float) -> bool:
 				# missiles in the air anywhere else
 				if is_instance_valid(world.cqb) and not world.cqb.range_mode:
 					var c: Vector2 = world.cqb.centre
-					world.cqb._add_nuke(3.0, Vector3(c.x + 40.0, Sim.height_at(c.x + 40.0, c.y),
-						c.y), CqbMatch.TAC_LETHAL, false)
-					world.cqb._bomb(Vector3(c.x - 30.0, 0.0, c.y), 1.0, true)
+					world.cqb.streaks.add_nuke(3.0, Vector3(c.x + 40.0, Sim.height_at(c.x + 40.0, c.y),
+						c.y), Killstreaks.TAC_LETHAL, false)
+					world.cqb.streaks.bomb(Vector3(c.x - 30.0, 0.0, c.y), 1.0, true)
 			return true
 		if _restart_t > 3.0 and _restart_n < 3:
 			_restart_n += 1
@@ -554,7 +554,7 @@ func tick_spawn(delta: float) -> bool:
 			await world.get_tree().physics_frame
 			print("[spawn] started in a boat: crewing %s" % [
 				Sim.label_of(world.ship) if is_instance_valid(world.ship) else "nothing"])
-			for k in Tank.KINDS.keys():
+			for k in VehicleSpec.KINDS.keys():
 				world._start("veh:" + String(k), "free")
 				await world.get_tree().process_frame
 				await world.get_tree().physics_frame
@@ -597,7 +597,7 @@ func tick_spawn(delta: float) -> bool:
 						"BURIED IN THE BODY" if buried else "clear",
 						sight, roof, "   <- PERCHED" if perched else ""])
 				print("[spawn] chose %-13s -> %s%s" % [String(k),
-					"in the %s" % Tank.KINDS[got]["name"] if ok
+					"in the %s" % VehicleSpec.KINDS[got]["name"] if ok
 					else "STILL ON THE BOAT" if is_instance_valid(world.ship)
 					else "NOT IN IT (crewing %s, aeroplane=%s)" % [got,
 						"yes" if is_instance_valid(world.player) else "no"],
@@ -832,7 +832,7 @@ func _hn_board(jet: Aircraft) -> void:
 		world.player.global_position += Vector3(0, -3000, 0)
 		world.player.visible = false
 	var hold: Node3D = jet.hold_node()
-	world._spawn_walker(hold.global_position)
+	world.crew.spawn_walker(hold.global_position)
 	world.walker.global_transform = hold.global_transform
 	world.walker.enter_frame(hold, jet)
 	world.walker.activate()
@@ -1051,16 +1051,16 @@ func tick_mptest(delta: float) -> void:
 					gjet = "%s%s" % [String((gg as Node).get_meta("jet", "?")),
 						" seen" if (gg as Node3D).visible else " hidden"]
 			print("[mp] host t=%.0f gen=%d mission=%s peers=%d men=%d units=%d net_men=%d kills=%s launches_sent=%d drawn=%d their_aircraft=%s" % [
-				_mp_t, world.net.match_gen, String(Sim.mission), peers, men, world.net.units.size(),
-				world.get_tree().get_nodes_in_group("net_men").size(), kills, world.net.launches_sent,
-				world.net.launches_drawn, gjet])
+				_mp_t, world.net.match_gen, String(Sim.mission), peers, men, world.net.units.by_key.size(),
+				world.get_tree().get_nodes_in_group("net_men").size(), kills, world.net.launches.sent,
+				world.net.launches.drawn, gjet])
 		return
 	# the client
 	if _mp_t - _mp_said > 3.0:
 		_mp_said = _mp_t
 		var kinds := {}
-		for k in world.net.units:
-			var u: Variant = world.net.units[k]
+		for k in world.net.units.by_key:
+			var u: Variant = world.net.units.by_key[k]
 			if is_instance_valid(u):
 				var nm: String = "man" if u is Soldier else ("tank" if u is Tank else "ship")
 				kinds[nm] = int(kinds.get(nm, 0)) + 1
@@ -1074,8 +1074,8 @@ func tick_mptest(delta: float) -> void:
 		# which end of town he is at, and who is on whose side here
 		if is_instance_valid(world.cqb) and is_instance_valid(world.walker):
 			var by_team := {0: 0, 1: 0}
-			for k2 in world.net.units:
-				var u3: Variant = world.net.units[k2]
+			for k2 in world.net.units.by_key:
+				var u3: Variant = world.net.units.by_key[k2]
 				if is_instance_valid(u3) and u3 is Soldier:
 					by_team[(u3 as Soldier).team] = int(by_team[(u3 as Soldier).team]) + 1
 			print("[mp] join sides: me at %+.0f m north-south of the middle; host's men here: %d ours, %d theirs; zones %s" % [
@@ -1083,7 +1083,7 @@ func tick_mptest(delta: float) -> void:
 				str(world.get_tree().get_nodes_in_group("zones").map(func(z): return int(z.owner_team)))])
 		print("[mp] join t=%.0f gen=%d mission=%s units=%s ai=%d my_kills=%d match_kills=%s mirror=%s vehicle_rounds=%s launches_drawn=%d missiles=%d hp=%.0f" % [
 			_mp_t, world.net.match_gen, String(Sim.mission), str(kinds), world.net.ai_ghosts.size(),
-			mine, kills, str(NetLink.mirroring()), str(world.net.vehicle_rounds_drawn), world.net.launches_drawn,
+			mine, kills, str(NetLink.mirroring()), str(world.net.units.vehicle_rounds_drawn), world.net.launches.drawn,
 			world.get_tree().get_nodes_in_group("missiles").size(), hp])
 	if _mp_flip > 0.0 and _mp_t > _mp_flip:
 		_mp_flip = -1.0
@@ -1110,9 +1110,9 @@ func tick_mptest(delta: float) -> void:
 			print("[mp] join: threw a grenade and a flashbang, fired a rocket")
 		elif _mp_act == 1 and _mp_cqb_t > 4.0:
 			_mp_act = 2
-			world.cqb.bank["strike"] = 1
+			world.cqb.streaks.bank["strike"] = 1
 			var c := Vector3(world.cqb.centre.x, 0.0, world.cqb.centre.y - 40.0)
-			world.cqb._picked("strike", c)
+			world.cqb.streaks.picked("strike", c)
 			print("[mp] join: called an airstrike")
 		elif _mp_act == 3 and _mp_cqb_t > 9.0:
 			_mp_act = 4
@@ -1126,15 +1126,15 @@ func tick_mptest(delta: float) -> void:
 			print("[mp] join: trigger up, %d rounds fired" % (_mp_ammo0 - w.ammo))
 		elif _mp_act == 2 and _mp_cqb_t > 6.0:
 			_mp_act = 3
-			world.cqb.bank["chopper"] = 1
-			var ok: bool = world.cqb._call("chopper")
+			world.cqb.streaks.bank["chopper"] = 1
+			var ok: bool = world.cqb.streaks.call_in("chopper")
 			print("[mp] join: called the chopper gunner: %s" % str(ok))
 	# a burst into the nearest of the host's men every second
 	_mp_shot += delta
 	if _mp_shot > 1.0 and is_instance_valid(world.cqb) and is_instance_valid(world.walker):
 		_mp_shot = 0.0
-		for k in world.net.units:
-			var u2: Variant = world.net.units[k]
+		for k in world.net.units.by_key:
+			var u2: Variant = world.net.units.by_key[k]
 			if is_instance_valid(u2) and u2 is Soldier and (u2 as Soldier).team == 1 \
 					and (u2 as Soldier).alive:
 				(u2 as Soldier).take_hit(45.0, world.walker)
@@ -1168,10 +1168,10 @@ func tick_lobby(delta: float) -> void:
 	if _lb_step == 0 and _lb_t > 2.0:
 		_lb_step = 1
 		if _lb_role == "host":
-			world._host_game(String(world.menu.jet_id), "")
+			world.session.host_game(String(world.menu.jet_id), "")
 			print("[lobby] host: HOST pressed; running=%s" % str(world.running))
 		else:
-			world._join_game(String(world.menu.jet_id), "127.0.0.1")
+			world.session.join_game(String(world.menu.jet_id), "127.0.0.1")
 			print("[lobby] join: JOIN pressed; running=%s" % str(world.running))
 	if _lb_role == "host" and _lb_step == 1 and world.net.roster.size() > 1 and _lb_t > 8.0:
 		_lb_step = 2
@@ -1237,7 +1237,7 @@ func tick_redeploy(delta: float) -> void:
 			if _rd_t < 4.0:
 				return
 			if world.boarding:
-				world._end_boarding()
+				world.crew.end_boarding()
 			var p: Aircraft = world.player
 			p.linear_velocity = Vector3.ZERO
 			p.throttle = 0.0
@@ -1246,7 +1246,7 @@ func tick_redeploy(delta: float) -> void:
 			# key event, the tap latched the way `Sim._input` latches it
 			Input.action_press(&"interact")
 			Sim._taps[&"interact"] = Time.get_ticks_msec()
-			world._try_dismount()
+			world.crew.try_dismount()
 			_rd_step = 1
 			_rd_t = 0.0
 		1:
@@ -1269,7 +1269,7 @@ func tick_redeploy(delta: float) -> void:
 				str(not world.menu._launch.disabled)])
 			if not world.menu.redeploy or world.menu._launch.disabled:
 				_rd_bad.append("no redeploy after dying on foot")
-			world._on_launch("veh:m1a2", String(Sim.mission))
+			world.session.on_launch("veh:m1a2", String(Sim.mission))
 			_rd_step = 3
 			_rd_t = 0.0
 		3:
@@ -1290,7 +1290,7 @@ func tick_redeploy(delta: float) -> void:
 			print("[redeploy] tank knocked out: chooser up %s" % str(world.menu.redeploy))
 			if not world.menu.redeploy:
 				_rd_bad.append("no redeploy after losing the tank")
-			world._on_launch("foot", String(Sim.mission))
+			world.session.on_launch("foot", String(Sim.mission))
 			_rd_step = 5
 			_rd_t = 0.0
 		5:
@@ -1309,7 +1309,7 @@ func tick_redeploy(delta: float) -> void:
 		6:
 			if _rd_t < 5.0:
 				return
-			world._on_launch("f16", String(Sim.mission))
+			world.session.on_launch("f16", String(Sim.mission))
 			_rd_step = 7
 			_rd_t = 0.0
 		7:
@@ -1343,11 +1343,11 @@ func tick_eject(delta: float) -> void:
 	if not _ej_done and _ej_t > 4.0:
 		_ej_done = true
 		if world.menu.redeploy:
-			world._on_launch("f16", String(Sim.mission))
+			world.session.on_launch("f16", String(Sim.mission))
 		if world.boarding:
-			world._end_boarding()
+			world.crew.end_boarding()
 		print("[eject] ejecting at t=%.1f" % _ej_t)
-		world._eject()
+		world.crew.eject()
 	if _ej_done and _ej_t > 34.0:
 		print("[eject] done")
 		world.get_tree().quit()

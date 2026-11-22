@@ -75,30 +75,30 @@ func plan() -> void:
 	_plan_cached = hit
 	if hit:
 		sites = cached_sites
-		Sim.load_road_state(cached_roads)
+		Sim.roads.load_road_state(cached_roads)
 	else:
 		var t_s := Time.get_ticks_msec()
 		_site_towns()
-		if Sim.debug_roads:
+		if Sim.roads.debug_roads:
 			print("[plan] siting towns and dispatching routes: %d ms"
 				% (Time.get_ticks_msec() - t_s))
 
 ## Is the network still being searched? The caller keeps drawing while it is.
 func plan_busy() -> bool:
-	return not _plan_cached and not Sim.roads_routed()
+	return not _plan_cached and not Sim.roads.roads_routed()
 
 ## Everything that has to wait for the routes: the streets hang off the trunk
 ## network, so they cannot be laid until it exists.
 func plan_finish() -> void:
 	var t0 := Time.get_ticks_msec()
 	if not _plan_cached:
-		Sim.finish_roads()
+		Sim.roads.finish_roads()
 	var t1 := Time.get_ticks_msec()
 	# Which trunk road each town runs out to meet, for all of them at once.
 	var centres := PackedVector2Array()
 	for t in sites:
 		centres.append(t["c"] as Vector2)
-	var trunks: PackedVector2Array = Sim.nearest_trunk_many(centres)
+	var trunks: PackedVector2Array = Sim.roads.nearest_trunk_many(centres)
 	for i in sites.size():
 		_plan_town_streets(sites[i]["c"], float(sites[i]["r"]), trunks[i])
 	var t2 := Time.get_ticks_msec()
@@ -108,14 +108,14 @@ func plan_finish() -> void:
 	var t4 := t2
 	var t5 := t2
 	if not _plan_cached:
-		Sim.register_segments(_streets)
+		Sim.roads.register_segments(_streets)
 		t3 = Time.get_ticks_msec()
 		WorldBake.put("town_sites", sites)
 		t4 = Time.get_ticks_msec()
-		var st := Sim.road_state()
+		var st := Sim.roads.road_state()
 		t5 = Time.get_ticks_msec()
 		WorldBake.put("roads", st)
-	if Sim.debug_roads:
+	if Sim.roads.debug_roads:
 		print("[plan] finish_roads %d | streets %d | register_segments %d | bake sites %d | road_state %d | bake roads %d ms" % [
 			t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4,
 			Time.get_ticks_msec() - t5])
@@ -185,7 +185,7 @@ static func find_regions() -> Array:
 			if c.length() > 110000.0:
 				var sc := _land_score(c, 13000.0)
 				if sc > 0.82:
-					cand.append([sc - Sim.site_roughness(c, 9000.0) * 2.0, c])
+					cand.append([sc - Sim.roads.site_roughness(c, 9000.0) * 2.0, c])
 			z += step
 		x += step
 	cand.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0])
@@ -214,7 +214,7 @@ func _site_towns() -> void:
 	# Which ground is reachable ground. A town across a strait is a town the
 	# trunk network has to swim to.
 	Sim.build_landmass()
-	if Sim.debug_roads:
+	if Sim.roads.debug_roads:
 		print("[plan]   build_landmass: %d ms" % (Time.get_ticks_msec() - _t_lm))
 	var _t_named := Time.get_ticks_msec()
 	var pads: Array = []
@@ -222,7 +222,7 @@ func _site_towns() -> void:
 		var want := Vector2(float(t[0].x), float(t[0].z))
 		var r: float = float(t[1])
 		var best := want
-		var best_rough: float = Sim.site_roughness(want, r)
+		var best_rough: float = Sim.roads.site_roughness(want, r)
 		# Every *candidate* was tested for dry land, but the position the town
 		# was asked for never was -- so a settlement wanted somewhere that
 		# turned out to be under water stayed there unless something else beat
@@ -247,7 +247,7 @@ func _site_towns() -> void:
 					# has to cross water
 					if not Sim.on_home_land(q.x, q.y):
 						continue
-					var rough := Sim.site_roughness(q, r)
+					var rough := Sim.roads.site_roughness(q, r)
 					if rough < best_rough:
 						best_rough = rough
 						best = q
@@ -260,12 +260,12 @@ func _site_towns() -> void:
 			"tallest": float(t[3]), "name": String(t[4]), "region": 0,
 			"was": want, "rough": best_rough})
 		pads.append({"c": best, "r": r})
-	if Sim.debug_roads:
+	if Sim.roads.debug_roads:
 		print("[plan]   the named towns: %d ms" % (Time.get_ticks_msec() - _t_named))
 	# and the clusters elsewhere on the map, each with its own towns
 	var t_fr := Time.get_ticks_msec()
 	var regions := find_regions()
-	if Sim.debug_roads:
+	if Sim.roads.debug_roads:
 		print("[plan]   find_regions: %d ms" % (Time.get_ticks_msec() - t_fr))
 	for ri in regions.size():
 		var rc: Vector2 = regions[ri]
@@ -280,7 +280,7 @@ func _site_towns() -> void:
 					var q2: Vector2 = want2 + Vector2(float(i2), float(j2)) * (rad * 0.7)
 					if not _town_ok(q2, rad, 30.0):
 						continue
-					var rg: float = Sim.site_roughness(q2, rad)
+					var rg: float = Sim.roads.site_roughness(q2, rad)
 					if rg < rough2:
 						rough2 = rg
 						best2 = q2
@@ -336,7 +336,7 @@ func _site_towns() -> void:
 					var q3: Vector2 = want3 + Vector2(float(i3), float(j3)) * 1100.0
 					if not _town_ok(q3, rad3, 30.0):
 						continue
-					var rg3: float = Sim.site_roughness(q3, rad3)
+					var rg3: float = Sim.roads.site_roughness(q3, rad3)
 					if rg3 < rough3:
 						rough3 = rg3
 						best3 = q3
@@ -355,7 +355,7 @@ func _site_towns() -> void:
 	# Sites whose ground is under water get no platform, so they get no town:
 	# a settlement is not a reason to raise an island out of the sea. `sites`
 	# and `pads` are built in step, so the survivors index the same way.
-	var kept_pads: Array = Sim.register_town_pads(pads)
+	var kept_pads: Array = Sim.roads.register_town_pads(pads)
 	if kept_pads.size() < pads.size():
 		var keep: Dictionary = {}
 		for k in kept_pads:
@@ -365,11 +365,11 @@ func _site_towns() -> void:
 			var sc = (sites[si] as Dictionary).get("c")
 			if keep.has(sc):
 				dry_sites.append(sites[si])
-		if Sim.debug_roads:
+		if Sim.roads.debug_roads:
 			print("[plan]   %d of %d sites were under water and are not built" % [
 				pads.size() - kept_pads.size(), pads.size()])
 		sites = dry_sites
-	if Sim.debug_roads:
+	if Sim.roads.debug_roads:
 		print("[plan]   register_town_pads (%d): %d ms" % [pads.size(),
 			Time.get_ticks_msec() - t_rp])
 	# The trunk network, laid to where the towns actually ended up.
@@ -417,7 +417,7 @@ func _site_towns() -> void:
 			links.append([tb, tail])
 		for k in range(run.size() - 1):
 			links.append([first_town + int(run[k]), first_town + int(run[k + 1])])
-	Sim.begin_roads(nodes, _valid_links(links, nodes.size()))
+	Sim.roads.begin_roads(nodes, _valid_links(links, nodes.size()))
 
 ## The town of a given region nearest a point, as a node index. Region 0 is the
 ## home cluster, which is also where the airfield gates are.
@@ -679,7 +679,7 @@ func _plan_junctions() -> void:
 			continue
 		# out of the road's carriageway and kerbs, measured along the street,
 		# which may cross it at an angle
-		var start: float = Sim.ROAD_HALF * 1.55 / maxf(absf(dir.cross(along)), 0.4)
+		var start: float = Sim.roads.ROAD_HALF * 1.55 / maxf(absf(dir.cross(along)), 0.4)
 		var reach: float = clampf(absf(fill) / STREET_GRADE, 8.0, 50.0)
 		for side in [-1.0, 1.0]:
 			# only on the side of the road the street goes on to
@@ -690,7 +690,7 @@ func _plan_junctions() -> void:
 			var q0: Vector2 = p + dir * side * start
 			var q1: Vector2 = p + dir * side * (start + l)
 			legs.append([q0, q1, road_y, town_y, town_y, town_y,
-				Sim.LEG_APPROACH, STREET_HALF])
+				Sim.roads.LEG_APPROACH, STREET_HALF])
 			# out past the end of the climb by as far as its bank rounds off,
 			# so the street's own approach is never taken for a bank it has to
 			# keep clear of (`_streets_clear_of_bridges`)
@@ -699,7 +699,7 @@ func _plan_junctions() -> void:
 				_approach_spans[si] = []
 			(_approach_spans[si] as Array).append([minf(t, t1), maxf(t, t1)])
 			joins += 1
-	Sim.set_street_approaches(legs)
+	Sim.roads.set_street_approaches(legs)
 	_stats["street_joins"] = joins
 	_stats["street_stops"] = stops
 
@@ -964,7 +964,7 @@ func _town_detail() -> void:
 		if faction == "":
 			faction = Sim.region_faction(c.x, c.y)
 		var ground: float = Sim.height_at(c.x, c.y)
-		var biome: String = Sim.biome_kind(c.x, c.y, ground,
+		var biome: String = Sim.biomes.kind(c.x, c.y, ground,
 			Sim.normal_at(c.x, c.y).y)
 		var lamp: Array = []
 		var seat: Array = []
@@ -1012,7 +1012,7 @@ func _town_detail() -> void:
 		for q0 in at:
 			box_lo = Vector2(minf(box_lo.x, q0.x), minf(box_lo.y, q0.y))
 			box_hi = Vector2(maxf(box_hi.x, q0.x), maxf(box_hi.y, q0.y))
-		var bridged: bool = Sim.near_bridges(box_lo, box_hi, PROP_REACH)
+		var bridged: bool = Sim.roads.near_bridges(box_lo, box_hi, PROP_REACH)
 		for k in at.size():
 			var q: Vector2 = at[k]
 			var gy: float = gys[k]
@@ -1020,7 +1020,7 @@ func _town_detail() -> void:
 				continue
 			# Not on a ramp up to a bridge, and not under a deck it would
 			# stand up through: the street it lines may go under one.
-			if bridged and Sim.bridge_headroom(q.x, q.y, PROP_REACH, gy) < PROP_HEADROOM:
+			if bridged and Sim.roads.bridge_headroom(q.x, q.y, PROP_REACH, gy) < PROP_HEADROOM:
 				continue
 			var xf := Transform3D(Basis(Vector3.UP, yaw[k]),
 				Vector3(q.x, gy, q.y))
@@ -1119,16 +1119,8 @@ func _detail_batch(mesh: Mesh, xforms: Array, nm: String, stops_rounds := false)
 		for ii in ids.size():
 			if ids[ii] >= 0:
 				_furn_obs[_furniture.size() * 65536 + ii] = ids[ii]
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = nm
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = mesh
-	mm.instance_count = xforms.size()
-	for i in xforms.size():
-		mm.set_instance_transform(i, xforms[i])
-	mmi.multimesh = mm
-	_furniture.append([mm, xforms])
+	var mmi := MeshKit.multimesh(mesh, xforms, nm)
+	_furniture.append([mmi.multimesh, xforms])
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# the LOD itself: nothing at all beyond half a kilometre
 	mmi.visibility_range_end = PROP_FADE
@@ -1421,15 +1413,7 @@ func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false,
 		foot := AABB()) -> void:
 	if xforms.is_empty():
 		return
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = nm
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = mesh
-	mm.instance_count = xforms.size()
-	for i in xforms.size():
-		mm.set_instance_transform(i, xforms[i])
-	mmi.multimesh = mm
+	var mmi := MeshKit.multimesh(mesh, xforms, nm)
 	add_child(mmi)
 	# and into the obstacle field, so it is something you can fly into rather
 	# than something you fly through
@@ -1890,7 +1874,7 @@ func _scatter_nature() -> void:
 		# for
 		_scat_surf = Sim.native.surfaces_at(_scat_pts, Terrain.BASE_CELL)
 		# read by every worker, so built here first
-		Sim.index_bridges()
+		Sim.roads.index_bridges()
 		_scat_out = []
 		_scat_out.resize(SCAT_TASKS)
 		var gid := WorkerThreadPool.add_group_task(_scat_slice, SCAT_TASKS, -1, true,
@@ -1956,12 +1940,12 @@ func _scat_slice(t: int) -> void:
 		# answers, so the drop is under the interpolation rather than taken off
 		# after it.
 		y = _scat_surf[base + i]
-		if absf(x) < 6000.0 and Sim.road_distance(x, z) < 15.0:
+		if absf(x) < 6000.0 and Sim.roads.road_distance(x, z) < 15.0:
 			continue
 		var slope: float = _scat_slope[base + i]
 		if slope < 0.55:
 			continue                                        # nothing clings to a cliff
-		var biome := Sim.biome_kind(x, z, y, slope)
+		var biome := Sim.biomes.kind(x, z, y, slope)
 		# Thickets and glades, not a carpet. The clump field is slow -- about
 		# 800 m across -- so a stand is the size of a wood rather than the size
 		# of a bush, and the open ground between stands is genuinely open.
@@ -1977,7 +1961,7 @@ func _scat_slice(t: int) -> void:
 		# Clear of the road bridges: off the ramps, and under a deck only
 		# where the deck is well over the top of it -- a valley viaduct, not
 		# the low end of a town flyover.
-		if Sim.bridge_headroom(x, z, float(SCAT_CROWN.get(kind, 2.0)) * sc, y) \
+		if Sim.roads.bridge_headroom(x, z, float(SCAT_CROWN.get(kind, 2.0)) * sc, y) \
 				< float(SCAT_TALL.get(kind, 3.0)) * sy + 1.0:
 			continue
 		# and not inside anything built: a barn, a hangar, a fuel tank
@@ -2100,7 +2084,7 @@ func _build_roads() -> void:
 	# come through a road that is the ground. This hands the network over --
 	# the trunk legs and the streets as drawn, the approach stretches marked --
 	# and the extension works out which parts of each street are drawn.
-	var legs := PackedFloat32Array(Sim.road_draw)
+	var legs := PackedFloat32Array(Sim.roads.road_draw)
 	street_draw = _streets_clear_of_bridges()
 	for r in street_draw:
 		var a: Vector2 = r[0]
@@ -2142,7 +2126,7 @@ func _streets_clear_of_bridges() -> Array:
 		# bank -- the side of a ramp, or a road raised on one it does not
 		# climb to meet -- and a margin round it. As [t0, t1].
 		var blocked: Array = []
-		if not Sim.road_bridges.is_empty() and Sim.near_bridges(
+		if not Sim.roads.road_bridges.is_empty() and Sim.roads.near_bridges(
 				Vector2(minf(a.x, b.x), minf(a.y, b.y)),
 				Vector2(maxf(a.x, b.x), maxf(a.y, b.y)), STREET_REACH):
 			var n: int = maxi(int(ceil(run / STEP)), 1)
@@ -2150,7 +2134,7 @@ func _streets_clear_of_bridges() -> Array:
 			for k in n + 1:
 				var t := float(k) / float(n)
 				var q: Vector2 = a.lerp(b, t)
-				var ok: bool = Sim.bridge_headroom(q.x, q.y, STREET_REACH, NAN, false) \
+				var ok: bool = Sim.roads.bridge_headroom(q.x, q.y, STREET_REACH, NAN, false) \
 					>= STREET_HEADROOM
 				if not ok and from < 0.0:
 					from = t
@@ -2386,7 +2370,7 @@ func _deck_road(a: Vector2, b: Vector2, ya_m: float, ya_p: float,
 		var o0: float = offs[k]
 		var o1: float = offs[k + 1]
 		var corner := func(at: Vector2, o: float, ym: float, yp: float) -> Vector3:
-			var q: Vector2 = at + n * Sim.ROAD_HALF * o
+			var q: Vector2 = at + n * Sim.roads.ROAD_HALF * o
 			return Vector3(q.x, lerpf(ym, yp, (o + 1.0) * 0.5) + 0.03, q.y)
 		var p00: Vector3 = corner.call(a, o0, ya_m, ya_p)
 		var p01: Vector3 = corner.call(a, o1, ya_m, ya_p)
@@ -2395,8 +2379,8 @@ func _deck_road(a: Vector2, b: Vector2, ya_m: float, ya_p: float,
 		# (a lap's outer edge, as `_deck_lap` laid it: the road's offset on
 		# the deck's width)
 		if b_edge.size() == LAP_N:
-			p11.y = _lap_y(b_edge, o1 * Sim.ROAD_HALF / DECK_HALF) + 0.03
-			p10.y = _lap_y(b_edge, o0 * Sim.ROAD_HALF / DECK_HALF) + 0.03
+			p11.y = _lap_y(b_edge, o1 * Sim.roads.ROAD_HALF / DECK_HALF) + 0.03
+			p10.y = _lap_y(b_edge, o0 * Sim.roads.ROAD_HALF / DECK_HALF) + 0.03
 		_deck_v.append_array(PackedVector3Array([p00, p01, p11, p00, p11, p10]))
 		_deck_uv.append_array(PackedVector2Array([Vector2(o0, va), Vector2(o1, va),
 			Vector2(o1, vb), Vector2(o0, va), Vector2(o1, vb), Vector2(o0, vb)]))
@@ -2411,7 +2395,7 @@ func _deck_road(a: Vector2, b: Vector2, ya_m: float, ya_p: float,
 ## ribbon's own couple of centimetres. `out` points away from the deck.
 func _deck_lap(st: SurfaceTool, at: Vector2, out: Vector2, top: float) -> void:
 	var nrm := Vector2(-out.y, out.x)
-	var tip: Vector2 = at + out * Sim.BRIDGE_LAP
+	var tip: Vector2 = at + out * Sim.roads.BRIDGE_LAP
 	# The outer edge at LAP_N points across, from the +nrm side to the other,
 	# each on the road it meets. Taken at the two corners alone and drawn
 	# straight between them, the edge stood up to forty centimetres off a road
@@ -2424,7 +2408,7 @@ func _deck_lap(st: SurfaceTool, at: Vector2, out: Vector2, top: float) -> void:
 	for k in LAP_N:
 		var g: float = got[k] + 0.03 if got.size() > k else top
 		# never more than a step off the deck: it is a lap, not a ramp
-		hs.append(clampf(g, top - Sim.BRIDGE_STEP, top + Sim.BRIDGE_STEP))
+		hs.append(clampf(g, top - Sim.roads.BRIDGE_STEP, top + Sim.roads.BRIDGE_STEP))
 	for k in LAP_N - 1:
 		var sa: float = _lap_side(k)
 		var sb: float = _lap_side(k + 1)
@@ -2475,7 +2459,7 @@ func _build_structures() -> void:
 	# back with the same span: drawn twice in the same place the deck fought
 	# itself for every pixel.
 	var drawn: Array = []
-	for br in Sim.road_bridges:
+	for br in Sim.roads.road_bridges:
 		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
 		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
 		if pts.size() < 2:
@@ -2573,11 +2557,11 @@ func _build_structures() -> void:
 					for k2 in 3:
 						for sx2 in [-1.0, 0.0, 1.0]:
 							var fq: Vector2 = station + into * (ABUT_LEN * float(k2) * 0.5) \
-								+ Vector2(-into.y, into.x) * (Sim.RAMP_HALF * sx2)
+								+ Vector2(-into.y, into.x) * (Sim.roads.RAMP_HALF * sx2)
 							foot = minf(foot, Sim.drawn_height_at(fq.x, fq.y))
 					var deep: float = top - foot + 0.5
 					var block := MeshKit.begin()
-					MeshKit.box(block, Vector3(Sim.RAMP_HALF * 2.0, deep, ABUT_LEN),
+					MeshKit.box(block, Vector3(Sim.roads.RAMP_HALF * 2.0, deep, ABUT_LEN),
 						Vector3(0.0, -deep * 0.5, ABUT_LEN * 0.5))
 					var mi_block := MeshKit.mi(MeshKit.finish(block,
 						MeshKit.mat(Color(0.58, 0.57, 0.55), 0.92, 0.0)), "Abutment")
@@ -2606,8 +2590,8 @@ func _build_structures() -> void:
 				var g: float = Sim.height_at(b2.x, b2.y)
 				var clear: float = yb - 1.9 - g
 				var pw0: float = clampf(4.4 + clear * 0.035, 4.4, 14.0)
-				var in_road: bool = Sim.segments_indexed > 0 \
-					and Sim.road_distance(b2.x, b2.y) < pw0 * 0.5 + STREET_REACH + 1.0
+				var in_road: bool = Sim.roads.segments_indexed > 0 \
+					and Sim.roads.road_distance(b2.x, b2.y) < pw0 * 0.5 + STREET_REACH + 1.0
 				if not in_road or since >= PIER_STEP * 2.2:
 					since = 0.0
 				if clear > 5.0 and not in_road:
@@ -2620,7 +2604,7 @@ func _build_structures() -> void:
 						Vector3(b2.x, g + clear * 0.5, b2.y))
 					pier_spots.append(Vector3(b2.x, pw * 0.5, b2.y))
 	var portals := 0
-	for tn in Sim.road_tunnels:
+	for tn in Sim.roads.road_tunnels:
 		var tp: PackedVector2Array = tn.get("pts", PackedVector2Array())
 		var ty: PackedFloat32Array = tn.get("ys", PackedFloat32Array())
 		if tp.size() < 2:
@@ -2705,7 +2689,7 @@ func _off_the_road(q: Vector2, a: Vector2, b: Vector2) -> Vector2:
 ## clear of a road bridge -- its ramps and anywhere under the deck. A bridge is
 ## not in the road index, so the kerb test alone put towers up through decks.
 func _pylon_clear(q: Vector2) -> bool:
-	return Sim.clear_of_roads(q.x, q.y, 12.0) and Sim.bridge_headroom(q.x, q.y, 12.0) == INF
+	return Sim.clear_of_roads(q.x, q.y, 12.0) and Sim.roads.bridge_headroom(q.x, q.y, 12.0) == INF
 
 ## Close a run of pylons off. A run of one carries no wire and is a tower
 ## standing on its own in a field, so it is dropped.
@@ -2910,7 +2894,7 @@ func _windfarm() -> void:
 		var y := Sim.height_at(q.x, q.y)
 		if y < Sim.sea_at(q.x, q.y) + 20.0 or not Sim.clear_of_airfield(q.x, q.y):
 			continue
-		if Sim.bridge_headroom(q.x, q.y, 45.0) < INF:
+		if Sim.roads.bridge_headroom(q.x, q.y, 45.0) < INF:
 			continue                        # a rotor sweeps forty metres
 		var t := Turbine.new()
 		t.build()

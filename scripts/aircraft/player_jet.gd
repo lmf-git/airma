@@ -280,41 +280,12 @@ func cycle_target() -> void:
 		say("no radar contacts — terrain masked")
 		target = null
 		return
-	if cand.is_empty():
-		say("no targets")
-		target = null
-		return
 	if Sim.debug_weapons:
 		print("[lock] %d candidate(s) survived: reach %.0f km, weapon %s" % [
 			cand.size(), reach * 0.001, w])
-	# Two orders, deliberately. Which contact to take when the radar is empty is
-	# a question about the here and now, so that one is ranked on cost. Which
-	# contact comes *next* must not be: cost is boresight angle plus range, you
-	# turn toward whatever you just locked, that makes it rank first again, and
-	# the next press hands back the same neighbour. T walked between two
-	# contacts for ever and never reached the third — which is exactly what
-	# "it works sometimes" looks like from the cockpit.
-	var order := cand.duplicate()
-	order.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
-	var i := order.find(target)
-	if i < 0:
-		# nothing held, or what was held is gone: take the best one there is
-		cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
-		target = cand[0]
-	else:
-		target = order[(i + 1) % order.size()]
-	lock_time = 0.0
+	_next_target(cand, cost)
 	var d := global_position.distance_to(target.global_position) * 0.001
 	say("target %s  %.1f km" % [Sim.label_of(target).left(18), d])
-
-## The marks our own sensor is holding, inside `reach`.
-func _own_spots(reach: float) -> Array:
-	var out: Array = []
-	for sp in get_tree().get_nodes_in_group("laser_spots"):
-		if is_instance_valid(sp) and bool(sp.get("on")) and int(sp.get("team")) == team \
-				and global_position.distance_to((sp as Node3D).global_position) < reach:
-			out.append(sp)
-	return out
 
 func on_weapon_hit(what: Node, _wid: String) -> void:
 	if what.has_method("is_alive") and not what.is_alive():

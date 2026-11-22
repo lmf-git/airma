@@ -12,7 +12,7 @@ func parse_arg(a: String) -> bool:
 		_town_test = true
 	elif a == "--roadtest":
 		_road_test = true
-		Sim.debug_roads = true
+		Sim.roads.debug_roads = true
 	elif a == "--skirttest":
 		_skirt_test = true
 	elif a == "--guntest":
@@ -70,7 +70,7 @@ func _terrain_stats(span: float, step: float, ring_a: int, ring_b: int) -> void:
 		for i in n:
 			var x := -span + float(i) * step
 			var z := -span + float(j) * step
-			h[j * n + i] = Sim.natural_height_at(x, z) + Sim.planet_drop(x, z)
+			h[j * n + i] = Sim.roads.natural_height_at(x, z) + Sim.planet_drop(x, z)
 	var land := 0
 	var flat := 0
 	var slope_sum := 0.0
@@ -133,7 +133,7 @@ func tick_prop_clear() -> void:
 func _clear_parts() -> Array:
 	var decks: Array = []
 	var ramps: Array = []
-	for br in Sim.road_bridges:
+	for br in Sim.roads.road_bridges:
 		var pts: PackedVector2Array = br.get("pts", PackedVector2Array())
 		var ys: PackedFloat32Array = br.get("ys", PackedFloat32Array())
 		if pts.size() < 2:
@@ -143,9 +143,9 @@ func _clear_parts() -> Array:
 			var b: Vector2 = pts[i + 1]
 			var dir := (b - a).normalized()
 			if i == 0:
-				a -= dir * Sim.BRIDGE_LAP
+				a -= dir * Sim.roads.BRIDGE_LAP
 			if i == pts.size() - 2:
-				b += dir * Sim.BRIDGE_LAP
+				b += dir * Sim.roads.BRIDGE_LAP
 			decks.append([a, b, ys[i] - Sim.planet_drop(a.x, a.y),
 				ys[i + 1] - Sim.planet_drop(b.x, b.y)])
 		for r in br.get("ramps", []):
@@ -161,16 +161,16 @@ func _clear_verdict(parts: Array, p: Vector3, r: float, h: float, ramps := true)
 		var ramp: PackedVector2Array = rp
 		for i in ramp.size() - 1:
 			if Geometry2D.get_closest_point_to_segment(q, ramp[i], ramp[i + 1]) \
-					.distance_to(q) < Sim.RAMP_HALF + r:
+					.distance_to(q) < Sim.roads.RAMP_HALF + r:
 				return "ramp"
 	for d in parts[0]:
 		var a: Vector2 = d[0]
 		var b: Vector2 = d[1]
 		var on: Vector2 = Geometry2D.get_closest_point_to_segment(q, a, b)
-		if on.distance_to(q) > Sim.BRIDGE_HALF + r:
+		if on.distance_to(q) > Sim.roads.BRIDGE_HALF + r:
 			continue
 		var f: float = on.distance_to(a) / maxf(a.distance_to(b), 0.01)
-		var under: float = lerpf(float(d[2]), float(d[3]), f) - Sim.BRIDGE_GIRDER
+		var under: float = lerpf(float(d[2]), float(d[3]), f) - Sim.roads.BRIDGE_GIRDER
 		if under - p.y < h:
 			return "deck"
 	return ""
@@ -230,7 +230,7 @@ func _run_prop_clear() -> void:
 			if _in_block(blocks, t.origin.x, t.origin.z, 0.5) \
 					or Obstacles.blocks(t.origin + Vector3(0, 0.9, 0), 0.4) >= 0:
 				nat["block"] += 1
-			if Sim.road_distance(t.origin.x, t.origin.z) < Sim.ROAD_HALF + 1.5:
+			if Sim.roads.road_distance(t.origin.x, t.origin.z) < Sim.roads.ROAD_HALF + 1.5:
 				nat["road"] += 1
 	print("[propclear] country scatter: %d placed; %d under a deck, %d on a ramp, %d inside a building or structure, %d in a carriageway" % [
 		nat["all"], nat["deck"], nat["ramp"], nat["block"], nat["road"]])
@@ -279,7 +279,7 @@ func _run_prop_clear() -> void:
 	var piers: Array = sc.get("pier_spots") if sc.get("pier_spots") != null else []
 	for pp in piers:
 		var pv: Vector3 = pp
-		if Sim.road_distance(pv.x, pv.z) < pv.y + 7.75:
+		if Sim.roads.road_distance(pv.x, pv.z) < pv.y + 7.75:
 			pier_bad += 1
 	print("[propclear] piers: %d, %d standing in a road or street" % [piers.size(), pier_bad])
 	# And what a town's set puts in its streets, for every town a bridge runs
@@ -512,7 +512,7 @@ func tick_town() -> void:
 		var on_apron := 0
 		var on_runway := 0
 		var pts_f := 0
-		for r in Sim.ROADS:
+		for r in Sim.roads.ROADS:
 			var ra: Vector2 = r[0]
 			var rb: Vector2 = r[1]
 			var steps: int = maxi(int(ra.distance_to(rb) / 12.0), 2)
@@ -536,7 +536,7 @@ func tick_town() -> void:
 			built += 1
 			# half the footprint, from the instance scale
 			var halfw: float = maxf(xf.basis.x.length(), xf.basis.z.length()) * 0.5
-			var d := Sim.road_distance(xf.origin.x, xf.origin.z)
+			var d := Sim.roads.road_distance(xf.origin.x, xf.origin.z)
 			if d < halfw + 4.0:
 				clash += 1
 				nearest_clash = minf(nearest_clash, d)
@@ -570,7 +570,7 @@ func tick_town() -> void:
 		var pts := 0
 		var worst_sink := 0.0
 		var sum_sink := 0.0
-		for r in (Sim.ROADS + world.scenery._streets):
+		for r in (Sim.roads.ROADS + world.scenery._streets):
 			var ra: Vector2 = r[0]
 			var rb: Vector2 = r[1]
 			var steps: int = maxi(int(ra.distance_to(rb) / 11.0), 2)
@@ -621,7 +621,7 @@ func tick_town() -> void:
 		var climb := 0.0
 		var length := 0.0
 		var steepest := 0.0
-		for r in Sim.ROADS:
+		for r in Sim.roads.ROADS:
 			var a: Vector2 = r[0]
 			var b: Vector2 = r[1]
 			var d := a.distance_to(b)
@@ -637,7 +637,7 @@ func tick_town() -> void:
 		for t in world.scenery.sites:
 			var tc: Vector2 = t["c"]
 			var near := 1e9
-			for r in Sim.ROADS:
+			for r in Sim.roads.ROADS:
 				near = minf(near, Geometry2D.get_closest_point_to_segment(
 					tc, r[0], r[1]).distance_to(tc))
 			print("[town] %-14s nearest trunk road %.0f m from the middle of it" % [
@@ -649,14 +649,14 @@ func tick_town() -> void:
 		var sum_err := 0.0
 		var missed := 0
 		var samples := 0
-		for r in (Sim.ROADS + world.scenery._streets):
+		for r in (Sim.roads.ROADS + world.scenery._streets):
 			var ra: Vector2 = r[0]
 			var rb: Vector2 = r[1]
 			for k in 9:
 				var q: Vector2 = ra.lerp(rb, float(k) / 8.0)
 				if absf(q.x) >= 18000.0 or absf(q.y) >= 18000.0:
 					continue
-				var field := Sim.road_distance(q.x, q.y)
+				var field := Sim.roads.road_distance(q.x, q.y)
 				samples += 1
 				sum_err += field
 				worst_err = maxf(worst_err, field)
@@ -694,7 +694,7 @@ func tick_town() -> void:
 			if h5 <= Sim.sea_at(p5.x, p5.y):
 				continue
 			dry += 1
-			var k5: String = Sim.biome_kind(p5.x, p5.y, h5, 1.0)
+			var k5: String = Sim.biomes.kind(p5.x, p5.y, h5, 1.0)
 			mix[k5] = int(mix.get(k5, 0)) + 1
 		var parts: Array = []
 		for k6 in mix.keys():
@@ -704,7 +704,7 @@ func tick_town() -> void:
 		print("[town] the country is %s (of %d dry samples out to 260 km)" % [
 			", ".join(PackedStringArray(parts)), dry])
 		print("[town] trunk roads: %d legs, %.1f km of tarmac, %.0f m of climb (%.1f m per km), steepest %.1f%%" % [
-			Sim.ROADS.size(), length * 0.001, climb, climb / maxf(length * 0.001, 1.0),
+			Sim.roads.ROADS.size(), length * 0.001, climb, climb / maxf(length * 0.001, 1.0),
 			steepest * 100.0])
 		world.get_tree().quit()
 #endregion
@@ -730,7 +730,7 @@ func tick_road() -> bool:
 		var lp_reversals := 0
 		var lp_bends := 0
 		var lp_loops := 0
-		var lp_lines: Array = Sim.road_lines()
+		var lp_lines: Array = Sim.roads.road_lines()
 		for ln in lp_lines:
 			var pl: PackedVector2Array = ln
 			if pl.size() < 3:
@@ -801,7 +801,7 @@ func tick_road() -> bool:
 				wet2, pl2.size(), far2 * 0.001, str(far_at.round())])
 			break
 		_road_test = false
-		Sim.resurvey_roads()
+		Sim.roads.resurvey_roads()
 		var worst_grade := 0.0
 		var mean_grade := 0.0
 		var worst_cross := 0.0
@@ -819,7 +819,7 @@ func tick_road() -> bool:
 		var mean_cross := 0.0
 		var n := 0
 		var span := 0.0
-		for r in Sim.ROADS:
+		for r in Sim.roads.ROADS:
 			var a: Vector2 = r[0]
 			var b: Vector2 = r[1]
 			var d: float = a.distance_to(b)
@@ -847,7 +847,7 @@ func tick_road() -> bool:
 				var rr: float = Sim.survey_height_at(q.x + nrm.x * 6.0,
 					q.y + nrm.y * 6.0)
 				var cross: float = absf(rr - l) / 12.0
-				var made: Vector3 = Sim.road_surface(q.x, q.y)
+				var made: Vector3 = Sim.roads.road_surface(q.x, q.y)
 				if made.y > 0.5:
 					# the design surface in the same frame as the ground
 					var design: float = made.x + Sim.planet_drop(q.x, q.y)
@@ -859,18 +859,18 @@ func tick_road() -> bool:
 					worst_grade = g
 					worst_grade_at = q
 					worst_grade_note = "%.1f -> %.1f over %.0f m, %.0f m from a road" % [
-						prev_y, y, d / float(steps), Sim.road_distance(q.x, q.y)]
+						prev_y, y, d / float(steps), Sim.roads.road_distance(q.x, q.y)]
 				if cross > worst_cross:
 					worst_cross = cross
 					worst_at = q
 					worst_lr = Vector3(l, y, rr)
-					worst_w = Sim.road_surface(q.x, q.y)
+					worst_w = Sim.roads.road_surface(q.x, q.y)
 					worst_left = q - nrm * 6.0
 					worst_right = q + nrm * 6.0
 				mean_grade += g
 				mean_cross += cross
 				n += 1
-		print("[roads] %d legs, %.1f km of trunk road" % [Sim.ROADS.size(), span * 0.001])
+		print("[roads] %d legs, %.1f km of trunk road" % [Sim.roads.ROADS.size(), span * 0.001])
 		grades.sort()
 		crosses.sort()
 		var g95: float = grades[mini(grades.size() - 1, int(grades.size() * 0.95))]
@@ -888,7 +888,7 @@ func tick_road() -> bool:
 		var cut_worst := 0.0
 		var cut_n := 0
 		var cut_at := Vector2.ZERO
-		for r in Sim.ROADS:
+		for r in Sim.roads.ROADS:
 			var ra: Vector2 = r[0]
 			var rb: Vector2 = r[1]
 			var rd := rb - ra
@@ -897,7 +897,7 @@ func tick_road() -> bool:
 			for kk in 5:
 				var q: Vector2 = ra.lerp(rb, (float(kk) + 0.5) / 5.0)
 				# what the earthworks actually did here
-				var depth: float = Sim.natural_height_at(q.x, q.y) \
+				var depth: float = Sim.roads.natural_height_at(q.x, q.y) \
 					- Sim.height_at(q.x, q.y)
 				if depth > 0.0:
 					cut_sum += depth
@@ -906,31 +906,31 @@ func tick_road() -> bool:
 						cut_at = q
 				cut_n += 1
 		if cut_worst > 20.0:
-			var rsw: Vector3 = Sim.road_surface(cut_at.x, cut_at.y)
+			var rsw: Vector3 = Sim.roads.road_surface(cut_at.x, cut_at.y)
 			print("[roads]   at the worst point: natural %.1f, finished %.1f, design %.1f, weight %.2f, centreline ground %.1f" % [
-				Sim.natural_height_at(cut_at.x, cut_at.y),
+				Sim.roads.natural_height_at(cut_at.x, cut_at.y),
 				Sim.height_at(cut_at.x, cut_at.y), rsw.x, rsw.y, rsw.z])
 			print("[roads]   flat_factor %.2f, road_distance %.0f m" % [
 				Sim.flat_factor(cut_at.x, cut_at.y),
-				Sim.road_distance(cut_at.x, cut_at.y)])
+				Sim.roads.road_distance(cut_at.x, cut_at.y)])
 		print("[roads] earth moved to make the road: mean %.2f m cut, worst %.1f m at %s" % [
 			cut_sum / maxf(float(cut_n), 1.0), cut_worst, str(cut_at.round())])
 		print("[roads] worst cross fall at %s: left %.1f, centre %.1f, right %.1f, corridor y=%.1f w=%.2f, %.0f m from a road" % [
 			str(worst_at.round()), worst_lr.x, worst_lr.y, worst_lr.z,
-			worst_w.x, worst_w.y, Sim.road_distance(worst_at.x, worst_at.y)])
+			worst_w.x, worst_w.y, Sim.roads.road_distance(worst_at.x, worst_at.y)])
 		var near := 0
-		for r in Sim.ROADS:
-			if Sim._seg_dist(worst_at, r[0], r[1]) < 30.0:
+		for r in Sim.roads.ROADS:
+			if Sim.roads.seg_dist(worst_at, r[0], r[1]) < 30.0:
 				near += 1
 				print("[roads]   leg %s -> %s at %.1f m" % [
 					str((r[0] as Vector2).round()), str((r[1] as Vector2).round()),
-					Sim._seg_dist(worst_at, r[0], r[1])])
+					Sim.roads.seg_dist(worst_at, r[0], r[1])])
 		print("[roads]   %d trunk legs within 30 m of that point" % near)
 		for probe in [worst_left, worst_right]:
 			print("[roads]   probe %s: corridor y=%.1f w=%.2f, %.1f m from a road, ground %.1f" % [
 				str((probe as Vector2).round()),
-				Sim.road_surface(probe.x, probe.y).x, Sim.road_surface(probe.x, probe.y).y,
-				Sim.road_distance(probe.x, probe.y),
+				Sim.roads.road_surface(probe.x, probe.y).x, Sim.roads.road_surface(probe.x, probe.y).y,
+				Sim.roads.road_distance(probe.x, probe.y),
 				Sim.height_at(probe.x, probe.y)])
 		# The alignment as a whole, structures included -- the open legs alone
 		# flatter the road, because the steep ground is exactly what became a
@@ -940,9 +940,9 @@ func tick_road() -> bool:
 		var al_note := ""
 		var al_sum := 0.0
 		var al_n := 0
-		for li in Sim._road_lines.size():
-			var pl: PackedVector2Array = Sim._road_lines[li]
-			var pf: PackedFloat32Array = Sim._road_prof[li]
+		for li in Sim.roads.trunk_lines.size():
+			var pl: PackedVector2Array = Sim.roads.trunk_lines[li]
+			var pf: PackedFloat32Array = Sim.roads.road_prof[li]
 			for i in range(pl.size() - 1):
 				var run: float = pl[i].distance_to(pl[i + 1])
 				if run < 1.0:
@@ -953,22 +953,22 @@ func tick_road() -> bool:
 					al_at = pl[i]
 					al_note = "%.1f -> %.1f over %.0f m, structure %s/%s" % [
 						pf[i], pf[i + 1], run,
-						str(Sim._in_structure(li, i)),
-						str(Sim._in_structure(li, i + 1))]
+						str(Sim.roads.in_structure(li, i)),
+						str(Sim.roads.in_structure(li, i + 1))]
 				al_sum += gr
 				al_n += 1
 		print("[roads] whole alignment, structures included: mean %.1f%%, worst %.1f%% at %s (%s)" % [
 			100.0 * al_sum / maxf(float(al_n), 1.0), 100.0 * al_worst,
 			str(al_at.round()), al_note])
 		var bore := 0.0
-		for tn in Sim.road_tunnels:
+		for tn in Sim.roads.road_tunnels:
 			bore += (tn["a"] as Vector2).distance_to(tn["b"] as Vector2)
 		var carried := 0.0
-		for br2 in Sim.road_bridges:
+		for br2 in Sim.roads.road_bridges:
 			carried += (br2["a"] as Vector2).distance_to(br2["b"] as Vector2)
 		print("[roads] %d tunnel(s), %.2f km bored; %d viaduct(s), %.2f km carried" % [
-			Sim.road_tunnels.size(), bore * 0.001,
-			Sim.road_bridges.size(), carried * 0.001])
+			Sim.roads.road_tunnels.size(), bore * 0.001,
+			Sim.roads.road_bridges.size(), carried * 0.001])
 		_report_valleys()
 		# Every span, against what it is actually crossing. A viaduct that
 		# stands a couple of metres off the ground for its whole length is an
@@ -981,7 +981,7 @@ func tick_road() -> bool:
 		var clear_min := 1e9
 		var clear_sum := 0.0
 		var wet_spans := 0
-		for br in Sim.road_bridges:
+		for br in Sim.roads.road_bridges:
 			var pts: PackedVector2Array = br["pts"]
 			var ys: PackedFloat32Array = br["ys"]
 			var top := 0.0
@@ -991,14 +991,14 @@ func tick_road() -> bool:
 			# station of the deck moves earth -- that is what an abutment is --
 			# and the corridor carries it a graded shoulder further. Anything
 			# inside that is the abutment, not the middle of a span.
-			var skirt: float = Sim.ROAD_HALF + Sim.ROAD_SHOULDER
+			var skirt: float = Sim.roads.ROAD_HALF + Sim.roads.ROAD_SHOULDER
 			var deck_ends: Array = []
-			for br_e in Sim.road_bridges:
+			for br_e in Sim.roads.road_bridges:
 				deck_ends.append(br_e["a"])
 				deck_ends.append(br_e["b"])
 			for i in pts.size():
 				# the country under the deck, which nothing should have touched
-				var under: float = Sim.natural_height_at(pts[i].x, pts[i].y)
+				var under: float = Sim.roads.natural_height_at(pts[i].x, pts[i].y)
 				# the profile is flat-frame, the country under it is not
 				var deck_y: float = ys[i] - Sim.planet_drop(pts[i].x, pts[i].y)
 				top = maxf(top, deck_y - under)
@@ -1016,7 +1016,7 @@ func tick_road() -> bool:
 						near_end = true
 						break
 				if not near_end:
-					var made2: Vector3 = Sim.road_surface(pts[i].x, pts[i].y)
+					var made2: Vector3 = Sim.roads.road_surface(pts[i].x, pts[i].y)
 					# Another road passing under a viaduct is ordinary, and its
 					# earthworks are its own business. What would be wrong is
 					# the corridor levelling the ground to carry *this*
@@ -1031,20 +1031,20 @@ func tick_road() -> bool:
 				wet_spans += 1
 			clear_min = minf(clear_min, top)
 			clear_sum += top
-			if top < Sim.ROAD_FILL_MAX:
+			if top < Sim.roads.ROAD_FILL_MAX:
 				low_decks += 1
 			# does the carriageway actually reach the abutment it is drawn to?
 			for endi in [0, pts.size() - 1]:
 				var at: Vector2 = pts[endi]
 				gap_worst = maxf(gap_worst, absf(ys[endi]
 					- Sim.planet_drop(at.x, at.y)
-					- Sim.road_surface(at.x, at.y).x))
+					- Sim.roads.road_surface(at.x, at.y).x))
 		print("[roads] spans: %d, %d of them over water; deck stands %.1f m above the country at least, %.1f m on average" % [
-			Sim.road_bridges.size(), wet_spans,
-			clear_min if Sim.road_bridges.size() > 0 else 0.0,
-			clear_sum / maxf(float(Sim.road_bridges.size()), 1.0)])
+			Sim.roads.road_bridges.size(), wet_spans,
+			clear_min if Sim.roads.road_bridges.size() > 0 else 0.0,
+			clear_sum / maxf(float(Sim.roads.road_bridges.size()), 1.0)])
 		print("[roads] the made road meets each deck end within %.2f m" % gap_worst)
-		for brp in Sim.road_bridges:
+		for brp in Sim.roads.road_bridges:
 			var bpa: Vector2 = brp["a"]
 			var bpb: Vector2 = brp["b"]
 			print("[roads]   span %s -> %s, %.2f km, deck %.0f -> %.0f" % [
@@ -1057,7 +1057,7 @@ func tick_road() -> bool:
 		# when anything about the world does. Ground worked under a deck stays
 		# at zero, because that one is a mistake rather than a judgement.
 		print("[roads] spans that could have been an embankment: %d of %d; stations with the ground worked under a deck: %d" % [
-			low_decks, Sim.road_bridges.size(), stained])
+			low_decks, Sim.roads.road_bridges.size(), stained])
 
 		# What is gated is what can actually go wrong now that the survey
 		# solves the earthworks limit and the gradient together: how steep the
@@ -1079,10 +1079,10 @@ func tick_road() -> bool:
 			# router's own cap now prevents.
 			if lp_detour < 4.6
 			and lp_reversals * 200 < lp_bends
-			and g95 < Sim.road_grade_hairpin + 0.01 and c95 < 0.06
-			and worst_grade < Sim.road_grade_hairpin + 0.01
-			and cut_worst < Sim.road_cut_hard + 2.0
-			and low_decks * 100 <= Sim.road_bridges.size() and stained == 0
+			and g95 < Sim.roads.road_grade_hairpin + 0.01 and c95 < 0.06
+			and worst_grade < Sim.roads.road_grade_hairpin + 0.01
+			and cut_worst < Sim.roads.road_cut_hard + 2.0
+			and low_decks * 100 <= Sim.roads.road_bridges.size() and stained == 0
 			else "FAILED"))
 		world.get_tree().quit()
 		return true
@@ -1101,11 +1101,11 @@ func _report_valleys() -> void:
 	var worst := 0.0
 	var worst_at := Vector2.ZERO
 	var deepest_decked := 0.0
-	for li in Sim._road_lines.size():
-		var pl: PackedVector2Array = Sim._road_lines[li]
-		if li >= Sim._natural.size():
+	for li in Sim.roads.trunk_lines.size():
+		var pl: PackedVector2Array = Sim.roads.trunk_lines[li]
+		if li >= Sim.roads.natural.size():
 			break
-		var g: PackedFloat32Array = Sim._natural[li]
+		var g: PackedFloat32Array = Sim.roads.natural[li]
 		var n := pl.size()
 		if n < 5:
 			continue
@@ -1151,7 +1151,7 @@ func _report_valleys() -> void:
 			var on_deck := false
 			for k in range(ra + 1, rb):
 				deep = maxf(deep, shut[k] - g[k])
-				on_deck = on_deck or Sim._in_structure(li, k)
+				on_deck = on_deck or Sim.roads.in_structure(li, k)
 			if deep < 60.0:
 				continue
 			var width: float = s[rb] - s[ra]
@@ -1242,7 +1242,7 @@ var _gun_test := false
 func tick_gun() -> bool:
 	if _gun_test:
 		_gun_test = false
-		world._start(world._jet_arg if world._jet_arg != "" else "f16", "free")
+		world._start(world.jet_arg if world.jet_arg != "" else "f16", "free")
 		await world.get_tree().process_frame
 		await world.get_tree().physics_frame
 		if not is_instance_valid(world.player):
@@ -2070,11 +2070,11 @@ func tick_seamix() -> bool:
 				var y2: float = Sim.height_at(x2, z2)
 				if y2 <= Sim.sea_at(x2, z2):
 					continue
-				var bk: String = Sim.biome_kind(x2, z2, y2, Sim.normal_at(x2, z2).y)
+				var bk: String = Sim.biomes.kind(x2, z2, y2, Sim.normal_at(x2, z2).y)
 				tally[bk] = int(tally.get(bk, 0)) + 1
 				n2 += 1
 			var parts := PackedStringArray()
-			for nm in Sim.BIOME_NAMES:
+			for nm in Sim.biomes.NAMES:
 				var c2 := int(tally.get(nm, 0))
 				if c2 > 0:
 					parts.append("%s %.0f%%" % [nm, 100.0 * float(c2) / maxf(float(n2), 1.0)])
@@ -2125,7 +2125,7 @@ func tick_field() -> bool:
 				Sim.flat_factor(worst_at.x, worst_at.y),
 				Sim.native.field_flat(worst_at.x, worst_at.y),
 				Sim.pad_weight(worst_at.x, worst_at.y),
-				Sim.road_surface(worst_at.x, worst_at.y).y,
+				Sim.roads.road_surface(worst_at.x, worst_at.y).y,
 				Terrain.cell_at(worst_at.x, worst_at.y)])
 			print("[field]   drawn surface at the middle: %.2f m (pavement sits at %.2f m)" % [
 				drawn, elev])
@@ -2294,8 +2294,8 @@ func tick_biome() -> bool:
 				lerpf(p01.r, p11.r, fa), fb)
 			var cm: float = lerpf(lerpf(p00.g, p10.g, fa),
 				lerpf(p01.g, p11.g, fa), fb)
-			var truth := Sim.biome_colour(x, z, y, up)
-			var shaded := Sim.biome_colour(x, z, y, up, Vector2(ct, cm))
+			var truth := Sim.biomes.colour(x, z, y, up)
+			var shaded := Sim.biomes.colour(x, z, y, up, Vector2(ct, cm))
 			var d: float = maxf(maxf(absf(truth.r - shaded.r),
 				absf(truth.g - shaded.g)), absf(truth.b - shaded.b))
 			wc = maxf(wc, d)

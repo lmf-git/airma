@@ -480,32 +480,7 @@ func follow(cam: Camera3D) -> void:
 	_mat.set_shader_parameter("r_ground", Sim.PLANET_R * k)
 
 func _shell() -> ArrayMesh:
-	var r := 1.0
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for i in RINGS:
-		var t0: float = PI * float(i) / float(RINGS)
-		var t1: float = PI * float(i + 1) / float(RINGS)
-		for j in SEGS:
-			var p0: float = TAU * float(j) / float(SEGS)
-			var p1: float = TAU * float(j + 1) / float(SEGS)
-			var a := _on(t0, p0, r)
-			var b := _on(t0, p1, r)
-			var c := _on(t1, p1, r)
-			var d := _on(t1, p0, r)
-			if i > 0:
-				_tri(st, a, b, c)
-			_tri(st, a, c, d)
-	return st.commit()
-
-func _on(theta: float, phi: float, r: float) -> Vector3:
-	var s := sin(theta)
-	return Vector3(s * cos(phi) * r, cos(theta) * r, s * sin(phi) * r)
-
-func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
-	for v in [a, b, c]:
-		st.set_normal((v as Vector3).normalized())
-		st.add_vertex(v)
+	return MeshKit.globe(MeshKit.even_rings(RINGS), SEGS, 1.0, false).commit()
 
 ## The weather sets how much cloud there is; the sun says which way is up.
 func apply(cover: float, density: float, sun: Node3D) -> void:
