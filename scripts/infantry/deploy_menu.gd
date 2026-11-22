@@ -180,8 +180,73 @@ func _ready() -> void:
 	go.pressed.connect(_go)
 	fr.add_child(go)
 
+	_build_side_page()
 	_show_page(0)
 	visible = false
+
+# --------------------------------------------------------------- choose a side
+## The first thing asked on arriving in a match in a session, before any of
+## the loadout: which side to fight for. It was a row of two small buttons
+## over the tabs, already set to whichever side you happened to be on, and
+## nobody noticed they had been asked anything.
+var _side_page: Control = null
+var _side_big: Array = []
+
+func _build_side_page() -> void:
+	_side_page = Control.new()
+	_side_page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_side_page.mouse_filter = Control.MOUSE_FILTER_STOP
+	_side_page.visible = false
+	add_child(_side_page)
+	var shade := ColorRect.new()
+	shade.color = Color(0.0, 0.01, 0.02, 0.97)
+	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_side_page.add_child(shade)
+	var centre := CenterContainer.new()
+	centre.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_side_page.add_child(centre)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 22)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	centre.add_child(col)
+	var t := _label("CHOOSE YOUR SIDE", 34, ACCENT)
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(t)
+	var sub := _label("Your loadout comes next. You can change sides later on this screen.", 15, DIM)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(sub)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 28)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.add_child(row)
+	for sd in [0, 1]:
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(300, 150)
+		b.add_theme_font_size_override("font_size", 26)
+		var tint: Color = Color(0.20, 0.42, 0.85) if sd == 0 else Color(0.80, 0.24, 0.20)
+		b.add_theme_stylebox_override("normal", _box(tint.darkened(0.55), tint, 10, 2))
+		b.add_theme_stylebox_override("hover", _box(tint.darkened(0.35), tint.lightened(0.3), 10, 3))
+		b.add_theme_stylebox_override("pressed", _box(tint.darkened(0.6), tint, 10, 2))
+		b.pressed.connect(_side_chosen.bind(sd))
+		row.add_child(b)
+		_side_big.append(b)
+
+## Ask which side, over the loadout: `mine` is the side this player is on now
+## and `counts` how many are on each.
+func ask_side(mine: int, counts: Array) -> void:
+	show_sides(mine, counts)
+	if _side_page == null:
+		return
+	for i in mini(_side_big.size(), counts.size()):
+		var n := int(counts[i])
+		(_side_big[i] as Button).text = "%s\n%d player%s%s" % ["BLUE" if i == 0 else "RED", n,
+			"" if n == 1 else "s", "  (you)" if i == mine else ""]
+	_side_page.visible = true
+
+func _side_chosen(sd: int) -> void:
+	_side_page.visible = false
+	_pick_side(sd)
 
 # -------------------------------------------------------------- page: CLASS
 func _build_class_page() -> Control:
@@ -553,7 +618,10 @@ func show_sides(mine: int, counts: Array) -> void:
 	if _side_row == null:
 		return
 	_side_row.visible = mine >= 0
-	for i in _side_btns.size():
+	# offline there is no side to pick, and no counts to label the buttons with
+	if mine < 0:
+		return
+	for i in mini(_side_btns.size(), counts.size()):
 		var b := _side_btns[i] as Button
 		b.text = "%s   %d player%s" % ["BLUE" if i == 0 else "RED", int(counts[i]),
 			"" if int(counts[i]) == 1 else "s"]

@@ -294,16 +294,24 @@ static func _bake(id: String) -> AudioStreamWAV:
 				b[i] *= sin(t * PI) * (0.6 + 0.4 * sin(t * 40.0))
 			return _wav(_norm(b, 0.45), false)
 		"step_a", "step_b", "step_c":
-			# a boot on a hard road: a heel, then the scuff of the sole
+			# A boot on the ground: a soft, dull heel and the scuff of the
+			# sole. It was a full-band burst at full level with no rise to it,
+			# which is how a shot is made, and it sounded like one: here it
+			# swells over a few milliseconds, has no top end, and is quiet.
 			var which: int = ["step_a", "step_b", "step_c"].find(id)
-			var n := int(RATE * 0.16)
-			var b := _noise(n, 0.10 + 0.03 * which, 283 + which * 7)
-			var grit := _noise(n, 0.6, 293 + which * 5, 0.3)
+			var n := int(RATE * 0.13)
+			var heel := _noise(n, 0.035 + 0.01 * which, 283 + which * 7)
+			var grit := _noise(n, 0.35, 293 + which * 5, 0.3)
+			var b := PackedFloat32Array()
+			b.resize(n)
+			var rise: float = 0.006 * RATE
 			for i in n:
 				var t := float(i) / float(n)
-				b[i] = b[i] * pow(1.0 - t, 9.0) + grit[i] * pow(1.0 - t, 4.0) \
-					* clampf(t / 0.12, 0.0, 1.0) * 0.20
-			return _wav(_norm(b, 0.8), false)
+				var up: float = clampf(float(i) / rise, 0.0, 1.0)
+				var thud: float = sin(TAU * (85.0 + 10.0 * which) * float(i) / RATE) * exp(-t * 22.0)
+				var scuff: float = clampf((t - 0.15) / 0.15, 0.0, 1.0) * pow(1.0 - t, 3.0)
+				b[i] = up * (heel[i] * exp(-t * 14.0) + thud * 0.35) + grit[i] * scuff * 0.12
+			return _wav(_norm(b, 0.4), false)
 		"land":
 			var n := int(RATE * 0.3)
 			var b := _noise(n, 0.07, 307)

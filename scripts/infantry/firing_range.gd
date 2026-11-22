@@ -23,6 +23,8 @@ var world: Node = null
 var origin := Vector3.ZERO
 var dir := Vector3.FORWARD
 var targets: Array = []
+## The built-up places ({c, r}) the boards keep out of: see `site_near`.
+var keep_out: Array = []
 var _rack: Dictionary = {}       # kit id -> the Drop on the rack, or null
 var _rack_at: Dictionary = {}    # kit id -> where it lies
 var _tick := 0.0
@@ -40,19 +42,37 @@ var _panel: Label
 var _tips: Label
 var _layer: CanvasLayer
 var _dirty := false
-## Where a range would go out from `centre`: the first bearing and distance
-## from which a lane `LANE_LEN` long is clear at chest height all the way.
-## Returns [origin, dir], or [] when nowhere round the town will do.
-static func site_near(centre: Vector3) -> Array:
+## Where a range would go out from the town at `centre`, `town_r` across: the
+## first bearing and distance, out past the houses, from which a lane
+## `LANE_LEN` long is clear at chest height all the way. `towns` are the
+## other built-up places ({c, r}) it must not run into either. Returns
+## [origin, dir], or [] when nowhere round the town will do.
+##
+## It used to look 110 to 470 m from the middle -- inside every town, which
+## are 400 to 1500 m across -- and came out in the streets, or across the
+## ramp of a road bridge.
+static func site_near(centre: Vector3, town_r := 0.0, towns: Array = []) -> Array:
 	var best: Array = []
 	var best_score := -1.0
-	for ring in range(0, 9):
-		var r: float = 110.0 + float(ring) * 45.0
-		for bi in 16:
-			var a: float = TAU * float(bi) / 16.0 + float(ring) * 0.2
+	for ring in range(0, 12):
+		var r: float = town_r + 80.0 + float(ring) * 60.0
+		for bi in 24:
+			var a: float = TAU * float(bi) / 24.0 + float(ring) * 0.2
 			var d := Vector3(cos(a), 0.0, sin(a))
 			var p := centre + d * r
 			p.y = Sim.height_at(p.x, p.z)
+			# open country under the line and down the short lane: no town,
+			# no bridge or its banks, no water, no road at the line itself
+			if not Sim.clear_of_roads(p.x, p.z, 8.0):
+				continue
+			var open := true
+			for k in range(0, 23):
+				var q: Vector3 = p + d * (-10.0 + float(k) * 15.0)
+				if not ground_free(q, towns):
+					open = false
+					break
+			if not open:
+				continue
 			# standing room at the firing line
 			if Obstacles.hit(p + Vector3(0, 1.0, 0), 2.5) >= 0:
 				continue
@@ -72,7 +92,7 @@ static func site_near(centre: Vector3) -> Array:
 					if dist < 400.0:
 						taken.append(atan2(float(STAGGER[i]), dist))
 						continue
-					var lat: float = _clear_lateral(p, d, eye, right, dist, float(STAGGER[i]), taken)
+					var lat: float = _clear_lateral(p, d, eye, right, dist, float(STAGGER[i]), taken, towns)
 					if not is_nan(lat):
 						taken.append(atan2(lat, dist))
 						score += 1.0
@@ -82,6 +102,19 @@ static func site_near(centre: Vector3) -> Array:
 			if score >= 5.0:
 				return [p, d]
 	return best
+
+## Somewhere a board or a man can stand on the range: dry, outside every town
+## in `towns` ({c, r}), and nowhere near a road bridge, its deck or its banks.
+static func ground_free(q: Vector3, towns: Array = []) -> bool:
+	if Sim.height_at(q.x, q.z) < Sim.sea_at(q.x, q.z) + 0.5:
+		return false
+	if Sim.roads.bridge_headroom(q.x, q.z, 25.0) < INF:
+		return false
+	for t in towns:
+		var c: Vector2 = t["c"]
+		if c.distance_to(Vector2(q.x, q.z)) < float(t["r"]) + 30.0:
+			return false
+	return true
 
 func setup(owner_world: Node, at: Vector3, facing: Vector3) -> void:
 	world = owner_world
@@ -99,7 +132,7 @@ func _ready() -> void:
 		var dist: float = DISTANCES[i]
 		var lat: float = float(STAGGER[i])
 		if dist >= 400.0:
-			var found: float = _clear_lateral(origin, dir, eye, right, dist, lat, bearings)
+			var found: float = _clear_lateral(origin, dir, eye, right, dist, lat, bearings, keep_out)
 			if not is_nan(found):
 				lat = found
 		bearings.append(atan2(lat, dist))
@@ -176,7 +209,7 @@ func _ready() -> void:
 ## offset, either side, with nothing in the way and no nearer board on the
 ## same bearing; the one asked for if none is.
 static func _clear_lateral(at0: Vector3, fwd: Vector3, eye: Vector3, right: Vector3, dist: float,
-		want: float, taken: Array) -> float:
+		want: float, taken: Array, towns: Array = []) -> float:
 	var tries: Array = [want]
 	for k in range(1, 12):
 		tries.append(want + float(k) * 12.0)
@@ -191,6 +224,8 @@ static func _clear_lateral(at0: Vector3, fwd: Vector3, eye: Vector3, right: Vect
 		if clash:
 			continue
 		var at: Vector3 = at0 + fwd * dist + right * float(lat)
+		if not ground_free(at, towns):
+			continue
 		at.y = Sim.height_at(at.x, at.z) + 1.5
 		var to: Vector3 = at - eye
 		if Firearm.sight_range(eye, to.normalized(), to.length()) >= to.length() - 2.0 \

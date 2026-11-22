@@ -497,7 +497,7 @@ func setup_cqb(kind := "cqb") -> void:
 func _setup_range(c3: Vector3) -> void:
 	if is_instance_valid(world.firing_range):
 		world.firing_range.queue_free()
-	var site: Array = FiringRange.site_near(c3)
+	var site: Array = FiringRange.site_near(c3, _range_town_r(), _range_towns())
 	var at: Vector3 = c3
 	var facing := Vector3.FORWARD
 	if not site.is_empty():
@@ -506,13 +506,28 @@ func _setup_range(c3: Vector3) -> void:
 	world.firing_range = FiringRange.new()
 	world.firing_range.name = "FiringRange"
 	world.firing_range.setup(world, at, facing)
+	world.firing_range.keep_out = _range_towns()
 	world.add_child(world.firing_range)
 	# the edges are round the range, not the town
 	world._bounds_c = at + facing * FiringRange.LANE_LEN * 0.5
 	world.crew.spawn_walker(at - facing * 1.5)
 	world.walker.yaw = atan2(-facing.x, -facing.z)
 	world.cqb.set_player(world.walker)
+	# the range is out past the town: keep the country down it drawn
+	_hide_far_scenery(world._bounds_c, _bounds_ground + KEEP_FOOT)
 	cqb_deploy(true)
+
+## How far the range's town reaches from its middle.
+func _range_town_r() -> float:
+	return float(world.cqb.site.get("r", 0.0)) if world.cqb != null else 0.0
+
+## Every town on the chart, {c, r}, for the range to stay out of.
+func _range_towns() -> Array:
+	var out: Array = []
+	if is_instance_valid(world.scenery):
+		for st in world.scenery.sites:
+			out.append({"c": st["c"], "r": float(st.get("r", 0.0))})
+	return out
 
 
 func town_set(i: int, unhurried := false) -> TownSet:
@@ -613,7 +628,11 @@ func cqb_deploy(first: bool) -> void:
 		world.cqb.streaks.points if takes != "none" else -1)
 	# which side, in a session
 	if world.net != null and world.net.active:
-		world.deploy_ui.show_sides(world.net.abs_side, world.net.side_counts())
+		# arriving in the match: which side, before anything else
+		if first:
+			world.deploy_ui.ask_side(world.net.abs_side, world.net.side_counts())
+		else:
+			world.deploy_ui.show_sides(world.net.abs_side, world.net.side_counts())
 	else:
 		world.deploy_ui.show_sides(-1, [])
 
