@@ -63,7 +63,34 @@ static var stats := {"count": 0, "cells": 0}
 ## now. Before the chart has ever moved the two are the same numbers.
 static var _laid := PackedFloat32Array()
 
+## Where the field has changed since it was laid, for whatever keeps its own
+## picture of it -- the street fight's route grids -- to bring that picture up
+## to date: one rectangle of ground (x0, z0, x1, z1) per change, the newest
+## last, numbered from `edit_base`. Something reading it keeps the number it
+## has read up to; one that has fallen behind the oldest kept starts again.
+## The men's routes were surveyed once, as the match began, and a house that
+## went up after that, a heap where a block came down or the wreck of a tank
+## was not on them: men were sent into and through all three.
+static var edits: Array = []
+static var edit_base := 0
+const EDITS_KEEP := 4096
+
+static func _edited(id: int) -> void:
+	var b: int = id * STRIDE
+	var reach: float = sqrt(_ent[b + 3] * _ent[b + 3] + _ent[b + 5] * _ent[b + 5])
+	edits.append(Rect2(_ent[b] - reach, _ent[b + 2] - reach, reach * 2.0, reach * 2.0))
+	if edits.size() > EDITS_KEEP:
+		var drop: int = EDITS_KEEP >> 1
+		edits = edits.slice(drop)
+		edit_base += drop
+
+## How many changes there have been, all told.
+static func edit_count() -> int:
+	return edit_base + edits.size()
+
 static func clear() -> void:
+	edits.clear()
+	edit_base += 1 << 20      # anyone reading starts again
 	_light.clear()
 	_squash.clear()
 	_rubble_of.clear()
@@ -210,6 +237,7 @@ static func add_batch(mesh: Mesh, xforms: Array, min_h := MIN_HEIGHT, soft_from 
 		_ent.append_array(_turn(yaw))
 		_lay_last()
 		_dead.append(state)
+		_edited(id)
 		# every cell the footprint's bounding circle touches
 		var reach: float = sqrt(hx * hx + hz * hz)
 		var lo_i: int = int(floor((o.x - reach) / CELL))
@@ -273,6 +301,7 @@ static func add_box(origin: Vector3, half_x: float, height: float, half_z: float
 	_lay_last()
 	_dead.append(0)
 	_file(id)
+	_edited(id)
 	stats["count"] = _dead.size()
 	stats["cells"] = _cells.size()
 	return id
@@ -280,6 +309,7 @@ static func add_box(origin: Vector3, half_x: float, height: float, half_z: float
 static func remove(id: int) -> void:
 	if id >= 0 and id < _dead.size():
 		_dead[id] = GONE
+		_edited(id)
 
 ## The same question as `hit`, asked by something standing on the ground rather
 ## than flying through the air. `hit` pads the box by `r` in every direction,
@@ -657,6 +687,7 @@ static func lift(id: int, dy: float) -> void:
 	var b := id * STRIDE
 	_ent[b + 1] += dy
 	_ent[b + 4] -= dy
+	_edited(id)
 	if b + 4 < _laid.size():
 		_laid[b + 1] += dy
 		_laid[b + 4] -= dy
@@ -749,6 +780,7 @@ static func kill_near(pos: Vector3, radius: float) -> void:
 		var dz: float = _ent[b + 2] - pos.z
 		if dx * dx + dz * dz <= r2:
 			_dead[id] = GONE
+			_edited(id)
 			_leave_rubble(id, float(_squash[id]))
 
 # ------------------------------------------------------------ near colliders

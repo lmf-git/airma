@@ -61,16 +61,7 @@ func _pilot(delta: float) -> void:
 			# over the tallest thing under it and on the way -- ground, roofs,
 			# pylons -- not just the ground: run in at roof height it flew into
 			# the first pylon on the line
-			var floor_h := -1e9
-			for k in 5:
-				var q: Vector3 = global_position + linear_velocity * (float(k) * 1.2)
-				floor_h = maxf(floor_h, Sim.height_at(q.x, q.z))
-				# as wide as the rotor reaches, which is what strikes first
-				var hit_id: int = Obstacles.hit(Vector3(q.x, global_position.y, q.z),
-					float(spec.get("rotor_radius", 6.0)) + 4.0)
-				if hit_id >= 0:
-					floor_h = maxf(floor_h, Obstacles.top_of(hit_id))
-			var want_h: float = floor_h + NAP_AGL
+			var want_h: float = _floor_ahead() + NAP_AGL
 			var low: bool = global_position.y < want_h - 30.0
 			_fly(home, want_h, 30.0 if low else 58.0, delta)
 			return
@@ -145,10 +136,12 @@ func _pilot(delta: float) -> void:
 		_:
 			want_speed = 22.0
 
-	# never fly into the hill in front
+	# never fly into the hill in front -- nor the tower block: over a city
+	# the working orbit and the run onto a man are flown lower than its roofs,
+	# and only the hill was looked for
 	var look := global_position + linear_velocity * 4.0
-	var ahead := Sim.height_at(look.x, look.z) + 120.0
-	want_alt = maxf(want_alt, ahead)
+	want_alt = maxf(want_alt, Sim.height_at(look.x, look.z) + 120.0)
+	want_alt = maxf(want_alt, _floor_ahead() + NAP_AGL)
 
 	# Up in the air, down to land. It was down for good, because with it
 	# stowed a helicopter has nothing to stand on -- so every one on station
@@ -241,6 +234,20 @@ func _scan_enemy() -> Node3D:
 
 ## Collective holds the height, pedal points the nose, and the nose tips over to
 ## translate: the three things a helicopter pilot is actually doing.
+## The highest thing under the next five seconds of track -- ground, roofs,
+## pylons -- as wide as the rotor reaches, which is what strikes first. Hovering
+## it looks round where it is.
+func _floor_ahead() -> float:
+	var floor_h := -1e9
+	var reach: float = float(spec.get("rotor_radius", 6.0)) + 4.0
+	for k in 5:
+		var q: Vector3 = global_position + linear_velocity * (float(k) * 1.2)
+		floor_h = maxf(floor_h, Sim.height_at(q.x, q.z))
+		var hit_id: int = Obstacles.hit(Vector3(q.x, global_position.y, q.z), reach)
+		if hit_id >= 0:
+			floor_h = maxf(floor_h, Obstacles.top_of(hit_id))
+	return floor_h
+
 func _fly(goal: Vector3, want_alt: float, want_speed: float, _delta: float) -> void:
 	var b := global_transform.basis
 	var to := goal - global_position

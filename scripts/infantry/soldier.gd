@@ -601,10 +601,21 @@ func _move(delta: float) -> void:
 	# or hang over it.
 	p.y = maxf(Terrain.drawn_ground(p.x, p.z, was + Vector3(0.0, 1.7, 0.0)),
 		Sim.roads.bridge_floor(p.x, p.z, was.y))
-	if Obstacles.blocks(p, BODY_R) >= 0:
+	var hit_id: int = Obstacles.blocks(p, BODY_R)
+	if hit_id >= 0:
 		var try_x := Vector3(p.x, p.y, was.z)
 		var try_z := Vector3(was.x, p.y, p.z)
-		if Obstacles.blocks(try_x, BODY_R) < 0:
+		# Along the face he walked into, whichever way it is turned. Taking
+		# the step a world axis at a time slid him along a wall square to
+		# the axes and nothing else: against one set at an angle -- a block
+		# on a skewed street, a wall across a corner -- both halves went in
+		# and he stood pressed against it.
+		var along: Vector3 = p + Obstacles.push_out(hit_id, p, BODY_R + 0.01)
+		along.y = p.y
+		if along.distance_to(was) <= flat.length() * delta + 0.05 \
+				and Obstacles.blocks(along, BODY_R) < 0:
+			p = along
+		elif Obstacles.blocks(try_x, BODY_R) < 0:
 			p = try_x
 		elif Obstacles.blocks(try_z, BODY_R) < 0:
 			p = try_z

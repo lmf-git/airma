@@ -40,6 +40,21 @@ static var classes: Array = []
 static var class_pick := 0
 ## Set from the command line, to deploy with a plain loadout instead.
 static var plain := false
+## Offline, the side the player chose on arriving: 0 BLUE, the bloc of the
+## aeroplane picked in the hangar, or 1 RED, the other one. In a session the
+## side is `NetLink.abs_side` instead and this is not read.
+static var offline_side := 0
+## Set while a match restarts for a change of side, so that it does not ask
+## again straight away.
+static var side_settled := false
+
+## Whether the player's own side (side 0 on this machine) fights with NATO
+## kit. The hangar's aeroplane says, unless he chose RED offline.
+static func our_nato() -> bool:
+	var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+	if Sim.net == null or not Sim.net.active:
+		nato = nato != (offline_side == 1)
+	return nato
 
 static func kit_classes() -> Array:
 	if classes.is_empty():
@@ -154,31 +169,6 @@ func _survey() -> void:
 	_nav.default_compute_heuristic = AStarGrid2D.HEURISTIC_OCTILE
 	_nav.default_estimate_heuristic = AStarGrid2D.HEURISTIC_OCTILE
 	_nav.update()
-	var free := 0
-	for j in _n:
-		for i in _n:
-			var x: float = _corner.x + (i + 0.5) * CELL
-			var z: float = _corner.y + (j + 0.5) * CELL
-			var blocked: bool = Obstacles.blocks(Vector3(x, _ground(x, z) + 0.3, z), 0.5) >= 0
-			if blocked:
-				_nav.set_point_solid(Vector2i(i, j), true)
-			else:
-				free += 1
-	# Hugging a wall is how a man gets hung up on its corner, so the open
-	# middle of an alley is cheaper to walk than its edges.
-	for j in _n:
-		for i in _n:
-			var id := Vector2i(i, j)
-			if _nav.is_point_solid(id):
-				continue
-			var tight := false
-			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-				var q: Vector2i = id + d
-				if _nav.is_in_boundsv(q) and _nav.is_point_solid(q):
-					tight = true
-			if tight:
-				_nav.set_point_weight_scale(id, 1.6)
-	stats["free_cells"] = free
 	# And the same again for things too wide for an alley: a coarser grid
 	# that only the streets and the squares are open on. Anything a tank
 	# would simply drive through does not count as in its way.
@@ -188,32 +178,184 @@ func _survey() -> void:
 	_vnav.offset = _corner + Vector2(VCELL, VCELL) * 0.5
 	_vnav.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
 	_vnav.update()
+	_edit_seen = Obstacles.edit_count()
+	_mark_men(Vector2i.ZERO, Vector2i(_n - 1, _n - 1))
+	_mark_vehicles(Vector2i.ZERO, Vector2i(_vn - 1, _vn - 1))
+	_comp = _components(_nav, _n)
+	_vcomp = _components(_vnav, _vn)
+	_paint_map()
+
+## How far through `Obstacles.edits` the grids have been brought up to date.
+var _edit_seen := 0
+var _edit_t := 0.0
+
+## Bring the route grids up to date with whatever has gone up or come down
+## since they were surveyed: the rest of a town still being built as the match
+## began, the heap a block leaves, a wreck. Twice a second at most; only the
+## cells under what changed are looked at again.
+func _refresh_routes(delta: float) -> void:
+	_edit_t -= delta
+	if _edit_t > 0.0 or Obstacles.edit_count() == _edit_seen:
+		return
+	_edit_t = 0.5
+	var arena := Rect2(_corner, Vector2(HALF, HALF) * 2.0)
+	var dirty: Array = []
+	if _edit_seen < Obstacles.edit_base:
+		dirty.append(arena)              # fallen behind: all of it
+	else:
+		for k in range(_edit_seen - Obstacles.edit_base, Obstacles.edits.size()):
+			var r: Rect2 = Obstacles.edits[k]
+			if r.intersects(arena):
+				dirty.append(r.intersection(arena))
+	_edit_seen = Obstacles.edit_count()
+	if dirty.is_empty():
+		return
+	for r in dirty:
+		var rr: Rect2 = (r as Rect2).grow(BODY_PAD + CELL)
+		_mark_men(_cell_of(rr.position, CELL, _n), _cell_of(rr.end, CELL, _n))
+		var rv: Rect2 = (r as Rect2).grow(VCELL)
+		_mark_vehicles(_cell_of(rv.position, VCELL, _vn), _cell_of(rv.end, VCELL, _vn))
+	_comp = _components(_nav, _n)
+	_vcomp = _components(_vnav, _vn)
+	_paint_map()
+
+func _cell_of(p: Vector2, size: float, n: int) -> Vector2i:
+	return Vector2i(clampi(int(floor((p.x - _corner.x) / size)), 0, n - 1),
+		clampi(int(floor((p.y - _corner.y) / size)), 0, n - 1))
+
+## How wide a man is, as far as the routes are concerned: `Soldier.BODY_R`.
+const BODY_PAD := 0.36
+## How far either way from the middle of a cell its cross reaches. With the
+## pad, a wall anywhere on the line between two cells' middles is under one
+## cross or the other.
+const ARM := CELL * 0.5 - BODY_PAD
+
+## The men's grid over cells `lo` to `hi`, from the footprints of what stands
+## there. Each cell was asked about its middle only, so a garden wall or a
+## fence -- forty centimetres through, lying between two middles two metres
+## apart -- was on neither, and the route went straight through it: the men
+## walked into it and stood there. Now a cell is shut if any structure that
+## would stop a man there, padded by his width, crosses the cross through its
+## middle: the two lines along which a route leaves it.
+func _mark_men(lo: Vector2i, hi: Vector2i) -> void:
+	for j in range(lo.y, hi.y + 1):
+		for i in range(lo.x, hi.x + 1):
+			_nav.set_point_solid(Vector2i(i, j), false)
+	var w0: Vector2 = _corner + Vector2(lo) * CELL - Vector2.ONE * (BODY_PAD + CELL)
+	var w1: Vector2 = _corner + Vector2(hi + Vector2i.ONE) * CELL + Vector2.ONE * (BODY_PAD + CELL)
+	for oid in Obstacles.ids_in(w0, w1):
+		_stamp(oid, lo, hi)
+	# Hugging a wall is how a man gets hung up on its corner, so the open
+	# middle of an alley is cheaper to walk than its edges.
+	var free := 0
+	for j in range(maxi(lo.y - 1, 0), mini(hi.y + 1, _n - 1) + 1):
+		for i in range(maxi(lo.x - 1, 0), mini(hi.x + 1, _n - 1) + 1):
+			var id := Vector2i(i, j)
+			if _nav.is_point_solid(id):
+				continue
+			var tight := false
+			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var q: Vector2i = id + d
+				if _nav.is_in_boundsv(q) and _nav.is_point_solid(q):
+					tight = true
+			_nav.set_point_weight_scale(id, 1.6 if tight else 1.0)
+	for j in _n:
+		for i in _n:
+			if not _nav.is_point_solid(Vector2i(i, j)):
+				free += 1
+	stats["free_cells"] = free
+
+## One structure onto the men's grid, within cells `lo` to `hi`.
+func _stamp(oid: int, lo: Vector2i, hi: Vector2i) -> void:
+	var half: Vector2 = Obstacles.half_of(oid)
+	var at: Vector3 = Obstacles.centre_of(oid)
+	var top: float = Obstacles.top_of(oid)
+	var yaw: float = Obstacles.yaw_of(oid)
+	var c: float = cos(yaw)
+	var s: float = -sin(yaw)                 # as `Obstacles` keeps it
+	var ex: float = half.x + BODY_PAD
+	var ez: float = half.y + BODY_PAD
+	var reach: float = sqrt(half.x * half.x + half.y * half.y) + BODY_PAD + ARM
+	var a: Vector2i = _cell_of(Vector2(at.x - reach, at.z - reach), CELL, _n)
+	var b: Vector2i = _cell_of(Vector2(at.x + reach, at.z + reach), CELL, _n)
+	for j in range(maxi(a.y, lo.y), mini(b.y, hi.y) + 1):
+		for i in range(maxi(a.x, lo.x), mini(b.x, hi.x) + 1):
+			var id := Vector2i(i, j)
+			if _nav.is_point_solid(id):
+				continue
+			var x: float = _corner.x + (i + 0.5) * CELL
+			var z: float = _corner.y + (j + 0.5) * CELL
+			# what stops a man standing here, as `Obstacles.blocks` has it:
+			# not a deck he walks under, not a kerb under his boots
+			var dy: float = _ground(x, z) - at.y
+			if dy < -1.85 or dy >= top - at.y - 0.02:
+				continue
+			var dx: float = x - at.x
+			var dz: float = z - at.z
+			var lx: float = dx * c + dz * s
+			var lz: float = -dx * s + dz * c
+			# the cross: world x is (c, -s) in the box's frame, world z (s, c)
+			if _seg_in_box(lx, lz, c, -s, ex, ez) or _seg_in_box(lx, lz, s, c, ex, ez):
+				_nav.set_point_solid(id, true)
+
+## Does the segment from p - d ARM to p + d ARM touch the box of half size
+## (ex, ez) about the origin?
+static func _seg_in_box(px: float, pz: float, dx: float, dz: float, ex: float, ez: float) -> bool:
+	var t0 := -ARM
+	var t1 := ARM
+	for k in 2:
+		var p: float = px if k == 0 else pz
+		var d: float = dx if k == 0 else dz
+		var e: float = ex if k == 0 else ez
+		if absf(d) < 1e-6:
+			if absf(p) > e:
+				return false
+			continue
+		var ta: float = (-e - p) / d
+		var tb: float = (e - p) / d
+		if ta > tb:
+			var sw := ta
+			ta = tb
+			tb = sw
+		t0 = maxf(t0, ta)
+		t1 = minf(t1, tb)
+		if t0 > t1:
+			return false
+	return true
+
+## The vehicles' grid over cells `lo` to `hi`. Its cells are wider than the
+## pad it asks with is short of, so a wall between two middles is caught.
+func _mark_vehicles(lo: Vector2i, hi: Vector2i) -> void:
 	var open_v := 0
-	for j in _vn:
-		for i in _vn:
+	for j in range(lo.y, hi.y + 1):
+		for i in range(lo.x, hi.x + 1):
 			var vx: float = _corner.x + (i + 0.5) * VCELL
 			var vz: float = _corner.y + (j + 0.5) * VCELL
 			var hit_id: int = Obstacles.hit(Vector3(vx, _ground(vx, vz) + 1.5, vz), 4.2)
 			var soft: bool = hit_id >= 0 and is_instance_valid(dressing) \
 				and dressing._breaks.has(hit_id)
-			if hit_id >= 0 and not soft:
-				_vnav.set_point_solid(Vector2i(i, j), true)
-			else:
+			var vid := Vector2i(i, j)
+			_vnav.set_point_solid(vid, hit_id >= 0 and not soft)
+			# passable, but the open road is preferred to somebody's wall
+			_vnav.set_point_weight_scale(vid, 2.5 if soft else 1.0)
+	for j in _vn:
+		for i in _vn:
+			if not _vnav.is_point_solid(Vector2i(i, j)):
 				open_v += 1
-				if soft:
-					# passable, but the open road is preferred to somebody's wall
-					_vnav.set_point_weight_scale(Vector2i(i, j), 2.5)
 	stats["vehicle_cells"] = open_v
-	_comp = _components(_nav, _n)
-	_vcomp = _components(_vnav, _vn)
-	# The same survey, as a picture: what is solid and what is street. This
-	# is the map in the corner of the screen.
+
+## The survey as a picture: what is solid and what is street. This is the
+## map in the corner of the screen.
+func _paint_map() -> void:
 	var img := Image.create(_n, _n, false, Image.FORMAT_RGBA8)
 	for j in _n:
 		for i in _n:
 			img.set_pixel(i, j, Color(0.62, 0.68, 0.74, 0.78)
 				if _nav.is_point_solid(Vector2i(i, j)) else Color(0.03, 0.06, 0.09, 0.62))
-	map_tex = ImageTexture.create_from_image(img)
+	if map_tex == null:
+		map_tex = ImageTexture.create_from_image(img)
+	else:
+		map_tex.update(img)
 
 ## A point in the world as a place on the map, 0 to 1 each way, north at the top.
 func map_uv(p: Vector3) -> Vector2:
@@ -686,7 +828,12 @@ func _drive_armour(delta: float) -> void:
 		# Not getting anywhere -- nosed into a wreck, a wall the grid did not
 		# know about, a corner too tight to turn in: somewhere else.
 		var prog: Array = t.get_meta("cqb_prog", [here, 0.0])
-		prog[1] = float(prog[1]) + 0.35
+		# Stopped to shoot is not stuck: the crew halts while it has a
+		# target on the ground (see `Tank._ai_drive`), and the route it was
+		# on was thrown away after every fight that lasted eight seconds.
+		var engaged: Variant = t.get("_ai_target")
+		if not (is_instance_valid(engaged) and not (engaged is Aircraft)):
+			prog[1] = float(prog[1]) + 0.35
 		if (prog[0] as Vector3).distance_to(here) > 5.0:
 			prog = [here, 0.0]
 		t.set_meta("cqb_prog", prog)
@@ -791,6 +938,7 @@ func _process(delta: float) -> void:
 	if over:
 		return
 	var _pc := Sim.prof_at()
+	_refresh_routes(delta)
 	streaks.support(delta)
 	_under_wheels()
 	_drive_armour(delta)

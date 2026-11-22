@@ -232,16 +232,20 @@ func _build_side_page() -> void:
 		row.add_child(b)
 		_side_big.append(b)
 
-## Ask which side, over the loadout: `mine` is the side this player is on now
-## and `counts` how many are on each.
-func ask_side(mine: int, counts: Array) -> void:
-	show_sides(mine, counts)
+## Ask which side, over the loadout: `mine` is the side this player is on now,
+## `counts` how many are on each (empty offline) and `names` what each side
+## fights as.
+func ask_side(mine: int, counts: Array, names: Array = []) -> void:
+	show_sides(mine, counts, names)
 	if _side_page == null:
 		return
-	for i in mini(_side_big.size(), counts.size()):
-		var n := int(counts[i])
-		(_side_big[i] as Button).text = "%s\n%d player%s%s" % ["BLUE" if i == 0 else "RED", n,
-			"" if n == 1 else "s", "  (you)" if i == mine else ""]
+	for i in _side_big.size():
+		var line: String = String(names[i]) if i < names.size() else ""
+		if i < counts.size():
+			var n := int(counts[i])
+			line = "%d player%s" % [n, "" if n == 1 else "s"]
+		(_side_big[i] as Button).text = "%s\n%s%s" % ["BLUE" if i == 0 else "RED", line,
+			"  (you)" if i == mine else ""]
 	_side_page.visible = true
 
 func _side_chosen(sd: int) -> void:
@@ -614,17 +618,20 @@ var _side_btns: Array = []
 
 ## Show the side picker: `mine` is the side this player is on, `counts` how
 ## many are on each. Hidden with `mine` below 0.
-func show_sides(mine: int, counts: Array) -> void:
+func show_sides(mine: int, counts: Array, names: Array = []) -> void:
 	if _side_row == null:
 		return
 	_side_row.visible = mine >= 0
-	# offline there is no side to pick, and no counts to label the buttons with
 	if mine < 0:
 		return
-	for i in mini(_side_btns.size(), counts.size()):
+	for i in _side_btns.size():
 		var b := _side_btns[i] as Button
-		b.text = "%s   %d player%s" % ["BLUE" if i == 0 else "RED", int(counts[i]),
-			"" if int(counts[i]) == 1 else "s"]
+		# players on it in a session; offline, what it fights as
+		if i < counts.size():
+			b.text = "%s   %d player%s" % ["BLUE" if i == 0 else "RED", int(counts[i]),
+				"" if int(counts[i]) == 1 else "s"]
+		else:
+			b.text = "%s   %s" % ["BLUE" if i == 0 else "RED", String(names[i]) if i < names.size() else ""]
 		b.button_pressed = i == mine
 		b.modulate = Color(0.55, 0.75, 1.0) if i == 0 else Color(1.0, 0.6, 0.55)
 

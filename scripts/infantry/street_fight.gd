@@ -183,7 +183,7 @@ func cqb_fire_mission(mark: Vector3) -> bool:
 		Sim.report("fire mission: the battery is already working", Sim.Ev.BAD)
 		return false
 	if not is_instance_valid(world.cqb_tel) or not world.cqb_tel.alive:
-		var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+		var nato: bool = CqbMatch.our_nato()
 		world.cqb_tel = world._spawn_tank(Vector3(mark.x + 350.0, 0.0, mark.z + 2700.0), 0.0, 0,
 			"m270" if nato else "tel_kalibr")
 		world.cqb_tel.name = "Fire support"
@@ -622,25 +622,49 @@ func cqb_deploy(first: bool) -> void:
 	world.walker.body.set_head_visible(true)
 	var takes: String = {"ground": "ground", "arms": "any"}.get(String(Sim.mission), "none")
 	var fac := String(JetSpec.get_spec(Sim.selected_jet).get("faction", "usa"))
-	if world.net != null and world.net.active:
+	var online: bool = world.net != null and world.net.active
+	if online:
 		fac = world.net.side_faction(fac)
+	elif CqbMatch.our_nato() != (JetSpec.bloc_of(Sim.selected_jet) == "nato"):
+		# RED offline: the other bloc's vehicles first
+		fac = "usa" if CqbMatch.our_nato() else "russia"
 	world.deploy_ui.open(takes, first, fac,
 		world.cqb.streaks.points if takes != "none" else -1)
-	# which side, in a session
-	if world.net != null and world.net.active:
-		# arriving in the match: which side, before anything else
-		if first:
-			world.deploy_ui.ask_side(world.net.abs_side, world.net.side_counts())
-		else:
-			world.deploy_ui.show_sides(world.net.abs_side, world.net.side_counts())
-	else:
+	# Which side. Arriving in the match it is the first thing asked, in a
+	# session or not; the range has nobody to be on a side against.
+	var mine: int = world.net.abs_side if online else CqbMatch.offline_side
+	var counts: Array = world.net.side_counts() if online else []
+	if world.cqb.range_mode:
 		world.deploy_ui.show_sides(-1, [])
+	elif first and not CqbMatch.side_settled:
+		world.deploy_ui.ask_side(mine, counts, _side_names())
+	else:
+		world.deploy_ui.show_sides(mine, counts, _side_names())
+	CqbMatch.side_settled = false
+
+## What each side fights as, for the buttons: BLUE is the hangar's bloc.
+func _side_names() -> Array:
+	var blue_nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+	return ["NATO" if blue_nato else "EASTERN BLOC", "EASTERN BLOC" if blue_nato else "NATO"]
 
 
 ## Joined the other side on the deploy screen: announced, and the man moved
 ## to that side's end of town before he goes in.
 func _on_side_picked(sd: int) -> void:
-	if world.net == null or not world.net.active or not is_instance_valid(world.cqb):
+	if not is_instance_valid(world.cqb):
+		return
+	if world.net == null or not world.net.active:
+		# Offline the other side is the other bloc's troops, armour and air,
+		# all of it put down as the match was set up: so it starts again.
+		if sd == CqbMatch.offline_side:
+			return
+		CqbMatch.offline_side = sd
+		CqbMatch.side_settled = true
+		Sim.report("you are %s — starting again on that side" % ("BLUE" if sd == 0 else "RED"), Sim.Ev.INFO)
+		world.deploy_ui.visible = false
+		# this mode, on foot, from the top: not whatever the main menu has
+		# selected, which need not be the match being played
+		world._start.call_deferred("foot", String(Sim.mission))
 		return
 	if sd == world.net.abs_side:
 		return
@@ -734,7 +758,7 @@ func _cqb_armour(c3: Vector3) -> void:
 	# the host drives the armour; a client is sent pictures of it
 	if NetLink.mirroring():
 		return
-	var nato: bool = JetSpec.bloc_of(Sim.selected_jet) == "nato"
+	var nato: bool = CqbMatch.our_nato()
 	var ours: Array = ["m1a2", "bradley"] if nato else ["t90", "bmp3"]
 	var theirs: Array = ["t90", "bmp3"] if nato else ["m1a2", "bradley"]
 	for team in [0, 1]:
@@ -866,7 +890,7 @@ func _tick_air() -> void:
 
 func _air_one(team: int, n: int, fight: CqbMatch) -> Aircraft:
 	var c3 := Vector3(fight.centre.x, Sim.height_at(fight.centre.x, fight.centre.y), fight.centre.y)
-	var nato: bool = (JetSpec.bloc_of(Sim.selected_jet) == "nato") == (team == 0)
+	var nato: bool = CqbMatch.our_nato() == (team == 0)
 	# from behind its own side's end of the town
 	var back := Vector3(0.0, 0.0, 1.0 if team == 0 else -1.0)
 	var a: Aircraft
