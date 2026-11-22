@@ -191,6 +191,11 @@ func _run_range_cam(arg: String) -> void:
 	var kit: String = parts[1] if parts.size() > 1 else "fifty"
 	for i in 240:
 		await world.get_tree().physics_frame
+	# the deploy screen is up on arriving, and would be all the pictures show
+	if is_instance_valid(world.deploy_ui):
+		world.deploy_ui.visible = false
+	for i in 10:
+		await world.get_tree().process_frame
 	world.weapon_cam_on = true
 	var rt: FiringRange.RangeTarget = world.firing_range.targets[5]
 	var g: Dictionary = Firearm.spec(kit)
@@ -215,8 +220,9 @@ func _run_range_cam(arg: String) -> void:
 					kit, str((rn as Effects.Tracer).cal.get("name", "none")), float(rn.call("ride_scale")),
 					world.cam.global_position.distance_to(rn.get_global_transform_interpolated().origin), world.cam.near,
 					str((rn as Effects.Tracer)._round != null and (rn as Effects.Tracer)._round.visible)])
-			print("[rangecam] mid-flight: time scale %.3f, physics %d a second, riding %s" % [
-				Engine.time_scale, Engine.physics_ticks_per_second, str(world.cam.riding())])
+			print("[rangecam] mid-flight: time scale %.3f, physics %d a second, riding %s, near %.3f far %.0f" % [
+				Engine.time_scale, Engine.physics_ticks_per_second, str(world.cam.riding()),
+				world.get_viewport().get_camera_3d().near, world.get_viewport().get_camera_3d().far])
 			print("[rangecam] panel:\n%s" % world.firing_range._panel.text)
 		if shot_mid and not world.cam.riding() and Engine.time_scale == 1.0:
 			break

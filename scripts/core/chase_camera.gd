@@ -45,6 +45,8 @@ var weapon_cam: Node3D = null:   # ride a round in flight
 	set(v):
 		weapon_cam = v
 		_wcam_live = v != null
+		if v == null:
+			remove_meta(&"ride_planes")
 ## Set while a ride is on, including the frames between the round going off and
 ## this camera noticing and starting to hold on the spot. Without it there was
 ## a frame in which nothing was being ridden and nothing held, and whoever was
@@ -196,6 +198,7 @@ func _process(delta: float) -> void:
 			# watching and it happens on the frame the node goes away
 			weapon_cam = null
 			_wcam_hold = 1.6
+			remove_meta(&"ride_planes")
 			if _wcam_far_was > 0.0:
 				far = _wcam_far_was
 				_wcam_far_was = 0.0
@@ -300,6 +303,15 @@ func _process(delta: float) -> void:
 					_wcam_near_was = near
 				near = 0.01
 				far = 8000.0
+				# The planet sets every camera's planes each frame, and the
+				# air, the cloud deck and the moon are then sized inside
+				# whatever it set -- before this runs. Left to it, the air was
+				# sized for 260 km, the frame was drawn to 8, and the whole
+				# shell was clipped away: a night sky behind every bullet.
+				# Handed to it instead, so all of them are sized to these.
+				set_meta(&"ride_planes", Vector2(near, far))
+			else:
+				remove_meta(&"ride_planes")
 			if _wcam_blend < 1.0:
 				_wcam_blend = minf(_wcam_blend + delta * 3.0, 1.0)
 				var e: float = _wcam_blend * _wcam_blend * (3.0 - 2.0 * _wcam_blend)

@@ -414,6 +414,11 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 		# the whole shrunken body, and the moon beyond it if it is that close
 		cam.far = maxf(cam.far, (r + alt) * 1.3)
 	cam.near = clampf(cam.far / NEAR_RATIO, NEAR_LO, NEAR_MAX)
+	# riding a bullet: the chase camera's own planes (see `ChaseCamera`)
+	if cam.has_meta(&"ride_planes"):
+		var rp: Vector2 = cam.get_meta(&"ride_planes")
+		cam.near = rp.x
+		cam.far = rp.y
 	if is_instance_valid(terrain) and terrain.has_method("set_ground_fade"):
 		terrain.call("set_ground_fade", 1.0 - fade)
 		(terrain as Node3D).visible = not dormant
