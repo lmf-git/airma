@@ -64,6 +64,9 @@ var status := "offline"
 ## Where the game is listening. Always PORT; kept as a variable only so the
 ## UPnP mapping and the join address read from one place.
 var port := PORT
+## A different port for the test harness (--netport=N), so a test session on
+## this machine never meets a game the player has open on the real one.
+static var port_override := 0
 
 func host(jet_id: String) -> bool:
 	_shut = false
@@ -78,7 +81,7 @@ func host(jet_id: String) -> bool:
 	# the answer is to find out why, not to move quietly to 27016 and leave
 	# everyone guessing — and the reason is almost always this game itself,
 	# still running from a session that was not shut down.
-	port = PORT
+	port = PORT if port_override <= 0 else port_override
 	var err := peer.create_server(port, 8)
 	if err != OK:
 		status = "host failed (%d)" % err
@@ -308,7 +311,7 @@ func join(address: String, jet_id: String) -> bool:
 	_shut = false
 	_drop_peer()
 	var host_ip := address.strip_edges()
-	var want := PORT
+	var want := PORT if port_override <= 0 else port_override
 	var colon := host_ip.rfind(":")
 	if colon > 0 and host_ip.substr(colon + 1).is_valid_int():
 		want = int(host_ip.substr(colon + 1))
@@ -411,6 +414,7 @@ func _on_peer_joined(id: int) -> void:
 func _on_peer_left(id: int) -> void:
 	Sim.report("player %d left" % id, Sim.Ev.BAD)
 	if ghosts.has(id) and is_instance_valid(ghosts[id]):
+		(ghosts[id] as Aircraft).spill_hold()
 		ghosts[id].queue_free()
 	ghosts.erase(id)
 	roster.erase(id)
@@ -500,6 +504,7 @@ func net_announce(id: int, jet_id: String, team: int, nm := "") -> void:
 		var old: Aircraft = ghosts[id]
 		var keep_xf := old.global_transform
 		ghosts.erase(id)
+		old.spill_hold()
 		old.queue_free()
 		# hidden until his next packet puts it somewhere: back on foot after a
 		# gunship there may be no more of them, and it hung in the sky
@@ -560,7 +565,7 @@ func _make_ghost(id: int, jet_id: String, team: int) -> void:
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func net_state(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, thr: float, flags: int) -> void:
 	rx += 1
-	var g: Aircraft = ghosts.get(id)
+	var g: Aircraft = _live(ghosts, id) as Aircraft
 	if g == null or not is_instance_valid(g):
 		return
 	if not g.has_meta("t_rx"):
@@ -611,8 +616,10 @@ func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int,
 	# himself: two of him in the hold, on his own screen.
 	if id == my_id:
 		return
-	var g: Node3D = foot_ghosts.get(id)
-	if g == null or not is_instance_valid(g):
+	# a Variant first: a freed object handed to a typed variable is an error
+	var gv: Variant = foot_ghosts.get(id)
+	var g: Node3D = gv as Node3D if is_instance_valid(gv) else null
+	if g == null:
 		var pil := Pilot.new()
 		pil.build()
 		pil.name = "Crew %d" % id
@@ -628,7 +635,7 @@ func net_foot(id: int, pos: Vector3, yaw: float, crouch: bool, in_hold_of: int,
 		g = pil
 	var want_parent: Node = world
 	if in_hold_of != 0:
-		var carrier_jet: Aircraft = ghosts.get(in_hold_of)
+		var carrier_jet: Aircraft = _live(ghosts, in_hold_of) as Aircraft
 		if in_hold_of == my_id and world.get("player") != null:
 			carrier_jet = world.get("player")
 		if carrier_jet and is_instance_valid(carrier_jet) and carrier_jet.has_hold():
@@ -775,7 +782,7 @@ func net_ai_state(idx: PackedInt32Array, pos: PackedVector3Array,
 	if is_host or world == null:
 		return
 	for i in idx.size():
-		var g: Aircraft = ai_ghosts.get(idx[i])
+		var g: Aircraft = _live(ai_ghosts, idx[i]) as Aircraft
 		if g == null or not is_instance_valid(g):
 			continue
 		if alive[i] == 0:
@@ -800,7 +807,7 @@ func net_ai_gone(idx: PackedInt32Array) -> void:
 	if is_host or world == null:
 		return
 	for key in idx:
-		var g: Aircraft = ai_ghosts.get(key)
+		var g: Aircraft = _live(ai_ghosts, key) as Aircraft
 		ai_ghosts.erase(key)
 		ai_kinds.erase(key)
 		if g != null and is_instance_valid(g):
@@ -1045,7 +1052,7 @@ func net_vehicle(id: int, pos: Vector3, rot: Quaternion, vel: Vector3, turret: f
 		barrel: float, flags: int = 1) -> void:
 	if id == my_id:
 		return                 # our own, passed back to us by the host
-	var t: Tank = veh_ghosts.get(id)
+	var t: Tank = _live(veh_ghosts, id) as Tank
 	if t == null or not is_instance_valid(t):
 		t = Tank.new()
 		t.setup(peer_team(id))
@@ -1078,7 +1085,7 @@ func net_fire(id: int, weapon: String, origin: Vector3, basis_q: Quaternion, vel
 		return
 	var m := Missile.new()
 	var xf := Transform3D(Basis(basis_q), origin)
-	var shooter: Node = ghosts.get(id)
+	var shooter: Node = _live(ghosts, id)
 	m.launch(weapon, xf, vel, shooter if shooter else self, null)
 	world.add_child(m)
 	if is_host:
@@ -1314,6 +1321,14 @@ func _tick_net(delta: float) -> void:
 	var _ps := Sim.prof_at()
 	_send(delta)
 	Sim.prof_end(&"net.send", _ps)
+
+## What a dictionary holds under `k`, or null if it is not there or has been
+## freed. A freed object handed to a typed variable is an error, and anything
+## held here can be freed under us: a passenger with his aircraft, a ghost
+## rebuilt as another type.
+static func _live(d: Dictionary, k: Variant) -> Node:
+	var v: Variant = d.get(k)
+	return v as Node if is_instance_valid(v) else null
 
 ## Drop anything that went away.
 ##

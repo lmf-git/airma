@@ -3435,6 +3435,12 @@ func _process(_delta: float) -> void:
 	for a in _blocked.keys():
 		if not Input.is_action_pressed(a):
 			_blocked.erase(a)
+			# and the press it was blocking goes with it. The press is latched
+			# as a tap when its event arrives, which can be after whatever
+			# blocked it had already cleared the latch -- so a quick tap of U
+			# got a man out of the aeroplane, and the same tap, still fresh
+			# when the key came up, put him straight back in.
+			_taps.erase(a)
 
 func _input(e: InputEvent) -> void:
 	if typing or not (e is InputEventKey or e is InputEventMouseButton):
@@ -3442,7 +3448,7 @@ func _input(e: InputEvent) -> void:
 	if e is InputEventKey and (e as InputEventKey).echo:
 		return
 	for a in InputMap.get_actions():
-		if e.is_action_pressed(a):
+		if e.is_action_pressed(a) and not _blocked.has(a):
 			_taps[a] = Time.get_ticks_msec()
 
 func tapped(action: StringName) -> bool:

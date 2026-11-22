@@ -64,8 +64,15 @@ func parse_arg(a: String) -> bool:
 		_sound_log = true
 	elif a == "--soundquit":
 		_sl_quit = true
+	elif a == "--ramptest":
+		_ramp_test = true
+	elif a == "--uexit":
+		_uexit = true
 	elif a == "--midairtest":
 		_midair_test = true
+	elif a == "--soundtrace":
+		_trace_guns = true
+		_sound_log = true
 	elif a == "--phantomtest":
 		_phantom = true
 		_sound_log = true
@@ -522,6 +529,8 @@ var _sl_t := 0.0
 var _sl_hooked := false
 var _sl: Dictionary = {}
 var _phantom := false
+## Every gun sound printed with where it came from: --soundtrace.
+var _trace_guns := false
 var _ph_step := 0
 
 ## Runway start: a bomb off the rails on the runway, then out of the seat.
@@ -549,7 +558,7 @@ func tick_sound_log(delta: float) -> void:
 			var eye := world.get_viewport().get_camera_3d()
 			var d: float = -1.0 if (eye == null or pos == Vector3.INF) \
 				else eye.global_position.distance_to(pos)
-			if _phantom and id in ["rifle", "mg", "autocannon", "gun", "carbine", "smg", "shot_far",
+			if (_phantom or _trace_guns) and id in ["rifle", "mg", "autocannon", "gun", "carbine", "smg", "shot_far",
 					"dmr", "pistol", "shotgun", "lmg", "suppressed"]:
 				print("[phantom] %s at %s (%.0f m), stack: %s" % [id, str(pos.round()), d,
 					" < ".join(PackedStringArray(get_stack().slice(1, 5).map(
@@ -607,4 +616,128 @@ func tick_midair(delta: float) -> void:
 			"destroyed" if not p.is_alive() else "still flying",
 			"destroyed" if not (is_instance_valid(_ma_other) and _ma_other.is_alive()) else "still flying"])
 		world.get_tree().quit()
+#endregion
+
+
+#region --uexit
+## U tapped as a man taps it -- a key event down, the same key up a moment
+## later -- on the runway, stopped: he must be out and stay out.
+## --preset=takeoff:f16 --uexit
+var _uexit := false
+var _ux_t := 0.0
+var _ux_step := 0
+
+func _key_u(down: bool) -> void:
+	var e := InputEventKey.new()
+	e.keycode = KEY_U
+	e.physical_keycode = KEY_U
+	e.pressed = down
+	Input.parse_input_event(e)
+
+func tick_uexit(delta: float) -> void:
+	if not _uexit or not world.running or not is_instance_valid(world.player):
+		return
+	_ux_t += delta
+	if _ux_step == 0 and _ux_t > 3.0:
+		if world.boarding:
+			world._end_boarding()
+		world.player.linear_velocity = Vector3.ZERO
+		world.player.throttle = 0.0
+		_ux_step = 1
+		_ux_t = 0.0
+	elif _ux_step == 1 and _ux_t > 1.0:
+		_key_u(true)
+		_ux_step = 2
+		_ux_t = 0.0
+	elif _ux_step == 2 and _ux_t > 0.05:
+		_key_u(false)
+		_ux_step = 3
+		_ux_t = 0.0
+	elif _ux_step == 3 and _ux_t > 2.0:
+		var out: bool = world.on_foot and not world.boarding
+		print("[uexit] a quick tap of U: on foot %s, boarding %s -> %s" % [str(world.on_foot),
+			str(world.boarding), "ok" if out else "FAILED, back in"])
+		# and U again by the aeroplane gets him in, as it should
+		_key_u(true)
+		_ux_step = 4
+		_ux_t = 0.0
+	elif _ux_step == 4 and _ux_t > 0.05:
+		_key_u(false)
+		_ux_step = 5
+		_ux_t = 0.0
+	elif _ux_step == 5 and _ux_t > 2.0:
+		print("[uexit] U again beside it: on foot %s, boarding %s -> %s" % [str(world.on_foot),
+			str(world.boarding), "ok" if not world.on_foot else "FAILED, still out"])
+		world.get_tree().quit()
+#endregion
+
+
+#region --ramptest
+## Up the open ramp of a C-130 and into its hold on foot, then back out down it:
+## the man is walked with the keys, and his height over the ground and where he
+## is are printed as he goes. --preset=ramp:c130 --ramptest
+var _ramp_test := false
+var _rt_t := 0.0
+var _rt_step := 0
+var _rt_jet: Aircraft = null
+
+func tick_ramp_test(delta: float) -> void:
+	if not _ramp_test or not world.running or not is_instance_valid(world.walker):
+		return
+	_rt_t += delta
+	var w: Walker = world.walker
+	if _rt_step == 0 and _rt_t > 2.0:
+		for j in world.parked:
+			if is_instance_valid(j) and j.has_hold():
+				_rt_jet = j
+		if _rt_jet == null:
+			print("[ramp] RESULT: FAILED -- no transport on the line")
+			world.get_tree().quit()
+			return
+		_rt_jet.ramp_open = true
+		_rt_jet.ramp_anim = 1.0
+		var hold: Node3D = _rt_jet.hold_node()
+		var half: Vector3 = hold.get_meta("half")
+		var behind: Vector3 = hold.global_transform * Vector3(0.0, 0.0, half.z * 1.62 + 6.0)
+		behind.y = Sim.height_at(behind.x, behind.z) + 0.1
+		w.global_position = behind
+		var fwd: Vector3 = (hold.global_position - behind)
+		w.yaw = atan2(-fwd.x, -fwd.z)
+		Input.action_press(&"pitch_down")
+		_rt_step = 1
+		_rt_t = 0.0
+	elif _rt_step == 1:
+		if fmod(_rt_t, 0.5) < delta:
+			var g: float = Sim.height_at(w.global_position.x, w.global_position.z)
+			print("[ramp] t=%.1f %.1f m over the ground, in the hold %s" % [_rt_t,
+				w.global_position.y - g, str(w.frame != null)])
+		if w.frame != null and _rt_t > 1.0:
+			print("[ramp] aboard after %.1f s" % _rt_t)
+			Input.action_release(&"pitch_down")
+			_rt_step = 2
+			_rt_t = 0.0
+		elif _rt_t > 12.0:
+			Input.action_release(&"pitch_down")
+			print("[ramp] RESULT: FAILED -- never got aboard")
+			world.get_tree().quit()
+	elif _rt_step == 2 and _rt_t > 1.0:
+		# and back out, down the ramp
+		w.yaw += PI
+		Input.action_press(&"pitch_down")
+		_rt_step = 3
+		_rt_t = 0.0
+	elif _rt_step == 3:
+		if fmod(_rt_t, 0.5) < delta:
+			print("[ramp] out: t=%.1f local z %.1f y %.2f, in the hold %s" % [_rt_t,
+				w.position.z, w.position.y, str(w.frame != null)])
+		if w.frame == null:
+			Input.action_release(&"pitch_down")
+			var g2: float = Sim.height_at(w.global_position.x, w.global_position.z)
+			print("[ramp] off the ramp after %.1f s, %.1f m over the ground" % [_rt_t,
+				w.global_position.y - g2])
+			print("[ramp] RESULT: ok")
+			world.get_tree().quit()
+		elif _rt_t > 15.0:
+			print("[ramp] RESULT: FAILED -- could not walk out")
+			world.get_tree().quit()
 #endregion

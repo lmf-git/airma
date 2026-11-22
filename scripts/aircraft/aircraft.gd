@@ -2268,6 +2268,10 @@ func _midair(pos: Vector3, vel: Vector3) -> void:
 			continue
 		var ov: Vector3 = o.get_meta("net_vel") if o.has_meta("net_vel") else o.linear_velocity
 		var closing: float = (vel - ov).length()
+		# two standing still where they were put down is a parking problem,
+		# not a collision: only aircraft moving into one another
+		if closing < 4.0:
+			continue
 		if Sim.debug_weapons:
 			print("[midair] %s into %s at %.0f m/s, %.1f m apart" % [name, o.name, closing, d])
 		_impact(maxf(closing, 13.0))
@@ -2544,6 +2548,7 @@ func get_velocity() -> Vector3:
 ## but it must not emit `died`, which is what scores the kill and would score it
 ## once on every machine in the session.
 func wreck_visuals() -> void:
+	spill_hold()
 	Effects.explosion(get_tree().current_scene, global_position, 14.0)
 	for i in randi_range(2, 4):
 		break_part(_pick_part())
@@ -2556,6 +2561,30 @@ func wreck_visuals() -> void:
 	var embers := Effects.ember_particles(Color(1.0, 0.55, 0.18), 2.2, 26)
 	embers.emitting = true
 	add_child(embers)
+
+## Everyone in the hold out into the world before the aircraft goes, at the
+## speed it was going. They were its children, so they went with the wreck:
+## the man riding in the back was deleted along with it, and another player's
+## figure left the network layer holding a freed object -- "Trying to assign
+## invalid previously freed instance" on the next packet about him.
+func spill_hold() -> void:
+	if not has_hold():
+		return
+	var h: Node3D = hold_node()
+	if h == null or not is_instance_valid(h):
+		return
+	var scene := get_tree().current_scene if is_inside_tree() else null
+	if scene == null:
+		return
+	for c in h.get_children():
+		if c is Walker:
+			(c as Walker).exit_frame(scene)
+		elif c is Pilot:
+			var xf: Transform3D = (c as Node3D).global_transform
+			h.remove_child(c)
+			scene.add_child(c)
+			(c as Node3D).global_transform = Transform3D(Basis(Vector3.UP,
+				xf.basis.get_euler().y), xf.origin)
 
 ## `with_pilot` throws a body clear as the aeroplane comes apart. An ejection
 ## has already taken the pilot out under a canopy, and leaving this on gave two

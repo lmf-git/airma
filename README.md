@@ -234,6 +234,17 @@ from the moment it is called, drawn as what it is, and every shell and rocket it
 fires is shared. Sides are BLUE and RED for everybody, the host included,
 chosen in the hangar or on the deploy screen, and can be changed mid-match.
 
+**Up the ramp and into the hold.** An open ramp is a floor now: a man behind a
+transport walks up its slope and is in the hold at the top, and walks back down
+it on the way out -- the ramp was a picture, the hold reached only by a key
+pressed near the tail. Another player's transport too, its ramp shown open on
+every screen. When an aircraft is lost, whoever is in its hold is put out into
+the world first; they were deleted with the wreck, which also left the network
+layer holding a freed object. A joiner chooses what to fly when the host's
+match begins, and can change it mid-match; the hangar comes up for it. Rifle
+rounds into an aeroplane are holes rather than rockets, and a quick tap of U
+gets you out of the seat and leaves you out.
+
 **Aircraft collide.** Nothing did: two aeroplanes passed through each other, a
 wingman could sit inside his leader and a taxiing jet drove through the parked
 line. Each machine now checks its own aircraft against every other -- players'

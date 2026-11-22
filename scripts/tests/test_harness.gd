@@ -100,6 +100,7 @@ func tick_after_input(delta: float) -> void:
 	session_tests.tick_mptest(delta)
 	session_tests.tick_lobby(delta)
 	session_tests.tick_redeploy(delta)
+	session_tests.tick_eject(delta)
 	session_tests.tick_holdnet(delta)
 
 
@@ -127,6 +128,8 @@ func tick_main(delta: float) -> bool:
 	dev_options.tick_nuke_shot()
 	dev_options.tick_sound_log(delta)
 	dev_options.tick_midair(delta)
+	dev_options.tick_uexit(delta)
+	dev_options.tick_ramp_test(delta)
 	dev_options.tick_road_probe()
 	weapon_tests.tick_decoy()
 	ground_tests.tick_mirv_lock(delta)

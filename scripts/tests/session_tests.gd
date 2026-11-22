@@ -43,6 +43,10 @@ func parse_arg(a: String) -> bool:
 		_hn_shots = a.substr(12)
 	elif a == "--nettest":
 		_nettest = true
+	elif a.begins_with("--netport="):
+		NetLink.port_override = int(a.substr(10))
+	elif a == "--ejecttest":
+		_ej_test = true
 	elif a == "--redeploytest":
 		_rd_test = true
 	elif a.begins_with("--lobbytest="):
@@ -1322,4 +1326,29 @@ func tick_redeploy(delta: float) -> void:
 			print("[redeploy] RESULT: %s" % ("ok" if _rd_bad.is_empty() else "FAILED -- " + ", ".join(_rd_bad)))
 			_rd_test = false
 			world.get_tree().quit()
+#endregion
+
+
+#region --ejecttest
+## A joiner in a runway start ejects. With --soundtrace, every gun sound after
+## it is printed with where it came from. --lobbytest=join --ejecttest
+var _ej_test := false
+var _ej_t := 0.0
+var _ej_done := false
+
+func tick_eject(delta: float) -> void:
+	if not _ej_test or not world.running or world.net == null or world.net.match_gen == 0:
+		return
+	_ej_t += delta
+	if not _ej_done and _ej_t > 4.0:
+		_ej_done = true
+		if world.menu.redeploy:
+			world._on_launch("f16", String(Sim.mission))
+		if world.boarding:
+			world._end_boarding()
+		print("[eject] ejecting at t=%.1f" % _ej_t)
+		world._eject()
+	if _ej_done and _ej_t > 34.0:
+		print("[eject] done")
+		world.get_tree().quit()
 #endregion

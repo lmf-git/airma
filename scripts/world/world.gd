@@ -1168,6 +1168,13 @@ func _start(id: String, mission: String) -> void:
 func _foot_at_field() -> void:
 	if not is_instance_valid(player):
 		return
+	# one aeroplane on the spot: the one left there by the last time
+	var spot := Vector3(150.0, 0.0, -150.0)
+	for j in parked.duplicate():
+		if is_instance_valid(j) and j != player and (j as Node3D).global_position.distance_to(
+				Vector3(spot.x, (j as Node3D).global_position.y, spot.z)) < 15.0:
+			parked.erase(j)
+			(j as Node).queue_free()
 	player.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(-90.0)),
 		Vector3(150.0, _apron_y(150.0, -150.0) + _stance(player.spec), -150.0))
 	player.linear_velocity = Vector3.ZERO
@@ -1232,7 +1239,16 @@ func _on_launch(id: String, mission: String) -> void:
 
 ## Back into the match that is running, as `id`: an aeroplane at this mode's
 ## start, a vehicle at the park, or on foot on the flight line.
+var _redeploy_replace := false
+
 func _redeploy(id: String) -> void:
+	# chosen in place of what he was in, rather than after losing it: that
+	# one goes, rather than standing about on the runway
+	if _redeploy_replace and is_instance_valid(player) and player.is_alive() \
+			and not parked.has(player):
+		player.queue_free()
+		player = null
+	_redeploy_replace = false
 	menu.set_redeploy(false)
 	menu.visible = false
 	Sim.menu_open = false
@@ -3067,6 +3083,35 @@ func _start_from_host(mission: String) -> void:
 	if id == "":
 		id = String(Sim.selected_jet)
 	_start(id, mission)
+	# He has not chosen anything: the host chose the mode and the match began
+	# with whatever happened to be highlighted in his hangar -- a fighter, for
+	# anyone who had not touched it. The hangar comes up to choose in, the
+	# aeroplane held where it is until he has, then replaced by his choice.
+	# (A street fight asks on its own deploy screen.)
+	if mission not in ["cqb", "ground", "arms", "range"]:
+		_choose_in_match("DEPLOY")
+
+## The hangar over a running match, to choose what to be in: on arriving in a
+## match the host started, and for a joiner who asks to change mid-match. What
+## he is in now is held still and goes when the choice is made.
+func _choose_in_match(label: String) -> void:
+	_redeploy_replace = true
+	if is_instance_valid(player) and not on_foot and not is_instance_valid(tank):
+		player.set_meta("choosing", true)
+		player.freeze = true
+	menu.set_redeploy(true, label)
+	menu.visible = true
+	Sim.menu_open = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+## Let go of an aeroplane held while choosing, if the choice was not made.
+func _unhold_choice() -> void:
+	if is_instance_valid(player) and player.has_meta("choosing"):
+		player.remove_meta("choosing")
+		player.freeze = false
+	_redeploy_replace = false
+	if menu.redeploy:
+		menu.set_redeploy(false)
 
 func _join_game(jet_id: String, address: String) -> void:
 	Sim.selected_jet = jet_id
@@ -3500,6 +3545,7 @@ func _watch_landing(delta: float) -> void:
 
 func _resume() -> void:
 	Sim.menu_open = false
+	_unhold_choice()
 	menu.visible = false
 	if is_instance_valid(pause_menu):
 		pause_menu.close()
@@ -3570,6 +3616,10 @@ func _pause_to_hangar() -> void:
 	_show_roster(false)
 	menu.set_paused(true)
 	menu.visible = true
+	# A joiner cannot change the mode, but he can change what he is in.
+	if net != null and net.active and not net.is_host and running \
+			and not is_instance_valid(cqb):
+		_choose_in_match("CHANGE")
 
 ## The same mode and the same vehicle, from the top.
 func _restart_match() -> void:

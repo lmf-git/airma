@@ -666,6 +666,49 @@ func enter_frame(hold: Node3D, jet: Node) -> void:
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	Sim.report("aboard — walk aft off the ramp to jump", Sim.Ev.INFO)
 
+## How far an open ramp comes down: see `JetFactory` and `Aircraft._animate`.
+const RAMP_ANGLE := deg_to_rad(22.0)
+var _boarding_ramp := false
+
+## The ramp of a transport standing open with its hold behind it: a floor up
+## into the aircraft. It had nothing under it, and the hold had no way in but
+## a key pressed somewhere near the tail -- the ramp was a picture you walked
+## through. Walked up, it puts him in the hold at the top. Another player's
+## transport too, when its ramp is down on every screen.
+func _ramp_floor(feet: Vector3) -> float:
+	var best := -1e9
+	for n in get_tree().get_nodes_in_group("boardable"):
+		if not is_instance_valid(n) or not n.has_method("has_hold") or not n.has_hold() \
+				or not n.get("ramp_open"):
+			continue
+		if (n as Node3D).global_position.distance_squared_to(feet) > 1600.0:
+			continue
+		var hold: Node3D = n.hold_node()
+		if hold == null:
+			continue
+		var half: Vector3 = hold.get_meta("half", Vector3(2.0, 2.2, 6.0))
+		var local: Vector3 = hold.global_transform.affine_inverse() * feet
+		var run: float = half.z * 0.62
+		if absf(local.x) > half.x * 0.85 or local.z < half.z - 0.6 or local.z > half.z + run + 0.3:
+			continue
+		var ang: float = RAMP_ANGLE * float(n.get("ramp_anim"))
+		var along: float = clampf(local.z - half.z, 0.0, run)
+		var y: float = (hold.global_transform * Vector3(local.x, -along * tan(ang), local.z)).y
+		# about at it, coming up from the ground or along it, not under it
+		if feet.y > y + 1.0 or feet.y < y - 1.4:
+			continue
+		best = maxf(best, y)
+		# at the top of it: aboard
+		if local.z < half.z + 0.3 and not _boarding_ramp and frame == null:
+			_boarding_ramp = true
+			_step_aboard.call_deferred(hold, n)
+	return best
+
+func _step_aboard(hold: Node3D, jet: Node) -> void:
+	_boarding_ramp = false
+	if frame == null and is_instance_valid(hold) and is_instance_valid(jet):
+		enter_frame(hold, jet)
+
 ## Step back out into the world, inheriting the aircraft velocity.
 func exit_frame(scene: Node) -> void:
 	if frame == null:
@@ -907,6 +950,8 @@ func _tick_walk_p(delta: float) -> void:
 	# `Terrain.foot_ground`.
 	var ground: float = Terrain.foot_ground(gx, gz, global_position.y,
 		cam.global_position if is_instance_valid(cam) else global_position)
+	# and the ramp of a transport standing open, which is a floor to walk up
+	ground = maxf(ground, _ramp_floor(global_position))
 	if global_position.y <= ground:
 		global_position.y = ground
 		if not on_floor and _fall_peak < -13.0 and not chute:
@@ -964,12 +1009,18 @@ func _step_in_frame(delta: float) -> void:
 	var lim := frame_half.x - 0.35
 	position.x = clampf(position.x, -lim, lim)
 	position.z = maxf(position.z, -frame_half.z + 0.35)
-	if position.y <= 0.0:
-		position.y = 0.0
+	# The floor, and past the end of it the ramp going down: it was flat to
+	# the end of the ramp and then nothing, so a man walked out level into
+	# the air and dropped.
+	var floor_y := 0.0
+	if position.z > frame_half.z and is_instance_valid(frame_owner) and frame_owner.get("ramp_open"):
+		floor_y = -(position.z - frame_half.z) * tan(RAMP_ANGLE * float(frame_owner.get("ramp_anim")))
+	if position.y <= floor_y:
+		position.y = floor_y
 		vel.y = 0.0
 		on_floor = true
 	else:
-		on_floor = position.y < 0.02
+		on_floor = position.y < floor_y + 0.02
 	rotation.y = yaw
 	# aft end: step off the open ramp
 	var ramp_open: bool = is_instance_valid(frame_owner) and frame_owner.get("ramp_open")

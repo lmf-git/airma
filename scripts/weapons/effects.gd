@@ -1953,7 +1953,18 @@ class Tracer extends Node3D:
 			var was_alive: bool = not best.has_method("is_alive") or best.is_alive()
 			# a rifle round does nothing to armour plate but mark the paint
 			var plate: bool = best is Tank or best is Ship
-			if best.has_method("take_hit") and not plate:
+			if best is Aircraft:
+				# A rifle round into an aeroplane is a hole, not a kill. It took
+				# the full damage it does to a man, and an airframe has the
+				# health of one: three rounds brought a jet down, and the bigger
+				# hits blew parts off it as a rocket does. A helicopter, low and
+				# slow and full of things that matter, takes more of it; half an
+				# inch of steel core three times as much again.
+				var frac: float = 0.15 if best is Helicopter else 0.05
+				if heavy:
+					frac *= 3.0
+				best.take_hit(dmg * best_k * frac, shooter if is_instance_valid(shooter) else null)
+			elif best.has_method("take_hit") and not plate:
 				best.take_hit(dmg * best_k, shooter if is_instance_valid(shooter) else null)
 			elif heavy and best is Tank:
 				# half an inch of steel core does not stop on a scout car

@@ -773,20 +773,25 @@ func _refresh_side_row() -> void:
 ## REDEPLOY, for a joiner as much as for the host, and the mode cannot change.
 var redeploy := false
 
-func set_redeploy(on: bool) -> void:
+## What the button says while choosing: REDEPLOY after being killed, DEPLOY
+## on joining a match, CHANGE when swapping mid-match.
+var redeploy_label := "REDEPLOY"
+
+func set_redeploy(on: bool, label := "REDEPLOY") -> void:
 	redeploy = on
+	redeploy_label = label
 	for k in _mission_btns:
 		_mission_btns[k].disabled = on or net_role == "client"
 	if _launch != null:
 		_launch.disabled = net_role == "client" and not on
-		_launch.text = "REDEPLOY" if on else ("HOST STARTS" if net_role == "client" else "LAUNCH")
+		_launch.text = redeploy_label if on else ("HOST STARTS" if net_role == "client" else "LAUNCH")
 
 func set_net_role(role: String, host_mission: String) -> void:
 	if role == net_role and (role != "client" or host_mission == mission_id):
 		_refresh_side_row()
 		if redeploy and _launch != null:
 			_launch.disabled = false
-			_launch.text = "REDEPLOY"
+			_launch.text = redeploy_label
 		return
 	net_role = role
 	var locked := role == "client"
@@ -801,7 +806,7 @@ func set_net_role(role: String, host_mission: String) -> void:
 		_select_mission(host_mission)
 	_refresh_side_row()
 	if redeploy:
-		set_redeploy(true)
+		set_redeploy(true, redeploy_label)
 
 func _mission_tip(id: String) -> String:
 	for m in MISSIONS:
