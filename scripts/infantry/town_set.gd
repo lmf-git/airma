@@ -603,6 +603,7 @@ func _hollow(id: int) -> void:
 	# front, a side, a side, back -> front, back, then whichever side
 	var order: Array = [faces[0], faces[3], faces[1 + _rng.randi() % 2]]
 	var doors := 0
+	var panes_here: Array = []
 	for f in faces:
 		var along_x: bool = f[0]
 		var sgn: float = f[1]
@@ -641,6 +642,11 @@ func _hollow(id: int) -> void:
 			for cut in cuts:
 				if absf(wu - float(cut[0])) < float(cut[1]) + 1.9:
 					room = false
+			# not where the partition across the middle meets this wall: a
+			# window was cut there with the stud wall standing in the middle
+			# of it, half of it looking into each room
+			if parted and along_x == long_x and absf(wu) < 0.8 + PARTITION_T + 0.6:
+				room = false
 			if room and absf(wu) < run - 1.8:
 				cuts.append([wu, 0.8, sill])
 		cuts.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
@@ -651,6 +657,8 @@ func _hollow(id: int) -> void:
 			if float(cut[2]) > 0.0:
 				_storey_wall(st, o, bs, a_l, n_l * off, lo, lo + float(cut[1]) * 2.0, 0.0,
 					float(cut[2]))
+				# and glass in it
+				panes_here.append([float(cut[0]), float(cut[1]), float(cut[2]), a_l, n_l * off])
 			from = lo + float(cut[1]) * 2.0
 		_storey_wall(st, o, bs, a_l, n_l * off, from, run, 0.0, lintel)
 		# and the wall over all of them, door and window alike
@@ -666,9 +674,97 @@ func _hollow(id: int) -> void:
 	var mi := MeshKit.mi(MeshKit.finish(st, _wall_mats[kind]), "GroundFloor")
 	add_child(mi)
 	mi.global_transform = Transform3D(bs, o)
+	for pn in panes_here:
+		_pane(mi, o, bs, float(pn[0]), float(pn[1]), float(pn[2]), lintel, pn[3], pn[4])
 	_hollowed.append([id, dy, mi, c, first, _boxes.size()])
 	stats["interiors"] = int(stats.get("interiors", 0)) + 1
 	stats["doors"] = int(stats.get("doors", 0)) + doors
+
+# --------------------------------------------------------------------- glass
+## Every pane of glass in every town standing, as [node, middle, normal, along,
+## half width, half height]. A round through one breaks it and goes on; a
+## blast breaks every one near it.
+static var panes: Array = []
+static var _glass_mat: StandardMaterial3D = null
+
+func _pane(floor_mi: Node3D, o: Vector3, bs: Basis, u: float, hw: float, sill: float,
+		lintel: float, along: Vector3, off: Vector3) -> void:
+	if _glass_mat == null:
+		_glass_mat = MeshKit.mat(Color(0.55, 0.68, 0.74, 0.32), 0.05, 0.6)
+		_glass_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_glass_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var hh: float = (lintel - sill) * 0.5
+	var mid_l: Vector3 = off + along * u + Vector3(0, sill + hh, 0)
+	var is_x: bool = absf(along.x) > 0.5
+	var bm := BoxMesh.new()
+	bm.size = Vector3(hw * 2.0, hh * 2.0, 0.02) if is_x else Vector3(0.02, hh * 2.0, hw * 2.0)
+	var mi := MeshInstance3D.new()
+	mi.mesh = bm
+	mi.material_override = _glass_mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.name = "Pane"
+	floor_mi.add_child(mi)
+	mi.position = mid_l
+	var n_w: Vector3 = (bs * (Vector3(0, 0, 1) if is_x else Vector3(1, 0, 0))).normalized()
+	panes.append([mi, o + bs * mid_l, n_w, (bs * along).normalized(), hw, hh])
+
+## A round from `a` to `b`: any pane it goes through breaks.
+static func glass_hit(a: Vector3, b: Vector3) -> void:
+	if panes.is_empty():
+		return
+	var mid: Vector3 = (a + b) * 0.5
+	var reach: float = a.distance_to(b) * 0.5 + 3.0
+	for i in range(panes.size() - 1, -1, -1):
+		var p: Array = panes[i]
+		if not is_instance_valid(p[0]):
+			panes.remove_at(i)
+			continue
+		var c: Vector3 = p[1]
+		if c.distance_to(mid) > reach:
+			continue
+		var n: Vector3 = p[2]
+		var d0: float = (a - c).dot(n)
+		var d1: float = (b - c).dot(n)
+		if d0 * d1 > 0.0:
+			continue
+		var t: float = d0 / (d0 - d1) if absf(d0 - d1) > 1e-6 else 0.0
+		var q: Vector3 = a.lerp(b, t) - c
+		if absf(q.dot(p[3])) <= float(p[4]) and absf(q.y) <= float(p[5]):
+			_shatter(i)
+
+## Everything glazed within `r` of a blast goes.
+static func glass_blast(at: Vector3, r: float) -> void:
+	for i in range(panes.size() - 1, -1, -1):
+		var p: Array = panes[i]
+		if not is_instance_valid(p[0]):
+			panes.remove_at(i)
+		elif (p[1] as Vector3).distance_to(at) < r:
+			_shatter(i)
+
+static func _shatter(i: int) -> void:
+	var p: Array = panes[i]
+	panes.remove_at(i)
+	var mi: Node3D = p[0]
+	if not is_instance_valid(mi) or not mi.is_inside_tree():
+		return
+	var world: Node = mi.get_tree().current_scene
+	var c: Vector3 = p[1]
+	Sfx.play_at(world, "glass", c, -4.0, randf_range(0.9, 1.15), 70.0)
+	# a few shards out of the frame, both ways, glinting as they go
+	for k in 6:
+		var st := MeshKit.begin()
+		MeshKit.box(st, Vector3(randf_range(0.08, 0.3), randf_range(0.08, 0.35), 0.015), Vector3.ZERO)
+		var d := Effects.Debris.new()
+		d.add_child(MeshKit.mi(MeshKit.finish(st, _glass_mat), "Shard"))
+		d.vel = (p[2] as Vector3) * randf_range(-3.0, 3.0) + Vector3(randf_range(-1, 1), randf_range(-0.5, 1.5),
+			randf_range(-1, 1))
+		d.spin = Vector3(randf_range(-9, 9), randf_range(-9, 9), randf_range(-9, 9))
+		d.rest_offset = 0.02
+		d.life = 25.0
+		world.add_child(d)
+		d.global_position = c + (p[3] as Vector3) * randf_range(-float(p[4]), float(p[4])) \
+			+ Vector3(0, randf_range(-float(p[5]), float(p[5])), 0)
+	mi.queue_free()
 
 ## One length of a ground floor's wall, from `from` to `to` along `along` and
 ## `y0` to `y1` up it, in the building's own frame.

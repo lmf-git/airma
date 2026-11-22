@@ -10,7 +10,6 @@ extends Node3D
 ## your hands is what anyone else sees you holding.
 
 signal board_requested(jet)
-signal hold_requested(jet)
 signal station_requested(jet)
 signal died(where)
 
@@ -669,12 +668,34 @@ func enter_frame(hold: Node3D, jet: Node) -> void:
 ## How far an open ramp comes down: see `JetFactory` and `Aircraft._animate`.
 const RAMP_ANGLE := deg_to_rad(22.0)
 var _boarding_ramp := false
+## Standing on a transport's ramp from outside (see `_ramp_floor`).
+var _on_ramp := false
+
+## How far either side of the middle of `hold`'s ramp a man can stand, a
+## fraction `t` of the way down it: the deck narrows to the tail
+## (`JetFactory`), and he was held up over the air beside the narrow end.
+static func _ramp_half(hold: Node, t: float, fallback: float) -> float:
+	var r: Node = hold.get_node_or_null("Ramp") if hold != null else null
+	if r == null or not r.has_meta("deck_w"):
+		return fallback
+	var w: PackedFloat32Array = r.get_meta("deck_w")
+	var f: float = clampf(t, 0.0, 1.0) * float(w.size() - 1)
+	var i: int = mini(int(f), w.size() - 2)
+	return lerpf(w[i], w[i + 1], f - float(i)) - 0.3
 
 ## The ramp of a transport standing open with its hold behind it: a floor up
 ## into the aircraft. It had nothing under it, and the hold had no way in but
 ## a key pressed somewhere near the tail -- the ramp was a picture you walked
 ## through. Walked up, it puts him in the hold at the top. Another player's
 ## transport too, when its ramp is down on every screen.
+## How far down the ramp of `hold` is tipped, part way open: from lying along
+## the belly, shut (rising, so negative), to `RAMP_ANGLE` open. The same as the
+## aircraft turns the ramp it draws.
+static func _ramp_tilt(hold: Node, anim: float) -> float:
+	var r: Node = hold.get_node_or_null("Ramp") if hold != null else null
+	var shut: float = float(r.get_meta("shut_angle", 0.0)) if r != null else 0.0
+	return lerpf(-shut, RAMP_ANGLE, anim)
+
 func _ramp_floor(feet: Vector3) -> float:
 	var best := -1e9
 	for n in get_tree().get_nodes_in_group("boardable"):
@@ -689,9 +710,11 @@ func _ramp_floor(feet: Vector3) -> float:
 		var half: Vector3 = hold.get_meta("half", Vector3(2.0, 2.2, 6.0))
 		var local: Vector3 = hold.global_transform.affine_inverse() * feet
 		var run: float = half.z * 0.62
-		if absf(local.x) > half.x * 0.85 or local.z < half.z - 0.6 or local.z > half.z + run + 0.3:
+		if local.z < half.z - 0.6 or local.z > half.z + run + 0.3:
 			continue
-		var ang: float = RAMP_ANGLE * float(n.get("ramp_anim"))
+		if absf(local.x) > _ramp_half(hold, (local.z - half.z) / run, half.x * 0.85):
+			continue
+		var ang: float = _ramp_tilt(hold, float(n.get("ramp_anim")))
 		var along: float = clampf(local.z - half.z, 0.0, run)
 		var y: float = (hold.global_transform * Vector3(local.x, -along * tan(ang), local.z)).y
 		# about at it, coming up from the ground or along it, not under it
@@ -951,7 +974,9 @@ func _tick_walk_p(delta: float) -> void:
 	var ground: float = Terrain.foot_ground(gx, gz, global_position.y,
 		cam.global_position if is_instance_valid(cam) else global_position)
 	# and the ramp of a transport standing open, which is a floor to walk up
-	ground = maxf(ground, _ramp_floor(global_position))
+	var ramp_y: float = _ramp_floor(global_position)
+	_on_ramp = ramp_y > ground and ramp_y > -1e8
+	ground = maxf(ground, ramp_y)
 	if global_position.y <= ground:
 		global_position.y = ground
 		if not on_floor and _fall_peak < -13.0 and not chute:
@@ -976,15 +1001,17 @@ func _tick_walk_p(delta: float) -> void:
 
 	_reach_for(delta)
 	_fight(delta)
-	_animate(delta, flat, true)
+	# On a ramp the feet stand on the ramp. Left reaching for the ground, they
+	# went down through it to the grass underneath on the way up; on the way
+	# down, inside the hold's frame, they never reach for anything.
+	_animate(delta, flat, not _on_ramp)
 	_view(delta, Basis.IDENTITY)
 
 	_scan()
+	# Into the cockpit. A hold is not got into with a key: up the open ramp
+	# on foot, or not at all (`_ramp_floor`).
 	if target_jet and Sim.tapped(&"interact"):
-		if target_jet.has_method("has_hold") and target_jet.has_hold() and target_jet.get("ramp_open"):
-			hold_requested.emit(target_jet)
-		else:
-			board_requested.emit(target_jet)
+		board_requested.emit(target_jet)
 
 ## Movement solved entirely in the hold's local space: flat floor at y = 0,
 ## walls at the hull, and the open ramp as the way out.
@@ -1014,7 +1041,11 @@ func _step_in_frame(delta: float) -> void:
 	# the air and dropped.
 	var floor_y := 0.0
 	if position.z > frame_half.z and is_instance_valid(frame_owner) and frame_owner.get("ramp_open"):
-		floor_y = -(position.z - frame_half.z) * tan(RAMP_ANGLE * float(frame_owner.get("ramp_anim")))
+		floor_y = -(position.z - frame_half.z) * tan(_ramp_tilt(frame, float(frame_owner.get("ramp_anim"))))
+		# and the ramp is narrower than the hold, and narrows as it goes
+		var rl: float = maxf(_ramp_half(frame, (position.z - frame_half.z) / (frame_half.z * 0.62),
+			lim), 0.2)
+		position.x = clampf(position.x, -rl, rl)
 	if position.y <= floor_y:
 		position.y = floor_y
 		vel.y = 0.0
@@ -1033,12 +1064,11 @@ func _step_in_frame(delta: float) -> void:
 	_fight(delta)
 	_animate(delta, flat, false)
 	_view(delta, frame.global_transform.basis.orthonormalized())
-	# G takes the gun station on a gunship; U steps back out of the hold
+	# G takes the gun station on a gunship. There is no key out of the hold:
+	# down the open ramp and off the end of it, as he came in.
 	if Sim.tapped(&"gunner_station") and is_instance_valid(frame_owner) \
 			and frame_owner.spec.get("gunship", false):
 		station_requested.emit(frame_owner)
-	elif Sim.tapped(&"interact"):
-		exit_frame(get_tree().current_scene)
 
 ## A click on the map, or any other screen with a pointer, is not a pull of
 ## the trigger -- and nor is the same click still held as that screen closes:
@@ -2098,10 +2128,9 @@ func _scan() -> void:
 	for n in get_tree().get_nodes_in_group("boardable"):
 		if not is_instance_valid(n):
 			continue
-		# somebody else's aircraft: its hold, when the ramp is down, and not
-		# its cockpit
-		if n.is_in_group("remote") and not (n.has_method("has_hold") and n.has_hold()
-				and n.get("ramp_open")):
+		# somebody else's aircraft: not its cockpit, and its hold is walked
+		# into up the ramp, not boarded with a key
+		if n.is_in_group("remote"):
 			continue
 		var d: float = n.hull_distance(global_position) if n.has_method("hull_distance") \
 			else global_position.distance_to(n.global_position) - 6.0
@@ -2118,12 +2147,11 @@ func prompt() -> String:
 			return "F   take the rounds from the %s" % String(Firearm.KIT[id]["name"])
 		return "F   swap for the %s" % String(Firearm.KIT[id]["name"])
 	if frame != null:
+		var way_out: String = "down the ramp to get out" if is_instance_valid(frame_owner) \
+			and frame_owner.get("ramp_open") else "ramp shut"
 		if is_instance_valid(frame_owner) and frame_owner.spec.get("gunship", false):
-			return "G   gun station        U   step out"
-		return "U   step out"
-	if target_jet != null and target_jet.has_method("has_hold") and target_jet.has_hold() \
-			and target_jet.get("ramp_open"):
-		return "U   walk into the hold"
+			return "G   gun station        %s" % way_out
+		return way_out
 	if target_jet == null:
 		return ""
 	var nm := "aircraft"

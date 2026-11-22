@@ -44,6 +44,32 @@ static func build(spec: Dictionary) -> Dictionary:
 					for c in 5:
 						mid.append(lerpf(float(sections[i][c]), float(sections[i + 1][c]), f))
 					stations.append(mid)
+	# A cargo ramp is the underside of the tail, hinged at the back of the
+	# hold, with the upper cargo door over it. The fuselage was one closed
+	# shell, so lowering the ramp swung a deck down inside the skin and the
+	# hold could not be seen into from behind. Stations at the front of the
+	# hold, the hinge and the ramp's end, so the skin can be cut along exactly
+	# those lines (see `_tail_piece`) and the inside lined from the front.
+	var ramp_z := Vector2(INF, -INF)
+	var hold_top := -INF
+	var hold_front := INF
+	if sh.has("hold"):
+		var hp: Vector3 = sh["hold"]["pos"]
+		var hh: Vector3 = sh["hold"]["half"]
+		ramp_z = Vector2(hp.z + hh.z, hp.z + hh.z + hh.z * 0.62)
+		hold_top = hp.y + hh.y
+		hold_front = hp.z - hh.z
+		for zc in [hold_front, ramp_z.x, ramp_z.y]:
+			for i in stations.size() - 1:
+				var za: float = stations[i][0]
+				var zb: float = stations[i + 1][0]
+				if za < zc - 0.05 and zb > zc + 0.05:
+					var f: float = (zc - za) / (zb - za)
+					var mid: Array = []
+					for c in 5:
+						mid.append(lerpf(float(stations[i][c]), float(stations[i + 1][c]), f))
+					stations.insert(i + 1, mid)
+					break
 	for s in stations:
 		rings.append(MeshKit.ring(s[1], s[2], s[3], s[0], s[4], 12))
 	var unmanned: bool = bool(spec.get("unmanned", false))
@@ -53,7 +79,56 @@ static func build(spec: Dictionary) -> Dictionary:
 	# of him, from the windscreen to the horizon.
 	if not unmanned and bool(spec.get("canopy_opens", true)):
 		_cut_cockpit(rings, cz_a, cz_b, float(cp0["y"]) - 0.62)
-	MeshKit.loft(st, rings, Vector3(0, 0, sections[int(sections.size() * 0.5)][0]))
+	# The tail between the hinge and the end of the ramp is not airframe: the
+	# belly is the ramp, the rest of it below the hold's ceiling the upper
+	# cargo door. Each keeps its own panels, outside and in.
+	var tail_cut := {"ramp": [], "door": []}
+	var cut_out := func(a: Vector3, b: Vector3, c: Vector3, d: Vector3, n: Vector3) -> bool:
+		var k: String = _tail_piece((a + b + c + d) * 0.25, n, ramp_z, hold_top)
+		if k == "":
+			return false
+		(tail_cut[k] as Array).append([a, b, c, d, n])
+		return true
+	MeshKit.loft(st, rings, Vector3(0, 0, sections[int(sections.size() * 0.5)][0]),
+		true, true, false, cut_out)
+	# The hold's lining: the fuselage's own sections a little in from the
+	# skin, from the bulkhead at the front of the hold to the tail. A box of
+	# flat walls and a low flat ceiling inside a round fuselage was what the
+	# hold was, and from inside -- or in through the open tail -- it was a
+	# shed parked in an aeroplane. Lined to the end, too: the outer skin is
+	# one sided, and from in the tail you looked out through it.
+	var lining_st: SurfaceTool = null
+	var lining_rings: Array = []
+	if sh.has("hold"):
+		for sx in stations:
+			if float(sx[0]) >= hold_front - 0.01:
+				lining_rings.append(MeshKit.ring(maxf(float(sx[1]) - LINING, 0.05),
+					maxf(float(sx[2]) - LINING, 0.05), sx[3], sx[0], sx[4], 12))
+		if lining_rings.size() > 1:
+			lining_st = MeshKit.begin()
+			var cut_in := func(a: Vector3, b: Vector3, c: Vector3, d: Vector3, n: Vector3) -> bool:
+				# the same pieces, by where the panel is and which way the
+				# skin outside it faces
+				var k: String = _tail_piece((a + b + c + d) * 0.25, -n, ramp_z, hold_top)
+				if k == "":
+					return false
+				(tail_cut[k + "_in"] as Array).append([a, b, c, d, n])
+				return true
+			tail_cut["ramp_in"] = []
+			tail_cut["door_in"] = []
+			# the bulkhead faces aft, into the hold
+			MeshKit.loft(lining_st, lining_rings, Vector3(0, 0, hold_front - 10.0),
+				true, false, true, cut_in)
+			# frames round it every metre and a half, standing off the lining
+			var fz := hold_front + 0.8
+			while fz < ramp_z.x - 0.3:
+				var fs: Array = _section_at(stations, fz)
+				var fr: Array = []
+				for dz in [-0.05, 0.05]:
+					fr.append(MeshKit.ring(float(fs[1]) - LINING - 0.09, float(fs[2]) - LINING - 0.09,
+						fs[3], fz + dz, fs[4], 12))
+				MeshKit.loft(lining_st, fr, Vector3(0, 0, fz), false, false, true)
+				fz += 1.5
 
 	# wings: the trailing edge is carved off and rebuilt as hinged flaperons
 	var wing: Dictionary = sh["wing"].duplicate(true)
@@ -379,34 +454,102 @@ void fragment() {
 		hold.position = hd["pos"]
 		hold.set_meta("half", hd["half"])          # Vector3: x, headroom, z
 		var hw: Vector3 = hd["half"]
+		var mat_hold := MeshKit.mat(Color(0.30, 0.31, 0.30), 0.9, 0.1)
 		var hold_st := MeshKit.begin()
-		MeshKit.box(hold_st, Vector3(hw.x * 2.0, 0.14, hw.z * 2.0), Vector3(0, -0.07, 0))
-		for sx in [-1.0, 1.0]:
-			MeshKit.box(hold_st, Vector3(0.12, hw.y, hw.z * 2.0),
-				Vector3(sx * hw.x, hw.y * 0.5, 0))
-		MeshKit.box(hold_st, Vector3(hw.x * 2.0, hw.y, 0.14), Vector3(0, hw.y * 0.5, -hw.z))
-		var ribs := int(hw.z / 1.4)
-		for i in range(-ribs, ribs + 1):
-			MeshKit.box(hold_st, Vector3(hw.x * 2.0, 0.10, 0.10),
-				Vector3(0, hw.y * 0.92, float(i) * 1.4))
-		hold.add_child(MeshKit.mi(MeshKit.finish(hold_st,
-			MeshKit.mat(Color(0.30, 0.31, 0.30), 0.9, 0.1)), "Shell"))
+		# the floor, as wide as the fuselage is at that height
+		var fw: float = hw.x
+		var mid: Array = _section_at(stations, hd["pos"].z)
+		var w_floor: float = _half_width(mid, hd["pos"].y, LINING)
+		if w_floor > 0.5:
+			fw = w_floor
+		MeshKit.box(hold_st, Vector3(fw * 2.0, 0.14, hw.z * 2.0), Vector3(0, -0.07, 0))
+		hold.add_child(MeshKit.mi(MeshKit.finish(hold_st, mat_hold), "Shell"))
+		if lining_st != null:
+			var lmi := MeshKit.mi(MeshKit.finish(lining_st, mat_hold), "Lining")
+			lmi.position = -hold.position
+			hold.add_child(lmi)
 		# crates bolted to the floor: part of the hold, so they never drift
 		var crate_st := MeshKit.begin()
 		for c in hd.get("crates", []):
 			MeshKit.box(crate_st, c[1], c[0])
 		hold.add_child(MeshKit.mi(MeshKit.finish(crate_st,
 			MeshKit.mat(Color(0.34, 0.32, 0.24), 0.95, 0.0)), "Cargo"))
-		# rear ramp
+		# The rear ramp: one piece, the belly outside and the deck on top of
+		# it. Shut, it lies along the underside of the tail, rising with it;
+		# lowered, it is the flat deck tipped down that men walk up (see
+		# `Walker._ramp_floor`).
 		var ramp := Node3D.new()
 		ramp.name = "Ramp"
 		ramp.position = Vector3(0, 0, hw.z)
+		var hinge: Vector3 = hold.position + ramp.position
+		var run: float = ramp_z.y - ramp_z.x
+		var s0: Array = _section_at(stations, ramp_z.x)
+		var s1: Array = _section_at(stations, ramp_z.y)
+		# shut, at the angle the belly rises at between the hinge and the end
+		var rise: float = atan2((float(s1[3]) - float(s1[2])) - (float(s0[3]) - float(s0[2])), run)
+		rise = clampf(rise, 0.0, deg_to_rad(40.0))
+		ramp.set_meta("shut_angle", rise)
+		var to_ramp := Basis(Vector3.RIGHT, rise)      # the shut ramp's frame
 		var rst := MeshKit.begin()
-		MeshKit.box(rst, Vector3(hw.x * 1.7, 0.14, hw.z * 0.62),
-			Vector3(0, -0.07, hw.z * 0.31))
+		var steps := 6
+		var prev: Array = []
+		var deck_w := PackedFloat32Array()
+		for k in steps + 1:
+			var t: float = float(k) / float(steps)
+			var z: float = ramp_z.x + run * t
+			var y: float = hinge.y + run * t * tan(rise)
+			var w: float = _half_width(_section_at(stations, z), y, LINING + 0.04)
+			w = clampf(w, 0.3, hw.x)
+			deck_w.append(w)
+			var row: Array = [Vector3(-w, y, z), Vector3(w, y, z), Vector3(w, y - 0.14, z),
+				Vector3(-w, y - 0.14, z)]
+			for i in 4:
+				row[i] = to_ramp * ((row[i] as Vector3) - hinge)
+			if not prev.is_empty():
+				var up: Vector3 = Vector3.UP
+				MeshKit.quad_n(rst, prev[0], prev[1], row[1], row[0], up)
+				MeshKit.quad_n(rst, prev[3], prev[2], row[2], row[3], -up)
+				MeshKit.quad_n(rst, prev[1], prev[2], row[2], row[1], Vector3.RIGHT)
+				MeshKit.quad_n(rst, prev[0], prev[3], row[3], row[0], Vector3.LEFT)
+			prev = row
+		MeshKit.quad_n(rst, prev[0], prev[1], prev[2], prev[3], Vector3.BACK)
+		# what can be stood on, from the hinge to the end (`Walker._ramp_half`)
+		ramp.set_meta("deck_w", deck_w)
 		ramp.add_child(MeshKit.mi(MeshKit.finish(rst,
 			MeshKit.mat(Color(0.27, 0.28, 0.27), 0.9, 0.1)), "RampDeck"))
+		var skin_st := MeshKit.begin()
+		var lin_st := MeshKit.begin()
+		for q in tail_cut["ramp"]:
+			MeshKit.quad_n(skin_st, to_ramp * (q[0] - hinge), to_ramp * (q[1] - hinge),
+				to_ramp * (q[2] - hinge), to_ramp * (q[3] - hinge), to_ramp * (q[4] as Vector3))
+		for q in tail_cut.get("ramp_in", []):
+			MeshKit.quad_n(lin_st, to_ramp * (q[0] - hinge), to_ramp * (q[1] - hinge),
+				to_ramp * (q[2] - hinge), to_ramp * (q[3] - hinge), to_ramp * (q[4] as Vector3))
+		ramp.add_child(MeshKit.mi(MeshKit.finish(skin_st, mat_paint), "RampSkin"))
+		ramp.add_child(MeshKit.mi(MeshKit.finish(lin_st, mat_hold), "RampLining"))
+		ramp.rotation.x = -rise
 		hold.add_child(ramp)
+		# The upper cargo door: the rest of the tail over the ramp, which goes
+		# up into the tail as the ramp goes down -- not down with it.
+		var door := Node3D.new()
+		door.name = "CargoDoor"
+		var pivot := Vector3(0, hold_top, ramp_z.x)
+		door.position = pivot - hold.position
+		var dst := MeshKit.begin()
+		var dlin := MeshKit.begin()
+		var low := 0.0
+		for q in tail_cut["door"]:
+			for c in 4:
+				low = minf(low, (q[c] as Vector3).y - pivot.y)
+			MeshKit.quad_n(dst, q[0] - pivot, q[1] - pivot, q[2] - pivot, q[3] - pivot, q[4])
+		for q in tail_cut.get("door_in", []):
+			MeshKit.quad_n(dlin, q[0] - pivot, q[1] - pivot, q[2] - pivot, q[3] - pivot, q[4])
+		door.add_child(MeshKit.mi(MeshKit.finish(dst, mat_paint), "DoorSkin"))
+		door.add_child(MeshKit.mi(MeshKit.finish(dlin, mat_hold), "DoorLining"))
+		# how far it has to go up to be clear of the opening
+		door.set_meta("lift", -low)
+		hold.add_child(door)
+		out["cargo_door"] = door
 		root.add_child(hold)
 		out["hold"] = hold
 		out["ramp"] = ramp
@@ -422,13 +565,13 @@ void fragment() {
 			MeshKit.cone(pst, pr * 0.86, pr, -pl * 0.5, -pl * 0.18, pp, 12, false)
 			MeshKit.cone(pst, pr, pr * 0.90, -pl * 0.18, pl * 0.5, pp, 12, false)
 			MeshKit.box(pst, Vector3(0.22, 1.05, pl * 0.34), pp + Vector3(0, pr * 0.8, -pl * 0.1))
-			root.add_child(MeshKit.mi(MeshKit.finish(pst, mat_paint), "Nacelle"))
+			root.add_child(_mounted(MeshKit.mi(MeshKit.finish(pst, mat_paint), "Nacelle")))
 			var fst2 := MeshKit.begin()
 			MeshKit.cone(fst2, pr * 0.80, pr * 0.20, -pl * 0.42, -pl * 0.18, pp, 12, true)
 			# turbine bullet in the tailpipe. Without it the nacelle was a tube
 			# open at the back and you could see through the engine.
 			MeshKit.cone(fst2, pr * 0.74, pr * 0.26, pl * 0.5, pl * 0.28, pp, 12, true)
-			root.add_child(MeshKit.mi(MeshKit.finish(fst2, mat_dark), "FanFace"))
+			root.add_child(_mounted(MeshKit.mi(MeshKit.finish(fst2, mat_dark), "FanFace")))
 
 	# ------------------------------------------------------- side firing battery
 	# Barrels run out through the port side of the belly, the way a gunship
@@ -537,7 +680,7 @@ void fragment() {
 			if not pusher:
 				var nac := MeshKit.begin()
 				MeshKit.cone(nac, 0.95, 0.55, -2.6, 2.4, ppos, 10)
-				root.add_child(MeshKit.mi(MeshKit.finish(nac, mat_paint), "Nacelle"))
+				root.add_child(_mounted(MeshKit.mi(MeshKit.finish(nac, mat_paint), "Nacelle")))
 			var hub := Node3D.new()
 			hub.name = "Prop"
 			hub.position = ppos if pusher else ppos + Vector3(0, 0, -2.8)
@@ -556,7 +699,7 @@ void fragment() {
 			else:
 				MeshKit.cone(bst, 0.34, 0.16, -0.5, 0.3, Vector3.ZERO, 8)
 			hub.add_child(MeshKit.mi(MeshKit.finish(bst, mat_dark), "Blades"))
-			root.add_child(hub)
+			root.add_child(_mounted(hub))
 			out["props"].append(hub)
 
 	# ------------------------------------------------------------------ canards
@@ -595,7 +738,41 @@ void fragment() {
 		zmin = minf(zmin, p.y)
 		zmax = maxf(zmax, p.y)
 		xr = minf(xr, p.x)
-	if not poly.is_empty():
+	if not poly.is_empty() and bool(stb.get("elevator", false)) and poly.size() == 4:
+		# A fixed tailplane with an elevator hinged on the back of it, the way
+		# a transport, an A-10 or a light aircraft is built. Everything had a
+		# fighter's all-moving slab, swinging seventeen degrees each way and
+		# scissoring for roll, which nothing of theirs does.
+		# poly is (span, chord): root leading, tip leading, tip trailing, root trailing
+		var e_root: float = lerpf(float(poly[0].y), float(poly[3].y), 0.70)
+		var e_tip: float = lerpf(float(poly[1].y), float(poly[2].y), 0.70)
+		var fixed_d: Dictionary = stb.duplicate()
+		fixed_d["poly"] = [poly[0], poly[1], Vector2(poly[2].x, e_tip), Vector2(poly[3].x, e_root)]
+		var elev_d: Dictionary = stb.duplicate()
+		elev_d["poly"] = [Vector2(poly[3].x, e_root), Vector2(poly[2].x, e_tip), poly[2], poly[3]]
+		elev_d["t_root"] = float(stb["t_root"]) * 0.7
+		elev_d["t_tip"] = float(stb["t_tip"]) * 0.7
+		for side in [1.0, -1.0]:
+			var fixed_n := Node3D.new()
+			fixed_n.name = "Stab" + ("R" if side > 0 else "L")
+			var fst := MeshKit.begin()
+			_add_planform(fst, fixed_d, side)
+			fixed_n.add_child(MeshKit.mi(MeshKit.finish(fst, mat_paint), "Mesh"))
+			# the elevator turns about its hinge line, root to tip
+			var h0 := Vector3(float(poly[3].x) * side, float(stb["y"]), e_root)
+			var h1 := Vector3(float(poly[2].x) * side, float(stb["y"]), e_tip)
+			var elev := Node3D.new()
+			elev.name = "Elevator"
+			elev.position = h0
+			elev.set_meta("hinge", (h1 - h0).normalized() * side)
+			var est := MeshKit.begin()
+			_add_planform(est, elev_d, side, -h0)
+			elev.add_child(MeshKit.mi(MeshKit.finish(est, mat_paint), "Mesh"))
+			fixed_n.add_child(elev)
+			root.add_child(fixed_n)
+			out["stabs"].append(elev)
+			out["parts"]["stab_" + ("r" if side > 0 else "l")] = fixed_n
+	elif not poly.is_empty():
 		var hinge_z := lerpf(zmin, zmax, 0.42)
 		for side in [1.0, -1.0]:
 			var pivot := Node3D.new()
@@ -693,6 +870,7 @@ void fragment() {
 		for stn in bay["stations"]:
 			var holder := Node3D.new()
 			holder.name = "Store"
+			_mounted(holder)
 			# Hung off the wing the model actually has. The pylon positions are
 			# authored by eye, and on a cropped-delta planform they missed: an
 			# F-16's wingtip rails sat thirty centimetres outboard of the tip
@@ -743,7 +921,7 @@ void fragment() {
 		lm.position = Vector3(float(l[0]) * tip_x, float(wing["y"]) + 0.05,
 			lerpf(tip_c.x, tip_c.y, 0.62))
 		lm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		root.add_child(lm)
+		root.add_child(_mounted(lm))
 		out["lights"].append(lm)
 
 	# ------------------------------------------------- cockpit furniture
@@ -843,7 +1021,43 @@ void fragment() {
 	out["nav_tips"] = [Vector3(-tip_x, float(wing["y"]) + 0.05, lerpf(tip_c.x, tip_c.y, 0.62)),
 		Vector3(tip_x, float(wing["y"]) + 0.05, lerpf(tip_c.x, tip_c.y, 0.62))]
 	out["cockpit"] = Vector3(0.0, cp["y"] - 0.10, lerpf(cp["z0"], cp["z1"], 0.34))
+	_hang_on_wings(root, out, sh)
 	return out
+
+## Everything mounted out on a wing -- the engines and their propellers, the
+## stores under it, the lamp on its tip -- goes on the wing, so that it goes
+## with it. They were all on the airframe: a wing torn off left its engines
+## and pylons hanging in the air where it had been, propellers turning.
+## Something that hangs off a wing if it is out on one: see `_hang_on_wings`.
+static func _mounted(n: Node3D) -> Node3D:
+	n.set_meta("mountable", true)
+	return n
+
+static func _hang_on_wings(root: Node3D, out: Dictionary, sh: Dictionary) -> void:
+	var parts: Dictionary = out["parts"]
+	if not parts.has("wing_r") or not parts.has("wing_l"):
+		return
+	var body := 0.5
+	for sec in sh.get("sections", []):
+		body = maxf(body, float(sec[1]))
+	var lamps: Array = out.get("lights", [])
+	for n in root.get_children():
+		var nd := n as Node3D
+		if nd == null:
+			continue
+		# by what it is, not its name: a second of anything is "@Node3D@12"
+		if not nd.has_meta("mountable") and not lamps.has(nd):
+			continue
+		var x: float = nd.position.x
+		if nd is MeshInstance3D and (nd as MeshInstance3D).mesh != null:
+			x = (nd.transform * (nd as MeshInstance3D).get_aabb().get_center()).x
+		if absf(x) < body + 0.3:
+			continue
+		var wing: Node3D = parts["wing_r" if x > 0.0 else "wing_l"]
+		var keep := nd.transform
+		root.remove_child(nd)
+		wing.add_child(nd)
+		nd.transform = wing.transform.affine_inverse() * keep
 
 ## The sensor turret under a drone's chin: a gimballed ball with a window in
 ## it, which is the drone's whole reason for being up there. Optional -- a
@@ -879,6 +1093,45 @@ static func _add_sensor_ball(root: Node3D, sh: Dictionary, mat_dark: Material, m
 	win.rotation_degrees = Vector3(90, 0, 0)
 	win.position = at + Vector3(0, -r * 0.2, -r * 0.96)
 	root.add_child(win)
+
+## How far in from the skin the hold's lining is.
+const LINING := 0.12
+
+## Which piece of the tail a fuselage panel belongs to, by its middle `c` and
+## its outward normal `n`: "ramp" for the belly between the hinge and the end
+## of the ramp, "door" for the rest of the tail there below the hold's
+## ceiling, "" for the airframe.
+static func _tail_piece(c: Vector3, n: Vector3, ramp_z: Vector2, top: float) -> String:
+	if c.z <= ramp_z.x or c.z >= ramp_z.y:
+		return ""
+	if n.y < -0.3:
+		return "ramp"
+	if c.y < top:
+		return "door"
+	return ""
+
+## The fuselage's section [z, half width, half height, centre height, power]
+## at `z`, between the stations either side.
+static func _section_at(stations: Array, z: float) -> Array:
+	for i in stations.size() - 1:
+		var a: Array = stations[i]
+		var b: Array = stations[i + 1]
+		if float(a[0]) <= z and float(b[0]) >= z:
+			var f: float = (z - float(a[0])) / maxf(float(b[0]) - float(a[0]), 0.001)
+			var mid: Array = []
+			for c in 5:
+				mid.append(lerpf(float(a[c]), float(b[c]), f))
+			return mid
+	return stations[0] if z < float(stations[0][0]) else stations[stations.size() - 1]
+
+## Half the width of a section at height `y`, `inset` in from the skin.
+static func _half_width(sec: Array, y: float, inset: float) -> float:
+	var hw: float = float(sec[1]) - inset
+	var hh: float = float(sec[2]) - inset
+	var p: float = float(sec[4])
+	var v: float = clampf(absf(y - float(sec[3])) / maxf(hh, 0.01), 0.0, 1.0)
+	# the ring is |x / hw|^p + |y / hh|^p = 1 (see `MeshKit.ring`)
+	return hw * pow(maxf(1.0 - pow(v, p), 0.0), 1.0 / p)
 
 ## Sink a trough into the top of the fuselage so the crew sit IN the aeroplane
 ## instead of on top of the skin. The upper vertices of every station inside the

@@ -190,32 +190,36 @@ func _find_enemy() -> Node3D:
 	return _held("any", _scan_enemy)
 
 func _scan_enemy() -> Node3D:
+	# Whatever is the most danger to it first, then what it is for: the air
+	# defence and the men with missiles, a helicopter of theirs; then the
+	# armour its missiles are for; then the rest. It took the nearest armour
+	# it could see before anything else, and left the gun that was tracking
+	# it until there was no tank left. Weighed against how near, as a crew
+	# in armour weighs its own (`Tank.threat_to_aircraft`).
 	var best: Node3D = null
-	var bd := 1e9
-	# Over a fight, armour first: it is what the missiles are for, and a man
-	# can be left to the gun once nothing heavier is about.
+	var bs := 1e9
 	if arena != null:
-		var heavy: Node3D = null
-		var hd := 3500.0
 		for v in get_tree().get_nodes_in_group("vehicles"):
 			if not is_instance_valid(v) or not (v is Tank) or (v as Tank).team == team \
 					or not (v as Tank).alive:
 				continue
 			var dv: float = global_position.distance_to((v as Node3D).global_position)
-			if dv < hd and Firearm.can_see(global_position,
+			if dv > 3500.0:
+				continue
+			var sv: float = dv / Tank.threat_to_aircraft(v)
+			if sv < bs and Firearm.can_see(global_position,
 					(v as Node3D).global_position + Vector3(0, 2.0, 0)):
-				hd = dv
-				heavy = v
-		if heavy != null:
-			return heavy
+				bs = sv
+				best = v
 	# over a street fight it hunts the men in it as well, any it can see
 	if arena != null and is_instance_valid(arena):
 		for n in arena.enemies_of(team):
 			if not is_instance_valid(n) or not n.is_alive():
 				continue
 			var d0: float = global_position.distance_to(n.global_position)
-			if d0 < bd and Firearm.can_see(global_position, Soldier.chest_of(n)):
-				bd = d0
+			var s0: float = d0 / Tank.threat_to_aircraft(n)
+			if s0 < bs and Firearm.can_see(global_position, Soldier.chest_of(n)):
+				bs = s0
 				best = n
 	for n in get_tree().get_nodes_in_group("hittable"):
 		if not is_instance_valid(n) or n == self:
@@ -226,9 +230,13 @@ func _scan_enemy() -> Node3D:
 			continue
 		if Sim.no_air_threat and (n is Aircraft):
 			continue
+		# nothing it carries catches a jet
+		if n is Aircraft and not (n is Helicopter):
+			continue
 		var d: float = global_position.distance_to(n.global_position)
-		if d < bd:
-			bd = d
+		var s1: float = d / Tank.threat_to_aircraft(n)
+		if s1 < bs:
+			bs = s1
 			best = n
 	return best
 

@@ -478,12 +478,20 @@ func path(from: Vector3, to: Vector3) -> PackedVector2Array:
 		pts.remove_at(0)
 	return pts
 
-## Somewhere close that the threat cannot see into, even kneeling.
-func find_cover(from: Vector3, threat: Vector3) -> Vector3:
+## Somewhere close that the threat -- and each of `others`, eye positions of
+## the other men who have a line on him -- cannot put a round into, even
+## kneeling. See `covered_from`.
+##
+## It was a cell whose middle the one threat could not see. A man counts as
+## there anywhere within a step or so of that middle, and on a corner a step
+## is back in view; the others already shooting at him were not asked; and a
+## hedge, a car's panels or a smoke cloud hid the middle as well as a wall.
+## Measured, nine places in ten that men went to ground were in plain view of
+## an enemy as they got there.
+func find_cover(from: Vector3, threat: Vector3, others: Array = []) -> Vector3:
 	var home := _cell(from)
-	var best := Vector3.INF
-	var best_d := 1e9
 	for r in range(1, 8):
+		var ring: Array = []
 		for dj in range(-r, r + 1):
 			for di in range(-r, r + 1):
 				if maxi(absi(di), absi(dj)) != r:
@@ -494,15 +502,35 @@ func find_cover(from: Vector3, threat: Vector3) -> Vector3:
 				var p := _cell_pos(q)
 				if p.distance_to(threat) < 7.0:
 					continue
+				# the cheap question first: the middle, from the threat
 				if Firearm.can_see(p + Vector3(0, 1.1, 0), threat):
 					continue
-				var d: float = p.distance_to(from) + p.distance_to(threat) * 0.05
-				if d < best_d:
-					best_d = d
-					best = p
-		if best != Vector3.INF and r >= 2:
-			break
-	return best
+				ring.append([p.distance_to(from) + p.distance_to(threat) * 0.05, p])
+		if ring.is_empty():
+			continue
+		ring.sort_custom(func(x, y) -> bool: return float(x[0]) < float(y[0]))
+		for c in ring:
+			var p: Vector3 = c[1]
+			if not covered_from(p, threat):
+				continue
+			var ok := true
+			for o in others:
+				if (o as Vector3).distance_to(p) < 5.0 or not covered_from(p, o):
+					ok = false
+					break
+			if ok:
+				return p
+	return Vector3.INF
+
+## Would a round from `from` stop before it reached a man kneeling at `p`:
+## stopped by something hard -- a wall, a block, rubble, not a hedge or a
+## car's panels and not smoke -- everywhere he might be standing round `p`.
+static func covered_from(p: Vector3, from: Vector3) -> bool:
+	for o in [Vector3.ZERO, Vector3(0.6, 0, 0), Vector3(-0.6, 0, 0), Vector3(0, 0, 0.6), Vector3(0, 0, -0.6)]:
+		var a: Vector3 = p + o + Vector3(0, 1.1, 0)
+		if Obstacles.segment(a, from) >= 1.0 or Obstacles.seg_soft:
+			return false
+	return true
 
 # -------------------------------------------------------------------- the men
 func enemies_of(team: int) -> Array:
@@ -551,6 +579,11 @@ func spawn_point(team: int, slot := -1) -> Vector3:
 	# which end of town is the absolute side's, not this machine's "us": a
 	# RED player's side 0 comes in from RED's end
 	var z: float = centre.y + (118.0 if NetLink.local_team(team) == 0 else -118.0)
+	# with aircraft killing them in the open, in from a building at their end
+	if under_air(team):
+		var inside: Vector3 = indoor_spot(Vector3(centre.x + _rng.randf_range(-40.0, 40.0), 0.0, z))
+		if inside != Vector3.INF:
+			return inside
 	var best := Vector3.INF
 	var best_score := -1e9
 	for k in 9:
@@ -614,6 +647,9 @@ func _on_died(who: Soldier, killer: Node, head: bool) -> void:
 	(_teams[who.team] as Array).erase(who)
 	soldiers.erase(who)
 	_feed(killer, who.callsign, who.team, who.last_cause, head)
+	if (killer != null and is_instance_valid(killer) and killer is Aircraft) \
+			or who.last_cause in ["air", "strafe", "strike", "nuke"]:
+		_note_air_kill(who.team)
 	var by_player: bool = killer != null and is_instance_valid(killer) \
 		and (killer == player or (not is_instance_valid(player) and killer == streaks.caller()))
 	# A hit a player on another machine landed: his kill, for his streaks.
@@ -989,6 +1025,11 @@ func heard(at: Vector3, by_team: int, radius := 75.0) -> void:
 ## Where a man with nothing to shoot at should go: wherever his fire team has
 ## been sent, and near the others in it rather than on top of them.
 func objective_for(s: Soldier) -> Vector3:
+	# with the sky against them, indoors before anything else
+	if under_air(s.team):
+		var inside: Vector3 = indoor_spot(s.global_position)
+		if inside != Vector3.INF:
+			return inside
 	var ft: int = fireteam_of(s)
 	# the fire team you are in stays with you, which is what makes it yours
 	if s.team == 0 and ft == 0 and is_instance_valid(player) and player.is_alive() \
@@ -1011,6 +1052,86 @@ func set_away(on: bool) -> void:
 	if not on and is_instance_valid(player):
 		(_teams[0] as Array).append(player)
 
+
+# ------------------------------------------------------------- under the air
+## A side losing men to aircraft gets off the street: what it does as a side
+## stops mattering next to not being out in the open. Three of its men killed
+## from the air inside half a minute and it goes indoors -- into buildings
+## still standing, not the shells of ones brought down -- and comes back into
+## the fight from inside them, until the sky has been quiet for a while.
+const AIR_KILLS := 3
+const AIR_WINDOW := 30.0
+const AIR_HOLD := 45.0
+var _air_kills := {0: [], 1: []}
+var _air_until := {0: -1.0, 1: -1.0}
+
+func _now() -> float:
+	return float(Time.get_ticks_msec()) * 0.001
+
+func _note_air_kill(team: int) -> void:
+	var now: float = _now()
+	var ks: Array = _air_kills[team]
+	ks.append(now)
+	while not ks.is_empty() and now - float(ks[0]) > AIR_WINDOW:
+		ks.pop_front()
+	if ks.size() >= AIR_KILLS:
+		var fresh: bool = not under_air(team)
+		_air_until[team] = now + AIR_HOLD
+		if fresh:
+			# everybody walking somewhere is told again, and the answer is in
+			for s in _teams[team]:
+				if s is Soldier and is_instance_valid(s):
+					(s as Soldier).new_orders()
+			if team == 0:
+				Sim.report("losing men to the air — into the buildings", Sim.Ev.BAD)
+
+func under_air(team: int) -> bool:
+	return _now() < float(_air_until.get(team, -1.0))
+
+## Is `p` inside a building still standing?
+func indoors(p: Vector3) -> bool:
+	if not is_instance_valid(dressing):
+		return false
+	for h in dressing._hollowed:
+		var id: int = int(h[0])
+		if Obstacles.gone(id):
+			continue
+		var c: Vector3 = h[3]
+		var half: Vector2 = Obstacles.half_of(id)
+		if Vector2(p.x - c.x, p.z - c.z).length() > half.length():
+			continue
+		var l: Vector3 = Basis(Vector3.UP, Obstacles.yaw_of(id)).inverse() * (p - c)
+		if absf(l.x) < half.x and absf(l.z) < half.y:
+			return true
+	return false
+
+## Somewhere a man can stand inside a building still standing, the nearest to
+## `near` there is: on the floor, in the open part of a room. INF if none.
+func indoor_spot(near: Vector3) -> Vector3:
+	if not is_instance_valid(dressing):
+		return Vector3.INF
+	var halls: Array = []
+	for h in dressing._hollowed:
+		var id: int = int(h[0])
+		if Obstacles.gone(id):
+			continue
+		var c: Vector3 = h[3]
+		halls.append([Vector2(c.x - near.x, c.z - near.z).length(), id, c])
+	halls.sort_custom(func(a: Array, b: Array) -> bool: return float(a[0]) < float(b[0]))
+	for h in halls.slice(0, 4):
+		var id: int = h[1]
+		var c: Vector3 = h[2]
+		var half: Vector2 = Obstacles.half_of(id)
+		var bs := Basis(Vector3.UP, Obstacles.yaw_of(id))
+		for k in 8:
+			var lp := Vector3(_rng.randf_range(-half.x + 1.4, half.x - 1.4), 0.0,
+				_rng.randf_range(-half.y + 1.4, half.y - 1.4))
+			var p: Vector3 = c + bs * lp
+			var cell := _cell(p)
+			if _nav.is_point_solid(cell):
+				continue
+			return _cell_pos(cell)
+	return Vector3.INF
 
 # ----------------------------------------------------------------- team plans
 ## What each side is doing as a side. Every man used to choose for himself: a

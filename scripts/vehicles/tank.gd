@@ -559,10 +559,14 @@ func _ai_think(delta: float) -> void:
 				if whose[i] == team:
 					continue
 				var d: float = here.distance_to(pos[i])
-				if d >= reach or d >= best:
+				if d >= reach:
 					continue
 				var n: Variant = nodes[i]
 				if not is_instance_valid(n) or n == self:
+					continue
+				# what it is to this crew, as well as how near: see `threat_to_armour`
+				var score: float = d / Tank.threat_to_armour(n)
+				if score >= best:
 					continue
 				if n.has_method("is_alive") and not n.is_alive():
 					continue
@@ -592,7 +596,7 @@ func _ai_think(delta: float) -> void:
 						and d < 4000.0 and Obstacles.segment(here + Vector3(0, 2.2, 0),
 							pos[i] + Vector3(0, 1.5, 0)) < 1.0:
 					continue
-				best = d
+				best = score
 				_ai_target = n
 		if not is_instance_valid(had) or had != _ai_target:
 			_ai_err = Vector3(randfn(0.0, 1.0), randfn(0.0, 0.6), randfn(0.0, 1.0))
@@ -1372,6 +1376,52 @@ var _power := 1.0
 
 func vclass() -> String:
 	return _cls
+
+## How much `n` matters to a crew in armour, as a multiple of its nearness. It
+## was the nearest thing in reach, whatever it was: a gun turned on a rifleman
+## across the street while the tank behind him laid on it. First what kills
+## armour -- other armour, a man with a tube, a helicopter -- then what kills
+## aircraft, then the rest. What the crew cannot hurt is never asked about.
+static func threat_to_armour(n: Variant) -> float:
+	if n is Tank:
+		var c: String = (n as Tank).vclass()
+		if c in ["mbt", "ifv"]:
+			return 3.0
+		if c in ["spaag", "sam"]:
+			return 2.0
+		return 1.3 if c == "lav" else 1.0
+	if n is Helicopter:
+		return 3.0
+	if n is Aircraft:
+		return 2.0
+	if n is Soldier:
+		var l: String = (n as Soldier).launcher
+		if l == "law":
+			return 3.0
+		if l != "":
+			return 2.0
+	return 1.0
+
+## The same for a crew in the air: what can bring it down first -- the air
+## defence, a man with a missile, an aircraft that fights other aircraft --
+## then what kills armour, then the rest.
+static func threat_to_aircraft(n: Variant) -> float:
+	if n is Tank:
+		var c: String = (n as Tank).vclass()
+		if c in ["spaag", "sam"]:
+			return 3.0
+		if c in ["mbt", "ifv"]:
+			return 2.0
+		return 1.0
+	if n is Aircraft:
+		return 3.0
+	if n is Soldier:
+		var l: String = (n as Soldier).launcher
+		if l == "stinger":
+			return 3.0
+		if l == "law":
+			return 2.0
+	return 1.0
 
 ## A multiple launcher ripples its pod; a howitzer loads one round at a time.
 ## What this vehicle can shoot with, in selection order.

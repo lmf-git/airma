@@ -128,26 +128,48 @@ func build() -> void:
 	_lights()
 	_buildings()
 
+## How far the ground has fallen away from the field's flat frame at (x, z):
+## the field is laid on the tangent plane at its middle (`build_country_bases`)
+## and the planet curves away under it. Everything drawn on the ground is
+## brought down by this so it lies on the ground, not over it.
+##
+## The pavement was a flat slab on a curved world: six centimetres up at the
+## middle of the runway and twenty-six at its ends, and the wheels and boots,
+## which stand on the ground, were sunk into it all along.
+static func sag(x: float, z: float) -> float:
+	return -(x * x + z * z) / (2.0 * Sim.PLANET_R)
+
+## A rectangle of pavement `y` up off the ground, cut into pieces small enough
+## to follow the curve of it.
 func _tri_quad(st: SurfaceTool, cx: float, cz: float, hw: float, hl: float, y: float) -> void:
-	var a := Vector3(cx - hw, y, cz - hl)
-	var b := Vector3(cx + hw, y, cz - hl)
-	var c := Vector3(cx + hw, y, cz + hl)
-	var d := Vector3(cx - hw, y, cz + hl)
-	for v in [a, b, c, a, c, d]:
-		st.set_normal(Vector3.UP)
-		st.add_vertex(v)
+	var nx: int = maxi(1, ceili(hw * 2.0 / 60.0))
+	var nz: int = maxi(1, ceili(hl * 2.0 / 60.0))
+	for i in nx:
+		for j in nz:
+			var x0: float = cx - hw + hw * 2.0 * float(i) / float(nx)
+			var x1: float = cx - hw + hw * 2.0 * float(i + 1) / float(nx)
+			var z0: float = cz - hl + hl * 2.0 * float(j) / float(nz)
+			var z1: float = cz - hl + hl * 2.0 * float(j + 1) / float(nz)
+			var a := Vector3(x0, y + sag(x0, z0), z0)
+			var b := Vector3(x1, y + sag(x1, z0), z0)
+			var c := Vector3(x1, y + sag(x1, z1), z1)
+			var d := Vector3(x0, y + sag(x0, z1), z1)
+			for v in [a, b, c, a, c, d]:
+				st.set_normal(Vector3.UP)
+				st.add_vertex(v)
 
 func _pavement() -> void:
 	if not _shared.has("pavement"):
 		var st := MeshKit.begin()
-		_tri_quad(st, 0, 0, W, HALF, 0.06)                       # runway
-		_tri_quad(st, 0, 0, W + 8.0, HALF + 60.0, 0.02)          # shoulders / overrun
+		# a couple of centimetres apart, each just clear of the one under it
+		_tri_quad(st, 0, 0, W, HALF, 0.03)                       # runway
+		_tri_quad(st, 0, 0, W + 8.0, HALF + 60.0, 0.015)         # shoulders / overrun
 		for s in [-1.0, 1.0]:
-			_tri_quad(st, s * 76.0, 0, 11.0, HALF - 40.0, 0.05)  # parallel taxiways
-			_tri_quad(st, s * 44.0, HALF - 60.0, 33.0, 11.0, 0.05)
-			_tri_quad(st, s * 44.0, -HALF + 60.0, 33.0, 11.0, 0.05)
-			_tri_quad(st, s * 44.0, 0.0, 33.0, 11.0, 0.05)
-		_tri_quad(st, 150.0, -420.0, 62.0, 150.0, 0.05)          # apron
+			_tri_quad(st, s * 76.0, 0, 11.0, HALF - 40.0, 0.025)  # parallel taxiways
+			_tri_quad(st, s * 44.0, HALF - 60.0, 33.0, 11.0, 0.025)
+			_tri_quad(st, s * 44.0, -HALF + 60.0, 33.0, 11.0, 0.025)
+			_tri_quad(st, s * 44.0, 0.0, 33.0, 11.0, 0.025)
+		_tri_quad(st, 150.0, -420.0, 62.0, 150.0, 0.025)          # apron
 		_shared["pavement"] = MeshKit.finish(st,
 			MeshKit.mat(Color(0.115, 0.12, 0.128), 0.92, 0.0))
 	add_child(MeshKit.mi(_shared["pavement"], "Pavement"))
@@ -162,7 +184,7 @@ func _markings() -> void:
 			add_child(num)
 		return
 	var st := MeshKit.begin()
-	var y := 0.09
+	var y := 0.045
 	for s in [-1.0, 1.0]:
 		_tri_quad(st, float(s) * (W - 1.2), 0, 0.45, HALF, y)                     # edge lines
 	var z := -HALF + 90.0
@@ -195,7 +217,7 @@ func _markings() -> void:
 		t.pixel_size = 0.16
 		var mi := MeshKit.mi(t, "Number")
 		mi.material_override = _shared["number_mat"]
-		mi.position = Vector3(0, 0.1, float(pair[0]))
+		mi.position = Vector3(0, 0.05 + sag(0.0, float(pair[0])), float(pair[0]))
 		mi.rotation_degrees = Vector3(-90, float(pair[2]), 0)
 		add_child(mi)
 		_shared["number%d" % made] = t
@@ -219,7 +241,9 @@ func _lights() -> void:
 			m.mesh = bulb
 			m.instance_count = positions.size()
 			for i in positions.size():
-				m.set_instance_transform(i, Transform3D(Basis(), positions[i]))
+				var lp: Vector3 = positions[i]
+				lp.y += sag(lp.x, lp.z)
+				m.set_instance_transform(i, Transform3D(Basis(), lp))
 			_shared[nm] = m
 		multi.multimesh = _shared[nm]
 		multi.material_override = mat
@@ -256,7 +280,7 @@ func _lights() -> void:
 		var mat := MeshKit.mat(Color.BLACK, 0.3, 0.0, Color(1, 1, 1))
 		var mi := MeshKit.mi(box, "PAPI%d" % i)
 		mi.material_override = mat
-		mi.position = Vector3(-W - 12.0 - i * 3.2, 0.8, AIM_Z)
+		mi.position = Vector3(-W - 12.0 - i * 3.2, 0.8 + sag(-W - 12.0 - i * 3.2, AIM_Z), AIM_Z)
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(mi)
 		papi.append(mi)
@@ -276,8 +300,8 @@ func _buildings() -> void:
 			MeshKit.mat(Color(0.20, 0.28, 0.32), 0.15, 0.8))
 	add_child(MeshKit.mi(_shared["tower"], "Tower"))
 	add_child(MeshKit.mi(_shared["glass"], "TowerGlass"))
-	# Something to hit. The scenery clears `Obstacles` when it builds, which
-	# is after the fields are laid out, so this waits for that.
+	# Something to hit -- kept there by `_process`, since the scenery clears
+	# `Obstacles` when it builds, after the fields are laid out.
 	_tower_box.call_deferred()
 	for i in 4:
 		var t := GroundTarget.new()
@@ -293,15 +317,24 @@ func _buildings() -> void:
 		add_child(t)
 
 var _tower_id := -1
+var _tower_gen := -1
 
+## The tower's box in `Obstacles`. It was put in once, a frame after the field
+## was built, on the understanding that the scenery had cleared the field by
+## then; it had not, and every tower on the map was cleared away with it a
+## moment later -- aircraft and vehicles went through all six.
 func _tower_box() -> void:
 	if not is_inside_tree():
 		return
 	var gx := global_transform
 	var foot: Vector3 = gx * Vector3(150.0, 0.0, -600.0)
 	_tower_id = Obstacles.add_box(foot, 8.5, 33.0, 8.5, atan2(-gx.basis.x.z, gx.basis.x.x))
+	_tower_gen = Obstacles.generation
 
 func _process(_dt: float) -> void:
+	# put back whenever the field has been cleared since
+	if _tower_gen != Obstacles.generation and _tower_id >= 0:
+		_tower_box()
 	if watcher == null or not is_instance_valid(watcher):
 		return
 	# In the field's own frame. Taken in the world's, every PAPI on the planet

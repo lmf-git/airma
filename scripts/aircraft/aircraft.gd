@@ -109,6 +109,8 @@ var _pen_pitch := 1.0
 var _pen_yaw := 1.0
 var _pen_drag := 0.0
 var _pen_roll_auth := 1.0
+## What is left of the thrust, with engines gone with a wing.
+var _pen_thrust := 1.0
 var _wreck_t := 0.0
 var _life_t := 0.0
 var _overspeed_warn := 0.0
@@ -487,7 +489,18 @@ func _animate(delta: float) -> void:
 	ramp_anim = move_toward(ramp_anim, 1.0 if ramp_open else 0.0, delta / 3.0)
 	var ramp_n := _part("ramp")
 	if ramp_n != null:
-		ramp_n.rotation.x = deg_to_rad(22.0) * ramp_anim
+		# from lying along the belly, shut, to tipped down to the ground
+		ramp_n.rotation.x = lerpf(-float(ramp_n.get_meta("shut_angle", 0.0)),
+			deg_to_rad(22.0), ramp_anim)
+	# and the upper door up into the tail, out of the way first
+	var door_n := _part("cargo_door")
+	if door_n != null:
+		if not door_n.has_meta("rest"):
+			door_n.set_meta("rest", door_n.position)
+		var dk: float = clampf(ramp_anim * 1.6, 0.0, 1.0)
+		var lift: float = float(door_n.get_meta("lift", 1.0))
+		door_n.position = (door_n.get_meta("rest") as Vector3) + Vector3(0, lift * 0.6 * dk, 0)
+		door_n.scale = Vector3(1.0 - 0.18 * dk, 1.0 - 0.6 * dk, 1.0)
 	hook_anim = move_toward(hook_anim, 1.0 if hook_down else 0.0, delta / 1.4)
 	var hook_n := _part("hook")
 	if hook_n != null:
@@ -527,10 +540,17 @@ func _animate(delta: float) -> void:
 	_vis_roll = lerpf(_vis_roll, surf_roll, lp)
 	_vis_yaw = lerpf(_vis_yaw, surf_yaw, lp)
 	var sd := deg_to_rad(17.0)
-	if is_instance_valid(_stab_r):
-		_stab_r.rotation.x = sd * clampf(_vis_pitch + _vis_roll * 0.45, -1.0, 1.0)
-	if is_instance_valid(_stab_l):
-		_stab_l.rotation.x = sd * clampf(_vis_pitch - _vis_roll * 0.45, -1.0, 1.0)
+	for pair in [[_stab_r, 1.0], [_stab_l, -1.0]]:
+		var tail: Node3D = pair[0]
+		if not is_instance_valid(tail):
+			continue
+		if tail.has_meta("hinge"):
+			# an elevator on a fixed tailplane: both together, for pitch only,
+			# about its own hinge line
+			tail.transform.basis = Basis(tail.get_meta("hinge") as Vector3,
+				deg_to_rad(22.0) * clampf(_vis_pitch, -1.0, 1.0))
+		else:
+			tail.rotation.x = sd * clampf(_vis_pitch + _vis_roll * 0.45 * float(pair[1]), -1.0, 1.0)
 	if not _rotors.is_empty():
 		_rotor_spin += delta * (6.0 + power * 26.0)
 		for r in _rotors:
@@ -1166,6 +1186,7 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 	else:
 		thrust = lerpf(t_mil, t_ab, (power - 0.78) / 0.22)
 	thrust *= pow(clampf(rho / RHO0, 0.15, 1.0), 0.65)
+	thrust *= _pen_thrust
 	# Now that thrust is a real figure this is a real specific consumption:
 	# thrust in newtons times sfc gives kilograms a second.
 	const BURN_SCALE := 33800.0
@@ -1430,21 +1451,17 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 	_was_airborne = not on_ground
 
 	# ---- crash test ------------------------------------------------------
-	var belly := 1.15 if gear_anim > 0.9 else 0.9
-	if agl < belly and (gear_anim < 0.9 or absf(b.y.dot(Vector3.UP)) < 0.72):
-		_impact(vel.length())
+	# The airframe itself on the ground: see `_hull_contacts`. It was a sum --
+	# below a metre with the wheels up, or banked over on them, and it blew up
+	# -- with nothing touching anything: no belly landing, no wingtip dragged
+	# along the runway, no tail strike, just the explosion.
+	_hull_contacts(state)
 	# Buildings, hangars, masts and pylons. Nothing in the world used to be
 	# solid except the ground, so a low pass down a main street went straight
 	# through the office blocks. Only asked for below the height of the tallest
 	# thing standing, which is where the answer can be anything but "no".
 	if alive and agl < OBSTACLE_CEILING:
-		var span: float = float(spec.get("span", 12.0)) * 0.5
-		var struck := Obstacles.hit(pos, span)
-		if struck >= 0:
-			var sc := Scenery.current
-			if is_instance_valid(sc):
-				sc.damage_area(Obstacles.centre_of(struck), maxf(span, 8.0))
-			_impact(maxf(vel.length(), 30.0))
+		_structure_strike(state.transform, vel)
 	if agl < -2.0:
 		_impact(200.0)
 	_midair(pos, vel)
@@ -2306,12 +2323,40 @@ func _midair(pos: Vector3, vel: Vector3) -> void:
 			continue
 		if Sim.debug_weapons:
 			print("[midair] %s into %s at %.0f m/s, %.1f m apart" % [name, o.name, closing, d])
-		_impact(maxf(closing, 13.0))
+		# Each by where on it the other is: out along a wing, that wing; the
+		# fuselage, the lot. A wingtip through a wingtip used to bring both
+		# down as surely as nose into nose.
+		var mine_part: String = _part_toward(o.global_position)
+		var theirs: String = o._part_toward(pos)
+		if mine_part != "":
+			break_part(mine_part)
+			_damage(40.0, "collision")
+		else:
+			_impact(maxf(closing, 13.0))
 		# and the other, if this machine is the one flying it: once one has
 		# come apart the other no longer finds anything alive to hit
 		if not o.ghost and o.alive:
-			o._impact(maxf(closing, 13.0))
+			if theirs != "":
+				o.break_part(theirs)
+				o._damage(40.0, "collision")
+			else:
+				o._impact(maxf(closing, 13.0))
 		return
+
+## The wing on the side of `p`, if `p` is out past the fuselage along it and
+## the wing is still there; "" for the fuselage.
+func _part_toward(p: Vector3) -> String:
+	var local: Vector3 = global_transform.affine_inverse() * p
+	var half_body: float = 2.0
+	var sh: Dictionary = spec.get("shape", {})
+	for sec in sh.get("sections", []):
+		half_body = maxf(half_body, float(sec[1]))
+	if absf(local.x) < half_body + 1.5:
+		return ""
+	var id: String = "wing_r" if local.x > 0.0 else "wing_l"
+	if lost.has(id) or not _model.get("parts", {}).has(id):
+		return ""
+	return id
 
 ## How many salvos have gone, so a seeker judges each one once.
 var flare_salvo := 0
@@ -2391,7 +2436,8 @@ func take_hit(amount: float, _from: Node = null) -> void:
 		Sim.net.report_damage(self, amount)
 		return
 	# a solid hit is as likely to remove a control surface as it is to kill you
-	var chance: float = clampf(amount / 90.0, 0.0, 0.85)
+	# -- but not a rifle round's worth: a hole is not a wing gone
+	var chance: float = clampf(amount / 90.0, 0.0, 0.85) if amount >= 4.0 else 0.0
 	if amount > 55.0 or randf() < chance:
 		break_part(_pick_part())
 	_damage(amount)
@@ -2474,6 +2520,21 @@ func break_part(id: String) -> void:
 	match id:
 		"wing_l", "wing_r":
 			var side := -1.0 if id == "wing_l" else 1.0
+			# what was hung on it went with it: its engines' thrust, the
+			# stores on its pylons, the light on its tip
+			var props: Array = _model.get("props", [])
+			var gone_props := 0
+			for pr in props:
+				if is_instance_valid(pr) and node.is_ancestor_of(pr):
+					gone_props += 1
+			if not props.is_empty() and gone_props > 0:
+				_pen_thrust = maxf(_pen_thrust - float(gone_props) / float(props.size()), 0.0)
+			for st in stores:
+				if is_instance_valid(st["node"]) and node.is_ancestor_of(st["node"]):
+					st["gone"] = true
+			var tip_light: int = 0 if id == "wing_l" else 1
+			if tip_light < _nav.size() and is_instance_valid(_nav[tip_light]):
+				(_nav[tip_light] as Node3D).visible = false
 			_pen_lift = maxf(_pen_lift - 0.42, 0.16)
 			_pen_roll_bias += -side * 0.42
 			_pen_drag += 0.055
@@ -2526,6 +2587,168 @@ func _report_part(id: String) -> void:
 		"stab_r": "right stabilator", "fin_l": "left fin", "fin_r": "right fin",
 		"canopy": "canopy"}.get(id, id)
 	Sim.report("%s gone" % pretty, Sim.Ev.BAD)
+
+# ------------------------------------------------------------- the airframe
+## Points along the airframe to test against the ground and what stands on
+## it, in the aircraft's own frame: [where, how far round it counts, part].
+## The part is "" for the fuselage -- hitting anything with that is the end of
+## it -- or the wing the point is on, which is torn off instead.
+##
+## The whole aircraft was one ball half its span across, asked about only at
+## its middle: a transport's wing went through a hangar or a block of flats
+## untouched if the middle was clear, or the whole aeroplane blew up from a
+## ball twenty metres round that the wings did not fill; and a wingtip put
+## into the ground in a bank was not noticed at all.
+var _frame_pts: Array = []
+
+func _frame_points() -> Array:
+	if not _frame_pts.is_empty():
+		return _frame_pts
+	var sh: Dictionary = spec.get("shape", {})
+	# the fuselage: down its middle, as fat as it is there
+	for sec in sh.get("sections", []):
+		var r: float = minf(float(sec[1]), float(sec[2])) * 0.8
+		# [where, reach for buildings, part, on the ground, how far down its
+		# belly is from the middle -- the section's own half height]
+		_frame_pts.append([Vector3(0.0, float(sec[3]), float(sec[0])), maxf(r, 0.4), "", true,
+			float(sec[2])])
+		# and its lower corners, so that on the ground it has some width to
+		# stand on: down its middle alone it rolled over like a log
+		for cs in [-1.0, 1.0]:
+			_frame_pts.append([Vector3(cs * float(sec[1]) * 0.7, float(sec[3]) - float(sec[2]) * 0.7,
+				float(sec[0])), 0.3, "", true, 0.0])
+	# each wing from root to tip, down the middle of its chord
+	var w: Dictionary = sh.get("wing", {})
+	var poly: Array = w.get("poly", [])
+	var parts: Dictionary = _model.get("parts", {})
+	if poly.size() >= 4:
+		var root := Vector2(float(poly[0].x), (float(poly[0].y) + float(poly[poly.size() - 1].y)) * 0.5)
+		var tip := Vector2(float(poly[1].x), (float(poly[1].y) + float(poly[2].y)) * 0.5)
+		var wy: float = float(w.get("y", 0.0))
+		for side in [1.0, -1.0]:
+			var id: String = "wing_r" if side > 0.0 else "wing_l"
+			if not parts.has(id):
+				continue
+			for k in range(1, 6):
+				var f: float = float(k) / 5.0
+				var q: Vector2 = root.lerp(tip, f)
+				_frame_pts.append([Vector3(q.x * side, wy, q.y), 0.6, id, true, 0.25])
+	var winged := false
+	for fp in _frame_pts:
+		winged = winged or String(fp[2]) != ""
+	if not winged:
+		# no wing to lose -- a helicopter's rotor, a missile carrier: the
+		# whole span round the middle, as it always was
+		# (for buildings only: on the ground it would float on its rotor disc)
+		_frame_pts.append([Vector3.ZERO, float(spec.get("span", 12.0)) * 0.5, "", false, 0.0])
+	return _frame_pts
+
+## The airframe, point by point, against the ground and everything standing on
+## it. The fuselage into anything is a crash; a wing into it is a wing gone,
+## torn off where it hit, and the rest flies on -- or does not -- without it.
+func _structure_strike(xf: Transform3D, vel: Vector3) -> void:
+	var sc := Scenery.current
+	for fp in _frame_points():
+		var part: String = fp[2]
+		if part != "" and lost.has(part):
+			continue
+		var at: Vector3 = xf * (fp[0] as Vector3)
+		var r: float = fp[1]
+		# the ground is `_hull_contacts`: something to slide on, not a wall
+		var hit_id: int = Obstacles.hit(at, r)
+		if hit_id < 0:
+			continue
+		var pv: Vector3 = vel + angular_velocity.cross(at - xf.origin)
+		var speed: float = pv.length()
+		if hit_id >= 0 and is_instance_valid(sc):
+			sc.damage_area(Obstacles.centre_of(hit_id), maxf(r * 4.0, 8.0))
+		if part == "":
+			_impact(maxf(speed, 30.0))
+			return
+		if speed < 4.0:
+			# touching, not hitting: a wingtip resting on a hangar door
+			continue
+		if speed < 12.0:
+			_damage(10.0, "scrape")
+			continue
+		Effects.dust(get_tree().current_scene, at, 4.0)
+		break_part(part)
+		_damage(clampf(speed * 0.5, 15.0, 60.0), "wing strike")
+		return
+
+## Into the ground this fast at a fuselage point, square to it, is a crash.
+## Slower than that it lands on its belly and slides.
+const HULL_CRASH_VN := 11.0
+## A wing put into the ground this fast is torn off; so is one dug in more
+## than `WING_DIG` deep while moving along at more than `WING_DIG_SPEED` -- the
+## start of a cartwheel. Less than that it scrapes: a low wing on a belly
+## landing rocks down onto its tip, and that is all.
+const WING_TEAR_VN := 12.0
+const WING_DIG := 1.0
+const WING_DIG_SPEED := 40.0
+var _scrape_fx := 0.0
+
+## The airframe against the ground, the way the wheels are (`_gear_forces`):
+## each point along the fuselage and the wings that is down in it is pushed
+## back out, and drags along it. The underside of the fuselage slides on the
+## belly, a wingtip scrapes, the tail strikes on a rotation too steep -- and
+## only a real blow into the ground is the end of the aircraft, or of a wing.
+func _hull_contacts(state: PhysicsDirectBodyState3D) -> int:
+	var xf := state.transform
+	var com := xf.origin + xf.basis * center_of_mass
+	var hits := 0
+	var worst_slide := 0.0
+	var down := -xf.basis.y
+	for fp in _frame_points():
+		if not bool(fp[3]):
+			continue
+		var part: String = fp[2]
+		if part != "" and lost.has(part):
+			continue
+		# the underside of the section round the point, or a wing's skin
+		var reach: float = float(fp[4])
+		var wp: Vector3 = xf * (fp[0] as Vector3) + down * reach
+		var g: float = maxf(Sim.height_at(wp.x, wp.z), Sim.roads.bridge_floor(wp.x, wp.z, wp.y))
+		var pen: float = g - wp.y
+		if pen <= 0.0:
+			continue
+		hits += 1
+		var n: Vector3 = Sim.normal_at(wp.x, wp.z)
+		var arm := wp - com
+		var pv := state.linear_velocity + state.angular_velocity.cross(arm)
+		var vn: float = pv.dot(n)
+		var vt: Vector3 = pv - n * vn
+		var slide: float = vt.length()
+		if part == "" and -vn > HULL_CRASH_VN:
+			_impact(-vn + slide * 0.1)
+			return hits
+		if part != "" and (-vn > WING_TEAR_VN or (pen > WING_DIG and slide > WING_DIG_SPEED)):
+			Effects.dust(get_tree().current_scene, wp, 4.0)
+			break_part(part)
+			_damage(clampf(slide * 0.3, 10.0, 40.0), "wing strike")
+			continue
+		pen = minf(pen, 0.8)
+		var k: float = mass * 9.81 * 2.5 / 0.3
+		var c: float = 1.0 * sqrt(k * mass / 4.0)
+		var fn: float = clampf(k * pen - c * vn, 0.0, mass * 9.81 * 6.0)
+		var f := n * fn
+		# skin on the ground slides, it does not roll
+		if slide > 0.05:
+			var mu: float = 0.6 * Sim.surface_grip(wp.x, wp.z)
+			f -= vt / slide * minf(mu * fn, slide * mass * 0.5)
+		state.apply_force(f, arm)
+		if slide > worst_slide:
+			worst_slide = slide
+		if slide > 3.0:
+			_scrape_fx -= state.step
+			if _scrape_fx <= 0.0:
+				_scrape_fx = 0.12
+				Effects.dust(get_tree().current_scene, Vector3(wp.x, g, wp.z), 1.6)
+	# the skin wearing through, once for the airframe however much of it is
+	# down: point by point, a belly slide cost it twenty a second
+	if worst_slide > 3.0:
+		_damage(state.step * clampf(worst_slide * 0.03, 0.2, 2.5), "scrape")
+	return hits
 
 ## Above this there is nothing to hit: the tallest mast on the map plus the
 ## span of the biggest thing that can fly into it.

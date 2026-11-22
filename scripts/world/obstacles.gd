@@ -88,7 +88,12 @@ static func _edited(id: int) -> void:
 static func edit_count() -> int:
 	return edit_base + edits.size()
 
+## How many times the field has been cleared. Anything that put its own box in
+## and wants it kept compares this with the count when it did.
+static var generation := 0
+
 static func clear() -> void:
+	generation += 1
 	edits.clear()
 	edit_base += 1 << 20      # anyone reading starts again
 	_light.clear()

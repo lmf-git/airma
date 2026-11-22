@@ -187,8 +187,11 @@ static func centroid(loop: PackedVector3Array) -> Vector3:
 ## Skin a stack of equal-sized rings into a hull.
 ## `inward` skins a tube you are meant to look *into* -- the well behind an
 ## intake lip -- where the visible side is the one facing the axis.
+## `held_back`, when given, is asked about each side panel (its four corners
+## and its normal) and a panel it says true to is left out: the caller has
+## other plans for it -- a cargo ramp's skin, which goes with the ramp.
 static func loft(st: SurfaceTool, rings: Array, centre: Vector3, cap_front := true,
-		cap_back := true, inward := false) -> void:
+		cap_back := true, inward := false, held_back := Callable()) -> void:
 	for s in range(rings.size() - 1):
 		var a: PackedVector3Array = rings[s]
 		var b: PackedVector3Array = rings[s + 1]
@@ -212,6 +215,8 @@ static func loft(st: SurfaceTool, rings: Array, centre: Vector3, cap_front := tr
 				qn = -qn
 			if inward:
 				qn = -qn
+			if held_back.is_valid() and held_back.call(a[i], a[j], b[j], b[i], qn):
+				continue
 			quad_n(st, a[i], a[j], b[j], b[i], qn)
 	if cap_front and rings.size() > 0:
 		face(st, rings[0], centre)

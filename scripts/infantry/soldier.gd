@@ -81,6 +81,19 @@ var _last_state := ROAM
 var _idle := 0.0
 var _steps_seen := 0
 var _hurt_recent := 0.0
+## Who last hit him, and for how much longer that matters.
+var _shot_by: Node3D = null
+var _shot_by_t := 0.0
+## Seconds before he will go to ground behind something again, after the
+## last place he went to was no use.
+var _no_cover := 0.0
+## What the cover he is going to was picked against, and when it is next
+## looked at again.
+var _cover_from := Vector3.INF
+var _cover_check := 0.0
+## How close to the spot is being in cover. A step off it, on a corner, is
+## being back in view.
+const COVER_AT := 0.7
 var _last_head := false
 var _kneel := false
 var _last_amount := 0.0
@@ -206,10 +219,16 @@ func take_hit(amount: float, from: Node = null) -> void:
 	_hurt_recent = 2.5
 	_alert = 8.0
 	if from != null and is_instance_valid(from) and from is Node3D:
-		# he knows roughly where it came from, whether or not he saw it
+		# he knows roughly where it came from, whether or not he saw it --
+		# and whoever he was busy with, the man hitting him comes first
+		_shot_by = from as Node3D
+		_shot_by_t = 4.0
 		if target == null:
 			_seen_at = (from as Node3D).global_position
 			_seen_t = minf(_seen_t, 0.5)
+		if state == COVER:
+			# hit where he went to get out of it: it is not cover
+			_cover_failed()
 	if health <= 0.0:
 		_die(from)
 
@@ -257,6 +276,8 @@ func _process(delta: float) -> void:
 	_pinned = maxf(_pinned - delta * 0.22, 0.0)
 	_pin_try = maxf(_pin_try - delta, 0.0)
 	_hurt_recent = maxf(_hurt_recent - delta, 0.0)
+	_shot_by_t = maxf(_shot_by_t - delta, 0.0)
+	_no_cover = maxf(_no_cover - delta, 0.0)
 	loud = maxf(loud - delta, 0.0)
 	_think -= delta
 	if _think <= 0.0:
@@ -396,8 +417,11 @@ func _sense() -> void:
 		if not Firearm.can_see(from, at) and ((n.get("prone") == true)
 				or not Firearm.can_see(from, n.global_position + Vector3(0, 1.6, 0))):
 			continue
-		# stay on the one he is already shooting at unless another is much nearer
+		# stay on the one he is already shooting at unless another is much
+		# nearer -- or is the one putting rounds into him
 		var score: float = d * (0.75 if n == target else 1.0)
+		if n == _shot_by and _shot_by_t > 0.0:
+			score *= 0.4
 		if score < best_d:
 			best_d = score
 			best = n
@@ -412,8 +436,25 @@ func _sense() -> void:
 
 func _decide() -> void:
 	if state == COVER:
+		# Somewhere the man he is fighting can see him is not cover. He knelt
+		# there, waiting for the rounds to stop coming in, while they came
+		# in from the man he could see -- never firing back, because a man in
+		# cover does not shoot, and never leaving, because he was still
+		# under fire: in the open, aiming at nothing, until he was dead.
+		if _arrived(COVER_AT) and is_instance_valid(target):
+			_cover_failed()
+			return
+		# Still cover? What made it -- a wall, a car, a cloud of smoke -- may
+		# have been blown away or blown off, and the men he hid from move.
+		if _arrived(COVER_AT):
+			_cover_check -= 0.2
+			if _cover_check <= 0.0:
+				_cover_check = 0.5
+				if not _still_covered():
+					_cover_failed()
+					return
 		# stay put until the weapon is ready and the worst has passed
-		if _arrived(1.4):
+		if _arrived(COVER_AT):
 			_kneel = true
 			# and not while the rounds are still coming in
 			if _reload <= 0.0 and _hold <= 0.0 and _pinned < PINNED * 0.6:
@@ -422,32 +463,52 @@ func _decide() -> void:
 				_goal = Vector3.INF
 		# Cover he cannot get to, or has been crouched behind for long
 		# enough: back into it. He only came here to get out of the way.
-		if _state_t > 9.0 or (_state_t > 4.0 and not _arrived(1.4) and vel.length() < 0.3):
+		if _state_t > 9.0 or (_state_t > 4.0 and not _arrived(COVER_AT) and vel.length() < 0.3):
 			_kneel = false
 			state = HUNT
 			_goal = Vector3.INF
 		return
+	# With his side being killed from the air, getting under a roof comes
+	# before the man in front of him: in the street he is what the next pass
+	# is aimed at. Once inside he fights from there like anyone else.
+	if arena.has_method("under_air") and arena.under_air(team) and not arena.indoors(global_position):
+		if _goal == Vector3.INF or not arena.indoors(_goal):
+			var roof: Vector3 = arena.indoor_spot(global_position)
+			if roof != Vector3.INF:
+				_set_goal(roof)
+		if _goal != Vector3.INF and arena.indoors(_goal):
+			_kneel = false
+			state = ROAM
+			return
+	var sheltering: bool = arena.has_method("under_air") and arena.under_air(team)
 	# Pinned: behind something if there is something, and down where he is
 	# if there is not.
 	if _pinned > PINNED:
 		_kneel = true
-		if _pin_try <= 0.0:
+		if _pin_try <= 0.0 and _no_cover <= 0.0:
 			_pin_try = 1.5
 			var threat: Vector3 = Soldier.chest_of(target) + Vector3(0, 0.4, 0) \
 				if is_instance_valid(target) else _pin_from
-			var behind: Vector3 = arena.find_cover(global_position, threat)
+			var behind: Vector3 = arena.find_cover(global_position, threat, _threats(threat))
 			if behind != Vector3.INF:
+				_cover_from = threat
 				state = COVER
 				_set_goal(behind)
 				_hold = randf_range(1.5, 3.0)
 				return
 	if is_instance_valid(target):
 		var d: float = global_position.distance_to(target.global_position)
+		# indoors with aircraft overhead: fights from the window, does not
+		# go out after him
+		if sheltering:
+			_close_block = maxf(_close_block, 1.0)
 		var hurt: bool = health < 45.0 and _hurt_recent > 0.0
 		var dry: bool = _rounds <= 0 and d < 60.0
-		if hurt or dry:
-			var spot: Vector3 = arena.find_cover(global_position, Soldier.chest_of(target) + Vector3(0, 0.4, 0))
+		if (hurt or dry) and _no_cover <= 0.0:
+			var tp: Vector3 = Soldier.chest_of(target) + Vector3(0, 0.4, 0)
+			var spot: Vector3 = arena.find_cover(global_position, tp, _threats(tp))
 			if spot != Vector3.INF:
+				_cover_from = tp
 				state = COVER
 				_set_goal(spot)
 				_hold = randf_range(1.2, 2.6)
@@ -455,7 +516,7 @@ func _decide() -> void:
 		state = FIGHT
 		return
 	_kneel = false
-	if _seen_t < 7.0:
+	if _seen_t < 7.0 and not sheltering:
 		state = HUNT
 		if _goal == Vector3.INF or _goal.distance_to(_seen_at) > 4.0:
 			_set_goal(_seen_at)
@@ -464,6 +525,59 @@ func _decide() -> void:
 	if _goal == Vector3.INF or (_arrived(3.0) and _hold <= 0.0):
 		_set_goal(arena.objective_for(self))
 		_hold = randf_range(2.0, 6.0)
+
+## The other side's men who can see him from where they are, as the points
+## a round would come from: the four nearest, leaving out `besides`.
+func _threats(besides: Vector3 = Vector3.INF) -> Array:
+	var me: Vector3 = global_position + Vector3(0, 1.1, 0)
+	var found: Array = []
+	for n in arena.targets_of(team):
+		if not is_instance_valid(n) or not n.is_alive():
+			continue
+		var at: Vector3 = Soldier.chest_of(n) + Vector3(0, 0.4, 0)
+		var d: float = at.distance_to(me)
+		if d > SEE or (besides != Vector3.INF and at.distance_to(besides) < 1.0):
+			continue
+		if Firearm.can_see(me, at):
+			found.append([d, at])
+	found.sort_custom(func(x, y) -> bool: return float(x[0]) < float(y[0]))
+	var out: Array = []
+	for f in found.slice(0, 4):
+		out.append(f[1])
+	return out
+
+## Is where he has gone to ground still hiding him -- from what it was picked
+## against, and from anybody who can see him now?
+func _still_covered() -> bool:
+	if _cover_from != Vector3.INF and not arena.covered_from(global_position, _cover_from):
+		return false
+	return _threats().is_empty()
+
+## Where he went to ground is no good: seen there, or hit there. Somewhere
+## out of the line of whoever hit him if there is such a place near, and if not
+## he fights from where he is, down on one knee, and does not try for cover
+## again for a few seconds.
+func _cover_failed() -> void:
+	_no_cover = 5.0
+	_hold = 0.0
+	var threat := Vector3.INF
+	if is_instance_valid(_shot_by) and _shot_by_t > 0.0 and _shot_by != target:
+		threat = Soldier.chest_of(_shot_by) + Vector3(0, 0.4, 0)
+	if threat != Vector3.INF:
+		var spot: Vector3 = arena.find_cover(global_position, threat, _threats(threat))
+		if spot != Vector3.INF and spot.distance_to(global_position) > 2.5 \
+				and not (is_instance_valid(target) and Firearm.can_see(spot + Vector3(0, 1.1, 0),
+					Soldier.chest_of(target))):
+			_cover_from = threat
+			state = COVER
+			_set_goal(spot)
+			return
+	_kneel = is_instance_valid(target)
+	state = FIGHT if is_instance_valid(target) else HUNT
+	if state == HUNT:
+		_seen_at = _shot_by.global_position if is_instance_valid(_shot_by) else _seen_at
+		_seen_t = minf(_seen_t, 0.5)
+		_set_goal(_seen_at)
 
 ## The things that leave a man standing still with a fight going on round
 ## him. Each one has a way out.
@@ -500,16 +614,16 @@ func _at_goal(within: float) -> bool:
 ## As near as the route will take him. A goal across a wall or inside a
 ## courtyard with no way in gets a route that stops short of it, and a man who
 ## waited to be within a metre or two of the goal itself waited for ever.
-func _route_done() -> bool:
+func _route_done(within := 1.2) -> bool:
 	if _goal == Vector3.INF or _path.is_empty():
 		return true
 	if _path_i < _path.size() - 1:
 		return false
 	var wp: Vector2 = _path[_path.size() - 1]
-	return Vector2(wp.x - global_position.x, wp.y - global_position.z).length() < 1.2
+	return Vector2(wp.x - global_position.x, wp.y - global_position.z).length() < within
 
 func _arrived(within: float) -> bool:
-	return _at_goal(within) or _route_done()
+	return _at_goal(within) or _route_done(maxf(within, 0.5) if within < 1.2 else 1.2)
 
 func _set_goal(at: Vector3) -> void:
 	_goal = at
@@ -555,7 +669,9 @@ func _move(delta: float) -> void:
 			if d < 5.0:
 				wish -= Vector3(to.x, 0.0, to.z).normalized() * 0.8
 	else:
-		if _goal != Vector3.INF and not _at_goal(1.0):
+		# All the way into cover: a metre short of a corner is round it, in
+		# view of whoever he was getting away from.
+		if _goal != Vector3.INF and not _at_goal(0.35 if state == COVER else 1.0):
 			# The same route to the same place, asked for again every couple of
 			# seconds by every man who was walking anywhere: the town has not
 			# moved, and from a point on the route the answer is the route. It

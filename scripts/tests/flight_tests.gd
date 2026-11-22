@@ -697,6 +697,7 @@ func tick_accel() -> bool:
 #region --hoverhold
 var _hover2 := false
 var _hover2_t := 0.0
+var _hover2_rate := Vector3.ZERO
 var _hover2_step := 0
 var _hover2_at := Vector3.ZERO
 var _hover2_drift := 0.0
@@ -768,13 +769,19 @@ func tick_hover2(delta: float) -> bool:
 						world.player.global_position.z - _hover2_at.z).length())
 					_hover2_alt = maxf(_hover2_alt,
 						absf(world.player.global_position.y - _hover2_at.y))
+					# and how fast it is swinging about, in its own axes: a hover
+					# can sit on the spot rocking from side to side
+					var av: Vector3 = b3.inverse() * world.player.angular_velocity
+					_hover2_rate = Vector3(maxf(_hover2_rate.x, absf(av.x)), maxf(_hover2_rate.y,
+						absf(av.y)), maxf(_hover2_rate.z, absf(av.z)))
 				if _hover2_t > 32.0:
 					_hover2 = false
 					var spd: float = world.player.linear_velocity.length()
-					print("[hover] steady state (last 6 s): %.1f m off the spot, %.1f deg of bank, %.1f m of height, %.2f m/s" % [
-						_hover2_drift, _hover2_bank, _hover2_alt, spd])
+					print("[hover] steady state (last 6 s): %.1f m off the spot, %.1f deg of bank, %.1f m of height, %.2f m/s; worst rates pitch %.1f yaw %.1f roll %.1f deg/s" % [
+						_hover2_drift, _hover2_bank, _hover2_alt, spd, rad_to_deg(_hover2_rate.x),
+						rad_to_deg(_hover2_rate.y), rad_to_deg(_hover2_rate.z)])
 					var ok: bool = _hover2_drift < 8.0 and _hover2_bank < 8.0 \
-						and _hover2_alt < 6.0 and spd < 1.0
+						and _hover2_alt < 6.0 and spd < 1.0 and rad_to_deg(_hover2_rate.length()) < 4.0
 					print("[hover] RESULT: %s" % ("ok" if ok else
 						"FAILED — it does not hold"))
 					world.get_tree().quit()

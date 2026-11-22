@@ -40,6 +40,19 @@ func parse_arg(a: String) -> bool:
 		var av := a.substr(5).split(",")
 		if av.size() == 3:
 			world.start_at = Vector3(float(av[0]), float(av[1]), float(av[2]))
+	elif a.begins_with("--smallarms"):
+		# --smallarms or --smallarms=KIT: magazines of KIT into a parked aircraft
+		_sa_kit = a.substr(12) if a.begins_with("--smallarms=") else "carbine"
+		# KIT,tail / KIT,main / KIT,body: at the player's helicopter instead
+		if _sa_kit.contains(","):
+			_sa_aim = _sa_kit.get_slice(",", 1)
+			_sa_kit = _sa_kit.get_slice(",", 0)
+	elif a.begins_with("--groundtest="):
+		_gt_mode = a.substr(13)
+	elif a.begins_with("--wingstrike"):
+		# --wingstrike (a tower off the right wing) or --wingstrike=0 (dead ahead)
+		_ws_off = float(a.substr(13)) if a.begins_with("--wingstrike=") else 12.0
+		_ws_on = true
 	elif a == "--noboard":
 		world.skip_board = true
 	elif a == "--cqbquiet":
@@ -740,4 +753,218 @@ func tick_ramp_test(delta: float) -> void:
 		elif _rt_t > 15.0:
 			print("[ramp] RESULT: FAILED -- could not walk out")
 			world.get_tree().quit()
+#endregion
+
+
+#region --wingstrike
+## Fly the aeroplane past a tower standing in its way: off to one side, so
+## only a wing goes through it, or dead ahead. What it says after is which
+## parts it lost and whether it is still flying. --preset=free:c130 --wingstrike
+var _ws_on := false
+var _ws_off := 12.0
+var _ws_t := 0.0
+var _ws_box := -1
+var _ws_said := false
+
+func tick_wing_strike(delta: float) -> void:
+	if not _ws_on or not world.running or not is_instance_valid(world.player):
+		return
+	var jet: Aircraft = world.player
+	_ws_t += delta
+	if _ws_box < 0 and _ws_t > 2.0:
+		# low enough for there to be anything to hit (`OBSTACLE_CEILING`)
+		var gp: Vector3 = jet.global_position
+		jet.global_position = Vector3(gp.x, Sim.height_at(gp.x, gp.z) + 100.0, gp.z)
+		var xf := jet.global_transform
+		var fwd: Vector3 = -xf.basis.z
+		fwd.y = 0.0
+		fwd = fwd.normalized()
+		var right := Vector3(-fwd.z, 0.0, fwd.x)
+		var at: Vector3 = jet.global_position + fwd * 260.0 + right * _ws_off
+		at.y = jet.global_position.y - 30.0
+		_ws_box = Obstacles.add_box(at, 2.0, 60.0, 2.0, atan2(-fwd.x, -fwd.z))
+		print("[wingstrike] %s at %.0f m/s; tower %.0f m right of its track, 260 m ahead" % [
+			jet.name, jet.linear_velocity.length(), _ws_off])
+		_ws_t = 0.0
+	# a second after the tower, before a one-winged aeroplane reaches the
+	# ground: what it lost, and whether it is still in one piece otherwise
+	if _ws_box >= 0 and not _ws_said and _ws_t > 2.8:
+		_ws_said = true
+		var wings_lost: int = int(jet.lost.has("wing_l")) + int(jet.lost.has("wing_r"))
+		print("[wingstrike] after: alive=%s health=%.0f lost=%s -- %s" % [str(jet.alive), jet.health,
+			str(jet.lost.keys()), ("RESULT: wing torn off, still flying" if jet.alive and wings_lost == 1
+				else ("RESULT: destroyed" if not jet.alive else "RESULT: untouched"))])
+		Obstacles.remove(_ws_box)
+		world.get_tree().quit()
+#endregion
+
+
+#region --groundtest
+## The airframe on the ground. taxi: under power on the wheels for fifteen
+## seconds -- nothing should touch but the tyres. belly: wheels up, level, a
+## metre and a half off the ground at 65 m/s and sinking slowly -- it should
+## slide to a stop. slam: the same at 25 m/s down -- a crash. wing: banked
+## 35 degrees at that height -- the low wing should go.
+## --preset=takeoff:c130 --groundtest=taxi, --preset=free:c130 --groundtest=belly
+var _gt_mode := ""
+var _gt_t := 0.0
+var _gt_set := false
+var _gt_said := false
+
+var _gt_jet: Aircraft = null
+
+func tick_ground_test(delta: float) -> void:
+	# not running any more is fine once it has started: a crash ends the run
+	if _gt_mode == "" or (not world.running and not _gt_set):
+		return
+	if _gt_jet == null and is_instance_valid(world.player):
+		_gt_jet = world.player
+	if _gt_jet == null:
+		return
+	if not is_instance_valid(_gt_jet):
+		# gone: it was destroyed and cleared away
+		if _gt_set and not _gt_said:
+			_gt_said = true
+			print("[groundtest] %s after %.1f s: destroyed and gone -- RESULT: %s" % [_gt_mode, _gt_t,
+				"ok" if _gt_mode == "slam" else "FAILED"])
+			world.get_tree().quit()
+		return
+	var jet: Aircraft = _gt_jet
+	_gt_t += delta
+	if _gt_set and not _gt_said and not world.running:
+		_gt_said = true
+		print("[groundtest] %s after %.1f s: alive=%s, the run ended -- RESULT: %s" % [_gt_mode, _gt_t,
+			str(jet.alive), "ok" if _gt_mode == "slam" and not jet.alive else "FAILED"])
+		world.get_tree().quit()
+		return
+	if not _gt_set and _gt_t > 2.0:
+		_gt_set = true
+		_gt_t = 0.0
+		if world.boarding:
+			world.crew.end_boarding()
+		if _gt_mode == "taxi":
+			jet.throttle = 0.55
+			jet.power = 0.55
+		else:
+			var gp: Vector3 = jet.global_position
+			var fwd: Vector3 = -jet.global_transform.basis.z
+			fwd.y = 0.0
+			fwd = fwd.normalized()
+			var yaw: float = atan2(-fwd.x, -fwd.z)
+			var bank: float = deg_to_rad(35.0) if _gt_mode == "wing" else 0.0
+			var lift: float = 2.4 if _gt_mode == "wing" else 1.5
+			var g: float = Sim.height_at(gp.x, gp.z)
+			jet.gear_down = false
+			jet.gear_anim = 0.0
+			jet.throttle = 0.0
+			jet.power = 0.0
+			var body_low: float = 0.0
+			var sh: Dictionary = jet.spec.get("shape", {})
+			for sec in sh.get("sections", []):
+				body_low = maxf(body_low, float(sec[2]) - float(sec[3]))
+			jet.global_transform = Transform3D(Basis(Vector3.UP, yaw) * Basis(Vector3.BACK, bank),
+				Vector3(gp.x, g + body_low * 0.8 + lift, gp.z))
+			jet.linear_velocity = fwd * 65.0 + Vector3(0, -25.0 if _gt_mode == "slam" else -1.0, 0)
+			jet.angular_velocity = Vector3.ZERO
+			world._reset_interp(jet)
+		print("[groundtest] %s: %s" % [_gt_mode, jet.name])
+		# a crash stops the harness ticking, so the end is heard, not looked for
+		jet.died.connect(func(_w: Variant = null) -> void:
+			if _gt_said:
+				return
+			_gt_said = true
+			print("[groundtest] %s after %.1f s: destroyed -- RESULT: %s" % [_gt_mode, _gt_t,
+				"ok" if _gt_mode == "slam" else "FAILED"])
+			world.get_tree().quit())
+	if _gt_set and not _gt_said and (_gt_t > 30.0 or not jet.alive):
+		_gt_said = true
+		var res := ""
+		match _gt_mode:
+			"taxi":
+				res = "ok" if jet.alive and jet.health >= 99.0 and jet.lost.is_empty() else "FAILED"
+			"belly":
+				res = "ok" if jet.alive and jet.linear_velocity.length() < 8.0 else "FAILED"
+			"slam":
+				res = "ok" if not jet.alive else "FAILED"
+			"wing":
+				res = "ok" if (jet.lost.has("wing_l") or jet.lost.has("wing_r")) else "FAILED"
+		print("[groundtest] %s after %.1f s: alive=%s health=%.0f speed %.1f agl %.1f lost=%s -- RESULT: %s" % [
+			_gt_mode, _gt_t, str(jet.alive), jet.health, jet.linear_velocity.length(), jet.agl,
+			str(jet.lost.keys()), res])
+		world.get_tree().quit()
+#endregion
+
+
+#region --smallarms
+## A man with a rifle against a parked aircraft: three magazines into it from
+## twenty-five metres, and what it has left after each. A carbine should not
+## bring an aeroplane down. --preset=ramp:c130 --smallarms[=KIT]
+var _sa_kit := ""
+var _sa_t := 0.0
+var _sa_n := 0
+var _sa_jet: Aircraft = null
+var _sa_aim := ""
+
+func tick_small_arms(delta: float) -> void:
+	if _sa_kit == "" or not world.running:
+		return
+	if _sa_aim == "" and not is_instance_valid(world.walker):
+		return
+	_sa_t += delta
+	if _sa_jet == null:
+		if _sa_t < 3.0:
+			return
+		if _sa_aim != "" and world.player is Helicopter:
+			_sa_jet = world.player
+			if _sa_jet.has_method("set_hover_hold"):
+				_sa_jet.call("set_hover_hold", true)
+		else:
+			for j in world.parked:
+				if is_instance_valid(j) and j is Aircraft:
+					_sa_jet = j
+		if _sa_jet == null:
+			print("[smallarms] RESULT: FAILED -- nothing parked")
+			world.get_tree().quit()
+			return
+		print("[smallarms] %s at %s, health %.0f" % [_sa_kit, _sa_jet.name, _sa_jet.health])
+		_sa_t = 0.0
+		return
+	if not is_instance_valid(_sa_jet):
+		print("[smallarms] after %d rounds: destroyed and gone -- RESULT: FAILED" % _sa_n)
+		world.get_tree().quit()
+		return
+	var g: Dictionary = Firearm.spec(_sa_kit)
+	var mag: int = int(g["mag"])
+	if _sa_n < mag * 3 and _sa_t > 0.1:
+		_sa_t = 0.0
+		var c: Vector3 = _sa_jet.global_position + Vector3(0, 0.5, 0)
+		var side: Vector3 = _sa_jet.global_transform.basis.x
+		var from: Vector3 = c + side * 25.0 + Vector3(0, 0.5, 0)
+		var mark: Vector3 = c + Vector3(randf_range(-2, 2), randf_range(-0.5, 0.5), randf_range(-4, 4))
+		var rotors: Array = (_sa_jet.spec.get("shape", {}) as Dictionary).get("rotors", [])
+		var xf: Transform3D = _sa_jet.global_transform
+		if _sa_aim == "tail" and rotors.size() > 1:
+			mark = xf * (rotors[1]["pos"] as Vector3) + Vector3(randf_range(-0.6, 0.6), randf_range(-0.6, 0.6), 0)
+			from = mark + side * 25.0
+		elif _sa_aim == "main" and not rotors.is_empty():
+			var hub: Vector3 = xf * (rotors[0]["pos"] as Vector3)
+			mark = hub + xf.basis.x * randf_range(1.5, 6.0) * (1.0 if randf() < 0.5 else -1.0) \
+				+ xf.basis.z * randf_range(-5.0, 5.0)
+			# from off to the side and a little below, outboard of the body
+			from = mark + Vector3(0, -4.0, 0) + side * 25.0 * signf((mark - hub).dot(side) + 0.001)
+		var aim: Vector3 = (mark - from).normalized()
+		# as the other side: rounds pass through their own side's aircraft
+		var who: Node = world
+		if is_instance_valid(world.walker):
+			who = world.walker
+		Firearm.fire(world, who, 1 - int(_sa_jet.team), g, from, aim, 0.0)
+		_sa_n += 1
+		if _sa_n % mag == 0:
+			print("[smallarms] after %d rounds (%d magazines): alive=%s health=%.1f lost=%s%s" % [_sa_n,
+				int(float(_sa_n) / float(mag)), str(_sa_jet.alive), _sa_jet.health, str(_sa_jet.lost.keys()),
+				(" main rotor %.0f tail rotor %.0f" % [float(_sa_jet.get("main_rotor_hp")),
+					float(_sa_jet.get("tail_rotor_hp"))]) if _sa_jet is Helicopter else ""])
+	elif _sa_n >= mag * 3 and _sa_t > 3.0:
+		print("[smallarms] RESULT: %s" % ("ok" if _sa_aim != "" or (_sa_jet.alive and _sa_jet.lost.is_empty()) else "FAILED"))
+		world.get_tree().quit()
 #endregion

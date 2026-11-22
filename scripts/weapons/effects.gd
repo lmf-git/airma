@@ -1019,6 +1019,7 @@ static func _blast_infantry(world: Node, pos: Vector3, r: float) -> void:
 	KillFeed.cause = was_cause
 
 static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -> void:
+	TownSet.glass_blast(pos, radius * 3.0)
 	_blast_infantry(world, pos, maxf(radius * 0.8, 5.0))
 	# anything standing inside the blast comes down
 	if Scenery.current != null and is_instance_valid(Scenery.current) and radius > 5.0:
@@ -1055,6 +1056,7 @@ static func he_impact(world: Node, pos: Vector3, scale := 1.0, dmg := 0.0,
 		shooter: Node = null, team := -1) -> void:
 	if world == null or not is_instance_valid(world):
 		return
+	TownSet.glass_blast(pos, 6.0 * scale)
 	_blast_infantry(world, pos, 3.2 * scale)
 	if dmg > 0.0 and world.is_inside_tree():
 		var rv: float = 2.4 * scale
@@ -1757,6 +1759,9 @@ class Tracer extends Node3D:
 		vel = Ballistics.step(from, vel, drag, delta, _flown)
 		var to := from + vel * delta
 		_flown += vel.length() * delta
+		# through a window on the way: the pane goes, the round carries on
+		if not harmless:
+			TownSet.glass_hit(from, to)
 		if small:
 			if _small_step(from, to):
 				return
@@ -1881,6 +1886,7 @@ class Tracer extends Node3D:
 		var best: Node = null
 		var best_t := 2.0
 		var best_k := 0.0
+		var best_rotor := -1
 		Sim.hit_scan()
 		var step_mid: Vector3 = (from + stop) * 0.5
 		var half_len: float = from.distance_to(stop) * 0.5
@@ -1917,10 +1923,21 @@ class Tracer extends Node3D:
 					if c.distance_to(n.global_position) < rad:
 						k = 1.0
 						at = from.distance_to(c) / maxf(from.distance_to(stop), 0.001)
+				# a helicopter's rotors reach well past the ball round its
+				# middle, and a blade is not armour: asked of on their own
+				if n is Helicopter and not harmless:
+					var rc: Vector2 = (n as Helicopter).rotor_cross(from, stop)
+					if rc.x >= 0.0 and rc.x < best_t and (k <= 0.0 or rc.x < at):
+						best = n
+						best_t = rc.x
+						best_k = 1.0
+						best_rotor = int(rc.y)
+						continue
 				if k > 0.0 and at < best_t:
 					best = n
 					best_t = at
 					best_k = k
+					best_rotor = -1
 				elif k <= 0.0 and n.has_method("suppress") and not _scared.has(n):
 					# past his chest, or into the wall he is behind
 					var chest: Vector3 = n.global_position + Vector3(0, 0.9, 0)
@@ -1939,6 +1956,7 @@ class Tracer extends Node3D:
 			best = hh[1]
 			best_t = float(hh[0])
 			best_k = 1.0
+			best_rotor = -1
 		if best != null:
 			var where := from.lerp(stop, clampf(best_t, 0.0, 1.0))
 			ended_at = where
@@ -1952,10 +1970,18 @@ class Tracer extends Node3D:
 				# hits blew parts off it as a rocket does. A helicopter, low and
 				# slow and full of things that matter, takes more of it; half an
 				# inch of steel core three times as much again.
-				var frac: float = 0.15 if best is Helicopter else 0.05
+				#
+				# Still too much: a magazine took two fifths of a fighter and
+				# three brought it down; a helicopter went in one. Fractions of
+				# a point a round now -- a man with a rifle marks the paint.
+				var frac: float = 0.012 if best is Helicopter else 0.006
 				if heavy:
-					frac *= 3.0
-				best.take_hit(dmg * best_k * frac, shooter if is_instance_valid(shooter) else null)
+					frac *= 1.5
+				# a blade is not armour: through the disc it is the rotor hit
+				if best_rotor >= 0 and best is Helicopter:
+					(best as Helicopter).rotor_damage(best_rotor, dmg * (1.5 if heavy else 1.0))
+				else:
+					best.take_hit(dmg * best_k * frac, shooter if is_instance_valid(shooter) else null)
 			elif best.has_method("take_hit") and not plate:
 				best.take_hit(dmg * best_k, shooter if is_instance_valid(shooter) else null)
 			elif heavy and best is Tank:

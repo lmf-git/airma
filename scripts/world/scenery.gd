@@ -829,6 +829,10 @@ func _lay_down() -> void:
 ## The chart has moved: carry everything built into it. Worked from what was
 ## laid down every time, so there and back again is exactly where it started.
 func rechart() -> void:
+	# A heap is drawn where it fell, in the chart there was; it is cleared
+	# rather than carried, with the box it stands for.
+	for r in get_tree().get_nodes_in_group("rubble"):
+		(r as Node).call("clear_now")
 	for entry in _laid:
 		var n3: Node3D = entry[0]
 		if not is_instance_valid(n3):
@@ -1492,12 +1496,17 @@ func damage_area(pos_in: Vector3, radius: float) -> int:
 				continue
 			dead[i] = 1
 			hits += 1
-			# collapse in place: squash, slump and sink into its own footprint
-			var wreck := t.basis.rotated(Vector3.UP, randf_range(-0.25, 0.25))
-			wreck = wreck.scaled(Vector3(1.05, BLOCK_HEAP, 1.05))
-			wreck = wreck.rotated(Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)).normalized(),
-				randf_range(0.02, 0.09))
-			_redraw(b["mmi"], i, Transform3D(wreck, t.origin - Vector3(0, 0.4, 0)))
+			# Down to a heap of rubble where it stood. It was the building
+			# itself squashed to a seventh of its height: a big flat box
+			# raised off the ground, which is not what a block comes down as,
+			# and it stood there for the rest of the session.
+			var mmi: MultiMeshInstance3D = b["mmi"]
+			var drawn: Transform3D = mmi.global_transform * mmi.multimesh.get_instance_transform(i)
+			var size: Vector3 = mmi.multimesh.mesh.get_aabb().size * drawn.basis.get_scale()
+			_redraw(mmi, i, Transform3D(t.basis.scaled(Vector3.ONE * 0.001), t.origin - Vector3(0, 60.0, 0)))
+			var heap := Rubble.new()
+			heap.setup(drawn, size, oids[i] if i < oids.size() else -1)
+			add_child(heap)
 		b["dead"] = dead
 	return hits
 
@@ -2959,3 +2968,95 @@ class Turbine extends Node3D:
 	func _tick(delta: float) -> void:
 		if hub:
 			hub.rotate_z(delta * 0.85)
+
+
+## What a building comes down as: a low mound of broken concrete over its
+## footprint and a little past it, higher in the middle, lumps of every size
+## tumbled at every angle. It settles into the ground after a while and the
+## heap in the obstacle field goes with it.
+class Rubble extends Node3D:
+	const LIFE := 150.0
+	const SINK := 4.0
+	var _t := 0.0
+	var _oid := -1
+	var _sink_by := 0.0
+
+	func setup(at: Transform3D, size: Vector3, oid: int) -> void:
+		_oid = oid
+		add_to_group("rubble")
+		var yaw := Basis(Vector3.UP, at.basis.get_euler().y)
+		transform = Transform3D(yaw, at.origin)
+		var hx: float = size.x * 0.5
+		var hz: float = size.z * 0.5
+		var peak: float = clampf(size.y * BLOCK_HEAP * 1.3, 1.0, 5.0)
+		_sink_by = peak + 1.0
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(at.origin)
+		var st := MeshKit.begin()
+		# the body of the heap: broad flat slabs lying over most of the
+		# footprint, so the lumps sit on a mound and not on the grass
+		for k in 7:
+			var su: float = rng.randf_range(-0.6, 0.6)
+			var sv: float = rng.randf_range(-0.6, 0.6)
+			var slab := Vector3(hx * rng.randf_range(0.7, 1.1), peak * rng.randf_range(0.35, 0.6),
+				hz * rng.randf_range(0.7, 1.1))
+			var sb := Basis(Vector3.UP, rng.randf() * TAU) \
+				* Basis(Vector3(rng.randf_range(-1, 1), 0, rng.randf_range(-1, 1)).normalized(),
+					rng.randf_range(0.05, 0.25))
+			_box_at(st, sb, slab, Vector3(su * hx, slab.y * 0.15, sv * hz))
+		var n: int = clampi(int(size.x * size.z / 4.0), 24, 110)
+		for k in n:
+			# anywhere over the footprint and a little past it, the big
+			# lumps towards the middle and the small ones spilled out
+			var u: float = rng.randf_range(-1.15, 1.15)
+			var v: float = rng.randf_range(-1.15, 1.15)
+			var r: float = clampf(sqrt(u * u * 0.5 + v * v * 0.5), 0.0, 1.0)
+			var s: float = lerpf(2.4, 0.5, r) * rng.randf_range(0.6, 1.2)
+			var lump := Vector3(s * rng.randf_range(0.8, 1.6), s * rng.randf_range(0.4, 0.9),
+				s * rng.randf_range(0.8, 1.6))
+			var y: float = peak * (1.0 - r * r) - lump.y * 0.45
+			var b := Basis(Vector3.UP, rng.randf() * TAU) \
+				* Basis(Vector3(rng.randf_range(-1, 1), 0, rng.randf_range(-1, 1)).normalized(),
+					rng.randf_range(0.1, 0.6))
+			_box_at(st, b, lump, Vector3(u * hx, maxf(y, -lump.y * 0.3), v * hz))
+		var mi := MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.47, 0.45, 0.42), 0.95, 0.0)),
+			"Rubble")
+		add_child(mi)
+
+	static func _box_at(st: SurfaceTool, b: Basis, size: Vector3, at: Vector3) -> void:
+		var h := size * 0.5
+		var c: Array = []
+		for sx in [-1.0, 1.0]:
+			for sy in [-1.0, 1.0]:
+				for sz in [-1.0, 1.0]:
+					c.append(at + b * Vector3(h.x * sx, h.y * sy, h.z * sz))
+		# faces as corner indices (x, y, z bits: 4 x + 2 y + z)
+		for f in [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]]:
+			var a: Vector3 = c[f[0]]
+			var bb: Vector3 = c[f[1]]
+			var cc: Vector3 = c[f[2]]
+			var d: Vector3 = c[f[3]]
+			var mid: Vector3 = (a + bb + cc + d) * 0.25
+			MeshKit.quad_n(st, a, bb, cc, d, (mid - at).normalized())
+
+	func clear_now() -> void:
+		if _oid >= 0:
+			var rid: int = Obstacles.rubble_of(_oid)
+			if rid >= 0:
+				Obstacles.remove(rid)
+			_oid = -1
+		queue_free()
+
+	func _process(delta: float) -> void:
+		_t += delta
+		if _t < LIFE:
+			return
+		# into the ground, and the heap out of the field as it goes
+		if _oid >= 0:
+			var rid: int = Obstacles.rubble_of(_oid)
+			if rid >= 0:
+				Obstacles.remove(rid)
+			_oid = -1
+		position.y -= _sink_by * delta / SINK
+		if _t > LIFE + SINK:
+			queue_free()

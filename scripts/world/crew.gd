@@ -147,7 +147,6 @@ func spawn_walker(at: Vector3, thrown := Vector3.ZERO) -> void:
 	world.walker.yaw = deg_to_rad(90.0)
 	world.walker.board_requested.connect(board)
 	world.walker.died.connect(on_walker_died)
-	world.walker.hold_requested.connect(enter_hold)
 	world.walker.station_requested.connect(take_hold_station)
 	world.walker.activate()
 	world.hud.walker = world.walker
@@ -487,10 +486,6 @@ func leave_hold_station() -> void:
 	world.hud.aircraft = null
 	world.veil.aircraft = null
 	world.on_foot = true
-
-func enter_hold(jet: Node) -> void:
-	if is_instance_valid(world.walker) and jet.has_method("hold_node"):
-		world.walker.enter_frame(jet.hold_node(), jet)
 
 func board(jet: Node) -> void:
 	if jet is Ship:

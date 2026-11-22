@@ -51,6 +51,8 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var ge: float = 1.0 + 0.22 * clampf(1.0 - agl / maxf(spec["rotor_radius"] * 1.6, 1.0), 0.0, 1.0)
 	var density: float = clampf(pow(rho / RHO0, 0.75), 0.25, 1.0)
 	var thrust: float = hover * HOVER_MARGIN * power * trans * ge * density
+	if main_rotor_hp <= 0.0:
+		thrust = 0.0                  # no blades, no lift
 	var burn: float = thrust * 0.000021 * state.step
 	fuel = maxf(fuel - burn, 0.0)
 	var force := up * thrust
@@ -113,6 +115,11 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# The tail rotor is driven off the main rotor's gearbox and blows its own
 	# air: it has its authority in the hover, where it was cut to half with
 	# the cyclic's low-speed factor.
+	if tail_rotor_hp <= 0.0:
+		# Nothing at the tail to hold the main rotor's torque: the pedals do
+		# nothing, and the machine winds up the other way.
+		y_cmd = 0.0
+		torque += up * thrust * spec["rotor_radius"] * 0.011 * 2.5
 	torque += -up * y_cmd * spec["yaw_torque"]
 	# main rotor torque reaction. With the stability system on, the tail rotor
 	# trims it out automatically; switch the assist off and you hold the pedal.
@@ -164,3 +171,77 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 
 	state.apply_central_force(force)
 	state.apply_torque(torque)
+
+
+# ----------------------------------------------------------------- the rotors
+## Each rotor's own strength. They are what can be shot off it with a rifle:
+## the airframe is built to take small-arms fire and a blade is not, so a
+## round into the disc does far more to the rotor than one into the hull does
+## to the helicopter. The tail rotor is small and hard to hit; lose it and the
+## main rotor's torque spins the machine. Lose the main rotor and it falls.
+var main_rotor_hp := 40.0
+var tail_rotor_hp := 20.0
+## How much of a round's damage a blade takes.
+const ROTOR_FRAC := 0.15
+
+## A round from `a` to `b` through one of the rotor discs, by the chance a
+## blade is where it crossed: Vector2(how far along, which rotor), or x < 0.
+func rotor_cross(a: Vector3, b: Vector3) -> Vector2:
+	var specs: Array = (spec.get("shape", {}) as Dictionary).get("rotors", [])
+	for i in mini(_rotors.size(), specs.size()):
+		var hub: Node3D = (_rotors[i] as Dictionary)["node"]
+		if not is_instance_valid(hub) or not hub.is_inside_tree():
+			continue
+		var rs: Dictionary = _rotor_spec(hub)
+		if rs.is_empty():
+			continue
+		var c: Vector3 = hub.global_position
+		var n: Vector3 = hub.global_transform.basis.y.normalized()
+		var d0: float = (a - c).dot(n)
+		var d1: float = (b - c).dot(n)
+		if d0 * d1 > 0.0 and minf(absf(d0), absf(d1)) > 0.3:
+			continue
+		var t: float = clampf(d0 / (d0 - d1), 0.0, 1.0) if absf(d0 - d1) > 1e-5 else 0.0
+		var p: Vector3 = a.lerp(b, t)
+		var off: Vector3 = (p - c) - n * (p - c).dot(n)
+		var r: float = float(rs["radius"])
+		if off.length() > r or off.length() < 0.25:
+			continue
+		# a spinning disc is mostly air: the share of it the blades fill
+		var blades: float = float(rs.get("blades", 4))
+		var chord: float = float(rs.get("chord", 0.36))
+		var solid: float = clampf(blades * chord * r / (PI * r * r) * 2.0, 0.08, 0.6)
+		if randf() > solid:
+			continue
+		return Vector2(t, float(i))
+	return Vector2(-1.0, -1.0)
+
+## A blade of rotor `i` struck by a round of `dmg`.
+func rotor_damage(i: int, dmg: float) -> void:
+	if i < 0 or i >= _rotors.size():
+		return
+	var hub: Node3D = (_rotors[i] as Dictionary)["node"]
+	var tail: bool = String(_rotor_spec(hub).get("axis", "y")) == "x"
+	if tail:
+		tail_rotor_hp -= dmg * ROTOR_FRAC
+		if tail_rotor_hp <= 0.0:
+			_lose_rotor(i, "tail rotor")
+	else:
+		main_rotor_hp -= dmg * ROTOR_FRAC
+		if main_rotor_hp <= 0.0:
+			_lose_rotor(i, "main rotor")
+
+## The spec of the rotor `hub` was built from, by where it is.
+func _rotor_spec(hub: Node3D) -> Dictionary:
+	for rs in (spec.get("shape", {}) as Dictionary).get("rotors", []):
+		if ((rs as Dictionary)["pos"] as Vector3).distance_to(hub.position) < 0.05:
+			return rs
+	return {}
+
+func _lose_rotor(i: int, what: String) -> void:
+	var hub: Node3D = (_rotors[i] as Dictionary)["node"]
+	_rotors.remove_at(i)
+	if is_instance_valid(hub):
+		_shed(hub)
+	if is_in_group("player"):
+		Sim.report("%s gone" % what, Sim.Ev.BAD)

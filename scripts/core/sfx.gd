@@ -328,6 +328,20 @@ static func _bake(id: String) -> AudioStreamWAV:
 				var t := float(i) / float(n)
 				b[i] *= pow(1.0 - t, 12.0) + pow(1.0 - t, 3.0) * 0.12
 			return _wav(_norm(b, 0.85), false)
+		"glass":
+			# a pane going: a crack, a spray of high pings, the bits landing
+			var n := int(RATE * 0.55)
+			var b := _noise(n, 0.9, 331, 0.5)
+			for i in n:
+				var t := float(i) / float(RATE)
+				var crack: float = b[i] * exp(-t * 60.0)
+				var ring := 0.0
+				for k in 5:
+					var f: float = 2900.0 + 1300.0 * k
+					ring += sin(TAU * f * t + k) * exp(-t * (14.0 + 6.0 * k)) * 0.22
+				var rattle: float = b[(i * 7) % n] * exp(-pow((t - 0.25) / 0.12, 2.0)) * 0.25
+				b[i] = crack + ring + rattle
+			return _wav(_norm(b, 0.7), false)
 		"impact_soft":
 			var n := int(RATE * 0.14)
 			var b := _noise(n, 0.16, 317)

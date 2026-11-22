@@ -307,9 +307,14 @@ func _scan_ground() -> Node3D:
 			continue
 		if n.has_method("is_alive") and not n.is_alive():
 			continue
+		# the air defence that can bring it down first, then the armour,
+		# then the rest (`Tank.threat_to_aircraft`): it took the nearest
 		var d: float = global_position.distance_to((n as Node3D).global_position)
-		if d < bd:
-			bd = d
+		if d >= 26000.0:
+			continue
+		var sc: float = d / Tank.threat_to_aircraft(n)
+		if sc < bd:
+			bd = sc
 			best = n as Node3D
 	return best
 

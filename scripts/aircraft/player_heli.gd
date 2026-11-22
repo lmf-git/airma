@@ -211,6 +211,9 @@ func _pilot(delta: float) -> void:
 ##
 ## The outer loops are slow and the inner ones fast, so they do not fight.
 var hover_hold := false
+## Stick per radian a second of turn, against it.
+const HOVER_RATE_DAMP := 0.6
+const HOVER_YAW_DAMP := 1.4
 var _hover_at := Vector3.ZERO
 var _hover_hdg := 0.0
 
@@ -234,11 +237,21 @@ func set_hover_hold(on: bool) -> void:
 		(c as Pid).reset()
 	if on:
 		_hover_at = global_position
-		_hover_hdg = global_rotation.y
+		_hover_hdg = _heading()
 		_coll_trim = throttle
 		say("auto hover — holding this spot at %d ft" % int(global_position.y * 3.28084))
 	else:
 		say("auto hover off")
+
+## Which way the nose points over the ground. `global_rotation.y` is an Euler
+## angle, and taken with any bank or pitch on it can come out half a turn
+## from where the nose is: switched on in a turn, the hold set about swinging
+## the machine round to face backwards, and sat with the error on the ±180
+## seam, the pedals slammed from one stop to the other and back -- rocking
+## from side to side on the spot, with the sight on the nose going with it.
+func _heading() -> float:
+	var f: Vector3 = -global_transform.basis.z
+	return atan2(-f.x, -f.z)
 
 func toggle_hover_hold() -> void:
 	set_hover_hold(not hover_hold)
@@ -284,11 +297,20 @@ func fly_hover(delta: float) -> void:
 	# --- inner: attitude error works the cyclic
 	var pitch_att: float = asin(clampf(-b.z.y, -1.0, 1.0))
 	var bank: float = atan2(-b.x.y, b.y.y)
-	in_pitch = _pid_att_p.step(want_pitch - pitch_att, delta)
-	in_roll = _pid_att_r.step(want_roll - bank, delta)
+	# ...damped on how fast it is actually turning, the way a stability
+	# system is: on attitude alone each correction overshot into the next and
+	# the hold sat on its spot swinging from side to side -- eleven degrees a
+	# second in yaw, and a sight on the nose went with it.
+	var rate: Vector3 = b.inverse() * angular_velocity    # x pitch up, y yaw left, z roll left
+	in_pitch = clampf(_pid_att_p.step(want_pitch - pitch_att, delta) - rate.x * HOVER_RATE_DAMP, -1.0, 1.0)
+	in_roll = clampf(_pid_att_r.step(want_roll - bank, delta) + rate.z * HOVER_RATE_DAMP, -1.0, 1.0)
 
-	# --- heading, on the pedals
-	in_yaw = _pid_yaw.step(wrapf(_hover_hdg - global_rotation.y, -PI, PI), delta)
+	# --- heading, on the pedals, with the same damping on the turn
+	# The heading grows turning left and the pedal is right-positive, so it is
+	# the error turned round. Taken as it was, the hold pushed the nose away
+	# from the heading it held and could only come to rest half a turn off.
+	in_yaw = clampf(-_pid_yaw.step(wrapf(_hover_hdg - _heading(), -PI, PI), delta)
+		+ rate.y * HOVER_YAW_DAMP, -1.0, 1.0)
 
 	# --- height, through the collective
 	var want_vs: float = _pid_alt.step(_hover_at.y - global_position.y, delta)
