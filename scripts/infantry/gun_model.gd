@@ -232,6 +232,13 @@ static func build(g: Dictionary, quiet := false) -> Node3D:
 			_ar(k, g, false)
 	if _rec_on:
 		return null
+	if g.has("foregrip"):
+		# a vertical fore grip: a clamp on the fore-end and the post under it
+		var fg: Vector3 = g["foregrip"]
+		var fl: float = Firearm.FOREGRIP_LEN
+		blk(k.at("metal"), Vector3(0.030, 0.012, 0.040), fg + Vector3(0, 0.004, 0))
+		blk(k.at("furn"), Vector3(0.026, fl, 0.030), fg + Vector3(0, -fl * 0.5, 0.002))
+		blk(k.at("furn"), Vector3(0.030, 0.010, 0.034), fg + Vector3(0, -fl, 0.002))
 	var can: bool = quiet and Firearm.can_suppress(g)
 	var bore_y: float = 0.014 if g.get("hand", false) else 0.004
 	if can:

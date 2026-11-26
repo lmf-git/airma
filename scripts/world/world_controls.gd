@@ -228,6 +228,20 @@ func on_escape() -> void:
 		return
 	if not world.running:
 		return
+	# One layer at a time, the top one first. ESC went straight to the pause
+	# page from anywhere, leaving the map or the satellite view up under it --
+	# and with them whatever they had decided the mouse should be.
+	if is_instance_valid(world.sat_view) and world.sat_view.active():
+		toggle_sat_view()
+		return
+	if is_instance_valid(world.map) and world.map.visible:
+		world.map.toggle()
+		return
+	if is_instance_valid(world.actions) and world.actions.visible:
+		world.actions.close()
+		return
+	if is_instance_valid(world.admin) and world.admin.visible:
+		return                        # it closes itself on ESC
 	if world.menu.visible:
 		# the hangar was opened from the pause page: back to it
 		world.menu.visible = false
@@ -379,6 +393,9 @@ func shell_input(e: InputEvent) -> void:
 		# In the capsule the keyboard is the rocket's. The aeroplane left on the
 		# ramp must not hear any of it: P would cycle its camera away from the
 		# rocket, U would climb out of it, TAB would open its stores.
+		if k == KEY_F4 and world.running and Sim.globe and not Sim.typing:
+			toggle_sat_view()
+			return
 		if world.missions.in_rocket() and not k in [KEY_ESCAPE, KEY_M, KEY_F1, KEY_F2, KEY_F3,
 				KEY_PERIOD, KEY_COMMA, KEY_SLASH, KEY_APOSTROPHE]:
 			return
@@ -499,3 +516,72 @@ func shell_input(e: InputEvent) -> void:
 				world.crew.try_dismount()
 		# R used to restart the mission outright. That is far too easy to hit by
 		# accident mid-sortie; restarting belongs behind the pause menu.
+
+## Up to the satellite view, or back down to whatever the view was on.
+func toggle_sat_view() -> void:
+	if not is_instance_valid(world.sat_view):
+		world.sat_view = SatView.new()
+		world.sat_view.name = "SatView"
+		world.add_child(world.sat_view)
+	if world.sat_view.active():
+		world.sat_view.leave(world.hud)
+	else:
+		world.sat_view.enter(world.get_viewport().get_camera_3d(), world.hud)
+
+# ------------------------------------------------------------------ the mouse
+## Whether the pointer is captured, worked out afresh every frame from what is
+## on the screen and what you are in, and set only when it is wrong.
+##
+## Every screen used to take the mouse when it opened and hand back whatever it
+## had found when it closed. Stacked -- the map open under the pause page, ESC
+## pressed while freelook held it, a redeploy over the map, an aircraft swapped
+## for a rifle while paused -- each put back a mode that was no longer true, and
+## the pointer came back free in a firefight or stayed locked over a menu. Those
+## places still set it, for the frame they act on; this has the last word.
+func sync_mouse() -> void:
+	if not world.running or world.booting:
+		return
+	var want := Input.MOUSE_MODE_CAPTURED if _wants_grab() else Input.MOUSE_MODE_VISIBLE
+	if Input.mouse_mode != want:
+		Input.mouse_mode = want
+
+## A screen that is worked with the pointer is up.
+func pointer_screen() -> bool:
+	return Sim.menu_open or world.get_tree().paused or Sim.ui_pointer \
+		or (is_instance_valid(world.pause_menu) and world.pause_menu.visible) \
+		or (is_instance_valid(world.menu) and world.menu.visible) \
+		or (is_instance_valid(world.map) and world.map.visible) \
+		or (is_instance_valid(world.deploy_ui) and world.deploy_ui.visible) \
+		or (is_instance_valid(world.chat) and world.chat.typing) \
+		or (is_instance_valid(world.sat_view) and world.sat_view.active())
+
+## What you are in steers with the mouse.
+func _wants_grab() -> bool:
+	if pointer_screen():
+		return false
+	if world.on_foot:
+		if not is_instance_valid(world.walker):
+			return false
+		# dead in a street fight the view goes over the shoulder and waits for
+		# the deploy screen; dead anywhere else the pointer is wanted
+		return not world.walker.dead or is_instance_valid(world.cqb)
+	if is_instance_valid(world.rocket) and world.rocket.occupied:
+		return true
+	if is_instance_valid(world.tank) or is_instance_valid(world.ship) or world.crew.at_conn() \
+			or world.gunning or (is_instance_valid(world.pod) and world.pod.active):
+		return true
+	if is_instance_valid(world.cam) and bool(world.cam.get("_free")):
+		return true
+	return is_instance_valid(world.player) and "mouse_fly" in world.player \
+		and bool(world.player.mouse_fly)
+
+## Back in the window after another had it. The system lets go of a captured
+## pointer when the window loses focus, but the mode still reads as captured,
+## so `sync_mouse` saw nothing to put right and the view would not turn until
+## something else took the mouse again. Let go and take it again.
+func regrab() -> void:
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	sync_mouse()
+

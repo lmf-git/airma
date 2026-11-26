@@ -353,6 +353,7 @@ func tick_after_street(delta: float) -> void:
 	streak_tests.tick_heli_streak(delta)
 	infantry_tests.tick_ladder_fall()
 	infantry_tests.tick_wreck_test()
+	infantry_tests.tick_mortar_test()
 	streak_tests.tick_drop()
 	infantry_tests.tick_zero()
 	infantry_tests.tick_holdfire()
@@ -395,6 +396,7 @@ func tick_end(delta: float) -> void:
 	dev_options.tick_shot_podmark(delta)
 	dev_options.tick_hold_gun()
 	dev_options.tick_look_from()
+	dev_options.tick_sat_view()
 	dev_options.tick_shot()
 
 

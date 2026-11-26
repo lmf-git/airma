@@ -122,6 +122,9 @@ var mode: GameMode
 var veil: GVeil
 var net: NetLink
 var walker: Walker
+## The planet from orbit, on F4: see `SatView`.
+var sat_view: SatView
+var _air_cleared := false
 var parked: Array = []
 var tank: Tank = null
 var on_foot := false
@@ -753,6 +756,10 @@ func _process(delta: float) -> void:
 			eye = _me_or_player()
 		if eye != null:
 			weather.thin_air(_env, Sim.altitude(eye.global_position), _psm)
+		# the satellite view with the air cleared away: the ground as a map
+		# would show it, no haze over it
+		if SatView.clear_air and is_instance_valid(sat_view) and sat_view.active():
+			_env.fog_enabled = false
 	var _pw := Sim.prof_at()
 	_tick_world(delta)
 	Sim.prof_end(&"world.total", _pw)
@@ -913,6 +920,7 @@ func _tick_world(delta: float) -> void:
 		or (is_instance_valid(chat) and chat.typing) \
 		or (is_instance_valid(deploy_ui) and deploy_ui.visible) \
 		or get_tree().paused
+	controls.sync_mouse()
 	if harness != null:
 		harness.tick_after_input(delta)
 	# Keep the hangar's session line current. It carries the address a joiner
@@ -962,6 +970,15 @@ func _tick_world(delta: float) -> void:
 		# The same for the cloud: its mesh is only which pixels get to ask.
 		if is_instance_valid(clouds):
 			clouds.follow(get_viewport().get_camera_3d())
+	# and the air and the cloud put away for the satellite view's clear air
+	# (only when it changes: the planet tests hide them themselves)
+	var clear: bool = SatView.clear_air and is_instance_valid(sat_view) and sat_view.active()
+	if clear != _air_cleared:
+		_air_cleared = clear
+		if is_instance_valid(atmo):
+			atmo.visible = not clear
+		if is_instance_valid(clouds):
+			clouds.visible = not clear
 	if is_instance_valid(hud) and is_instance_valid(cam) and running:
 		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT) \
 			and not is_instance_valid(cam.weapon_cam)
@@ -1615,6 +1632,11 @@ class Shell extends Node:
 	func _input(e: InputEvent) -> void:
 		if world:
 			world.controls.shell_input(e)
+
+	func _notification(what: int) -> void:
+		if world and (what == NOTIFICATION_APPLICATION_FOCUS_IN \
+				or what == NOTIFICATION_WM_WINDOW_FOCUS_IN):
+			world.controls.regrab()
 
 ## The crewed launch vehicle, if there is one on the pad or in the sky.
 var rocket: LaunchVehicle = null

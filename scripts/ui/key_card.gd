@@ -15,25 +15,49 @@ func show_keys(g: Array) -> void:
 	groups = g
 	queue_redraw()
 
+## How wide a column is, and where the panel has to stop: the corner panels
+## (minimap, radar) sit over the bottom of the screen, and a long card ran down
+## behind them.
+const COL_W := 520.0
+const KEEP_CLEAR := 330.0
+
 func _draw() -> void:
 	if font == null or groups.is_empty():
 		return
-	var x := 26.0
-	var y := 118.0
-	var panel_h := 0.0
+	var top := 118.0
+	var bottom: float = maxf(get_viewport_rect().size.y - KEEP_CLEAR, top + 200.0)
+	# Lay the rows out first, down one column and on into the next when it
+	# would run past the bottom: a heading starts a column only with at least
+	# two of its rows under it.
+	var items: Array = []        # [column, y, kind, a, b]
+	var col := 0
+	var y := top
+	var deepest := top
 	for g in groups:
-		panel_h += 26.0 + float(g[1].size()) * 19.0
-	var box := Rect2(x - 14, y - 30, 330, panel_h + 24)
-	draw_rect(box, Color(0.02, 0.04, 0.06, 0.55), true)
-	draw_rect(box, Color(0.4, 0.9, 0.6, 0.35), false, 1.0)
-	for g in groups:
-		draw_string(font, Vector2(x, y), str(g[0]),
-			HORIZONTAL_ALIGNMENT_LEFT, -1.0, 15, Color(0.45, 0.95, 0.65))
+		if y + 22.0 + 2.0 * 19.0 > bottom and y > top:
+			col += 1
+			y = top
+		items.append([col, y, 0, str(g[0]), ""])
 		y += 22.0
 		for row in g[1]:
-			draw_string(font, Vector2(x + 6, y), str(row[0]),
-				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(1.0, 0.95, 0.7))
-			draw_string(font, Vector2(x + 116, y), str(row[1]),
-				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(0.82, 0.9, 0.95))
+			if y > bottom:
+				col += 1
+				y = top
+			items.append([col, y, 1, str(row[0]), str(row[1])])
 			y += 19.0
+			deepest = maxf(deepest, y)
 		y += 4.0
+	var x0 := 26.0
+	var box := Rect2(x0 - 14, top - 30, COL_W * float(col + 1) - 10.0, deepest - top + 24)
+	draw_rect(box, Color(0.02, 0.04, 0.06, 0.55), true)
+	draw_rect(box, Color(0.4, 0.9, 0.6, 0.35), false, 1.0)
+	for it in items:
+		var x: float = x0 + COL_W * float(it[0])
+		if int(it[2]) == 0:
+			draw_string(font, Vector2(x, it[1]), it[3],
+				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 15, Color(0.45, 0.95, 0.65))
+		else:
+			draw_string(font, Vector2(x + 6, it[1]), it[3],
+				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(1.0, 0.95, 0.7))
+			draw_string(font, Vector2(x + 116, it[1]), it[4],
+				HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(0.82, 0.9, 0.95))

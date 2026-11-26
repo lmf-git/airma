@@ -26,6 +26,21 @@ var shooter: Node3D = null
 ## hurts nothing. See `NetLaunches.share_round`.
 var picture := false
 static var _mesh: Mesh = null
+## How hard it knocks a building about, in direct hits of a 60 mm bomb, and
+## how far from a wall that still counts: see `Obstacles.batter`.
+var blow := 1.0
+var blow_r := 6.0
+
+## Where a round coming down on (x, z) goes off: on the roof of whatever stands
+## there, not on the ground under it. Laid on the ground, a bomb on a block went
+## off inside the ground floor, under the roof it had come down through.
+static func lands_at(x: float, z: float) -> Vector3:
+	return Vector3(x, maxf(Sim.height_at(x, z), Obstacles.top_at(x, z)), z)
+
+## Wear down whatever it went off on or beside.
+func _batter() -> void:
+	if Scenery.current != null and is_instance_valid(Scenery.current):
+		Scenery.current.batter(to, blow_r, blow)
 
 func _init() -> void:
 	top_level = true
@@ -84,12 +99,15 @@ func _physics_process(delta: float) -> void:
 		if picture:
 			var was_mp: bool = Effects.mute_blast
 			Effects.mute_blast = true
-			Effects.explosion(get_parent(), to + Vector3(0, 0.6, 0), 9.0, false)
+			Effects.explosion(get_parent(), to + Vector3(0, 0.6, 0), 9.0, false, false)
 			Effects.he_impact(get_parent(), to + Vector3(0, 0.4, 0), 2.6)
 			Effects.mute_blast = was_mp
 			Effects.dust(get_parent(), to, 3.0)
+			# what is drawn coming down has to come down here too
+			_batter()
 			queue_free()
 			return
+		_batter()
 		if is_instance_valid(shooter):
 			# one man's 60 mm: the blast, credited to him, hurting whoever
 			# is in it on the other side
@@ -99,7 +117,7 @@ func _physics_process(delta: float) -> void:
 			Effects.credit = shooter
 			Effects.spare_team = int(shooter.get("side")) if "side" in shooter else -1
 			KillFeed.cause = "mortar"
-			Effects.explosion(get_parent(), to + Vector3(0, 0.6, 0), 9.0, false)
+			Effects.explosion(get_parent(), to + Vector3(0, 0.6, 0), 9.0, false, false)
 			Effects.he_impact(get_parent(), to + Vector3(0, 0.4, 0), 2.6)
 			Effects.credit = was_c
 			Effects.spare_team = was_s

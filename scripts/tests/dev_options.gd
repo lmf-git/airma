@@ -36,6 +36,13 @@ func parse_arg(a: String) -> bool:
 		if lv.size() == 6:
 			_look_from = Vector3(float(lv[0]), float(lv[1]), float(lv[2]))
 			_look_at = Vector3(float(lv[3]), float(lv[4]), float(lv[5]))
+	elif a.begins_with("--satview="):
+		# --satview=ALT[,TILT_DEG[,PAN_KM]]: up into the satellite view, for a --shot
+		var sv := a.substr(10).split(",")
+		_sat_alt = float(sv[0])
+		_sat_tilt = deg_to_rad(float(sv[1])) if sv.size() > 1 else 0.0
+		_sat_pan = float(sv[2]) * 1000.0 if sv.size() > 2 else 0.0
+		SatView.clear_air = sv.size() > 3 and sv[3] == "clear"
 	elif a.begins_with("--at="):
 		var av := a.substr(5).split(",")
 		if av.size() == 3:
@@ -232,6 +239,22 @@ func tick_shot_obj() -> void:
 var _look_from := Vector3.INF
 var _look_at := Vector3.INF
 var _look_cam: Camera3D = null
+
+var _sat_alt := -1.0
+var _sat_tilt := 0.0
+var _sat_pan := 0.0
+
+func tick_sat_view() -> void:
+	if _sat_alt <= 0.0 or not world.running:
+		return
+	if not is_instance_valid(world.sat_view) or not world.sat_view.active():
+		world.controls.toggle_sat_view()
+		world.sat_view.alt = _sat_alt
+		world.sat_view.set("_alt_s", _sat_alt)
+		world.sat_view.tilt = _sat_tilt
+		if _sat_pan != 0.0:
+			world.sat_view.call("_pan", 0.0, _sat_pan)
+		_sat_alt = -1.0
 
 func tick_look_from() -> void:
 	if _look_from != Vector3.INF and world.running:

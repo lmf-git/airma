@@ -64,6 +64,11 @@ var grenades := 2
 ## line of sight at the weapon's zero, and these move where it goes from there
 ## -- a tenth of a mil a click on an optic, half a mil on irons.
 var elev_mil := {}
+## How far each slot's variable scope is wound in: 1 is its widest field,
+## `zoom_max` its closest. Kept per weapon, like the turrets.
+var scope_mag := {}
+## The mortar, when it is set up on the ground rather than carried.
+var tube: MortarTube = null
 var wind_mil := {}
 ## For a harness: the zero to use instead of the weapon's own, in metres.
 var zero_override := -1.0
@@ -483,6 +488,8 @@ func _ready() -> void:
 	# hard-edged hole in the bottom of every sight picture, worst on the short
 	# guns. The depth buffer is reversed, so the far ground does not pay for it.
 	cam.near = 0.01
+	# and `Planet.follow`, which sets every frame's planes, keeps it
+	cam.set_meta(&"near_need", 0.01)
 	cam.fov = BASE_FOV
 	cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	add_child(cam)
@@ -512,6 +519,7 @@ func rearm() -> void:
 	reloading = 0.0
 
 func _take_up(i: int, noisy := true) -> void:
+	_pack_tube()
 	kit_idx = i
 	body.equip(gun_spec(), is_quiet())
 	weapon = body.gun_node
@@ -628,6 +636,22 @@ func _unhandled_input(e: InputEvent) -> void:
 			elev_mil[kit_idx] = clampf(float(elev_mil.get(kit_idx, 0.0)) + de, -20.0, 40.0)
 			wind_mil[kit_idx] = clampf(float(wind_mil.get(kit_idx, 0.0)) + dw, -20.0, 20.0)
 			Sfx.play_ui(get_tree().current_scene, "clink", -16.0, 1.6)
+			get_viewport().set_input_as_handled()
+			return
+	# On a variable scope the wheel winds the power up and down.
+	if e is InputEventMouseButton and (e as InputEventMouseButton).pressed and _ads > 0.5:
+		var bi: MouseButton = (e as InputEventMouseButton).button_index
+		var top: float = float(gun_spec().get("zoom_max", 1.0))
+		if top > 1.0 and (bi == MOUSE_BUTTON_WHEEL_UP or bi == MOUSE_BUTTON_WHEEL_DOWN):
+			var m: float = float(scope_mag.get(kit_idx, 1.0))
+			m = clampf(m * (1.2 if bi == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.2), 1.0, top)
+			# land on the ends exactly rather than a hair off them
+			if absf(m - top) < 0.02:
+				m = top
+			elif absf(m - 1.0) < 0.02:
+				m = 1.0
+			scope_mag[kit_idx] = m
+			Sfx.play_ui(get_tree().current_scene, "clink", -20.0, 2.2)
 			get_viewport().set_input_as_handled()
 			return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -1524,6 +1548,9 @@ func _fight(delta: float) -> void:
 	if reloading > 0.0:
 		_work_reload(delta, g, edge)
 		return
+	if String(g.get("launcher", "")) == "mortar":
+		_work_mortar(delta, g, edge)
+		return
 
 	# Down the sights it goes where it is pointed; from the hip it does not.
 	var s: float = lerpf(float(g["hip"]), float(g["ads"]), _ads)
@@ -1650,11 +1677,6 @@ func _fight(delta: float) -> void:
 			lock_t = 0.0
 		elif String(g["launcher"]) == "gl":
 			Firearm.grenade40(world, self, side, g, from, aim)
-		elif String(g["launcher"]) == "mortar":
-			if not _mortar(start, look):
-				ammo += 1
-				_rounds[kit_idx] = ammo
-				_shot_cd = 0.3
 		else:
 			Firearm.rocket(world, self, side, g, from, aim)
 	else:
@@ -1692,33 +1714,96 @@ func _fight(delta: float) -> void:
 		_cycle_snd = cyc
 		_pump_in = 0.24 if cyc == "pump" else 0.40
 
-## A mortar round onto what the crosshair is on: up and over, down on the
-## mark. False, and nothing fired, if there is nothing there or it is too close
-## for the tube to lay on.
-func _mortar(start: Vector3, look: Vector3) -> bool:
-	# ranged further out than a rifle looks: it is laid on a street, not a man
-	var seen: float = Firearm.sight_range(start, look, 850.0)
-	var mark: Vector3 = start + look * seen
-	var flat: float = Vector2(mark.x - global_position.x, mark.z - global_position.z).length()
-	if seen >= 849.0 or flat > 820.0:
-		Sim.report("mortar: nothing to range on — look at the ground", Sim.Ev.BAD)
-		return false
-	if flat < 70.0:
-		Sim.report("mortar: too close — seventy metres at least", Sim.Ev.BAD)
-		return false
-	var mr := MortarRound.new()
-	mr.arena = arena as CqbMatch if is_instance_valid(arena) and arena is CqbMatch else null
-	mr.shooter = self
-	mr.from = global_position + Vector3(0.0, 1.0, 0.0)
-	mr.to = Vector3(mark.x, Sim.height_at(mark.x, mark.z), mark.z)
-	# a high-angle shot: about as long in the air as the range wants
-	mr.flight = clampf(5.0 + flat / 70.0, 6.0, 16.0)
-	mr.delay = 0.0
-	get_tree().current_scene.add_child(mr)
+## The mortar is worked from the ground: the first pull sets it up where he
+## stands (stand still for it), the sights button -- or a pull with nothing
+## plotted -- opens the map to lay it on a fire mission, and each pull after
+## that puts a round down the tube onto the mission. Moving off it, or taking
+## up another weapon, packs it up.
+func _work_mortar(delta: float, g: Dictionary, edge: bool) -> void:
+	var world := get_tree().current_scene
+	var moving: bool = Vector2(vel.x, vel.z).length() > 0.8 or not on_floor or frame != null
+	if not is_instance_valid(tube):
+		tube = null
+		if edge:
+			if moving:
+				Sim.report("mortar: stand still to set it up", Sim.Ev.BAD)
+			else:
+				tube = MortarTube.new()
+				tube.spec = g
+				world.add_child(tube)
+				var fwd := Vector3(-sin(yaw), 0.0, -cos(yaw))
+				var at: Vector3 = global_position + fwd * 0.7
+				tube.global_position = Vector3(at.x, global_position.y, at.z)
+				if is_instance_valid(body.gun_node):
+					body.gun_node.visible = false
+				Sfx.play_ui(world, "cloth", -6.0, 0.8)
+				Sim.report("setting up the mortar…", Sim.Ev.INFO)
+		return
+	if moving or Vector2(tube.global_position.x - global_position.x,
+			tube.global_position.z - global_position.z).length() > MortarTube.STAY:
+		_pack_tube()
+		Sim.report("mortar packed up", Sim.Ev.INFO)
+		return
+	if tube.work(delta):
+		Sfx.play_ui(world, "clink", -8.0, 0.9)
+		Sim.report("mortar ready — RMB to plot a fire mission on the map", Sim.Ev.GOOD)
+	if not tube.ready_to_fire():
+		return
+	if Sim.tapped(&"ads") or (edge and tube.mission == Vector3.INF):
+		_plot_mission()
+		return
+	if not edge or _shot_cd > 0.0 or tube.mission == Vector3.INF:
+		return
+	if ammo <= 0:
+		Sfx.play_ui(world, "dry", -6.0)
+		if spare > 0:
+			_begin_reload(g)
+		return
+	_shot_cd = float(g["cd"])
+	ammo -= 1
+	_rounds[kit_idx] = ammo
+	var mr: MortarRound = tube.fire(self, arena)
+	world.add_child(mr)
 	if Sim.net != null:
 		Sim.net.launches.share_round(mr)
-	Sim.report("round out — %d m, %.0f seconds" % [int(flat), mr.flight], Sim.Ev.INFO)
-	return true
+	Sfx.play_at(world, "thump", mr.from, 2.0, 0.9, 1500.0)
+	Effects.dust(world, tube.global_position, 1.2)
+	if is_instance_valid(arena) and arena.has_method("heard"):
+		arena.heard(mr.from, side, 90.0)
+	Sim.report("round out — %d m, %.0f seconds" % [int(Vector2(tube.mission.x - mr.from.x,
+		tube.mission.z - mr.from.z).length()), mr.flight], Sim.Ev.INFO)
+
+## Open the map to lay the tube on a fire mission: a line from the tube to
+## the cursor with the range on it, and a click where it is to go.
+func _plot_mission() -> void:
+	var world := get_tree().current_scene
+	var map: Variant = world.get("map") if world != null else null
+	if map == null or not is_instance_valid(map) or not is_instance_valid(tube):
+		return
+	var t: MortarTube = tube
+	(map as MapView).pick("FIRE MISSION", func(p: Vector3):
+		if not is_instance_valid(t):
+			return
+		var why: String = t.cannot_reach(p)
+		if why != "":
+			Sim.report("mortar: " + why, Sim.Ev.BAD)
+			return
+		t.lay_on(p)
+		Sim.report("fire mission laid — %d m. Fire when ready" % int(Vector2(p.x - t.global_position.x,
+			p.z - t.global_position.z).length()), Sim.Ev.GOOD))
+	# measured from the tube, not from wherever the map's last line began
+	(map as MapView).pick_from = tube.global_position
+
+## Take the mortar back up off the ground.
+func _pack_tube() -> void:
+	if is_instance_valid(tube):
+		tube.queue_free()
+	tube = null
+	if is_instance_valid(body) and is_instance_valid(body.gun_node):
+		body.gun_node.visible = true
+
+func _exit_tree() -> void:
+	_pack_tube()
 
 ## The seeker. With the missile up and the sights on something that flies,
 ## it takes a moment to settle; look away and it lets go.
@@ -1894,6 +1979,12 @@ func hit_confirm(head: bool, killed: bool) -> void:
 	else:
 		Sfx.play_ui(world, "hitmark", -9.0, 1.25 if head else 1.0)
 
+## The field of view through the sights of `g`, with a variable scope's
+## power worked in.
+func scope_fov(g: Dictionary) -> float:
+	return float(g["fov"]) / clampf(float(scope_mag.get(kit_idx, 1.0)), 1.0,
+		maxf(float(g.get("zoom_max", 1.0)), 1.0))
+
 ## True while looking through glass rather than over iron.
 func scoped() -> bool:
 	return not third and _ads > 0.9 and gun_spec().get("scope", false)
@@ -1932,7 +2023,7 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 		Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
 	_lean = lerpf(_lean, clampf(want_lean, -1.0, 1.0), clampf(delta * 9.0, 0.0, 1.0))
 	if is_instance_valid(cam):
-		var zoom: float = float(g["fov"])
+		var zoom: float = scope_fov(g)
 		if third:
 			zoom = maxf(zoom, 44.0)
 		# the world opens out a little at a run
@@ -2104,6 +2195,7 @@ func take_hit(amount: float, from: Node = null) -> void:
 
 func _go_ragdoll(v: Vector3) -> void:
 	dead = true
+	_pack_tube()
 	# The same as anybody else: what killed him decides what is left.
 	var from_dir := Vector3.ZERO
 	if is_instance_valid(last_attacker) and last_attacker is Node3D and last_attacker != self:

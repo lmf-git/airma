@@ -1018,11 +1018,15 @@ static func _blast_infantry(world: Node, pos: Vector3, r: float) -> void:
 			n.take_hit(280.0 * pow(1.0 - d / r, 1.2), credit if is_instance_valid(credit) else null)
 	KillFeed.cause = was_cause
 
-static func explosion(world: Node, pos: Vector3, radius: float, smoke := true) -> void:
+## `flatten` false: the blast hurts and is seen, but leaves buildings to
+## whoever set it off -- a mortar bomb wears them down (`Scenery.batter`)
+## rather than levelling whatever its middle is near.
+static func explosion(world: Node, pos: Vector3, radius: float, smoke := true,
+		flatten := true) -> void:
 	TownSet.glass_blast(pos, radius * 3.0)
 	_blast_infantry(world, pos, maxf(radius * 0.8, 5.0))
 	# anything standing inside the blast comes down
-	if Scenery.current != null and is_instance_valid(Scenery.current) and radius > 5.0:
+	if flatten and Scenery.current != null and is_instance_valid(Scenery.current) and radius > 5.0:
 		var flattened := Scenery.current.damage_area(pos, radius * 1.6)
 		if flattened > 0:
 			for i in mini(flattened, 3):

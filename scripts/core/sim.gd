@@ -673,6 +673,9 @@ var ui_modal := false
 ## playing cannot be frozen by one of them -- so the controls are let go of
 ## instead: the man stands, the vehicle coasts, nothing fires.
 var menu_open := false
+## Looking through the satellite view (`SatView`): the controls are let go of,
+## as with the pause page.
+var spectating := false
 ## A range with no air threat on it. Set by the STRIKE mission: the vehicles,
 ## shipping and helicopters on it are there to be attacked from the air, and
 ## none of them shoots at an aeroplane -- not the batteries, not a tank's main
@@ -1819,7 +1822,7 @@ const MENU_ACTIONS := [&"pitch_up", &"pitch_down", &"weapon_1", &"weapon_2",
 var sensor_keys := false
 
 func strength(action: StringName) -> float:
-	if typing or menu_open or (menu_keys and MENU_ACTIONS.has(action)):
+	if typing or menu_open or spectating or (menu_keys and MENU_ACTIONS.has(action)):
 		return 0.0
 	if action == &"throttle_down" and sensor_keys and Input.is_physical_key_pressed(KEY_CTRL):
 		return 1.0 if Input.is_physical_key_pressed(KEY_Z) \
@@ -1829,7 +1832,7 @@ func strength(action: StringName) -> float:
 func held(action: StringName) -> bool:
 	if _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
 		return false
-	return not typing and not menu_open and Input.is_action_pressed(action)
+	return not typing and not menu_open and not spectating and Input.is_action_pressed(action)
 
 ## Discrete key presses, latched from the input event rather than polled.
 ##
@@ -1890,7 +1893,8 @@ func _input(e: InputEvent) -> void:
 			_taps[a] = Time.get_ticks_msec()
 
 func tapped(action: StringName) -> bool:
-	if typing or menu_open or _blocked.has(action) or (menu_keys and MENU_ACTIONS.has(action)):
+	if typing or menu_open or spectating or _blocked.has(action) \
+			or (menu_keys and MENU_ACTIONS.has(action)):
 		return false
 	var at: int = _taps.get(action, 0)
 	if at == 0:

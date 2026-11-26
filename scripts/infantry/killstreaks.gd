@@ -894,7 +894,10 @@ func call_in(id: String) -> bool:
 				var mr := MortarRound.new()
 				mr.arena = fight
 				mr.from = _battery + Vector3(fight._rng.randf_range(-6, 6), 0.0, fight._rng.randf_range(-6, 6))
-				mr.to = Vector3(p.x, fight._ground(p.x, p.z), p.z)
+				mr.to = MortarRound.lands_at(p.x, p.z)
+				# the battery's are 120 mm: heavier on a building than a 60
+				mr.blow = 1.6
+				mr.blow_r = 8.0
 				mr.flight = 12.0 + fight._rng.randf_range(-0.4, 0.4)
 				mr.delay = i * 0.7 + fight._rng.randf_range(0.0, 0.3)
 				fight.world.add_child(mr)

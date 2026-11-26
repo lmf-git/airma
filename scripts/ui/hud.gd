@@ -38,6 +38,8 @@ const KILL_LIFE := 7.0
 var show_help := true
 var _t := 0.0
 var _font: Font
+## The on-foot picture: see `FootHud`.
+var _foot := FootHud.new(self)
 ## A real head-up display only covers twenty odd degrees of the windscreen.
 ## Symbology is clipped to that box so it sits inside the cockpit combiner
 ## instead of sprawling across the whole screen.
@@ -230,7 +232,7 @@ func _draw_all() -> void:
 		_draw_driver()
 		return
 	if walker != null and is_instance_valid(walker):
-		_draw_on_foot()
+		_foot.draw()
 		return
 	if aircraft == null or not is_instance_valid(aircraft) or cam == null:
 		return
@@ -729,369 +731,9 @@ func _draw_driver() -> void:
 				float(tank.last_solution["elev"]), int(tank.last_solution["salvo"]),
 				float(tank.last_solution.get("tof", 0.0))], 14, Color(0.7, 0.85, 0.95))
 	_txt(Vector2(26, vp.y - 48.0),
-		"W/S drive   A/D steer   X brake   SPACE fire   V coax   C sight   U out", 14,
+		"W/S drive   A/D steer   X brake   SPACE fire   K coax   O sight   U out   F2 keys", 14,
 		Color(0.85, 0.92, 1.0))
 	_draw_log(vp)
-
-## What a man on foot needs in front of him: where the rounds will go, what
-## is left to send, and what is being done to him.
-func _draw_on_foot() -> void:
-	var vp := get_viewport_rect().size
-	var c := vp * 0.5
-	var w: Walker = walker as Walker
-	var g: Dictionary = w.gun_spec()
-	var eye: Camera3D = w.cam
-
-	# Whose side everyone is on. Uniforms do it up close; across a street in
-	# bad light a chevron over your own people does it better.
-	if is_instance_valid(eye) and eye.current:
-		for n in get_tree().get_nodes_in_group("infantry"):
-			var sd := n as Soldier
-			if sd == null or sd.team != w.side or not sd.is_alive():
-				continue
-			var at: Vector3 = sd.global_position + Vector3(0, 2.05, 0)
-			if eye.is_position_behind(at):
-				continue
-			var far: float = eye.global_position.distance_to(at)
-			var sp: Vector2 = eye.unproject_position(at)
-			# A man right at the camera plane projects to infinity, or to
-			# nothing a triangle can be made of, and the fill says so.
-			if not sp.is_finite() or absf(sp.x) > 1.0e5 or absf(sp.y) > 1.0e5 or far < 0.3:
-				continue
-			var a: float = clampf(1.15 - far / 160.0, 0.25, 0.9)
-			var blue := Color(0.35, 0.72, 1.0, a)
-			draw_colored_polygon(PackedVector2Array([sp + Vector2(-5, -8), sp + Vector2(5, -8),
-				sp + Vector2(0, 0)]), blue)
-			if far < 40.0:
-				_txt(Vector2(sp.x - 60.0, sp.y - 12.0), sd.callsign, 11, blue,
-					HORIZONTAL_ALIGNMENT_CENTER, 120.0)
-
-	if not (is_instance_valid(eye) and eye.current):
-		# Riding a round on the weapon camera: his sight is not what is on
-		# the screen, and a scope tube or a crosshair over the ride marks
-		# nothing.
-		pass
-	elif w.glassing():
-		# Field glasses: two tubes side by side, and what is outside them is
-		# the inside of them. The outline is the two circles run together.
-		var br: float = minf(vp.y * 0.46, vp.x * 0.31)
-		var off: float = br * 0.5
-		var cut: float = acos(off / br)
-		var bdark := Color(0, 0, 0, 1)
-		draw_rect(Rect2(0, 0, c.x - off - br, vp.y), bdark)
-		draw_rect(Rect2(c.x + off + br, 0, vp.x - c.x - off - br, vp.y), bdark)
-		var top := PackedVector2Array([Vector2(c.x - off - br, 0.0)])
-		var bot := PackedVector2Array([Vector2(c.x - off - br, vp.y)])
-		var rim := PackedVector2Array()
-		for i in 25:
-			var ta: float = lerpf(PI, TAU - cut, float(i) / 24.0)
-			var q := Vector2(cos(ta), sin(ta)) * br
-			top.append(c + Vector2(-off, 0) + q)
-			bot.append(c + Vector2(-off, 0) + Vector2(q.x, -q.y))
-		# from 1: the first point of this arc is the last of the other, and a
-		# polygon with the same corner twice running does not triangulate
-		for i in range(1, 25):
-			var tb: float = lerpf(PI + cut, TAU, float(i) / 24.0)
-			var q2 := Vector2(cos(tb), sin(tb)) * br
-			top.append(c + Vector2(off, 0) + q2)
-			bot.append(c + Vector2(off, 0) + Vector2(q2.x, -q2.y))
-		rim.append_array(top.slice(1))
-		var back := bot.slice(1)
-		back.reverse()
-		rim.append_array(back)
-		rim.append(rim[0])
-		top.append(Vector2(c.x + off + br, 0.0))
-		bot.append(Vector2(c.x + off + br, vp.y))
-		draw_colored_polygon(top, bdark)
-		draw_colored_polygon(bot, bdark)
-		draw_polyline(rim, bdark, 7.0, true)
-		# a mil scale across the middle, and a short post under it
-		var bink := Color(0.03, 0.03, 0.03, 0.9)
-		draw_line(c + Vector2(-br * 0.5, 0), c + Vector2(-10, 0), bink, 1.4)
-		draw_line(c + Vector2(10, 0), c + Vector2(br * 0.5, 0), bink, 1.4)
-		draw_line(c + Vector2(0, 10), c + Vector2(0, br * 0.22), bink, 1.4)
-		for k in range(-5, 6):
-			if k == 0:
-				continue
-			var tx: float = float(k) * br * 0.1
-			var th: float = 9.0 if k % 5 == 0 else 5.0
-			draw_line(c + Vector2(tx, -th), c + Vector2(tx, th), bink, 1.2)
-		var rng: float = w.glass_range()
-		var brg: int = int(round(fposmod(-rad_to_deg(w.yaw), 360.0))) % 360
-		_txt(Vector2(c.x - 150.0, c.y + br * 0.62), "%03d°   %s" % [brg,
-			("%d m" % int(round(rng))) if rng >= 0.0 else "--- m"], 16,
-			Color(0.75, 1.0, 0.8, 0.95), HORIZONTAL_ALIGNMENT_CENTER, 300.0)
-	elif w.scoped():
-		# through the glass: everything outside the tube is the inside of it.
-		# A 2x shows most of the screen, a prism a little less, a long scope
-		# least of all.
-		var reticle := String(g.get("reticle", "cross"))
-		var r: float = vp.y * (0.49 if reticle == "ring" else (0.43 if reticle == "chevron" else 0.46))
-		var dark := Color(0, 0, 0, 1)
-		draw_rect(Rect2(0, 0, c.x - r, vp.y), dark)
-		draw_rect(Rect2(c.x + r, 0, vp.x - c.x - r, vp.y), dark)
-		# The corners between the circle and the square it sits in, as two
-		# shapes: above the glass and below it. It was a strip per segment of
-		# the rim down to the nearer edge, and the two strips that crossed the
-		# middle went up on one side and down on the other -- a bow tie, which
-		# the polygon fill cannot triangulate, and said so every frame.
-		var above := PackedVector2Array([Vector2(c.x - r, 0.0)])
-		var below := PackedVector2Array([Vector2(c.x + r, vp.y)])
-		for i in 33:
-			var ta: float = PI + PI * float(i) / 32.0
-			above.append(c + Vector2(cos(ta), sin(ta)) * r)
-			var tb: float = PI * float(i) / 32.0
-			below.append(c + Vector2(cos(tb), sin(tb)) * r)
-		above.append(Vector2(c.x + r, 0.0))
-		below.append(Vector2(c.x - r, vp.y))
-		draw_colored_polygon(above, dark)
-		draw_colored_polygon(below, dark)
-		draw_arc(c, r, 0, TAU, 64, Color(0, 0, 0, 1), 6.0)
-		var ink := Color(0.03, 0.03, 0.03, 0.95)
-		if reticle == "ring":
-			# a lit ring and a dot, and nothing else in the way
-			var lit := Color(1.0, 0.18, 0.10, 0.9)
-			draw_arc(c, 34.0, 0, TAU, 48, lit, 1.6)
-			draw_circle(c, 2.0, lit)
-		elif reticle == "chevron":
-			# the prism's chevron, lit amber, on a post, with the drop below it
-			var amb := Color(1.0, 0.62, 0.12, 0.95)
-			draw_line(c + Vector2(-9, 9), c, amb, 2.2)
-			draw_line(c, c + Vector2(9, 9), amb, 2.2)
-			draw_line(c + Vector2(0, 14), c + Vector2(0, r * 0.55), ink, 1.6)
-			for k in range(1, 5):
-				var y: float = 14.0 + k * 18.0
-				var hw: float = 10.0 - k * 1.5
-				draw_line(c + Vector2(-hw, y), c + Vector2(hw, y), ink, 1.2)
-			draw_line(c + Vector2(-r, 0), c + Vector2(-r * 0.55, 0), ink, 1.4)
-			draw_line(c + Vector2(r * 0.55, 0), c + Vector2(r, 0), ink, 1.4)
-		else:
-			draw_line(c + Vector2(-r, 0), c + Vector2(-14, 0), ink, 2.0)
-			draw_line(c + Vector2(14, 0), c + Vector2(r, 0), ink, 2.0)
-			draw_line(c + Vector2(0, 14), c + Vector2(0, r), ink, 2.0)
-			draw_line(c + Vector2(0, -r), c + Vector2(0, -14), ink, 1.0)
-			for k in range(1, 5):
-				draw_line(c + Vector2(-5, k * 22.0), c + Vector2(5, k * 22.0), ink, 1.0)
-			draw_circle(c, 1.4, Color(0.9, 0.1, 0.05, 0.9))
-	else:
-		# Four ticks that open as the weapon wanders. Through the sights in
-		# first person the sights are the mark -- irons, a dot, a holo -- and
-		# ticks painted over them only hid what they were laid on. It went only
-		# for a red dot; now it fades as any weapon comes up to the eye. Over
-		# the shoulder there is nothing to look through, so it stays.
-		var fade: float = 1.0 if w.third else clampf(1.0 - w._ads * 1.6, 0.0, 1.0)
-		if fade > 0.01:
-			var px: float = vp.y * 0.5 / tan(deg_to_rad(eye.fov * 0.5)) if is_instance_valid(eye) else 600.0
-			var gap: float = clampf(w.spread_now * px, 3.0, 90.0) + 3.0
-			var col := Color(1, 1, 1, (0.82 if w.reloading <= 0.0 else 0.3) * fade)
-			for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
-				draw_line(c + d * gap, c + d * (gap + 7.0), Color(0, 0, 0, 0.5 * fade), 3.0)
-				draw_line(c + d * gap, c + d * (gap + 7.0), col, 1.4)
-			draw_circle(c, 1.2, col)
-
-	# The missile's sight: a ring the size of what the seeker can see, and
-	# what the seeker is doing about it.
-	#
-	# All there was to aim a Stinger by was the tube itself and a box that
-	# appeared on an aeroplane once the seeker had already found it -- nothing
-	# said where to point to make that happen, how far along the lock was, or
-	# that the thing would not fire without one. The ring is the seeker's
-	# cone drawn to scale, so an aeroplane inside it is one it is looking at;
-	# it fills round as the lock builds, and goes red and steady with it.
-	var sam: bool = String(g.get("launcher", "")) == "sam"
-	if sam and w._ads > 0.5 and is_instance_valid(eye) and eye.current:
-		var px_s: float = vp.y * 0.5 / tan(deg_to_rad(eye.fov * 0.5))
-		var ring: float = clampf(tan(deg_to_rad(w.SEEK_CONE)) * px_s, 40.0, vp.y * 0.46)
-		var has: bool = is_instance_valid(w.lock_target)
-		var got: bool = has and w.lock_t >= w.LOCK_TIME
-		var sc := Color(0.55, 1.0, 0.62, 0.85)
-		if got:
-			sc = Color(1.0, 0.22, 0.16, 0.95)
-		elif has:
-			sc = Color(1.0, 0.74, 0.2, 0.95)
-		var fade_s: float = clampf((w._ads - 0.5) * 4.0, 0.0, 1.0)
-		sc.a *= fade_s
-		var under := Color(0, 0, 0, 0.45 * fade_s)
-		draw_arc(c, ring, 0.0, TAU, 72, under, 3.6)
-		draw_arc(c, ring, 0.0, TAU, 72, sc, 1.6)
-		# ticks at the quarters, and a pip to lay on it with
-		for d4 in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
-			draw_line(c + d4 * (ring - 10.0), c + d4 * (ring + 10.0), sc, 1.6)
-			draw_line(c + d4 * 6.0, c + d4 * 16.0, sc, 1.4)
-		draw_circle(c, 1.6, sc)
-		if has and not got:
-			# the lock, filling clockwise from the top
-			var f: float = clampf(w.lock_t / w.LOCK_TIME, 0.0, 1.0)
-			draw_arc(c, ring + 7.0, -PI * 0.5, -PI * 0.5 + TAU * f, 48, sc, 3.0)
-		elif got:
-			draw_arc(c, ring + 7.0, 0.0, TAU, 72, sc, 3.0)
-		var word := "NO TARGET"
-		if w.ammo <= 0:
-			word = "TUBE EMPTY"
-		elif got:
-			word = "LOCKED — FIRE" if fmod(_t, 0.3) < 0.2 else ""
-		elif has:
-			word = "SEEKING"
-		_txt(Vector2(c.x - 120.0, c.y + ring + 30.0), word, 16, sc,
-			HORIZONTAL_ALIGNMENT_CENTER, 240.0)
-	# the seeker: a box on what it is looking at, closed when it has it
-	if is_instance_valid(w.lock_target) and is_instance_valid(eye) \
-			and not eye.is_position_behind(w.lock_target.global_position):
-		var tgt_at: Vector3 = w.lock_target.global_position
-		var lp: Vector2 = eye.unproject_position(tgt_at)
-		var locked: bool = w.lock_t >= w.LOCK_TIME
-		var lc := RED if locked else AMBER
-		var lh: float = 26.0 if locked else lerpf(60.0, 26.0, clampf(w.lock_t / w.LOCK_TIME, 0.0, 1.0))
-		if locked:
-			# a diamond on it, and a line from the pip so it can be followed
-			draw_polyline(PackedVector2Array([lp + Vector2(0, -lh), lp + Vector2(lh, 0),
-				lp + Vector2(0, lh), lp + Vector2(-lh, 0), lp + Vector2(0, -lh)]), lc, 2.2)
-			if lp.distance_to(c) > lh + 8.0:
-				draw_line(c + (lp - c).normalized() * 8.0,
-					lp - (lp - c).normalized() * lh, Color(lc.r, lc.g, lc.b, 0.5), 1.2)
-		else:
-			_box(Rect2(lp.x - lh, lp.y - lh, lh * 2.0, lh * 2.0), lc, 2.0)
-		_txt(Vector2(lp.x - 80.0, lp.y + lh + 16.0), "%s  %.1f km" % [
-			"LOCK" if locked else "SEEKING",
-			eye.global_position.distance_to(tgt_at) * 0.001], 14, lc,
-			HORIZONTAL_ALIGNMENT_CENTER, 160.0)
-	# a round of yours landing
-	if w.hit_t > 0.0:
-		var hc := Color(1.0, 0.25, 0.2, 1.0) if (w.kill_t > 0.0 or w.hit_head) else Color(1, 1, 1, 1)
-		hc.a = clampf(w.hit_t / 0.22, 0.0, 1.0)
-		var o: float = 7.0 + (1.0 - hc.a) * 4.0
-		for d2 in [Vector2(1, 1), Vector2(-1, 1), Vector2(1, -1), Vector2(-1, -1)]:
-			draw_line(c + d2 * o, c + d2 * (o + 8.0), hc, 2.2)
-	# and one of theirs: an arc on the side it came from
-	if w.hurt_t > 0.0 and is_instance_valid(eye):
-		var to: Vector3 = w.hurt_from - w.global_position
-		var bearing: float = atan2(to.x, -to.z) + w.yaw
-		var ha: float = clampf(w.hurt_t, 0.0, 1.0) * 0.85
-		draw_arc(c, 120.0, bearing - PI * 0.5 - 0.32, bearing - PI * 0.5 + 0.32, 14,
-			Color(1.0, 0.12, 0.08, ha), 7.0)
-	# hurt: the edges of the world close in
-	var blood: float = clampf(1.0 - w.health / 60.0, 0.0, 1.0)
-	if blood > 0.0:
-		var edge := Color(0.55, 0.0, 0.0, 0.34 * blood)
-		var band: float = vp.y * 0.16
-		draw_rect(Rect2(0, 0, vp.x, band), edge)
-		draw_rect(Rect2(0, vp.y - band, vp.x, band), edge)
-		draw_rect(Rect2(0, band, band, vp.y - band * 2.0), edge)
-		draw_rect(Rect2(vp.x - band, band, band, vp.y - band * 2.0), edge)
-	# pinned down: the edges go dark and the middle is all there is
-	if w.suppression > 0.02:
-		var dark := Color(0.0, 0.0, 0.0, 0.5 * w.suppression)
-		var rim: float = vp.y * (0.10 + 0.14 * w.suppression)
-		draw_rect(Rect2(0, 0, vp.x, rim), dark)
-		draw_rect(Rect2(0, vp.y - rim, vp.x, rim), dark)
-		draw_rect(Rect2(0, rim, rim, vp.y - rim * 2.0), dark)
-		draw_rect(Rect2(vp.x - rim, rim, rim, vp.y - rim * 2.0), dark)
-		draw_rect(Rect2(0, 0, vp.x, rim * 0.5), dark)
-		draw_rect(Rect2(0, vp.y - rim * 0.5, vp.x, rim * 0.5), dark)
-		draw_rect(Rect2(0, rim * 0.5, rim * 0.5, vp.y - rim), dark)
-		draw_rect(Rect2(vp.x - rim * 0.5, rim * 0.5, rim * 0.5, vp.y - rim), dark)
-	# a stun grenade: nothing but white, and then the world coming back
-	var dazed: float = w.flash_left()
-	if dazed > 0.0:
-		var back: float = clampf(dazed / maxf(w.flash_span * 0.55, 0.4), 0.0, 1.0)
-		draw_rect(Rect2(Vector2.ZERO, vp), Color(1.0, 1.0, 1.0, back * back * (3.0 - 2.0 * back)))
-
-	var p: String = w.prompt()
-	if p != "":
-		var bw := 420.0
-		draw_rect(Rect2(c.x - bw * 0.5, c.y + 90.0, bw, 40.0), Color(0.02, 0.05, 0.07, 0.6), true)
-		_box(Rect2(c.x - bw * 0.5, c.y + 90.0, bw, 40.0), AMBER, 1.4)
-		_txt(Vector2(c.x - bw * 0.5, c.y + 116.0), p, 19, AMBER, HORIZONTAL_ALIGNMENT_CENTER, bw)
-
-	# what is in the hands, bottom right where the weapon is
-	var rel: bool = w.reloading > 0.0
-	var low: bool = w.ammo <= maxi(int(float(g["mag"]) * 0.2), 1)
-	var modes: Array = Walker.modes_of(g)
-	_txt(Vector2(vp.x - 330.0, vp.y - 118.0), String(g["name"])
-		+ ("  · SUPPRESSED" if w.is_quiet() else "")
-		+ ("  · %s (V)" % w.mode_now().to_upper() if modes.size() > 1 else ""), 15,
-		Color(0.85, 0.92, 1.0), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-	# rested, and the breath he is holding
-	if w._ads > 0.5:
-		var cx: float = vp.x * 0.5
-		var cy: float = vp.y * 0.5 + 70.0
-		if w.mounted:
-			_txt(Vector2(cx - 60.0, cy), "RESTED", 12, Color(0.6, 0.9, 0.6),
-				HORIZONTAL_ALIGNMENT_CENTER, 120.0)
-		if w.breath < 0.999 or w.steadying:
-			var bw := 90.0
-			var col: Color = RED if w._gasp else (Color(0.85, 0.92, 1.0) if w.steadying else Color(0.6, 0.65, 0.7))
-			draw_rect(Rect2(cx - bw * 0.5, cy + 16.0, bw * w.breath, 3.0), col)
-			_box(Rect2(cx - bw * 0.5, cy + 16.0, bw, 3.0), col, 1.0)
-	_txt(Vector2(vp.x - 330.0, vp.y - 78.0), "%d" % w.ammo, 40,
-		RED if (low or rel) else WHITE, HORIZONTAL_ALIGNMENT_RIGHT, 220.0)
-	_txt(Vector2(vp.x - 104.0, vp.y - 78.0), "/ %d" % w.spare, 20,
-		Color(0.75, 0.8, 0.85), HORIZONTAL_ALIGNMENT_LEFT, 90.0)
-	if rel:
-		_txt(Vector2(vp.x - 330.0, vp.y - 54.0), "RELOADING", 14, AMBER,
-			HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-	elif w.ammo == 0:
-		_txt(Vector2(vp.x - 330.0, vp.y - 54.0), "EMPTY — R" if w.spare > 0 else "OUT — SWITCH WEAPON",
-			14, RED, HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-	_txt(Vector2(vp.x - 330.0, vp.y - 32.0), "GRENADES %d   FLASH %d" % [w.grenades, w.flashes], 14,
-		Color(0.75, 0.8, 0.85), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-	# the sights: where it is zeroed and what is dialled on, always while on
-	# them, and otherwise only once something has been dialled
-	if not g.has("launcher"):
-		var el: float = float(w.elev_mil.get(w.kit_idx, 0.0))
-		var wd: float = float(w.wind_mil.get(w.kit_idx, 0.0))
-		if w._ads > 0.5 or el != 0.0 or wd != 0.0:
-			_txt(Vector2(vp.x - 330.0, vp.y - 138.0), "ZERO %d m   ELEV %+.1f   WIND %s%.1f mil   ↑↓←→" % [
-				int(w.zero_of(g)), el, "R " if wd > 0.0 else ("L " if wd < 0.0 else ""), absf(wd)],
-				13, AMBER if (el != 0.0 or wd != 0.0) else Color(0.75, 0.8, 0.85),
-				HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-	# the rack: which number is which
-	for i in w.slots.size():
-		var on: bool = i == w.slot
-		_txt(Vector2(vp.x - 330.0, vp.y - 196.0 + i * 18.0), "%d  %s" % [i + 1,
-			String(w.spec_of(int(w.slots[i]))["name"])], 13,
-			AMBER if on else Color(0.55, 0.6, 0.65), HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-
-	var hb := 220.0
-	var frac: float = clampf(w.health / 100.0, 0.0, 1.0)
-	var hcol := RED if w.health < 40.0 else GREEN
-	_box(Rect2(26, vp.y - 74.0, hb, 12), hcol, 1.2)
-	draw_rect(Rect2(27, vp.y - 73.0, (hb - 2.0) * frac, 10), hcol)
-	_txt(Vector2(26, vp.y - 82.0), "HEALTH %d" % int(maxf(w.health, 0.0)), 14, hcol)
-	if w.armour > 0.0:
-		_txt(Vector2(130, vp.y - 82.0), "VEST %d" % int(w.armour), 14, Color(0.55, 0.78, 1.0))
-	# wind: only worth drawing when some of it has been spent
-	if w.stamina < 0.995:
-		draw_rect(Rect2(27, vp.y - 59.0, (hb - 2.0) * w.stamina, 3),
-			AMBER if w._winded else Color(0.85, 0.92, 1.0, 0.8))
-	if w.arena != null and is_instance_valid(w.arena) and w.arena.has_method("hud_state"):
-		var cs: Dictionary = w.arena.hud_state()
-		_txt(Vector2(26, vp.y - 104.0), "KILLS %d   DEATHS %d   HEADSHOTS %d   STREAK %d" % [
-			int(cs["kills"]), int(cs["deaths"]), int(cs["headshots"]), int(cs["streak"])], 14,
-			Color(0.85, 0.92, 1.0))
-		_draw_cqb_map(cs, Rect2(26.0, vp.y - 312.0, 184.0, 184.0))
-		# the ladder: what a run of kills buys, and what is waiting to be spent
-		var ly: float = vp.y - 300.0
-		for k in cs["streaks"]:
-			var have: int = int((cs["bank"] as Dictionary).get(k["id"], 0))
-			var live: bool = String(k["id"]) == "uav" and float(cs["uav"]) > 0.0
-			var txt: String = "%d  %s" % [int(k["key"]), String(k["name"])]
-			if have > 0:
-				txt += "  READY" + (" x%d" % have if have > 1 else "")
-			elif live:
-				txt += "  %ds" % int(float(cs["uav"]))
-			else:
-				txt += "  (%d kills)" % int(k["at"])
-			_txt(Vector2(vp.x - 330.0, ly), txt, 13,
-				GREEN if have > 0 else (AMBER if live else Color(0.5, 0.55, 0.6)),
-				HORIZONTAL_ALIGNMENT_RIGHT, 300.0)
-			ly += 18.0
-	_txt(Vector2(26, vp.y - 40.0),
-		"F2 keys   SPACE vault/climb walls   C crouch   Z prone   F pick up   Q/E lean   G grenade   X flashbang   P view",
-		13, Color(0.85, 0.92, 1.0))
-	_draw_log(vp)
-	if mode != null and is_instance_valid(mode):
-		_draw_mode(vp)
 
 ## The street map in the corner of a street fight.
 var _cqb_map: CqbMap = null
@@ -1705,8 +1347,9 @@ func _draw_panels(vp: Vector2) -> void:
 ## Compass rose minimap: contacts and the runway, oriented to your nose.
 func _draw_minimap_at(c: Vector2, r: float) -> void:
 	var rng: float = Sim.radar_range() * 0.35
-	draw_rect(Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0), Color(0.02, 0.05, 0.04, 0.5), true)
-	_box(Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0), DIM, 1.2)
+	var box := Rect2(c - Vector2(r, r), Vector2(r, r) * 2.0)
+	draw_rect(box, Color(0.02, 0.05, 0.04, 0.5), true)
+	_box(box, DIM, 1.2)
 	var b := aircraft.global_transform.basis
 	var hdg := atan2(-b.z.x, b.z.z)
 	var here := Vector2(aircraft.global_position.x, aircraft.global_position.z)
@@ -1730,17 +1373,22 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 		var at: Vector2 = fd["at"]
 		var yaw: float = float(fd["yaw"])
 		var along := Vector2(sin(-yaw), cos(-yaw)) * Sim.RUNWAY_LEN * 0.5
-		var rw_a: Vector2 = to_screen.call(at - along)
-		var rw_b: Vector2 = to_screen.call(at + along)
-		if (rw_a - c).length() > r * 1.5 and (rw_b - c).length() > r * 1.5:
-			continue
-		draw_line(rw_a, rw_b, Color(0.85, 0.9, 0.95, 0.9), 2.4)
+		# Cut to the square. Anything within half again of the radius was drawn
+		# whole, so a runway near the edge ran out over the frame.
+		var seg: PackedVector2Array = _clip_seg(to_screen.call(at - along),
+			to_screen.call(at + along), box.grow(-1.5))
+		if seg.size() == 2:
+			draw_line(seg[0], seg[1], Color(0.85, 0.9, 0.95, 0.9), 2.4)
 	for z in _seen_zones:
 		if not is_instance_valid(z):
 			continue
 		var col := Color(0.35, 0.75, 1.0) if z.owner_team == 0 else (
 			RED if z.owner_team == 1 else Color(0.8, 0.8, 0.8))
 		var zp: Vector2 = to_screen.call(Vector2(z.global_position.x, z.global_position.z))
+		# zones were never culled at all: every one on the map was drawn,
+		# most of them out on the screen round the panel
+		if not box.grow(-3.0).has_point(zp):
+			continue
 		draw_circle(zp, 3.0, col)
 	for k in _seen.size():
 		var seen_k: Variant = _seen[k]
@@ -1752,13 +1400,36 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 		if _seen_what[k] & SEEN_MORTAL != 0 and not n.is_alive():
 			continue
 		var p: Vector2 = to_screen.call(Vector2(n.global_position.x, n.global_position.z))
-		if (p - c).length() > r:
+		if not box.grow(-2.5).has_point(p):
 			continue
 		var hostile: bool = ("team" in n) and n.team != aircraft.team
 		draw_circle(p, 2.5, RED if hostile else Color(0.4, 0.85, 1.0))
 	draw_colored_polygon(PackedVector2Array([c + Vector2(0, -7), c + Vector2(-5, 5),
 		c + Vector2(5, 5)]), GREEN)
 	_txt(c + Vector2(-r + 4, r - 6), "MAP %d km" % int(rng * 0.001), 12, DIM)
+
+## The part of the segment a-b inside `box` (Liang-Barsky), or nothing.
+func _clip_seg(a: Vector2, b: Vector2, box: Rect2) -> PackedVector2Array:
+	var d: Vector2 = b - a
+	var t0 := 0.0
+	var t1 := 1.0
+	var lo: Vector2 = box.position
+	var hi: Vector2 = box.end
+	for e in [[-d.x, a.x - lo.x], [d.x, hi.x - a.x], [-d.y, a.y - lo.y], [d.y, hi.y - a.y]]:
+		var pk: float = e[0]
+		var qk: float = e[1]
+		if absf(pk) < 1e-9:
+			if qk < 0.0:
+				return PackedVector2Array()
+			continue
+		var t: float = qk / pk
+		if pk < 0.0:
+			t0 = maxf(t0, t)
+		else:
+			t1 = minf(t1, t)
+		if t0 > t1:
+			return PackedVector2Array()
+	return PackedVector2Array([a + d * t0, a + d * t1])
 
 ## The relief sheet under the minimap's square, heading up. The close-in
 ## sheet where it covers the whole square, the world sheet where it does not.
@@ -2356,172 +2027,243 @@ func _rocket_keys() -> Array:
 	]], ["GENERAL", _general_keys()]]
 
 func _tank_keys() -> Array:
+	var t: Tank = tank as Tank
+	var drive: Array = [
+		["W / S", "throttle ahead / astern"],
+		["A / D", "steer"],
+		["X", "brake"],
+		["P", "view"],
+		["N", "night vision"],
+		["M", "tactical map"],
+		["U", "dismount"],
+	]
+	var gun: Array = [["mouse", "lay the turret"]]
+	var ws: PackedStringArray = t.weapons() if t != null else PackedStringArray()
+	if ws.size() > 1:
+		gun.append(["1 - %d  or  \\" % ws.size(), "select / cycle weapon"])
+	if t != null and t.is_indirect():
+		gun.append(["RMB on the map", "lay a fire mission by grid"])
+		gun.append(["SPACE / LMB", "fire on the mission" + ("  ( a ripple )" if t.is_ripple() else "")])
+		gun.append(["TAB", "cancel the fire mission"])
+	elif t != null and t.is_air_defence():
+		gun.append(["SPACE / LMB", "fire: the gun leads, the missile wants a lock"])
+	else:
+		gun.append(["SPACE / LMB", "fire"])
+		if t != null and t.has_coax():
+			gun.append(["K", "coaxial machine gun"])
+	gun.append(["O", "the sight"])
 	return [
-		["DRIVING", [
-			["W / S", "throttle ahead / astern"],
-			["A / D", "steer"],
-			["P", "view"],
-			["N", "night vision"],
-			["M", "tactical map"],
-			["U", "dismount"],
-		]],
-		["THE GUN", [
-			["mouse", "lay the turret"],
-			["1 - 3", "select weapon"],
-			["\\", "cycle weapon"],
-			["SPACE", "fire"],
-			["O", "commander\'s sight"],
-			["RMB on the map", "lay a fire mission"],
-		]],
+		["DRIVING", drive],
+		["THE GUN" if t == null or not t.is_indirect() else "FIRE MISSION", gun],
 		["GENERAL", _general_keys()],
 	]
 
 func _foot_keys() -> Array:
-	return [
-		["ON FOOT", [
-			["WASD", "walk"],
-			["SHIFT", "sprint  ( weapon down, spends wind )"],
-			["C / CTRL", "crouch on and off  ( from a sprint: slide )"],
-			["Z", "prone on and off"],
-			["under canopy", "A D turn, W run on and sink, S brake and hold up"],
-			["SPACE", "jump  /  vault  /  climb  —  at a tall wall: take hold of it"],
-			["on a wall", "W S A D climb, SHIFT faster, SPACE kick off, C let go"],
-			["F", "pick up a dropped weapon"],
-			["4 - 7", "kill streaks, cheapest first — chosen on the deploy screen"],
-			["", "airstrike and fire mission open the map: click the spot"],
-			["M", "map — wheel zooms right in to the streets"],
-			["Q / E", "lean left / right"],
+	var w: Walker = walker as Walker
+	var in_hold: bool = w != null and is_instance_valid(w.frame)
+	var gunship: bool = in_hold and is_instance_valid(w.frame_owner) \
+		and "spec" in w.frame_owner and bool(w.frame_owner.spec.get("gunship", false))
+	var move: Array = [
+		["WASD", "walk"],
+		["SHIFT", "sprint  ( weapon down, spends wind )"],
+		["C / CTRL", "crouch on and off  ( from a sprint: slide )"],
+		["Z", "prone on and off"],
+		["SPACE", "jump  /  vault  /  climb  —  at a tall wall: take hold of it"],
+		["on a wall", "W S A D climb, SHIFT faster, SPACE kick off, C let go"],
+		["Q / E", "lean left / right"],
+		["F", "pick up a dropped weapon"],
+		["U", "board what you are standing at"],
+	]
+	if w != null and w.chute:
+		move = [["under canopy", "A D turn, W run on and sink, S brake and hold up"]]
+	elif in_hold:
+		move = [
+			["WASD", "walk about the hold"],
+			["ramp", "walk off the end of the open ramp to jump"],
+		]
+		if gunship:
+			move.append(["G", "take a gun station"])
+	var groups: Array = [
+		["ON FOOT" if not in_hold else "IN THE HOLD", move],
+		["WEAPONS", [
 			["LMB", "fire"],
 			["RMB", "sights"],
+			["WHEEL", "on the sights: a variable scope's power"],
+			["↑ ↓ ← →", "on the sights: dial elevation and windage"],
+			["V", "fire mode"],
 			["1 - 3", "the two long guns and the sidearm"],
 			["R", "reload"],
 			["G", "grenade"],
 			["X", "flashbang"],
-			["P", "first person / over the shoulder"],
-			["B", "binoculars"],
-			["N", "night vision"],
-			["U", "board what you are standing at"],
 		]],
-		["GENERAL", _general_keys()],
 	]
+	if _carries_mortar() and not in_hold:
+		groups.append(["MORTAR", [
+			["LMB", "set it up where you stand  ( stand still )"],
+			["RMB", "plot a fire mission on the map, 80 – 820 m"],
+			["LMB", "once laid: a round onto the mission"],
+			["move", "packs it up again"],
+		]])
+	var view: Array = [
+		["P", "first person / over the shoulder"],
+		["B", "binoculars"],
+		["N", "night vision"],
+		["M", "map — wheel zooms right in to the streets"],
+		["TAB", "orders"],
+	]
+	if is_instance_valid(w) and is_instance_valid(w.arena):
+		view.append(["4 - 7", "kill streaks, cheapest first — chosen on the deploy screen"])
+		view.append(["", "airstrike and fire mission open the map: click the spot"])
+	groups.append(["VIEW", view])
+	groups.append(["GENERAL", _general_keys()])
+	return groups
+
+func _carries_mortar() -> bool:
+	if walker == null or not is_instance_valid(walker):
+		return false
+	var w: Walker = walker as Walker
+	for i in w.slots:
+		if String(w.spec_of(int(i)).get("launcher", "")) == "mortar":
+			return true
+	return false
 
 func _general_keys() -> Array:
 	return [
 		["F2", "this card"],
 		["F3", "admin"],
+		["F4", "satellite view: the planet from orbit"],
 		["/", "chat"],
-		["ESC", "menu"],
+		["ESC", "back out: map, satellite view, then menu"],
 	]
 
 func _air_keys() -> Array:
-	var groups := [
-		["FLYING", [
+	var ac: Aircraft = aircraft
+	var sp: Dictionary = ac.spec if is_instance_valid(ac) else {}
+	var heli: bool = ac is Helicopter or bool(sp.get("rotary", false))
+	var fly: Array
+	if heli:
+		fly = [
+			["W / S", "cyclic forward / back"],
+			["A / D", "cyclic left / right"],
+			["Q / E", "pedals: yaw left / right"],
+			["SHIFT / CTRL", "collective up / down  ( let go: it holds the height )"],
+			[";", "mouse as cyclic  ( ALT + mouse: look around )"],
+		]
+	else:
+		fly = [
 			["W / S", "pitch down / up"],
 			["A / D", "roll left / right"],
 			["Q / E", "rudder"],
 			["SHIFT / CTRL", "throttle + afterburner"],
-			[";", "mouse as stick"],
-			["M", "tactical map"],
-			["H", "fly-by-wire on / off"],
-		]],
-		["RUNWAY", [
-			["G", "landing gear up / down"],
-			["J", "gunner station (gunships)"],
-			["F", "flaps"],
-			["X", "wheel brakes / airbrake"],
-		]],
-		["WEAPONS", [
-			["1 - 8", "select weapon by number"],
-			["\\", "cycle weapon"],
-			["B", "open + close weapon bay"],
-			["T", "cycle target"],
-			["LMB / SPACE", "fire selected weapon"],
-			["K", "gun burst"],
-			["L", "landing / flood lamp"],
-			["C", "flares"],
-			["V", "chaff"],
-		]],
+			[";", "mouse as stick  ( ALT + mouse: look around )"],
+		]
+		if bool(sp.get("stovl", false)):
+			fly.append(["H", "jetborne / wingborne  ( STOVL )"])
+	var ground: Array = [["G", "landing gear up / down"],
+		["X", "wheel brakes" + ("" if heli else " / airbrake")]]
+	if not heli:
+		ground.append(["F", "flaps"])
+	if bool(sp.get("gunship", false)):
+		ground.append(["J", "gunner station"])
+	var arms: Array = [
+		["1 - 8", "select weapon by number"],
+		["\\", "cycle weapon"],
+		["T", "cycle target"],
+		["LMB / SPACE", "fire selected weapon"],
+		["K", "gun burst"],
+		["C", "flares"],
+		["V", "chaff"],
+	]
+	# doors to open, not pylons, which are listed with the bays and are always ready
+	if (sp.get("bays", []) as Array).any(func(b): return String(b.get("kind", "")) == "internal"):
+		arms.insert(2, ["B", "open + close weapon bay"])
+	return [
+		["HELICOPTER" if heli else "FLYING", fly],
+		["ON THE GROUND", ground],
+		["WEAPONS", arms],
 		["SENSORS", [
 			["RMB (hold)", "zoom the view"],
 			["O / ALT+RMB", "raise / stow the sensor page"],
 			["CTRL+T", "designate  ( point track )"],
-			["L", "laser"],
-			["N", "sensor channel  TV / night / white hot / black hot"],
+			["L", "laser  ( lamp with the page stowed )"],
+			["N", "sensor channel / night vision"],
 			["[  ]", "left / right side panels"],
 			["=  -", "radar range"],
 		]],
-		["MOUSE STICK", [
-			[";", "mouse stick on / off"],
-			["MOUSE", "then fly it like a stick: forward is nose down"],
-			["", "the further from centre, the more deflection"],
-			["", "release to centre; the FBW holds what you ask for"],
-			["ALT + mouse", "look around instead of flying"],
-		]],
 		["VIEW", [
 			["P", "cockpit / chase / orbit"],
-			["N", "night vision"],
 			["ALT + mouse", "look around"],
 			["Y", "weapon camera"],
 			["M", "map"],
 			["TAB", "aircraft actions"],
 			["F3", "air traffic: call aircraft in to land"],
-			["ESC", "menu   ( F2 hides this )"],
 		]],
+		["GENERAL", _general_keys()],
 	]
-	return groups
 
 
 var _card: KeyCard = null
 ## What the card is currently showing, as one integer: which seat, and the two
 ## things a ship's list depends on. Compared every frame, which costs nothing;
 ## the list is only rebuilt and redrawn when it differs.
-var _card_sig := -1
+var _card_sig := ""
 
 ## Which keys apply where you are sitting, and whether that has changed.
 func _refresh_help() -> void:
 	if _card == null:
 		return
-	var sig := 0
-	if show_help:
-		if rocket != null and is_instance_valid(rocket):
-			sig = 256
-		elif carrier != null and is_instance_valid(carrier):
-			sig = 64
-		elif ship != null and is_instance_valid(ship):
-			sig = 1 | (2 if ship.can_dive() else 0) | (4 if ship.can_launch() else 0) \
-				| (128 if ship.armed() else 0)
-		elif tank != null and is_instance_valid(tank):
-			sig = 8
-		elif walker != null and is_instance_valid(walker):
-			sig = 16
-		else:
-			sig = 32
+	var sig: String = _seat_sig() if show_help else "off"
 	if sig == _card_sig:
 		return
 	_card_sig = sig
 	_card.visible = show_help
 	if not show_help:
 		return
-	if sig == 256:
-		_card.show_keys(_rocket_keys())
-	elif sig == 64:
-		_card.show_keys(_conn_keys())
-	elif sig & 1 != 0:
-		_card.show_keys(_ship_keys())
-	elif sig == 8:
-		_card.show_keys(_tank_keys())
-	elif sig == 16:
-		var keys: Array = _foot_keys()
-		# on the range, its own keys first: the slow-motion bullet camera is
-		# the reason to be there and nothing on the card said how to get it
-		if mode != null and is_instance_valid(mode) and String(mode.get("mode")) == "range":
-			keys = [["FIRING RANGE", [
-				["Y", "slow-motion bullet camera: rides your next round to the board"],
-				["PgUp / PgDn", "slow-motion speed"],
-				["T", "trace lines: each round's flight, and its drop off the bore line"],
-				["BACKSPACE", "clear the boards and the traces"],
-				["F", "take a weapon off the rack behind the line"],
-			]]] + keys
-		_card.show_keys(keys)
-	else:
-		_card.show_keys(_air_keys())
+	match sig.get_slice(":", 0):
+		"rocket":
+			_card.show_keys(_rocket_keys())
+		"conn":
+			_card.show_keys(_conn_keys())
+		"ship":
+			_card.show_keys(_ship_keys())
+		"tank":
+			_card.show_keys(_tank_keys())
+		"foot":
+			var keys: Array = _foot_keys()
+			# on the range, its own keys first: the slow-motion bullet camera is
+			# the reason to be there and nothing on the card said how to get it
+			if mode != null and is_instance_valid(mode) and String(mode.get("mode")) == "range":
+				keys = [["FIRING RANGE", [
+					["Y", "slow-motion bullet camera: rides your next round to the board"],
+					["PgUp / PgDn", "slow-motion speed"],
+					["T", "trace lines: each round's flight, and its drop off the bore line"],
+					["BACKSPACE", "clear the boards and the traces"],
+					["F", "take a weapon off the rack behind the line"],
+				]]] + keys
+			_card.show_keys(keys)
+		_:
+			_card.show_keys(_air_keys())
+
+## Where you are, as far as the key card cares: the seat, and whatever about it
+## changes which keys do something -- the airframe, a ship's tubes, a man in a
+## hold or under a canopy, a mortar in his kit. Compared every frame, which
+## costs nothing; the card is only rebuilt when it differs. It was the seat
+## alone, so a helicopter got the jet's flaps and bay, and a man in a hold or
+## hanging under a canopy got the whole of the street.
+func _seat_sig() -> String:
+	if rocket != null and is_instance_valid(rocket):
+		return "rocket"
+	if carrier != null and is_instance_valid(carrier):
+		return "conn"
+	if ship != null and is_instance_valid(ship):
+		return "ship:%s%s%s" % [ship.can_dive(), ship.can_launch(), ship.armed()]
+	if tank != null and is_instance_valid(tank):
+		return "tank:%s" % String(tank.get("kind")) if "kind" in tank else "tank"
+	if walker != null and is_instance_valid(walker):
+		var w: Walker = walker as Walker
+		return "foot:%s%s%s%s" % [w.chute, is_instance_valid(w.frame), _carries_mortar(),
+			is_instance_valid(w.arena)]
+	if is_instance_valid(aircraft):
+		# the airframe itself: a spec carries no name of its own
+		return "air:%d" % aircraft.get_instance_id()
+	return "air:"

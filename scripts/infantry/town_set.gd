@@ -430,20 +430,31 @@ func _prop(kind: String, x_in: float, z_in: float, yaw: float) -> bool:
 			_mesh(at, yaw, st, MeshKit.mat(sc, 1.0, 0.0))
 			_solid(at, sz, yaw, kind)
 		"tree":
-			# a street tree of the right kind; the trunk stops a round
+			# a street tree of the right kind; the trunk stops a round. Bark and
+			# leaves apart: it was all one green, trunk and all.
+			var leaf := MeshKit.begin()
 			if biome == "desert":
 				MeshKit.cone(st, 0.20, 0.14, -DEEP, 5.2, Vector3.ZERO, 6, true)
 				for k in 6:
 					var a := TAU * float(k) / 6.0
-					# (in the cone's frame, which runs along z until it is stood up)
-					MeshKit.box(st, Vector3(2.4, 0.40, 0.08), Vector3(cos(a) * 1.1, sin(a) * 1.1, 5.1))
+					# (in the cone's frame, which runs along z until it is stood
+					# up) drooping out from the crown
+					MeshKit.box(leaf, Vector3(2.4, 0.40, 0.08), Vector3(cos(a) * 1.1, sin(a) * 1.1, 5.0))
 			elif biome == "snow" or biome == "rock":
 				MeshKit.cone(st, 0.18, 0.14, -DEEP, 1.6, Vector3.ZERO, 6, true)
-				MeshKit.cone(st, 1.5, 0.05, 1.4, 6.5, Vector3.ZERO, 7, true)
+				MeshKit.cone(leaf, 1.5, 0.75, 1.4, 3.6, Vector3.ZERO, 7, true)
+				MeshKit.cone(leaf, 1.1, 0.05, 3.2, 6.5, Vector3.ZERO, 7, true)
 			else:
 				MeshKit.cone(st, 0.24, 0.16, -DEEP, 3.0, Vector3.ZERO, 6, true)
-				MeshKit.cone(st, 2.1, 0.5, 2.7, 6.2, Vector3.ZERO, 8, true)
-			var mi := MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.20, 0.33, 0.17), 0.9, 0.0)), "Tree")
+				# a rounded crown: wide below, full in the middle, closing over
+				MeshKit.cone(leaf, 1.3, 2.2, 2.6, 3.9, Vector3.ZERO, 8, true)
+				MeshKit.cone(leaf, 2.2, 1.0, 3.9, 6.0, Vector3.ZERO, 8, true)
+				MeshKit.cone(leaf, 1.0, 0.2, 6.0, 6.6, Vector3.ZERO, 8, true)
+			var tm: ArrayMesh = MeshKit.finish(st, MeshKit.mat(Color(0.24, 0.18, 0.13), 0.95, 0.0))
+			var lm: ArrayMesh = MeshKit.finish(leaf, MeshKit.mat(Color(0.20, 0.33, 0.17), 0.9, 0.0))
+			tm.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lm.surface_get_arrays(0))
+			tm.surface_set_material(1, lm.surface_get_material(0))
+			var mi := MeshKit.mi(tm, "Tree")
 			add_child(mi)
 			# cones are lofted along z, so stand it up
 			mi.global_transform = Transform3D(Basis(Vector3.RIGHT, -PI * 0.5), at)

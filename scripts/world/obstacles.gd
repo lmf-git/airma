@@ -98,6 +98,7 @@ static func clear() -> void:
 	edit_base += 1 << 20      # anyone reading starts again
 	_light.clear()
 	_squash.clear()
+	_wear.clear()
 	_rubble_of.clear()
 	_ent = PackedFloat32Array()
 	_laid = PackedFloat32Array()
@@ -768,6 +769,55 @@ static func _leave_rubble(id: int, squash: float) -> void:
 ## The heap a structure left, or -1.
 static func rubble_of(id: int) -> int:
 	return int(_rubble_of.get(id, -1))
+
+## How much each breakable structure has been knocked about, against what it
+## takes to bring it down: see `batter`.
+static var _wear := {}
+
+## What a structure takes before it comes down, in direct hits from a light
+## mortar: a kiosk one, a house two or three, a city block six.
+static func toughness(id: int) -> float:
+	var b: int = id * STRIDE
+	return clampf(_ent[b + 3] * _ent[b + 5] / 40.0, 1.0, 6.0)
+
+## A blast too small to flatten anything at a stroke: each structure it is
+## within `radius` of -- measured to the nearest part of the box, roof and
+## walls, not to the middle of it -- takes `blow` (one direct hit at the wall,
+## less further off), and anything worn past its `toughness` comes down to its
+## heap. Returns what came down. The only test was the middle of a building
+## inside the blast, which a shell landing on a roof or in the street beside a
+## block thirty metres long never was: a mortar could not bring anything down.
+static func batter(pos: Vector3, radius: float, blow: float) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	if _dead.is_empty():
+		return out
+	for id in _ids_in(Vector2(pos.x - radius, pos.z - radius),
+			Vector2(pos.x + radius, pos.z + radius), true):
+		if not _squash.has(id) or _dead[id] == GONE:
+			continue
+		var b: int = id * STRIDE
+		var dx: float = pos.x - _ent[b]
+		var dz: float = pos.z - _ent[b + 2]
+		var c: float = _ent[b + 6]
+		var s: float = _ent[b + 7]
+		var ex: float = maxf(absf(dx * c + dz * s) - _ent[b + 3], 0.0)
+		var ez: float = maxf(absf(-dx * s + dz * c) - _ent[b + 5], 0.0)
+		var ey: float = maxf(maxf(_ent[b + 1] - pos.y, pos.y - (_ent[b + 1] + _ent[b + 4])), 0.0)
+		var d: float = sqrt(ex * ex + ez * ez + ey * ey)
+		if d > radius:
+			continue
+		var w: float = float(_wear.get(id, 0.0)) + blow * (1.0 - d / radius)
+		_wear[id] = w
+		if w >= toughness(id):
+			_dead[id] = GONE
+			_edited(id)
+			_leave_rubble(id, float(_squash[id]))
+			out.append(id)
+	return out
+
+## How worn a structure is, as a share of what brings it down.
+static func wear_of(id: int) -> float:
+	return float(_wear.get(id, 0.0)) / toughness(id) if id >= 0 and id < _dead.size() else 0.0
 
 ## Take everything inside a blast out of the field. Called by whatever flattens
 ## the meshes, so the two stay in step -- a building you can no longer see is a

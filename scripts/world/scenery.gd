@@ -1464,7 +1464,6 @@ func count_standing(pos_in: Vector3, radius: float) -> int:
 const BLOCK_HEAP := 0.14
 
 func damage_area(pos_in: Vector3, radius: float) -> int:
-	var hits := 0
 	# the benches, kiosks and planters in it go over as well, rather than
 	# standing whole with nothing left in them to stop a round
 	knock(pos_in, radius, Vector3.ZERO)
@@ -1472,6 +1471,26 @@ func damage_area(pos_in: Vector3, radius: float) -> int:
 	# The field is in the chart there is now; what was built is recorded where
 	# it was built.
 	Obstacles.kill_near(pos_in, radius)
+	return _fell(pos_in, radius, false)
+
+## A blast too light to flatten anything by itself -- a mortar bomb -- wearing
+## down whatever it lands on or beside: see `Obstacles.batter`. What has had
+## enough comes down as a bigger blast's would. Returns how many did.
+func batter(pos_in: Vector3, radius: float, blow: float) -> int:
+	var down: PackedInt32Array = Obstacles.batter(pos_in, radius, blow)
+	if down.is_empty():
+		return 0
+	knock(pos_in, radius, Vector3.ZERO)
+	var reach := radius
+	for id in down:
+		reach = maxf(reach, radius + Obstacles.half_of(id).length())
+	return _fell(pos_in, reach, true)
+
+## Draw down every breakable whose box has come out of the field near `pos_in`.
+## `boxed_only`: leave alone what has no box, which is otherwise brought down
+## by distance alone.
+func _fell(pos_in: Vector3, radius: float, boxed_only: bool) -> int:
+	var hits := 0
 	var pos: Vector3 = Sim.world_to_boot(pos_in)
 	for b in _breakable:
 		var c: Vector3 = b["centre"]
@@ -1492,7 +1511,7 @@ func damage_area(pos_in: Vector3, radius: float) -> int:
 			if i < oids.size() and oids[i] >= 0:
 				if not Obstacles.gone(oids[i]):
 					continue
-			elif Vector2(t.origin.x - pos.x, t.origin.z - pos.z).length() > radius:
+			elif boxed_only or Vector2(t.origin.x - pos.x, t.origin.z - pos.z).length() > radius:
 				continue
 			dead[i] = 1
 			hits += 1
@@ -1839,7 +1858,7 @@ static var _scat_clump := FastNoiseLite.new()
 const SCAT_TASKS := 24
 ## How tall each kind of scatter stands and how far its crown spreads, at scale
 ## one: the meshes below.
-const SCAT_TALL := {"tree": 8.3, "pine": 12.8, "rock": 3.0, "bush": 2.2}
+const SCAT_TALL := {"tree": 8.3, "pine": 12.0, "rock": 3.0, "bush": 2.2}
 const SCAT_CROWN := {"tree": 3.6, "pine": 2.7, "rock": 2.6, "bush": 1.5}
 
 ## Per slice, so the total is a round 150,000 without an integer division that
@@ -1992,25 +2011,90 @@ func _bush_mesh() -> ArrayMesh:
 	MeshKit.loft(st, rings, Vector3(0, 0.8, 0))
 	return MeshKit.finish(st, MeshKit.mat(Color(0.17, 0.25, 0.13), 0.97, 0.0))
 
+## A tree stood up: trunk, then a crown of `rings` -- each [radius, height up
+## the crown] as shares of `canopy_r` and `canopy_h` -- the crown starting at
+## `crown_from` of the trunk's height.
+##
+## These were built the way `MeshKit` lofts, along z, and the scatter only
+## turns each one about the vertical: every tree in the country lay on its side
+## with its trunk along the ground, and the crown -- two rings at the same z,
+## one high and one low -- was a flat sheet standing on edge, the shape of a
+## tree from one side and a line from the other.
 func _leafy(trunk_r: float, trunk_h: float, canopy_r: float, canopy_h: float,
-		trunk_c: Color, leaf_c: Color, seg: int) -> ArrayMesh:
+		trunk_c: Color, leaf_c: Color, seg: int, crown: Array, crown_from := 0.55) -> ArrayMesh:
 	var st := MeshKit.begin()
-	MeshKit.cone(st, trunk_r, trunk_r * 0.7, 0.0, trunk_h, Vector3.ZERO, 4)
+	MeshKit.cone(st, trunk_r, trunk_r * 0.7, 0.0, trunk_h, Vector3.ZERO, 5)
 	var m := MeshKit.finish(st, MeshKit.mat(trunk_c, 0.96, 0.0))
 	var st2 := MeshKit.begin()
-	var rings := [MeshKit.ring(canopy_r, canopy_r, trunk_h * 0.55, 0.0, 2.0, seg),
-		MeshKit.ring(canopy_r * 0.08, canopy_r * 0.08, trunk_h * 0.55 + canopy_h, 0.0, 2.0, seg)]
-	MeshKit.loft(st2, rings, Vector3(0, trunk_h * 0.55 + canopy_h * 0.4, 0))
+	var base: float = trunk_h * crown_from
+	# A crown is one or more lofts (a pine's tiers); each starts a new list.
+	for tier in crown:
+		var rings: Array = []
+		var lo := INF
+		var hi := -INF
+		for i in (tier as Array).size():
+			var rr: Vector2 = tier[i]
+			var z: float = base + rr.y * canopy_h
+			# a little out of round, and turned from ring to ring, so it is not
+			# a lathe turning
+			var wob: float = 1.0 + 0.08 * sin(float(i) * 2.3)
+			rings.append(_turned(MeshKit.ring(canopy_r * rr.x * wob, canopy_r * rr.x / wob,
+				0.0, z, 2.0, seg), float(i) * 0.45))
+			lo = minf(lo, z)
+			hi = maxf(hi, z)
+		MeshKit.loft(st2, rings, Vector3(0, 0, (lo + hi) * 0.5))
 	var leaves: ArrayMesh = MeshKit.finish(st2, MeshKit.mat(leaf_c, 0.96, 0.0))
 	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, leaves.surface_get_arrays(0))
 	m.surface_set_material(1, MeshKit.mat(leaf_c, 0.96, 0.0))
-	return m
+	return Scenery.upright(m)
 
+static func _turned(ring: PackedVector3Array, a: float) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var c := cos(a)
+	var sn := sin(a)
+	for p in ring:
+		out.append(Vector3(p.x * c - p.y * sn, p.x * sn + p.y * c, p.z))
+	return out
+
+## A mesh lofted along z, stood up so that z is the vertical.
+static func upright(m: ArrayMesh) -> ArrayMesh:
+	var b := Basis(Vector3.RIGHT, -PI * 0.5)
+	var out := ArrayMesh.new()
+	for s in m.get_surface_count():
+		var arr: Array = m.surface_get_arrays(s)
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		for i in v.size():
+			v[i] = b * v[i]
+		arr[Mesh.ARRAY_VERTEX] = v
+		if arr[Mesh.ARRAY_NORMAL] != null:
+			var nn: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+			for i in nn.size():
+				nn[i] = b * nn[i]
+			arr[Mesh.ARRAY_NORMAL] = nn
+		if arr[Mesh.ARRAY_TANGENT] != null:
+			var tg: PackedFloat32Array = arr[Mesh.ARRAY_TANGENT]
+			for i in range(0, tg.size(), 4):
+				var t3: Vector3 = b * Vector3(tg[i], tg[i + 1], tg[i + 2])
+				tg[i] = t3.x
+				tg[i + 1] = t3.y
+				tg[i + 2] = t3.z
+			arr[Mesh.ARRAY_TANGENT] = tg
+		out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		out.surface_set_material(s, m.surface_get_material(s))
+	return out
+
+## A broad leafy crown, fullest a third of the way up.
 func _tree_mesh() -> ArrayMesh:
-	return _leafy(0.42, 4.2, 3.6, 6.0, Color(0.21, 0.15, 0.11), Color(0.15, 0.27, 0.12), 5)
+	return _leafy(0.42, 4.2, 3.6, 6.0, Color(0.21, 0.15, 0.11), Color(0.15, 0.27, 0.12), 7,
+		[[Vector2(0.45, 0.0), Vector2(0.92, 0.18), Vector2(1.0, 0.42), Vector2(0.82, 0.70),
+			Vector2(0.42, 0.92), Vector2(0.08, 1.0)]])
 
+## Three tiers of boughs, each a skirt narrowing to the next.
 func _pine_mesh() -> ArrayMesh:
-	return _leafy(0.34, 5.0, 2.7, 10.0, Color(0.19, 0.14, 0.10), Color(0.10, 0.21, 0.13), 5)
+	return _leafy(0.34, 5.0, 2.7, 10.0, Color(0.19, 0.14, 0.10), Color(0.10, 0.21, 0.13), 7,
+		[[Vector2(0.25, 0.0), Vector2(1.0, 0.08), Vector2(0.35, 0.42)],
+		[Vector2(0.25, 0.30), Vector2(0.78, 0.38), Vector2(0.25, 0.72)],
+		[Vector2(0.2, 0.60), Vector2(0.55, 0.66), Vector2(0.03, 1.0)]], 0.4)
 
 func _rock_mesh() -> ArrayMesh:
 	var st := MeshKit.begin()

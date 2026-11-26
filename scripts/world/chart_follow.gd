@@ -207,6 +207,10 @@ func _settle_chart() -> void:
 ## have been built -- the far side of the world, seen from a camera standing
 ## in nothing.
 func _chart_subject() -> Node3D:
+	# the satellite view, while it is up: the ground has to be built where it
+	# is looking, not where the player was left
+	if is_instance_valid(world.sat_view) and world.sat_view.active():
+		return world.sat_view
 	if is_instance_valid(world.rocket) and world.rocket.occupied:
 		return world.rocket
 	if is_instance_valid(world.cam):

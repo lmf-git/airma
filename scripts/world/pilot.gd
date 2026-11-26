@@ -1353,7 +1353,8 @@ func _place_weapon(delta: float, look: float, moving: bool, speed: float) -> voi
 	# back toward the body: pulling the weapon in put the butt into the chest.
 	_grip_slide = 0.0
 	var v2: Vector3 = at - pull + wb * _grip_l() - sh_l
-	if v2.length() > reach and not hand:
+	# (not off a fore grip, which is bolted where it is)
+	if v2.length() > reach and not hand and not gun.has("foregrip"):
 		var along: Vector3 = wb * Vector3.BACK
 		var need: float = v2.length() - reach
 		# how far back along the weapon closes that gap, roughly
@@ -1477,6 +1478,11 @@ func _hands_on_weapon(wm: Transform3D, grip_l_t: Vector3) -> void:
 		# the support hand cups the firing hand
 		_grip_fingers(_hand_l, wm * (Firearm.GRIP_R + Vector3(0.0, -0.01, 0.0)), grip_axis, 0.03,
 			wb * Vector3(1.0, 0.0, 0.0), false)
+		return
+	if gun.has("foregrip"):
+		# round the fore grip, up and down it, the palm on its left side
+		_grip_fingers(_hand_l, torso.global_transform * grip_l_t, wb * Vector3(0.0, -1.0, 0.06),
+			0.014, wb * Vector3(1.0, 0.0, 0.0), false)
 		return
 	# under the fore-end, along the barrel
 	_grip_fingers(_hand_l, torso.global_transform * grip_l_t, wb * Vector3(0.0, 0.0, -1.0), 0.022,

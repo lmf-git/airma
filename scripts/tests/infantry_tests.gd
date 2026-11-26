@@ -30,6 +30,8 @@ func parse_arg(a: String) -> bool:
 		_ladder_fall = true
 	elif a == "--ruintest":
 		_wreck_test = true
+	elif a == "--mortartest":
+		_mortar_test = true
 	elif a == "--balltest":
 		_ball_test = true
 	elif a == "--boundstest":
@@ -1292,6 +1294,79 @@ func _run_wreck_test() -> void:
 		if through >= 1.0 or man < 0:
 			bad.append("the wreck is not solid")
 	print("[ruin] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
+	world.get_tree().quit()
+#endregion
+
+
+#region --mortartest
+## The mortar worked as it is meant to be: set up on the ground, laid on a
+## block a few hundred metres off, and rounds put onto it until it comes down.
+## --preset=cqb:foot --mortartest
+var _mortar_test := false
+
+func tick_mortar_test() -> void:
+	if not _mortar_test or not is_instance_valid(world.cqb) or not is_instance_valid(world.walker):
+		return
+	_mortar_test = false
+	_run_mortar_test()
+
+func _run_mortar_test() -> void:
+	var w: Walker = world.walker
+	var bad: Array = []
+	# a block a fair way from him, big enough to want several rounds
+	var at: Vector3 = w.global_position
+	var block := -1
+	for id in Obstacles.ids_in(Vector2(at.x - 400, at.z - 400), Vector2(at.x + 400, at.z + 400)):
+		if Obstacles.gone(id) or not Obstacles._squash.has(id):
+			continue
+		var h: Vector2 = Obstacles.half_of(id)
+		var c: Vector3 = Obstacles.centre_of(id)
+		var flat: float = Vector2(c.x - at.x, c.z - at.z).length()
+		if minf(h.x, h.y) >= 6.0 and flat > 120.0 and flat < 380.0:
+			block = id
+			break
+	if block < 0:
+		print("[mortar] RESULT: FAILED -- no block in range to shell")
+		world.get_tree().quit()
+		return
+	var tube := MortarTube.new()
+	tube.spec = Firearm.spec("mortar")
+	world.add_child(tube)
+	tube.global_position = at
+	while not tube.work(0.1):
+		pass
+	var bc: Vector3 = Obstacles.centre_of(block)
+	var why: String = tube.cannot_reach(bc)
+	if why != "":
+		bad.append("could not lay on a block in range: " + why)
+	tube.lay_on(bc)
+	print("[mortar] block %d, %.0f m off, takes %.1f hits" % [block,
+		Vector2(bc.x - at.x, bc.z - at.z).length(), Obstacles.toughness(block)])
+	# too close is refused
+	if tube.cannot_reach(at + Vector3(20, 0, 0)) == "":
+		bad.append("a mission twenty metres off was accepted")
+	var fired := 0
+	for i in 12:
+		var mr: MortarRound = tube.fire(w, world.cqb)
+		# dead on, so the count says what the wear does, not the spread
+		mr.to = MortarRound.lands_at(bc.x, bc.z)
+		mr.flight = 1.0
+		world.add_child(mr)
+		fired += 1
+		for k in Engine.physics_ticks_per_second * 2:
+			await world.get_tree().physics_frame
+		if Obstacles.gone(block):
+			break
+		print("[mortar] round %d: block worn %.0f%%" % [fired, Obstacles.wear_of(block) * 100.0])
+	var down: bool = Obstacles.gone(block)
+	print("[mortar] %d rounds: block %s, heap %d" % [fired, "DOWN" if down else "standing",
+		Obstacles.rubble_of(block)])
+	if not down:
+		bad.append("twelve rounds on it and the block still stands")
+	elif fired < 2:
+		bad.append("one 60 mm round flattened a whole block")
+	tube.queue_free()
+	print("[mortar] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
 	world.get_tree().quit()
 #endregion
 

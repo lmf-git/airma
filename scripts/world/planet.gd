@@ -414,6 +414,13 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 		# the whole shrunken body, and the moon beyond it if it is that close
 		cam.far = maxf(cam.far, (r + alt) * 1.3)
 	cam.near = clampf(cam.far / NEAR_RATIO, NEAR_LO, NEAR_MAX)
+	# A camera that carries something right under the lens -- the rifle on a
+	# man's cheek -- says how close it needs to see. Left at a quarter metre
+	# the plane sliced the stock and receiver open in first person, and worse
+	# looking up, where the butt comes up nearer the eye. The depth buffer is
+	# reversed, so the far ground does not pay for it.
+	if cam.has_meta(&"near_need"):
+		cam.near = minf(cam.near, float(cam.get_meta(&"near_need")))
 	# riding a bullet: the chase camera's own planes (see `ChaseCamera`)
 	if cam.has_meta(&"ride_planes"):
 		var rp: Vector2 = cam.get_meta(&"ride_planes")
@@ -440,6 +447,15 @@ func _patch_window(cam: Camera3D) -> PackedFloat32Array:
 	# spacecraft is a long way out.
 	var rk: float = Sim.PLANET_R * Sim.view_scale
 	var ang: float = clampf(acos(clampf(rk / dist, 0.0, 1.0)) * 1.1, PATCH_MIN, PATCH_MAX)
+	# The satellite view looking down sees its own footprint, not the horizon:
+	# baked out to the horizon, the cap's texels were two kilometres each from
+	# three hundred kilometres up and the ground under the view was a smear.
+	if cam is SatView and (cam as SatView).tilt < 0.35:
+		var vp: Vector2 = cam.get_viewport().get_visible_rect().size
+		var aspect: float = vp.x / maxf(vp.y, 1.0)
+		var foot: float = (cam as SatView).view_height() * tan(deg_to_rad(cam.fov) * 0.5) \
+			* sqrt(1.0 + aspect * aspect) * 1.3
+		ang = clampf(foot / Sim.PLANET_R, PATCH_MIN, ang)
 	var d: Vector3 = Sim.world_to_planet_dir(rel / dist).normalized()
 	var north: Vector3 = Sim.PLANET_NORTH
 	var home := Vector3.UP

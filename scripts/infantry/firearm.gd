@@ -35,7 +35,7 @@ const KIT := [
 		"auto": false, "dmg": 64.0, "muzzle": 930.0, "pellets": 1,
 		"hip": 0.034, "ads": 0.0004, "fov": 15.0, "reload": 2.9, "kick": 0.030,
 		"side": 0.008, "sound": "dmr", "db": -1.0, "work": "bolt",
-		"len": 0.62, "stock": 0.27, "mag_len": 0.12, "sight": 0.095, "scope": true,
+		"len": 0.62, "stock": 0.27, "mag_len": 0.12, "sight": 0.095, "scope": true, "zoom_max": 2.5,
 		"grip_l": Vector3(0.0, -0.045, -0.30), "move": 0.92, "reach": 80.0},
 	{"id": "pistol", "name": "M17 PISTOL", "mag": 17, "spare": 3, "cd": 0.13,
 		"auto": false, "dmg": 21.0, "muzzle": 375.0, "pellets": 1,
@@ -93,7 +93,7 @@ const KIT := [
 		"auto": false, "dmg": 140.0, "muzzle": 870.0, "pellets": 1,
 		"hip": 0.05, "ads": 0.0002, "fov": 12.0, "reload": 3.4, "kick": 0.060,
 		"side": 0.006, "sound": "dmr", "db": 2.0, "work": "bolt", "cycle": "bolt",
-		"len": 0.70, "stock": 0.28, "mag_len": 0.08, "sight": 0.10, "scope": true,
+		"len": 0.70, "stock": 0.28, "mag_len": 0.08, "sight": 0.10, "scope": true, "zoom_max": 3.0,
 		"grip_l": Vector3(0.0, -0.045, -0.33), "move": 0.88, "reach": 120.0},
 	{"id": "glock", "name": "G18 MACHINE PISTOL", "mag": 33, "spare": 3, "cd": 0.05,
 		"auto": true, "dmg": 17.0, "muzzle": 375.0, "pellets": 1,
@@ -105,10 +105,10 @@ const KIT := [
 	# Six 40 mm rounds in a drum, loaded one at a time. They arc, they arm
 	# after ten metres, and they burst; a round that hits something closer
 	# than that is a lump of metal and nothing more.
-	# A 60 mm light mortar, handheld: no bipod, no plotting board -- put the
-	# crosshair on the street you want it in and it goes up and comes down
-	# there, eighty to eight hundred metres off, the round in the air for as
-	# long as a real one would be. Not for anything in front of you.
+	# A 60 mm light mortar: set up on the ground and laid on a fire mission
+	# plotted on the map, eighty to eight hundred metres off, the round in the
+	# air for as long as a real one would be (`MortarTube`). Not for anything
+	# in front of you.
 	{"id": "mortar", "name": "M224 60 mm MORTAR", "mag": 1, "spare": 9, "cd": 0.8,
 		"auto": false, "dmg": 0.0, "muzzle": 110.0, "pellets": 1,
 		"hip": 0.030, "ads": 0.004, "fov": 44.0, "reload": 2.2, "kick": 0.040,
@@ -130,7 +130,7 @@ const KIT := [
 		"auto": false, "dmg": 240.0, "muzzle": 853.0, "pellets": 1,
 		"hip": 0.075, "ads": 0.0002, "fov": 12.0, "reload": 4.2, "kick": 0.095,
 		"side": 0.010, "sound": "dmr", "db": 5.0, "work": "bolt",
-		"len": 0.86, "stock": 0.30, "mag_len": 0.13, "sight": 0.10, "scope": true,
+		"len": 0.86, "stock": 0.30, "mag_len": 0.13, "sight": 0.10, "scope": true, "zoom_max": 3.0,
 		"grip_l": Vector3(0.0, -0.05, -0.33), "move": 0.76, "reach": 160.0},
 	# A shotgun that does not stop: gas operated, fully automatic, fed from a
 	# twenty round drum. Five shells a second of buckshot and a kick it keeps
@@ -175,7 +175,7 @@ const CLASSES := [
 		"note": "For going through doors. Useless across a square."},
 	{"id": "mortarman", "name": "INDIRECT FIRE", "primary": "carbine", "second": "mortar",
 		"sight": "2x", "quiet": false, "grip": false, "mag": false,
-		"note": "A 60 mm mortar. Look at a street up to eight hundred metres off and fire: it comes down there twelve seconds later."},
+		"note": "A 60 mm mortar. Fire to set it up on the ground, RMB to plot a fire mission on the map (80–820 m), fire to drop rounds on it. Knocks buildings down."},
 	{"id": "grenadier", "name": "GRENADIER", "primary": "carbine", "second": "gl",
 		"sight": "2x", "quiet": false, "grip": false, "mag": false,
 		"note": "Six rounds of 40 mm in a drum: over the wall, through the window, into the yard."},
@@ -239,6 +239,9 @@ const CHOKE_NAMES := {"none": "Cylinder — the pattern it comes with",
 static func is_shotgun(g: Dictionary) -> bool:
 	return int(g.get("pellets", 1)) > 1
 
+## How far a vertical fore grip hangs below the fore-end.
+const FOREGRIP_LEN := 0.085
+
 ## One weapon as a particular man has it set up: the table entry with his
 ## sight, grip and magazine worked into the numbers.
 static func fitted(id: String, c: Dictionary) -> Dictionary:
@@ -246,6 +249,8 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 	g["quiet"] = bool(c.get("quiet", false)) and can_suppress(g)
 	if g.has("launcher") or g.get("hand", false):
 		return g
+	# only the long scope is variable; the table's is for the rifle as issued
+	g.erase("zoom_max")
 	match String(c.get("sight", "dot")):
 		"irons":
 			g["dot"] = false
@@ -259,6 +264,9 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 			g["sight"] = 0.095 if not id in ["sniper", "fifty"] else 0.10
 			# a marksman's glass on the marksman's rifle, a 4x on anything else
 			g["fov"] = 15.0 if id == "dmr" else (12.0 if id in ["sniper", "fifty"] else 21.0)
+			# A variable-power glass: the wheel takes it from the field above to
+			# this many times closer (`Walker.scope_fov`).
+			g["zoom_max"] = 3.0 if id in ["sniper", "fifty"] else (2.5 if id == "dmr" else 2.0)
 		"2x":
 			g["dot"] = false
 			g["scope"] = true
@@ -280,6 +288,15 @@ static func fitted(id: String, c: Dictionary) -> Dictionary:
 		g["kick"] = float(g["kick"]) * 0.78
 		g["side"] = float(g["side"]) * 0.65
 		g["move"] = float(g["move"]) * 0.98
+		# And there is one on the gun, with the support hand round it. It was
+		# the numbers alone: nothing drawn, and the hand left flat under the
+		# fore-end where it had been. Hung from the fore-end a little behind
+		# where the hand was, so it is no further to reach.
+		var gl: Vector3 = g.get("grip_l", Vector3(0.0, -0.05, -0.22))
+		if gl.z < -0.12 and id != "minigun":
+			var top: float = gl.y - 0.008
+			g["foregrip"] = Vector3(0.0, top, gl.z + 0.06)
+			g["grip_l"] = Vector3(0.0, top - FOREGRIP_LEN * 0.55, gl.z + 0.06)
 	if c.get("mag", false):
 		g["mag"] = int(g["mag"]) + 2 if g.get("shells", false) else int(float(g["mag"]) * 1.5)
 		g["reload"] = float(g["reload"]) * (1.0 if g.get("shells", false) else 1.14)

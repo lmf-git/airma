@@ -213,7 +213,7 @@ func share_round(r: Node) -> void:
 	elif r is MortarRound:
 		var mr := r as MortarRound
 		d = {"k": "mortar", "from": mr.from, "to": mr.to, "flight": mr.flight,
-			"delay": mr.delay}
+			"delay": mr.delay, "blow": mr.blow, "blow_r": mr.blow_r}
 	else:
 		return
 	d["by"] = _who_of(link.world.get("walker"))
@@ -332,6 +332,8 @@ func net_launch(d: Dictionary) -> void:
 			mo.to = d.get("to", Vector3.ZERO)
 			mo.flight = float(d.get("flight", 12.0))
 			mo.delay = float(d.get("delay", 0.0))
+			mo.blow = float(d.get("blow", 1.0))
+			mo.blow_r = float(d.get("blow_r", 6.0))
 			scn.add_child(mo)
 		"icbm":
 			var ic := Icbm.new()
