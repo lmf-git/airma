@@ -103,7 +103,12 @@ func rechart(dir: Vector3) -> void:
 	# renumbered now -- that part has to be -- and the ground and the sheets
 	# are owed, and paid once when the eye comes back down: see `_settle_chart`.
 	var sub: Node3D = _chart_subject()
-	if (sub is LaunchVehicle or sub is Icbm) and is_instance_valid(world.planet) and world.planet.dormant:
+	# The satellite view the same: panning over the planet from orbit moved the
+	# chart every few hundred kilometres and paid the full price each time --
+	# the ground, the towns and the map sheet, none of them drawn -- seconds
+	# a move.
+	if (sub is LaunchVehicle or sub is Icbm or sub is SatView) and is_instance_valid(world.planet) \
+			and world.planet.dormant:
 		# The towns and the obstacle field with them: nobody can see a street
 		# from orbit, and carrying twenty thousand boxes several times a second
 		# on time warp is the same waste the ground would be.
@@ -182,6 +187,11 @@ func follow_chart() -> void:
 		# and further still on time warp, when it would otherwise be moved
 		# several times a second
 		reach = RECHART_HIGH if Sim.space_rate < 10.0 else RECHART_WARP
+		# and the satellite view, which pans thousands of kilometres a minute,
+		# as far as the chart holds true (`Sim.dir_to_chart` is exact over the
+		# near hemisphere)
+		if who is SatView:
+			reach = RECHART_WARP
 	if Vector2(p.x, p.z).length() < reach:
 		return
 	rechart(Sim.chart_to_dir(p.x, p.z))

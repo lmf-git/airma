@@ -38,6 +38,10 @@ var _turn_drag := false
 var _label: Label = null
 var _alt_s := 600_000.0
 var _hud: CanvasItem = null
+## How long since the view last moved, for `settled`.
+var _still_t := 0.0
+var _was_dir := Vector3.ZERO
+var _was_alt := 0.0
 
 func _ready() -> void:
 	far = 45000.0
@@ -53,6 +57,14 @@ func _ready() -> void:
 	_label.add_theme_constant_override("outline_size", 4)
 	cl.add_child(_label)
 	cl.visible = false
+
+## Not being panned or zoomed just now. The fine picture of the ground under
+## the view is a 2048-square texture; baked and uploaded every time a pan took
+## the view a fifth of the way across it, it was a tenth of a second's stall
+## every second of panning. It is held while the view moves and baked once it
+## stops.
+func settled() -> bool:
+	return _still_t > 0.35
 
 ## The height the view is at now, eased.
 func view_height() -> float:
@@ -155,6 +167,13 @@ func _process(delta: float) -> void:
 		alt = minf(alt * pow(3.0, delta * fast), ALT_HI)
 	# the height eases to where the wheel put it, so a notch is a glide
 	_alt_s = exp(lerpf(log(_alt_s), log(alt), clampf(delta * 8.0, 0.0, 1.0)))
+	if dir.distance_to(_was_dir) * Sim.PLANET_R > _alt_s * 0.002 \
+			or absf(_alt_s - _was_alt) > _alt_s * 0.002:
+		_still_t = 0.0
+	else:
+		_still_t += delta
+	_was_dir = dir
+	_was_alt = _alt_s
 	_place()
 	if _label != null:
 		_label.text = "SATELLITE VIEW   %s   heading %03d°%s\n" % [_alt_text(_alt_s),

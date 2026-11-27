@@ -5,6 +5,9 @@ extends RigidBody3D
 ## the hull pitches over crests, rolls in turns and the tracks actually drive it
 ## rather than the body being slid around.
 
+## See `TankLaunchers`.
+var launchers := TankLaunchers.new(self)
+
 signal died(who)
 signal dismount_requested()
 
@@ -539,7 +542,10 @@ func _ai_think(delta: float) -> void:
 		var reach: float = 22000.0 if _indirect \
 			else float(VehicleSpec.KINDS[kind].get("reach", 2600.0))
 		if _air_def:
-			reach = float(VehicleSpec.KINDS[kind].get("reach", 30000.0))
+			# a gun-and-missile vehicle looks as far as its own radar, not thirty
+			# kilometres: it had nothing that reached past eight
+			reach = float(VehicleSpec.KINDS[kind].get("reach",
+				VehicleSpec.KINDS[kind].get("radar", 30000.0)))
 		# From the picture `Sim` keeps for the tick: where everything is and
 		# whose, as plain arrays. This walked both groups and asked each thing
 		# in them seven questions before it looked at how far away it was; now
@@ -602,6 +608,9 @@ func _ai_think(delta: float) -> void:
 			_ai_err = Vector3(randfn(0.0, 1.0), randfn(0.0, 0.6), randfn(0.0, 1.0))
 	if _ai_target == null or not is_instance_valid(_ai_target):
 		return
+	# an air defence vehicle's radar on what it is laying on
+	if _air_def and _ai_target is Aircraft:
+		(_ai_target as Aircraft).spike(self)
 	var tp: Vector3 = _ai_target.global_position
 	if _indirect:
 		if "linear_velocity" in _ai_target:
@@ -723,7 +732,7 @@ func _asat_think(delta: float) -> void:
 	_ai_scan = 2.0
 	if rounds_left <= 0 or _gun_cd > 0.0:
 		return
-	var sat := _nearest_satellite()
+	var sat := launchers.nearest_satellite()
 	if not is_instance_valid(sat):
 		return
 	var lay: float = absf(wrapf(-turret_yaw - (rotation.y + _turret.rotation.y),
@@ -998,14 +1007,14 @@ func _tick_tank_p(delta: float) -> void:
 			# arrives nowhere near: it has to leave the tube already pointed at
 			# where the satellite is going to be.
 			if vclass() == "asat":
-				var sat := _nearest_satellite()
+				var sat := launchers.nearest_satellite()
 				if is_instance_valid(sat):
-					turret_yaw = _asat_bearing(sat)
+					turret_yaw = launchers.asat_bearing(sat)
 			var yerr := wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI)
 			_turret.rotation.y += clampf(yerr, -1.1 * delta, 1.1 * delta)
 		else:
 			_turret.rotation.y = 0.0
-		var want_up: float = 1.0 if _erect_wanted() else 0.0
+		var want_up: float = 1.0 if launchers.erect_wanted() else 0.0
 		_erect = move_toward(_erect, want_up,
 			delta * (SAM_ERECT_RATE if vclass() == "sam" else ERECT_RATE))
 		# A battery launches at a steep angle, not vertically: the round has to
@@ -1014,7 +1023,7 @@ func _tick_tank_p(delta: float) -> void:
 		if vclass() == "sam":
 			top_angle = deg_to_rad(62.0)
 		elif vclass() == "asat":
-			top_angle = _asat_elevation()
+			top_angle = launchers.asat_elevation()
 		_mantlet.rotation.x = _erect * top_angle
 	else:
 		var yaw_err := wrapf(-turret_yaw - (rotation.y + _turret.rotation.y), -PI, PI)
@@ -1640,7 +1649,7 @@ func fire_main(world: Node) -> bool:
 	# returns, so with this underneath it selecting the missiles changed the
 	# readout and nothing else: the trigger still fired the cannon.
 	if vclass() == "spaag" and current_weapon() == "sam":
-		return _fire_shorad(world, kd)
+		return launchers.fire_shorad(world, kd)
 	# An autocannon and an anti-aircraft gun are the same thing as far as this
 	# is concerned: a fast shell, a small burst, and a fuse that goes off near
 	# whatever it passes. Neither is a main gun and neither is artillery.
@@ -1663,13 +1672,13 @@ func fire_main(world: Node) -> bool:
 			randf_range(0.94, 1.06), 2400.0)
 		return true
 	if vclass() == "sam":
-		return _fire_sam(world, kd)
+		return launchers.fire_sam(world, kd)
 	if vclass() == "asat":
-		return _fire_asat(world, kd)
+		return launchers.fire_asat(world, kd)
 	if vclass() == "tel":
 		if rounds_left <= 0:
 			return false
-		return _fire_tel(world, kd)
+		return launchers.fire_tel(world, kd)
 	if is_indirect():
 		# Wait until the launcher is actually laid. The solution is worked out
 		# the instant you designate, but the traverse takes 0.9 rad/s and the
@@ -1724,354 +1733,6 @@ var map_lock: Node = null
 ## the bus hands one to each warhead as it opens. Empty means the old behaviour:
 ## spread the load over the footprint at the primary mark.
 var mirv_marks: Array = []
-
-## Where a warhead's mark is now. A mark is either a patch of ground (a
-## Vector3) or a unit that was clicked on, and a unit is followed: the warhead
-## is locked on it, not on the spot it was standing on when it was picked.
-static func mark_at(mk: Variant) -> Vector3:
-	if mk is Vector3:
-		return mk
-	if is_instance_valid(mk) and mk is Node3D:
-		return (mk as Node3D).global_position
-	return Vector3.INF
-
-## The unit a mark is locked on, or null for a patch of ground.
-static func mark_unit(mk: Variant) -> Node3D:
-	if mk is Node3D and is_instance_valid(mk):
-		return mk
-	return null
-
-## Every warhead's mark, primary first: what the fire mission will hand the
-## bus. Units that have died since they were picked are dropped.
-func warhead_marks() -> Array:
-	var out: Array = []
-	if is_instance_valid(map_lock):
-		out.append(map_lock)
-	elif map_target != Vector3.INF:
-		out.append(map_target)
-	for mk in mirv_marks:
-		if mark_at(mk) != Vector3.INF:
-			out.append(mk)
-	return out
-
-## How many warheads the round on the rail carries; nought for a single one.
-func warheads() -> int:
-	return int(WeaponSpec.get_spec(String(VehicleSpec.KINDS[kind].get("missile", "kalibr"))).get("mirv", 0))
-
-## Is there anything worth standing the canister up for? It goes back down when
-## there is not, because a launcher sitting on the road with its tube in the air
-## is a launcher that has already been seen.
-func _erect_wanted() -> bool:
-	if rounds_left <= 0 or not alive:
-		return false
-	if vclass() == "asat":
-		return is_instance_valid(_nearest_satellite())
-	if map_target != Vector3.INF:
-		return true
-	if is_instance_valid(_ai_target):
-		return true
-	return occupied
-
-## Sending a round at something in orbit. The only target this vehicle has is a
-## satellite: everything in the atmosphere is somebody else's problem, and the
-## round is far too large and far too slow to turn to be any use against it.
-func _fire_asat(world: Node, kd: Dictionary) -> bool:
-	if rounds_left <= 0:
-		return false
-	var tgt: Node3D = _nearest_satellite()
-	if not is_instance_valid(tgt):
-		Sim.report("%s: nothing in orbit to shoot at" % display_name(), Sim.Ev.BAD)
-		return false
-	if _erect < 0.97:
-		Sim.report("%s: erecting — %d%%" % [display_name(), int(_erect * 100.0)],
-			Sim.Ev.INFO)
-		return false
-	_gun_cd = float(kd["reload"])
-	rounds_left -= 1
-	var from: Vector3 = _muzzle.global_position
-	var dir := -_muzzle.global_transform.basis.z
-	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
-	var m := Missile.new()
-	m.launch(String(kd.get("missile", "asat")),
-		Transform3D(Basis.looking_at(dir, up_ref), from), dir * 30.0, self, tgt)
-	world.add_child(m)
-	store_released.emit(m)
-	Sim.report("%s: ASAT away at %s" % [display_name(),
-		tgt.call("display_name") if tgt.has_method("display_name") else "orbital contact"],
-		Sim.Ev.BAD)
-	return true
-
-## Where the round has to be pointed. The satellite is doing eleven hundred
-## metres a second and the round takes the better part of a minute to get up
-## there, so the tube is laid on where it WILL be, not where it is.
-func _asat_lead(sat: Node3D) -> Vector3:
-	var aim: Vector3 = sat.global_position
-	var tv := Vector3.ZERO
-	if sat.has_method("get_velocity"):
-		tv = sat.call("get_velocity")
-	# average speed over the climb, which is most of the burn plus the coast
-	var tof: float = global_position.distance_to(aim) / 2200.0
-	return aim + tv * clampf(tof, 0.0, 120.0)
-
-func _asat_bearing(sat: Node3D) -> float:
-	var to: Vector3 = _asat_lead(sat) - global_position
-	return atan2(to.x, -to.z)
-
-## Launch elevation, from the geometry rather than from a constant. Steep, but
-## not vertical unless the thing is actually overhead.
-func _asat_elevation() -> float:
-	var sat := _nearest_satellite()
-	if not is_instance_valid(sat):
-		return ERECT_ANGLE
-	var to: Vector3 = _asat_lead(sat) - global_position
-	var flat: float = Vector2(to.x, to.z).length()
-	return clampf(atan2(to.y, maxf(flat, 1.0)), deg_to_rad(35.0), deg_to_rad(88.0))
-
-## The hostile satellite that is easiest to reach: the one nearest overhead.
-func _nearest_satellite() -> Node3D:
-	# Whatever was picked on the map wins: that is the whole point of being able
-	# to pick one. Only if nothing is assigned does the crew choose for itself.
-	var told: Node = Sim.sat_target
-	if is_instance_valid(told) and (told is Node3D) \
-			and (not ("team" in told) or int(told.team) != team) \
-			and (not told.has_method("is_alive") or told.is_alive()):
-		return told as Node3D
-	var best: Node3D = null
-	var bd := 1e9
-	for n in get_tree().get_nodes_in_group("satellites"):
-		if not is_instance_valid(n) or not (n is Node3D):
-			continue
-		if ("team" in n) and n.team == team:
-			continue
-		if n.has_method("is_alive") and not n.is_alive():
-			continue
-		var d: float = global_position.distance_to((n as Node3D).global_position)
-		if d < bd:
-			bd = d
-			best = n as Node3D
-	return best
-
-## A battery sending a round. Unlike a launcher it has something to aim at —
-## an aeroplane — and unlike a gun it does not have to be laid on it: the round
-## leaves the rail on the launch elevation and turns onto the target itself.
-func _fire_sam(world: Node, kd: Dictionary) -> bool:
-	if rounds_left <= 0:
-		return false
-	var tgt: Node3D = _ai_target
-	if not is_instance_valid(tgt):
-		tgt = _nearest_air()
-	if not is_instance_valid(tgt):
-		Sim.report("%s: nothing in the air to shoot at" % display_name(), Sim.Ev.BAD)
-		return false
-	var reach: float = float(kd.get("reach", 60000.0))
-	var rng: float = global_position.distance_to(tgt.global_position)
-	if rng > reach:
-		Sim.report("%s: contact is %.0f km out, the round reaches %.0f" % [
-			display_name(), rng * 0.001, reach * 0.001], Sim.Ev.BAD)
-		return false
-	_gun_cd = float(kd["reload"])
-	rounds_left -= 1
-	var from: Vector3 = _muzzle.global_position
-	var dir := -_muzzle.global_transform.basis.z
-	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
-	var m := Missile.new()
-	m.launch(String(kd.get("missile", "sam_med")),
-		Transform3D(Basis.looking_at(dir, up_ref), from), dir * 40.0, self, tgt)
-	world.add_child(m)
-	store_released.emit(m)
-	Sim.report("%s: round away — %d on the rails" % [display_name(), rounds_left],
-		Sim.Ev.GOOD)
-	return true
-
-## A gun vehicle's missile. Short ranged and infrared — it is the round you use
-## on what the cannon cannot reach, not a substitute for a battery.
-func _fire_shorad(world: Node, kd: Dictionary) -> bool:
-	if sam_left <= 0:
-		Sim.report("%s: no missiles left" % display_name(), Sim.Ev.BAD)
-		return false
-	var tgt: Node3D = _ai_target if is_instance_valid(_ai_target) else _nearest_air()
-	if not is_instance_valid(tgt):
-		Sim.report("%s: nothing in the air to shoot at" % display_name(), Sim.Ev.BAD)
-		return false
-	var reach: float = float(kd.get("sam_reach", 8000.0))
-	var rng: float = global_position.distance_to(tgt.global_position)
-	if rng > reach:
-		Sim.report("%s: contact is %.1f km out, the round reaches %.1f" % [
-			display_name(), rng * 0.001, reach * 0.001], Sim.Ev.BAD)
-		return false
-	sam_left -= 1
-	_gun_cd = 1.6
-	var from: Vector3 = _muzzle.global_position
-	var dir := (tgt.global_position - from).normalized()
-	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
-	var m := Missile.new()
-	m.launch(String(kd.get("sam_missile", "manpads")),
-		Transform3D(Basis.looking_at(dir, up_ref), from), dir * 40.0, self, tgt)
-	world.add_child(m)
-	store_released.emit(m)
-	Sim.report("%s: missile away — %d left" % [display_name(), sam_left], Sim.Ev.GOOD)
-	return true
-
-## The nearest hostile aircraft this battery can see.
-func _nearest_air() -> Node3D:
-	var best: Node3D = null
-	var bd := 1e9
-	for n in get_tree().get_nodes_in_group("hittable"):
-		if not is_instance_valid(n) or not (n is Aircraft):
-			continue
-		if ("team" in n) and n.team == team:
-			continue
-		if n.has_method("is_alive") and not n.is_alive():
-			continue
-		var d: float = global_position.distance_to((n as Node3D).global_position)
-		if d < bd:
-			bd = d
-			best = n as Node3D
-	return best
-
-## Send one. A TEL does not need to be laid the way a gun does — the round is
-## guided and will turn onto the bearing itself — so all this has to do is get
-## it off the rail cleanly and pointed up.
-func _fire_tel(world: Node, kd: Dictionary) -> bool:
-	var mark: Vector3 = map_target
-	if is_instance_valid(map_lock):
-		mark = (map_lock as Node3D).global_position
-	# warheads marked but no primary: the bus goes for the first of them
-	if mark == Vector3.INF and not mirv_marks.is_empty():
-		var rv0: Array = warhead_marks()
-		if not rv0.is_empty():
-			mark = mark_at(rv0[0])
-	if mark == Vector3.INF:
-		mark = ground_aim()
-	if mark == Vector3.INF and is_instance_valid(_ai_target):
-		mark = _ai_target.global_position
-	if mark == Vector3.INF:
-		Sim.report("%s: no aiming point" % display_name(), Sim.Ev.BAD)
-		return false
-	# the round's reach, not a shell's
-	var spec := WeaponSpec.get_spec(String(kd.get("missile", "kalibr")))
-	var rng := global_position.distance_to(mark)
-	if bool(spec.get("icbm", false)):
-		# Over the ground, not through it. A quarter of the way round the
-		# planet the straight line between two points in the world's own
-		# coordinates is a third longer than the journey, and a round that
-		# reaches thirteen thousand kilometres was refused a shot of that.
-		rng = Vector2(mark.x - global_position.x, mark.z - global_position.z).length()
-	if rng > float(spec.get("range", 100000.0)):
-		Sim.report("%s: mark is %.0f km away, the round reaches %.0f" % [
-			display_name(), rng * 0.001,
-			float(spec.get("range", 100000.0)) * 0.001], Sim.Ev.BAD)
-		return false
-	if _erect < 0.97:
-		Sim.report("%s: erecting — %d%%" % [display_name(), int(_erect * 100.0)],
-			Sim.Ev.INFO)
-		return false
-	_gun_cd = float(kd["reload"])
-	rounds_left -= 1
-	var id: String = String(kd.get("missile", "kalibr"))
-	# Out of the tube it is actually sitting in, along the tube's own axis.
-	# Spawning it in the air on a computed bearing meant the round never
-	# appeared to leave the vehicle — it simply existed, already flying.
-	var from: Vector3 = global_position + Vector3(0, 3.0, 0)
-	# Straight out of the tube, wherever the tube happens to be pointing, and
-	# the tube points up. No lean onto the bearing: the round does that itself
-	# once it is clear, and a canister launch that comes out already heading
-	# for the target is the thing that made these look like guns.
-	var dir := Vector3.UP
-	if is_instance_valid(_muzzle):
-		from = _muzzle.global_position
-		dir = -_muzzle.global_transform.basis.z
-	if bool(spec.get("icbm", false)):
-		return _fire_icbm(world, id, from, mark, rng)
-	var up_ref := Vector3.UP if absf(dir.y) < 0.98 else Vector3.FORWARD
-	var m := Missile.new()
-	# Guide onto the unit itself when one was locked; onto a bare mark otherwise.
-	var aim: Node3D = map_lock as Node3D if is_instance_valid(map_lock) else null
-	if aim == null:
-		var mk := _TelMark.new()
-		mk.team = 1 if team == 0 else 0
-		world.add_child(mk)
-		mk.global_position = mark
-		aim = mk
-	m.launch(id, Transform3D(Basis.looking_at(dir, up_ref), from), dir * 22.0,
-		self, aim)
-	# The primary mark first, then whatever else has been assigned, so a bus
-	# given two extra points still puts a warhead on the one you laid to begin
-	# with rather than leaving it alone.
-	var units := 0
-	var rvs: Array = []
-	if not mirv_marks.is_empty() or (warheads() > 0 and is_instance_valid(map_lock)):
-		rvs = warhead_marks()
-		if rvs.is_empty() or mark_at(rvs[0]) == Vector3.INF:
-			rvs.push_front(mark)
-		m.programmed = rvs
-		for mk in rvs:
-			if mark_unit(mk) != null:
-				units += 1
-	
-	m.team = team
-	world.add_child(m)
-	store_released.emit(m)
-	# Where it is going, not just that it has gone. A canister launch goes
-	# straight up and turns over out of sight, so without this there is nothing
-	# to tell you whether it is on its way to the mark or simply leaving.
-	var brg: float = rad_to_deg(atan2(mark.x - from.x, -(mark.z - from.z)))
-	Sim.report("%s: %s away — %.0f km on %03d, %d left" % [display_name(),
-		String(WeaponSpec.get_spec(id)["short"]), rng * 0.001,
-		int(wrapf(brg, 0.0, 360.0)), rounds_left], Sim.Ev.BAD)
-	if not rvs.is_empty():
-		Sim.report("%d warhead marks: %d locked on units, %d on ground points" % [
-			rvs.size(), units, rvs.size() - units], Sim.Ev.INFO)
-	# Spent with the round, so the next one's first click is RV1 again
-	if warheads() > 0:
-		mirv_marks.clear()
-		map_lock = null
-		map_target = Vector3.INF
-	return true
-
-## An intercontinental round. It is not guided onto anything: every warhead it
-## carries is given its own mark before it leaves, and the bus puts each on
-## the arc that falls there. See `Icbm`.
-func _fire_icbm(world: Node, id: String, from: Vector3, mark: Vector3, rng: float) -> bool:
-	var targets: Array = warhead_marks()
-	if targets.is_empty():
-		targets = [mark]
-	var live: Array = []
-	for t in targets:
-		# a unit is followed; a patch of ground is where it was put
-		if t is Node:
-			if is_instance_valid(t):
-				live.append(t)
-		elif mark_at(t) != Vector3.INF:
-			live.append(mark_at(t))
-	if live.is_empty():
-		live = [mark]
-	var m := Icbm.launch(world, id, from, self, team, live)
-	store_released.emit(m)
-	var brg: float = rad_to_deg(atan2(mark.x - from.x, -(mark.z - from.z)))
-	var spec := WeaponSpec.get_spec(id)
-	Sim.report("%s: %s away — %.0f km on %03d, %d warheads on %d marks" % [
-		display_name(), String(spec["short"]), rng * 0.001,
-		int(wrapf(brg, 0.0, 360.0)), int(spec.get("mirv", 1)), live.size()], Sim.Ev.BAD)
-	Sim.report("three stages, then it coasts: . and , change the time warp while it is above the air",
-		Sim.Ev.INFO)
-	mirv_marks.clear()
-	map_lock = null
-	map_target = Vector3.INF
-	return true
-
-## A place for the round to guide onto. A patch of ground is not a contact, so
-## it is deliberately not lockable and not a radar return.
-class _TelMark extends Node3D:
-	var team := 1
-	func _ready() -> void:
-		add_to_group("no_lock")
-	func hit_radius() -> float:
-		return 6.0
-	func is_alive() -> bool:
-		return true
-	func take_hit(_a: float, _f: Node = null) -> void:
-		pass
 
 ## How far the piece still is from the bearing and elevation it needs, in
 ## radians: the worst of the two axes. Zero means it is laid and may fire.
@@ -2140,7 +1801,7 @@ func _fire_indirect(world: Node, kd: Dictionary) -> bool:
 
 func _lob(world: Node, vel: Vector3, dmg: float, blast: float, flash: float,
 		aim := Vector3.INF, arm := 12.0, as_rocket := false) -> void:
-	var shell := Aircraft.Shell.new()
+	var shell := GunShell.new()
 	shell.arm_dist = arm
 	shell.rocket = as_rocket
 	shell.drag = shell_drag()
@@ -2386,3 +2047,19 @@ func crew_position() -> Vector3:
 	if vclass() == "lav":
 		return global_transform * Vector3(-0.42, 1.65, -0.30)
 	return global_transform * Vector3(-0.55, 2.35, 1.0)
+
+## See `TankLaunchers.mark_at`.
+static func mark_at(mk: Variant) -> Vector3:
+	return TankLaunchers.mark_at(mk)
+
+## See `TankLaunchers.mark_unit`.
+static func mark_unit(mk: Variant) -> Node3D:
+	return TankLaunchers.mark_unit(mk)
+
+## See `TankLaunchers.warhead_marks`.
+func warhead_marks() -> Array:
+	return launchers.warhead_marks()
+
+## See `TankLaunchers.warheads`.
+func warheads() -> int:
+	return launchers.warheads()

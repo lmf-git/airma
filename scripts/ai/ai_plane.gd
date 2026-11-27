@@ -69,6 +69,10 @@ func _pilot(delta: float) -> void:
 			return
 	var player := _find_enemy()
 	target = player
+	# its radar on what it is chasing, once it is close enough to hold it
+	if is_instance_valid(player) and player is Aircraft and global_position.distance_to(
+			player.global_position) < Sim.radar_reach(20000.0, player):
+		(player as Aircraft).spike(self)
 	var goal := _patrol_point()
 
 	if missile_warn > 0.0:
@@ -556,7 +560,7 @@ func _try_shoot(p: Node3D, delta: float) -> void:
 	var want := ""
 	if d < 7000.0 and count_remaining("aim9") > 0:
 		want = "aim9"
-	elif d < 15000.0 and count_remaining("aim120") > 0:
+	elif d < Sim.radar_reach(15000.0, p) and count_remaining("aim120") > 0:
 		want = "aim120"
 	if want == "":
 		return

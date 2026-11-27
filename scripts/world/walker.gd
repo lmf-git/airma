@@ -9,6 +9,12 @@ extends Node3D
 ## The weapon is where `Pilot.animate` puts it either way, so what you see in
 ## your hands is what anyone else sees you holding.
 
+## See `WalkerArms`.
+var arms := WalkerArms.new(self)
+
+## See `WalkerClimb`.
+var climb := WalkerClimb.new(self)
+
 signal board_requested(jet)
 signal station_requested(jet)
 signal died(where)
@@ -67,8 +73,6 @@ var elev_mil := {}
 ## How far each slot's variable scope is wound in: 1 is its widest field,
 ## `zoom_max` its closest. Kept per weapon, like the turrets.
 var scope_mag := {}
-## The mortar, when it is set up on the ground rather than carried.
-var tube: MortarTube = null
 var wind_mil := {}
 ## For a harness: the zero to use instead of the weapon's own, in metres.
 var zero_override := -1.0
@@ -100,7 +104,7 @@ func turrets(aim: Vector3, look: Vector3, i: int) -> Vector3:
 ## looks along `look`: across the line of sight at its zero, then the turrets.
 func zeroed_aim(g: Dictionary, i: int, from: Vector3, start: Vector3, look: Vector3) -> Vector3:
 	var lay_at: Vector3 = start + look * zero_of(g)
-	var aim: Vector3 = _lay(from, lay_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
+	var aim: Vector3 = arms._lay(from, lay_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
 	return turrets(aim, look, i)
 
 ## The size of one click on this weapon's sights, in mils.
@@ -226,7 +230,6 @@ var flashes := 2
 ## the picture to fade back by.
 var _flash_until := 0.0
 var flash_span := 1.0
-var _throw_flash := false
 
 ## How suppressed he is, 0 to 1: rounds going close past, or into what he is
 ## behind. The weapon wanders, the sights come up slower, the edges of the
@@ -293,7 +296,6 @@ var lock_t := 0.0
 const LOCK_TIME := 1.3
 ## Half the angle the seeker sees, in degrees: what the ring in the sight is.
 const SEEK_CONE := 7.0
-var _tone_t := 0.0
 
 var cam: Camera3D
 ## Where the view would be with nobody looking round: what the rounds, the
@@ -395,15 +397,10 @@ var steadying := false
 var mounted := false
 ## Fire select, by kit index: "auto", "burst" or "semi".
 var fire_mode := {}
-var _burst_left := 0
 var _fall_peak := 0.0
 var _trigger_was := false
-var _queued := 0.0
 var _reload_span := 1.0
-var _reload_mark := 0
-var _reload_empty := false
 var _pump_in := 0.0
-var _cycle_snd := "pump"
 var _sprint := false
 var _steps_seen := 0
 var _since_hit := 99.0
@@ -418,14 +415,6 @@ var _slide := 0.0
 var _slide_dir := Vector3.ZERO
 ## Going over or up something: "vault" or "climb", and the path it takes.
 var _trav := ""
-## The way over has a top to it -- a window -- so it is taken crouched.
-var _trav_low := false
-var _trav_t := 0.0
-var _trav_span := 0.5
-var _trav_a := Vector3.ZERO
-var _trav_b := Vector3.ZERO
-var _trav_top := 0.0
-var _trav_grip := Vector3.ZERO
 ## Picking something up: how far through, and what.
 var _grab_t := -1.0
 var _grab_item: Node3D = null
@@ -437,14 +426,9 @@ var stance := 0
 var prone := false
 ## On a wall: which structure, the face he is on, and the view he had before.
 var _wall := -1
-var _wall_n := Vector3.ZERO
-var _wall_speed := 0.0
-## On a ladder rather than a bare wall: no going sideways, and quicker.
-var _ladder := false
 var near_ladder: Array = []
 ## The harness holding W for him on a wall.
 var test_climb := 0.0
-var _third_was := false
 const VAULT_MAX := 1.3            # higher than this is a climb
 const CLIMB_MAX := 2.85           # higher than this is a wall
 ## What the HUD draws: how wide the weapon is wandering, and what just happened.
@@ -519,7 +503,7 @@ func rearm() -> void:
 	reloading = 0.0
 
 func _take_up(i: int, noisy := true) -> void:
-	_pack_tube()
+	arms._pack_tube()
 	kit_idx = i
 	body.equip(gun_spec(), is_quiet())
 	weapon = body.gun_node
@@ -842,10 +826,10 @@ func _tick_walk_p(delta: float) -> void:
 		binos = not binos
 	# Halfway over a wall there is nothing to decide: the move finishes.
 	if _trav != "":
-		_traverse(delta)
+		climb._traverse(delta)
 		return
 	if _wall >= 0:
-		_on_wall(delta)
+		climb._on_wall(delta)
 		return
 	var wish := _wish()
 	var fwd := Vector3(-sin(yaw), 0, -cos(yaw))
@@ -934,14 +918,14 @@ func _tick_walk_p(delta: float) -> void:
 	if not near_ladder.is_empty() and on_floor and _grab_t < 0.0 \
 			and (Sim.tapped(&"interact") or (wish.dot(-(near_ladder[1] as Vector3)) > 0.6
 				and Sim.held(&"jump"))):
-		_take_ladder(near_ladder)
+		climb._take_ladder(near_ladder)
 		return
 	# Jump at something and he goes over it or up it rather than into it.
 	if on_floor and Sim.tapped(&"jump") and _grab_t < 0.0:
 		if stance > 0:
 			# getting up comes first
 			stance -= 1
-		elif _begin_traverse(wish if wish.length() > 0.3 else fwd, false):
+		elif climb._begin_traverse(wish if wish.length() > 0.3 else fwd, false):
 			return
 		else:
 			_slide = 0.0
@@ -976,11 +960,11 @@ func _tick_walk_p(delta: float) -> void:
 			global_position = Vector3(was.x, global_position.y, was.z)
 		# flat out into something waist high: he does not stop and think
 		if (_sprint or _slide > 0.0) and on_floor and wish.dot(fwd) > 0.5 \
-				and _begin_traverse(fwd, true):
+				and climb._begin_traverse(fwd, true):
 			return
 		# and jumped at a wall, he catches it
 		if not on_floor and Sim.held(&"jump") and wish.dot(fwd) > 0.3 and not chute \
-				and _begin_traverse(fwd, false):
+				and climb._begin_traverse(fwd, false):
 			return
 
 	# ground contact, with a landing that can hurt
@@ -1024,7 +1008,7 @@ func _tick_walk_p(delta: float) -> void:
 	rotation.y = yaw
 
 	_reach_for(delta)
-	_fight(delta)
+	arms._fight(delta)
 	# On a ramp the feet stand on the ramp. Left reaching for the ground, they
 	# went down through it to the grass underneath on the way up; on the way
 	# down, inside the hold's frame, they never reach for anything.
@@ -1085,7 +1069,7 @@ func _step_in_frame(delta: float) -> void:
 			exit_frame(get_tree().current_scene)
 			return
 		position.z = aft
-	_fight(delta)
+	arms._fight(delta)
 	_animate(delta, flat, false)
 	_view(delta, frame.global_transform.basis.orthonormalized())
 	# G takes the gun station on a gunship. There is no key out of the hold:
@@ -1110,294 +1094,6 @@ func _trigger() -> bool:
 	return down
 
 # ------------------------------------------------------- over, up, and down for
-## Is there something in the way that he can get over or onto? `auto` is the
-## version that happens without being asked -- running flat out into a low
-## wall -- and only ever vaults: nobody climbs a container by accident.
-func _begin_traverse(dir_in: Vector3, auto: bool) -> bool:
-	var dir := Vector3(dir_in.x, 0.0, dir_in.z).normalized()
-	var feet := global_position
-	var id := -1
-	var face := 0.0
-	# What is actually there at the height asked about. These asked `blocks`,
-	# which counts anything up to a man's height above the point -- so at a
-	# window the thing found at his shins was as often the wall over the
-	# window as the sill under it, and a sill to vault became a wall to climb.
-	# Through a window was never the answer it gave.
-	for step in 5:
-		face = 0.3 + step * 0.2
-		id = Obstacles.hit(feet + dir * face + Vector3(0, 0.25, 0), 0.05)
-		if id >= 0:
-			break
-	if id < 0 and not auto:
-		# nothing at his shins: perhaps something to catch hold of overhead
-		face = 0.6
-		id = Obstacles.hit(feet + dir * face + Vector3(0, 2.0, 0), 0.05)
-		# a hand's reach higher: the edge of a scaffold deck, a balcony
-		if id < 0:
-			id = Obstacles.hit(feet + dir * face + Vector3(0, 2.35, 0), 0.1)
-	if id < 0:
-		return false
-	var top: float = Obstacles.top_of(id)
-	var rise: float = top - feet.y
-	if rise < 0.45 or (auto and rise > VAULT_MAX):
-		return false
-	if rise > CLIMB_MAX:
-		# too tall to haul up onto in one go, so it is a climb in the other
-		# sense: onto the face of it, and up
-		return _take_wall(id, feet + dir * face)
-	var world := get_tree().current_scene
-	_trav_top = top
-	_trav_a = feet
-	_trav_grip = feet + dir * face + Vector3(0, rise, 0)
-	if rise <= VAULT_MAX:
-		# Over it, if it is thin enough to get over: look for clear ground on
-		# the far side within a stride and a half.
-		for step in 9:
-			var reach: float = face + 0.7 + step * 0.25
-			var land: Vector3 = feet + dir * reach
-			land.y = Sim.height_at(land.x, land.z)
-			if land.y > feet.y + 0.5 or land.y < feet.y - 2.5:
-				continue
-			if Obstacles.blocks(land, BODY_R) < 0 \
-					and Obstacles.floor_under(land.x, land.z, land.y + 1.0) < land.y + 0.3:
-				# whatever is tallest along the way is what has to be cleared,
-				# and if that is more than a vault this is not one
-				var crest: float = top
-				for k in 5:
-					var q: Vector3 = feet.lerp(land, (k + 1) / 6.0)
-					crest = maxf(crest, Obstacles.clear_over(q.x, q.z, feet.y + VAULT_MAX + 0.2))
-				if crest - feet.y > VAULT_MAX:
-					break
-				# Through an opening rather than over a wall: something over
-				# the top of the way across, a window's lintel. He goes
-				# through low, head down, not stood up into the wall above.
-				_trav_low = Obstacles.hit(Vector3(_trav_grip.x, crest + 1.15, _trav_grip.z), 0.15) >= 0
-				_trav_top = crest
-				_trav = "vault"
-				_trav_b = land
-				_trav_span = 0.42 + reach * 0.09
-				_trav_t = 0.0
-				vel = dir * (reach / _trav_span)
-				Sfx.play_at(world, "cloth", feet, -9.0, 0.8, 40.0)
-				return true
-	if auto:
-		return false
-	# Onto it. There has to be somewhere to stand once he is up.
-	# Whatever is a pace in from the edge is what he ends up standing on, and
-	# that is not always the thing his shins found: a car's bonnet is the way
-	# onto its roof.
-	var up: Vector3 = feet + dir * (face + 0.55)
-	up.y = Obstacles.floor_under(up.x, up.z, feet.y + CLIMB_MAX)
-	rise = up.y - feet.y
-	if rise < 0.45 or rise > CLIMB_MAX or Obstacles.blocks(up, BODY_R * 0.6) >= 0:
-		return false
-	_trav_top = up.y
-	_trav_grip = feet + dir * face + Vector3(0, rise, 0)
-	_trav = "climb"
-	_trav_b = up
-	_trav_span = 0.55 + rise * 0.36
-	_trav_t = 0.0
-	vel = Vector3.ZERO
-	Sfx.play_at(world, "cloth", feet, -8.0, 0.7, 40.0)
-	return true
-
-## Carry him along the move. A vault is one arc over the top; a climb is up
-## the face and then forward onto the edge.
-func _traverse(delta: float) -> void:
-	_trav_t += delta / _trav_span
-	var t: float = clampf(_trav_t, 0.0, 1.0)
-	var p: Vector3
-	if _trav == "vault":
-		var s: float = t * t * (3.0 - 2.0 * t)
-		p = _trav_a.lerp(_trav_b, s)
-		# straight line between the two ends, lifted to clear the top
-		var base_y: float = lerpf(_trav_a.y, _trav_b.y, s)
-		p.y = base_y + maxf(_trav_top + 0.12 - base_y, 0.0) * sin(t * PI)
-	else:
-		var lift: float = smoothstep(0.0, 0.68, t)
-		var over: float = smoothstep(0.55, 1.0, t)
-		var face: Vector3 = _trav_a.lerp(Vector3(_trav_b.x, _trav_a.y, _trav_b.z), 0.25)
-		p = Vector3(lerpf(face.x, _trav_b.x, over), lerpf(_trav_a.y, _trav_b.y, lift),
-			lerpf(face.z, _trav_b.z, over))
-	global_position = p
-	rotation.y = yaw
-	on_floor = false
-	crouching = _trav_low
-	_slide = 0.0
-	_sprint = false
-	_shot_cd = maxf(_shot_cd, 0.15)
-	_fight_idle(delta)
-	body.in_action = _trav
-	body.in_action_t = t
-	body.in_point = _trav_grip
-	_animate(delta, vel, false)
-	_view(delta, Basis.IDENTITY)
-	if t >= 1.0:
-		var done := _trav
-		_trav = ""
-		body.in_action = ""
-		on_floor = true
-		_fall_peak = 0.0
-		vel = Vector3(vel.x, 0.0, vel.z) * (0.6 if done == "vault" else 0.0)
-		Sfx.play_at(get_tree().current_scene, "land", global_position, -13.0,
-			randf_range(0.95, 1.1), 40.0)
-		if done == "climb":
-			_shot_cd = 0.3
-			body._draw = 0.8         # the weapon comes back off the sling
-
-# ------------------------------------------------------------------ on a wall
-## Take hold of a face. Anything built can be climbed: a building, a crane's
-## mast, a container stack. He goes where the keys say -- up, down, along --
-## for as long as he stays on that face, and comes off it over the top, onto
-## the ground, or by letting go.
-func _take_wall(id: int, at: Vector3) -> bool:
-	var f: Dictionary = Obstacles.face_of(id, at)
-	var n: Vector3 = f["n"]
-	var foot: Vector3 = f["foot"]
-	# onto the plane of the face, a shoulder's width out from it
-	var rel: Vector3 = global_position - foot
-	var p: Vector3 = global_position - n * (rel.dot(n) - (BODY_R + 0.06))
-	p.y = global_position.y
-	_wall = id
-	_wall_n = n
-	_ladder = false
-	_third_was = third
-	third = true                    # you climb by looking at the wall, not out of it
-	global_position = p
-	vel = Vector3.ZERO
-	on_floor = false
-	stance = 0
-	_slide = 0.0
-	_sprint = false
-	reloading = 0.0
-	Sfx.play_at(get_tree().current_scene, "cloth", p, -8.0, 0.8, 40.0)
-	return true
-
-## Step onto a ladder: [where its foot is, which way it faces, structure].
-func _take_ladder(l: Array) -> void:
-	var foot: Vector3 = l[0]
-	var n: Vector3 = l[1]
-	var keep_y: float = global_position.y
-	global_position = Vector3(foot.x, keep_y, foot.z) + n * 0.3
-	if _take_wall(int(l[2]), foot - n * 0.2):
-		_ladder = true
-		# square on to it, whatever part of the face that is
-		global_position = Vector3(foot.x, keep_y, foot.z) + n * (BODY_R + 0.06)
-
-func _leave_wall() -> void:
-	body.position = Vector3.ZERO
-	_ladder = false
-	_wall = -1
-	third = _third_was
-	body.in_action = ""
-	body._draw = 0.8
-	_shot_cd = 0.35
-	_fall_peak = 0.0
-
-func _on_wall(delta: float) -> void:
-	var n := _wall_n
-	var right := Vector3(n.z, 0.0, -n.x)            # his right, facing the wall
-	var up_in: float = Sim.strength(&"pitch_down") - Sim.strength(&"pitch_up") + test_climb
-	var side_in: float = Sim.strength(&"roll_right") - Sim.strength(&"roll_left")
-	var fast: bool = Sim.held(&"throttle_up") and stamina > 0.05
-	stamina = clampf(stamina + delta * (-1.0 / 9.0 if fast else 1.0 / 12.0), 0.0, 1.0)
-	var rate: float = 3.3 if fast else 2.2
-	if _ladder:
-		side_in = 0.0
-		rate *= 1.3
-	var p := global_position
-	var f: Dictionary = Obstacles.face_of(_wall, p - n * (BODY_R + 0.06))
-	var top: float = f["top"]
-	var step: Vector3 = Vector3.UP * up_in * rate * delta + right * side_in * rate * 0.8 * delta
-	# stay on the face: at its edge there is no more wall to hold
-	var along: float = float(f["along"])
-	var half: float = float(f["half"]) - 0.25
-	var q: Vector3 = p + step
-	var f2: Dictionary = Obstacles.face_of(_wall, q - n * (BODY_R + 0.06))
-	if absf(float(f2["along"])) > half and absf(float(f2["along"])) > absf(along):
-		q = p + Vector3.UP * up_in * rate * delta
-	# something else built against this wall is in the way
-	var other: int = Obstacles.blocks(q + Vector3(0, 0.9, 0), 0.2)
-	if other >= 0 and other != _wall:
-		q = p
-		# Unless it is something overhead he can get onto: a crane's jib
-		# across the top of its mast, a deck. Then that is the top.
-		var lip: float = Obstacles.top_of(other)
-		if up_in > 0.1 and lip > p.y and lip - p.y < 4.3:
-			_trav_a = p
-			_trav_b = Vector3(p.x, lip, p.z) - n * 0.25
-			_trav_top = lip
-			_trav_grip = Vector3(p.x, lip, p.z) - n * 0.3
-			_trav = "climb"
-			_trav_span = 1.3
-			_trav_t = 0.0
-			_leave_wall()
-			body.in_action = "climb"
-			return
-	_wall_speed = (q - p).length() / maxf(delta, 0.001)
-	global_position = q
-	rotation.y = atan2(n.x, n.z)                     # chest to the wall
-	# in close: the figure's arms are not long enough to climb at arm's length
-	body.position = Vector3(0.0, 0.0, -0.17)
-	crouching = false
-	prone = false
-	_fight_idle(delta)
-	var world := get_tree().current_scene
-	# over the top
-	if q.y + 1.5 >= top and up_in > 0.1:
-		var roof: Vector3 = q - n * (BODY_R + 0.7)
-		roof.y = top
-		_trav_a = q
-		_trav_b = roof
-		_trav_top = top
-		_trav_grip = Vector3(q.x, top, q.z) - n * (BODY_R + 0.06)
-		_trav = "climb"
-		_trav_span = 0.75
-		_trav_t = 0.0
-		_leave_wall()
-		body.in_action = "climb"
-		return
-	# back on the ground
-	var floor_y: float = maxf(Sim.height_at(q.x, q.z), Obstacles.floor_under(q.x, q.z, q.y + 0.2))
-	if q.y <= floor_y + 0.02 and up_in < 0.0:
-		global_position.y = floor_y
-		on_floor = true
-		vel = Vector3.ZERO
-		_leave_wall()
-		return
-	if Sim.tapped(&"jump"):
-		# kicked off backwards
-		vel = n * 4.6 + Vector3.UP * 4.2
-		_leave_wall()
-		Sfx.play_at(world, "cloth", q, -8.0, 1.0, 40.0)
-		return
-	if Sim.tapped(&"crouch"):
-		vel = n * 0.6
-		_leave_wall()
-		return
-	if _wall_speed > 0.4 and fmod(Time.get_ticks_msec() * 0.001, 0.42) < delta:
-		Sfx.play_at(world, "step_a", q + Vector3(0, 1.6, 0) - n * 0.4, -17.0,
-			randf_range(1.2, 1.5), 30.0)
-	body.in_action = "ladder" if _ladder else "wall"
-	body.in_action_t = 0.0
-	body.in_point = q + Vector3(0, 1.70, 0) - n * (BODY_R + 0.04)
-	body.in_move = Vector2(0.0, _wall_speed * (signf(up_in) if absf(up_in) > 0.05
-		else (1.0 if absf(side_in) > 0.05 else 0.0)))
-	body.in_crouch = false
-	body.in_prone = false
-	body.in_air = 0
-	body.in_ready = 0.0
-	body.in_ads = 0.0
-	body.in_lean = 0.0
-	body.in_reload = -1.0
-	body.in_foot_ik = false
-	_ads = 0.0
-	ads_latched = false
-	binos = false
-	_bino = 0.0
-	body.animate(delta)
-	_view(delta, Basis.IDENTITY)
-
 ## The timers that run whether or not the hands are free.
 func _fight_idle(delta: float) -> void:
 	_shot_cd = maxf(_shot_cd - delta, 0.0)
@@ -1475,521 +1171,6 @@ func _take(item: Node3D) -> void:
 	item.queue_free()
 
 # -------------------------------------------------------------------- weapons
-## Everything the hands do in a tick: change weapon, reload, throw, shoot.
-func _fight(delta: float) -> void:
-	_shot_cd = maxf(_shot_cd - delta, 0.0)
-	_queued = maxf(_queued - delta, 0.0)
-	_bloom = maxf(_bloom - delta * 0.035, 0.0)
-	_recoil = lerpf(_recoil, 0.0, clampf(delta * 8.0, 0, 1))
-	hit_t = maxf(hit_t - delta, 0.0)
-	kill_t = maxf(kill_t - delta, 0.0)
-	hurt_t = maxf(hurt_t - delta, 0.0)
-	_since_hit += delta
-	_supp_quiet += delta
-	if _supp_quiet > 0.8:
-		suppression = maxf(suppression - delta * 0.35, 0.0)
-	if regen and _since_hit > 5.0 and suppression < 0.25 and health < 100.0:
-		health = minf(health + delta * 22.0, 100.0)
-	var world := get_tree().current_scene
-	var g: Dictionary = gun_spec()
-
-	for wi in slots.size():
-		if Sim.tapped(StringName("weapon_%d" % (wi + 1))) and wi != slot and _grab_t < 0.0:
-			_rounds[kit_idx] = ammo
-			_spare[kit_idx] = spare
-			slot = wi
-			_take_up(int(slots[wi]))
-			return
-	var want_frag: bool = Sim.tapped(&"grenade") and grenades > 0
-	var want_flash: bool = Sim.tapped(&"flashbang") and flashes > 0
-	if (want_frag or want_flash) and _shot_cd < 0.2 and _throw_t < 0.0 \
-			and reloading <= 0.0:
-		_throw_flash = want_flash and not want_frag
-		_throw_t = 0.0
-		_shot_cd = 0.75
-		Sfx.play_ui(world, "pin", -6.0)
-	if _throw_t >= 0.0:
-		# it leaves the hand when the arm comes through, not when the key
-		# goes down
-		var was_t := _throw_t
-		_throw_t += delta / 0.62
-		if was_t < 0.62 and _throw_t >= 0.62:
-			_throw()
-		if _throw_t >= 1.0:
-			_throw_t = -1.0
-
-	# The shotgun has to be worked between shots.
-	if _pump_in > 0.0:
-		_pump_in -= delta
-		if _pump_in <= 0.0:
-			Sfx.play_at(world, _cycle_snd, global_position + Vector3(0, 1.4, 0), -8.0,
-				randf_range(0.95, 1.05), 60.0)
-
-	var full: int = int(g["mag"])
-	if binos and _trigger():
-		# the first pull puts the glasses down; it takes a second to shoot
-		binos = false
-		_ui_click = true
-	_steady(delta)
-	# the selector
-	if Sim.tapped(&"fire_mode"):
-		var ms: Array = modes_of(g)
-		if ms.size() > 1:
-			var nxt: String = String(ms[(ms.find(mode_now()) + 1) % ms.size()])
-			fire_mode[kit_idx] = nxt
-			_burst_left = 0
-			Sfx.play_ui(world, "clink", -12.0, 1.3)
-			Sim.report("%s — %s" % [String(g["name"]), nxt.to_upper()], Sim.Ev.INFO)
-	var pulled: bool = _trigger() and _block < 0.4
-	var edge: bool = pulled and not _trigger_was
-	_trigger_was = pulled
-	if Sim.tapped(&"reload") and reloading <= 0.0 and ammo < full and spare > 0:
-		_begin_reload(g)
-	if reloading > 0.0:
-		_work_reload(delta, g, edge)
-		return
-	if String(g.get("launcher", "")) == "mortar":
-		_work_mortar(delta, g, edge)
-		return
-
-	# Down the sights it goes where it is pointed; from the hip it does not.
-	var s: float = lerpf(float(g["hip"]), float(g["ads"]), _ads)
-	var loose: float = 1.0 - 0.75 * _ads
-	if prone:
-		s *= 0.45
-	elif crouching:
-		s *= 0.7
-	s += clampf(Vector2(vel.x, vel.z).length() / RUN, 0.0, 1.0) * float(g["hip"]) * 1.4 * loose
-	if not on_floor:
-		s += float(g["hip"]) * 2.0
-	s += _bloom * loose
-	# under fire: nobody holds a sight picture with rounds cracking past
-	s = s * (1.0 + 1.2 * suppression) + float(g["hip"]) * 0.5 * suppression
-	spread_now = s
-
-	if edge:
-		_queued = 0.12
-	_seek(delta, g)
-	var mode: String = mode_now()
-	if edge and mode == "burst":
-		_burst_left = 3
-	var want: bool
-	match mode:
-		"auto":
-			want = pulled
-		"burst":
-			want = _burst_left > 0
-		_:
-			want = _queued > 0.0
-	if not want or _shot_cd > 0.0 or body._ready_s < 0.75:
-		return
-	_queued = 0.0
-	if _burst_left > 0:
-		_burst_left -= 1
-	if ammo <= 0:
-		_burst_left = 0
-		if edge or mode != "auto":
-			Sfx.play_ui(world, "dry", -6.0)
-		if spare > 0:
-			_begin_reload(g)
-		else:
-			_shot_cd = 0.25
-		return
-	_shot_cd = float(g["cd"])
-	ammo -= 1
-	_rounds[kit_idx] = ammo
-	var from: Vector3 = body.muzzle_pos()
-	# The round leaves the muzzle but it goes where the eye is looking: find
-	# what is under the crosshair and send it there. Fired parallel to the
-	# view instead, a rifle held beside the head puts every shot a hand's
-	# width off, and a camera over the shoulder puts them a pace off.
-	var look := -_aim_xf.basis.z
-	var eye := _aim_xf.origin
-	var skip: float = maxf((body.eye_pos() - eye).dot(look), 0.0) + 0.6
-	var start: Vector3 = eye + look * skip
-	# What is under the crosshair: the first wall, prop or piece of ground the
-	# line of sight meets.
-	#
-	# Ground under the crosshair used to be pushed out to sixty metres, to
-	# keep a fold in the road from catching the rounds -- which put the mark
-	# underground, and from a muzzle lower than the eye every round aimed at
-	# the road came down metres short of it. Lying down that is every shot.
-	# The fold is dealt with below, for what it is.
-	var seen: float = Firearm.sight_range(start, look, 600.0)
-	var mark: Vector3 = start + look * seen
-	# And held up for the drop over that distance, so it lands where it is
-	# pointed. Laid flat on the crosshair, a rifle round at three hundred
-	# metres is half a metre low, and along a line skimming the road that is
-	# a hundred metres short.
-	# Only for something actually there: with nothing under the crosshair the
-	# "mark" is just how far the look was taken, and holding up for six
-	# hundred metres lobs the round over the line of sight on the way.
-	# What it falls under: a rifle round all of it, a rocket a little (its
-	# motor holds it up), a guided missile none. The launcher table calls the
-	# AT4 a "rocket" -- this asked for "law" and so held an AT4 up for a
-	# rifle round's drop.
-	var launcher := String(g.get("launcher", ""))
-	var fall: float = 3.0 if launcher == "rocket" else (0.0 if launcher == "sam" else 9.81)
-	var speed: float = float(g["muzzle"])
-	# rounds and the 40 mm fly the whole model; the AT4's motor holds it up
-	var air_k: float = Firearm.drag_of(g) if launcher != "rocket" else -1.0
-	# A rifle is sighted in, not ranged. It used to be laid for the drop over
-	# however far it was to whatever was under the crosshair -- and people
-	# are not in that answer, only walls and ground: a man in a doorway with a
-	# wall three hundred metres behind him had every round laid for three
-	# hundred metres and sent over his head. Now the round crosses the line of
-	# sight at the weapon's zero, and the turrets move it from there: closer
-	# than the zero it is a touch high, further out it drops, and the drop is
-	# the shooter's to hold over or dial. Launchers range themselves.
-	var zeroed: bool = launcher == ""
-	var lay_at: Vector3 = mark
-	var sky: bool = seen >= 599.0
-	if zeroed:
-		lay_at = start + look * zero_of(g)
-		sky = false
-	var aim: Vector3 = _lay(from, lay_at, speed, fall, sky, air_k)
-	# a grenade launcher is laid well above the line of sight at range
-	var off_line: float = 0.0 if launcher == "gl" else 0.5
-	if mark.distance_to(from) < 1.6 or aim.dot(look) < off_line:
-		aim = look
-	elif _fouled(from, mark) and not _fouled(start, mark):
-		# The muzzle cannot see what the eye can: a hump in the road a few
-		# metres in front of a man lying down, the sill a rifle is rested on,
-		# or anything below an over-the-shoulder view. The round goes from the
-		# line of sight, which on the screen is clear all the way, instead of
-		# into the ground in front of him.
-		from = start
-		aim = _lay(start, lay_at, speed, fall, sky, air_k)
-	if zeroed:
-		aim = turrets(aim, look, kit_idx)
-	var quiet: bool = is_quiet()
-	if g.has("launcher"):
-		if String(g["launcher"]) == "sam":
-			if not is_instance_valid(lock_target) or lock_t < LOCK_TIME:
-				# no tone, no shot: it will not leave the tube without a lock
-				ammo += 1
-				_rounds[kit_idx] = ammo
-				_shot_cd = 0.3
-				Sfx.play_ui(world, "dry", -6.0)
-				Sim.report("no lock — hold the sights on an aircraft", Sim.Ev.BAD)
-				return
-			Firearm.sam(world, self, side, from, look, lock_target)
-			lock_t = 0.0
-		elif String(g["launcher"]) == "gl":
-			Firearm.grenade40(world, self, side, g, from, aim)
-		else:
-			Firearm.rocket(world, self, side, g, from, aim)
-	else:
-		# Inside an aircraft the round has the aircraft's speed as well as its
-		# own. Where it goes from there -- out over the ramp, or into the
-		# inside of the fuselage -- is the round's business: `Effects.hull_hit`.
-		var carrier_vel := Vector3.ZERO
-		if frame != null and is_instance_valid(frame_owner):
-			carrier_vel = frame_owner.get_meta("net_vel") if frame_owner.has_meta("net_vel") \
-				else (frame_owner.get("linear_velocity") if "linear_velocity" in frame_owner else Vector3.ZERO)
-		Firearm.fire(world, self, side, g, from, aim, s, 1.0, quiet, carrier_vel)
-		# and on everyone else's screen: the flash, the report and the round
-		var nl: Variant = world.get("net") if world != null else null
-		if nl != null and is_instance_valid(nl) and (nl as NetLink).active:
-			(nl as NetLink).send_foot_shot(from, aim, String(g["id"]), quiet, carrier_vel)
-	if is_instance_valid(arena) and arena.has_method("heard"):
-		# a suppressed shot is heard by whoever is in the same yard, no further
-		arena.heard(from, side, 14.0 if quiet else 75.0)
-	# The kick: most of it comes back on its own, some of it you have to pull
-	# down yourself, and it never climbs quite straight.
-	var k: float = float(g["kick"]) * (1.0 - 0.35 * _ads) \
-		* (0.55 if prone else (0.8 if crouching else 1.0))
-	# rested on something, the something takes most of it
-	if mounted:
-		k *= 0.45
-	pitch = minf(pitch + k * 0.45, 1.35)
-	_recoil = minf(_recoil + k * 0.9, 0.12)
-	yaw += randf_range(-1.0, 1.0) * float(g["side"]) * (1.0 - 0.3 * _ads) * (0.4 if mounted else 1.0)
-	_bloom = minf(_bloom + float(g["hip"]) * 0.22, float(g["hip"]) * 1.6)
-	body.kick(clampf(float(g["kick"]) * 34.0, 0.3, 1.5))
-	# Working the action between shots: a pump, a bolt, or nothing -- a drum
-	# launcher is loaded one round at a time but fires straight off the next.
-	var cyc := String(g.get("cycle", "pump" if g.get("shells", false) else ""))
-	if cyc != "":
-		_cycle_snd = cyc
-		_pump_in = 0.24 if cyc == "pump" else 0.40
-
-## The mortar is worked from the ground: the first pull sets it up where he
-## stands (stand still for it), the sights button -- or a pull with nothing
-## plotted -- opens the map to lay it on a fire mission, and each pull after
-## that puts a round down the tube onto the mission. Moving off it, or taking
-## up another weapon, packs it up.
-func _work_mortar(delta: float, g: Dictionary, edge: bool) -> void:
-	var world := get_tree().current_scene
-	var moving: bool = Vector2(vel.x, vel.z).length() > 0.8 or not on_floor or frame != null
-	if not is_instance_valid(tube):
-		tube = null
-		if edge:
-			if moving:
-				Sim.report("mortar: stand still to set it up", Sim.Ev.BAD)
-			else:
-				tube = MortarTube.new()
-				tube.spec = g
-				world.add_child(tube)
-				var fwd := Vector3(-sin(yaw), 0.0, -cos(yaw))
-				var at: Vector3 = global_position + fwd * 0.7
-				tube.global_position = Vector3(at.x, global_position.y, at.z)
-				if is_instance_valid(body.gun_node):
-					body.gun_node.visible = false
-				Sfx.play_ui(world, "cloth", -6.0, 0.8)
-				Sim.report("setting up the mortar…", Sim.Ev.INFO)
-		return
-	if moving or Vector2(tube.global_position.x - global_position.x,
-			tube.global_position.z - global_position.z).length() > MortarTube.STAY:
-		_pack_tube()
-		Sim.report("mortar packed up", Sim.Ev.INFO)
-		return
-	if tube.work(delta):
-		Sfx.play_ui(world, "clink", -8.0, 0.9)
-		Sim.report("mortar ready — RMB to plot a fire mission on the map", Sim.Ev.GOOD)
-	if not tube.ready_to_fire():
-		return
-	if Sim.tapped(&"ads") or (edge and tube.mission == Vector3.INF):
-		_plot_mission()
-		return
-	if not edge or _shot_cd > 0.0 or tube.mission == Vector3.INF:
-		return
-	if ammo <= 0:
-		Sfx.play_ui(world, "dry", -6.0)
-		if spare > 0:
-			_begin_reload(g)
-		return
-	_shot_cd = float(g["cd"])
-	ammo -= 1
-	_rounds[kit_idx] = ammo
-	var mr: MortarRound = tube.fire(self, arena)
-	world.add_child(mr)
-	if Sim.net != null:
-		Sim.net.launches.share_round(mr)
-	Sfx.play_at(world, "thump", mr.from, 2.0, 0.9, 1500.0)
-	Effects.dust(world, tube.global_position, 1.2)
-	if is_instance_valid(arena) and arena.has_method("heard"):
-		arena.heard(mr.from, side, 90.0)
-	Sim.report("round out — %d m, %.0f seconds" % [int(Vector2(tube.mission.x - mr.from.x,
-		tube.mission.z - mr.from.z).length()), mr.flight], Sim.Ev.INFO)
-
-## Open the map to lay the tube on a fire mission: a line from the tube to
-## the cursor with the range on it, and a click where it is to go.
-func _plot_mission() -> void:
-	var world := get_tree().current_scene
-	var map: Variant = world.get("map") if world != null else null
-	if map == null or not is_instance_valid(map) or not is_instance_valid(tube):
-		return
-	var t: MortarTube = tube
-	(map as MapView).pick("FIRE MISSION", func(p: Vector3):
-		if not is_instance_valid(t):
-			return
-		var why: String = t.cannot_reach(p)
-		if why != "":
-			Sim.report("mortar: " + why, Sim.Ev.BAD)
-			return
-		t.lay_on(p)
-		Sim.report("fire mission laid — %d m. Fire when ready" % int(Vector2(p.x - t.global_position.x,
-			p.z - t.global_position.z).length()), Sim.Ev.GOOD))
-	# measured from the tube, not from wherever the map's last line began
-	(map as MapView).pick_from = tube.global_position
-
-## Take the mortar back up off the ground.
-func _pack_tube() -> void:
-	if is_instance_valid(tube):
-		tube.queue_free()
-	tube = null
-	if is_instance_valid(body) and is_instance_valid(body.gun_node):
-		body.gun_node.visible = true
-
-func _exit_tree() -> void:
-	_pack_tube()
-
-## The seeker. With the missile up and the sights on something that flies,
-## it takes a moment to settle; look away and it lets go.
-## Which way to send a round so it comes down on the mark: the arc for its
-## speed and what it falls under, or as far as it will go toward the mark if
-## the mark is out of reach. With nothing under the crosshair there is no
-## distance to allow for, and it goes the way it is pointed.
-func _lay(from: Vector3, mark: Vector3, speed: float, fall: float, open_sky: bool,
-		k := -1.0) -> Vector3:
-	if open_sky or fall <= 0.0:
-		return (mark - from).normalized()
-	var d: Vector3 = Firearm.lob(from, mark, speed, fall)
-	if d != Vector3.ZERO:
-		if k >= 0.0:
-			# The vacuum arc is the first guess; the round flies through air on
-			# a turning planet, so the guess is corrected against that until it
-			# comes down on the mark. Inside the first thirty metres the two are
-			# the same and this costs a step or two.
-			var sol: Dictionary = Ballistics.solve(from, mark, speed, k, d)
-			if not sol.is_empty():
-				return sol["dir"]
-		return d
-	var h := Vector3(mark.x - from.x, 0.0, mark.z - from.z)
-	return (h.normalized() + Vector3.UP).normalized() if h.length() > 0.01 \
-		else (mark - from).normalized()
-
-## Whether something stands between two points: a wall or a prop anywhere
-## along it, or the ground in the first stretch of it, where a line from a man
-## lying down is closest to the road. The far end is the mark itself, which is
-## on whatever it hit, so the last few per cent do not count.
-func _fouled(a: Vector3, b: Vector3) -> bool:
-	var span: float = a.distance_to(b)
-	if span < 0.5:
-		return false
-	if Obstacles.segment(a, b) < 0.97:
-		return true
-	var dir: Vector3 = (b - a) / span
-	var near: float = minf(span * 0.97, 25.0)
-	var s := 0.4
-	while s < near:
-		var p: Vector3 = a + dir * s
-		if p.y < Sim.height_at(p.x, p.z):
-			return true
-		s += 0.5
-	return false
-
-func _seek(delta: float, g: Dictionary) -> void:
-	if String(g.get("launcher", "")) != "sam" or _ads < 0.6 or ammo <= 0:
-		lock_target = null
-		lock_t = 0.0
-		return
-	var eye := _aim_xf.origin
-	var look := -_aim_xf.basis.z
-	var best: Node3D = null
-	var best_a := deg_to_rad(SEEK_CONE)
-	Sim.hit_scan()
-	for i in Sim.hit_nodes.size():
-		if Sim.hit_team[i] == side:
-			continue
-		var n: Variant = Sim.hit_nodes[i]
-		if not is_instance_valid(n) or not (n is Aircraft) or not n.is_alive():
-			continue
-		var to: Vector3 = (n as Node3D).global_position - eye
-		if to.length() > 5500.0 or to.length() < 60.0:
-			continue
-		var ang: float = look.angle_to(to)
-		if ang < best_a and Firearm.can_see(eye, (n as Node3D).global_position) \
-				and Sim.line_of_sight(eye, (n as Node3D).global_position):
-			best_a = ang
-			best = n
-	if best != lock_target:
-		lock_t = 0.0
-	lock_target = best
-	if best != null:
-		var before := lock_t
-		lock_t += delta
-		if before < LOCK_TIME and lock_t >= LOCK_TIME:
-			Sfx.play_ui(get_tree().current_scene, "killmark", -6.0, 1.4)
-		# The seeker's tone: a slow tick while it is working on something,
-		# quick and higher once it has it. The eye is on the aeroplane, not on
-		# the words under the ring, and this is what says "now".
-		_tone_t -= delta
-		if _tone_t <= 0.0:
-			var has_it: bool = lock_t >= LOCK_TIME
-			_tone_t = 0.27 if has_it else 0.6
-			Sfx.play_ui(get_tree().current_scene, "beep", -14.0 if has_it else -20.0,
-				2.0 if has_it else 1.0)
-	else:
-		_tone_t = 0.0
-
-func _begin_reload(g: Dictionary) -> void:
-	_reload_span = maxf(float(g["reload"]), 0.05)
-	reloading = _reload_span
-	_reload_mark = 0
-	_reload_empty = ammo <= 0
-	_pump_in = 0.0
-
-## A reload is something the hands do in stages, each of which you can hear.
-func _work_reload(delta: float, g: Dictionary, trigger_edge: bool) -> void:
-	var world := get_tree().current_scene
-	var at := global_position + Vector3(0, 1.35, 0)
-	reloading -= delta
-	var p: float = 1.0 - clampf(reloading / _reload_span, 0.0, 1.0)
-	if g.get("shells", false):
-		# one at a time into the tube, and the trigger breaks off the loading
-		if _reload_mark == 0 and p > 0.55:
-			_reload_mark = 1
-			ammo += 1
-			spare -= 1
-			Sfx.play_at(world, "shell", at, -9.0, randf_range(0.95, 1.1), 40.0)
-		if reloading <= 0.0:
-			_rounds[kit_idx] = ammo
-			_spare[kit_idx] = spare
-			if ammo < int(g["mag"]) and spare > 0 and not trigger_edge and not _trigger():
-				reloading = _reload_span
-				_reload_mark = 0
-			else:
-				reloading = 0.0
-				if _reload_empty and String(g.get("cycle", "pump")) != "":
-					Sfx.play_at(world, String(g.get("cycle", "pump")), at, -8.0, 1.0, 60.0)
-					_shot_cd = 0.3
-		return
-	if _reload_mark == 0 and p > 0.22:
-		_reload_mark = 1
-		Sfx.play_at(world, "mag_out", at, -9.0, randf_range(0.95, 1.05), 40.0)
-	elif _reload_mark == 1 and p > 0.66:
-		_reload_mark = 2
-		Sfx.play_at(world, "mag_in", at, -8.0, randf_range(0.95, 1.05), 40.0)
-	elif _reload_mark == 2 and p > 0.86:
-		_reload_mark = 3
-		if _reload_empty:
-			Sfx.play_at(world, String(g["work"]), at, -8.0, randf_range(0.95, 1.05), 40.0)
-	if reloading <= 0.0:
-		reloading = 0.0
-		var take: int = mini(int(g["mag"]) - ammo, spare)
-		ammo += take
-		spare -= take
-		_rounds[kit_idx] = ammo
-		_spare[kit_idx] = spare
-
-func _throw() -> void:
-	if _throw_flash:
-		flashes -= 1
-	else:
-		grenades -= 1
-	var world := get_tree().current_scene
-	var look := -_aim_xf.basis.z
-	var f := Firearm.Frag.new()
-	if _throw_flash:
-		# a short fuse: it is meant to go off as it arrives, not after
-		f.flash = true
-		f.fuse = 1.7
-	f.team = side
-	f.thrower = self
-	f.vel = look * 17.0 + Vector3(0, 3.2, 0) + Vector3(vel.x, 0, vel.z) * 0.6
-	world.add_child(f)
-	# out of the hand that threw it
-	var hand: Vector3 = body.fore_l.global_transform * Vector3(0, -Pilot.ARM_2, 0)
-	f.global_position = hand if hand.distance_to(body.eye_pos()) < 1.2 \
-		else body.eye_pos() + look * 0.5
-	if Sim.net != null:
-		Sim.net.launches.share_round(f)
-	Sfx.play_at(world, "cloth", f.global_position, -8.0, 1.3, 30.0)
-
-## A round of yours landed.
-func hit_confirm(head: bool, killed: bool) -> void:
-	hit_t = 0.22
-	hit_head = head
-	var world := get_tree().current_scene
-	if killed:
-		kill_t = 0.6
-		Sfx.play_ui(world, "killmark", -9.0)
-	else:
-		Sfx.play_ui(world, "hitmark", -9.0, 1.25 if head else 1.0)
-
-## The field of view through the sights of `g`, with a variable scope's
-## power worked in.
-func scope_fov(g: Dictionary) -> float:
-	return float(g["fov"]) / clampf(float(scope_mag.get(kit_idx, 1.0)), 1.0,
-		maxf(float(g.get("zoom_max", 1.0)), 1.0))
-
-## True while looking through glass rather than over iron.
-func scoped() -> bool:
-	return not third and _ads > 0.9 and gun_spec().get("scope", false)
-
-# ------------------------------------------------------------------ the figure
 func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 	var g: Dictionary = gun_spec()
 	var moving := flat.length() > 0.4
@@ -2023,7 +1204,7 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 		Sim.strength(&"yaw_right") - Sim.strength(&"yaw_left")
 	_lean = lerpf(_lean, clampf(want_lean, -1.0, 1.0), clampf(delta * 9.0, 0.0, 1.0))
 	if is_instance_valid(cam):
-		var zoom: float = scope_fov(g)
+		var zoom: float = arms.scope_fov(g)
 		if third:
 			zoom = maxf(zoom, 44.0)
 		# the world opens out a little at a run
@@ -2092,7 +1273,7 @@ func _animate(delta: float, flat: Vector3, on_ground_ik: bool) -> void:
 func _view(delta: float, ref: Basis) -> void:
 	# through the glasses there is no rifle in the way, and no shoulder either
 	var glass: bool = _bino > 0.5
-	body.visible = not scoped() and not glass
+	body.visible = not arms.scoped() and not glass
 	body.set_head_visible(third and not glass)
 	var up: Basis = ref * Basis(Vector3.UP, yaw + sway.x)
 	var look: Basis = up * Basis(Vector3.RIGHT, pitch + _recoil + sway.y)
@@ -2195,7 +1376,7 @@ func take_hit(amount: float, from: Node = null) -> void:
 
 func _go_ragdoll(v: Vector3) -> void:
 	dead = true
-	_pack_tube()
+	arms._pack_tube()
 	# The same as anybody else: what killed him decides what is left.
 	var from_dir := Vector3.ZERO
 	if is_instance_valid(last_attacker) and last_attacker is Node3D and last_attacker != self:
@@ -2252,3 +1433,18 @@ func prompt() -> String:
 	elif "spec" in target_jet:
 		nm = String(target_jet.spec["name"])
 	return "U   climb into %s" % nm
+
+func _exit_tree() -> void:
+	arms._pack_tube()
+
+## See `WalkerArms.hit_confirm`.
+func hit_confirm(head: bool, killed: bool) -> void:
+	arms.hit_confirm(head, killed)
+
+## See `WalkerArms.scope_fov`.
+func scope_fov(g: Dictionary) -> float:
+	return arms.scope_fov(g)
+
+## See `WalkerArms.scoped`.
+func scoped() -> bool:
+	return arms.scoped()

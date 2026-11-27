@@ -82,7 +82,6 @@ var shot_frames := 0
 var _stop_t := 0.0
 var _auto := ""
 var _dump := 0
-var _view := ""
 var _nocockpit := false
 var _openbay := false
 var _dist := 0.0
@@ -123,6 +122,7 @@ var veil: GVeil
 var net: NetLink
 var walker: Walker
 ## The planet from orbit, on F4: see `SatView`.
+var _view := ""
 var sat_view: SatView
 var _air_cleared := false
 var parked: Array = []
@@ -921,6 +921,7 @@ func _tick_world(delta: float) -> void:
 		or (is_instance_valid(deploy_ui) and deploy_ui.visible) \
 		or get_tree().paused
 	controls.sync_mouse()
+	controls.sync_presence()
 	if harness != null:
 		harness.tick_after_input(delta)
 	# Keep the hangar's session line current. It carries the address a joiner

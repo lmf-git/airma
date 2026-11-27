@@ -1069,6 +1069,13 @@ func coverage_source(team: int) -> String:
 var assist := true
 var last_landing := {}
 var score := 0
+var discord_presence = null
+## What the presence says you are doing, kept up to date by the world: the
+## mode actually being played and the seat actually being sat in. It read the
+## hangar's last choice -- `mission` and `selected_jet` -- so a street fight on
+## foot was "Runway Operations, flying an F-22".
+var presence_mode := ""
+var presence_seat := ""
 
 # --------------------------------------------------------------------------
 func _ready() -> void:
@@ -1095,6 +1102,8 @@ func _ready() -> void:
 		roads.road_grade_hairpin = lim[2]
 		roads.road_cut_hard = lim[5]
 		roads.road_fill_hard = lim[6]
+	if ClassDB.class_exists("DiscordPresence"):
+		discord_presence = ClassDB.instantiate("DiscordPresence")
 	_setup_noise()
 	keys.install()
 
@@ -1821,6 +1830,18 @@ const MENU_ACTIONS := [&"pitch_up", &"pitch_down", &"weapon_1", &"weapon_2",
 ## shoulder button still bring the power back.
 var sensor_keys := false
 
+## How far a radar can see, lock and engage `tgt` from, given what it does
+## at `base` against an ordinary target. Radar range goes as the fourth root of
+## the radar cross-section: an F-22 (0.12) is found at under two thirds of the
+## distance, a B-2 (0.04) at under half. Stealth was a number on the spec that
+## only the AI's choice of whom to chase read: every battery, fighter and
+## launcher locked and fired at a B-2 from as far off as at an airliner.
+func radar_reach(base: float, tgt: Object) -> float:
+	if tgt == null or not is_instance_valid(tgt) or not tgt.has_method("radar_cross_section"):
+		return base
+	var rcs: float = maxf(float(tgt.call("radar_cross_section")), 0.0001)
+	return base * clampf(pow(rcs, 0.25), 0.3, 1.25)
+
 func strength(action: StringName) -> float:
 	if typing or menu_open or spectating or (menu_keys and MENU_ACTIONS.has(action)):
 		return 0.0
@@ -1871,6 +1892,16 @@ func _physics_process(delta: float) -> void:
 	space_time += delta
 
 func _process(_delta: float) -> void:
+	if discord_presence != null:
+		discord_presence.update_presence(
+			"1575674183667556432",
+			presence_mode if presence_mode != "" else String(mission),
+			presence_seat if presence_seat != "" else String(selected_jet),
+			# Nothing running yet -- the start-up, the hangar -- is the hangar.
+			# It fell back to the hangar's defaults and said "Runway
+			# Operations, flying an F-22" from the moment the game opened.
+			menu_open or presence_mode == "",
+		)
 	if _blocked.is_empty():
 		return
 	for a in _blocked.keys():
@@ -1882,6 +1913,11 @@ func _process(_delta: float) -> void:
 			# got a man out of the aeroplane, and the same tap, still fresh
 			# when the key came up, put him straight back in.
 			_taps.erase(a)
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE or what == NOTIFICATION_EXIT_TREE:
+		if discord_presence != null:
+			discord_presence.shutdown_native()
 
 func _input(e: InputEvent) -> void:
 	if typing or not (e is InputEventKey or e is InputEventMouseButton):

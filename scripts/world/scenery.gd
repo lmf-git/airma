@@ -1,5 +1,48 @@
 class_name Scenery
 extends Node3D
+
+## Where a street meets a road of the network, it meets it the way a street
+## does. A road at the town's own level is a crossroads: the street stops at
+## its edge and neither lays its kerb across the other (`ribbon` in
+## raster.rs). A road a little up on a bank -- the foot of a ramp to a bridge,
+## a road carried over a dip -- the street climbs to meet: its last few tens of
+## metres are graded into the ground as an approach, like the road's own bank,
+## and it is laid on that. One higher than that, it does not climb: it ends at
+## the foot of the bank.
+##
+## They used to be cut back a fixed twenty metres and more from any ramp, which
+## was neither: the street stopped on open ground short of the bank, with the
+## made ground between, and the town's grid did not join the road through it.
+const JOIN_FILL := 3.0
+
+## Below this the road is at the street's level, near enough.
+const JOIN_MIN := 0.3
+
+## How steep a street's approach climbs: one in sixteen. (One in twelve and a
+## half was drawn at one in five in places, the fifteen metre mesh folding the
+## climb into the road's bank beside it.)
+const STREET_GRADE := 0.06
+
+const STREET_HALF := 5.0
+
+## How far past the top of a street's climb its own bank still reaches: the
+## shoulder a raised leg rounds off over, and the margin a street keeps.
+const APPROACH_TAIL := 16.0
+
+## For each street that climbs to meet a road, where along it (0 to 1) it does:
+## street index -> [[t0, t1], ...].
+var _approach_spans: Dictionary = {}
+
+## Every place a street meets a road, for the harness: {p, dir (the street's),
+## fill, kind: "level", "join" or "stop"}.
+var junctions: Array = []
+
+var _junctions_laid: Array = []
+
+## The road network as it was handed to the painter, in the chart it was laid
+## out in: carried into whatever chart there is and handed over again when the
+## chart moves (`rechart`).
+var _road_legs_laid := PackedFloat32Array()
 ## Procedural settlements and support bases scattered along the valley floor.
 ## Everything is instanced through MultiMeshInstance3D so a few thousand
 ## buildings cost a handful of draw calls.
@@ -46,6 +89,9 @@ var pylon_spots: Array = []
 ## Lay out the road network first. The terrain paints roads into its own vertex
 ## colours, so the street grid has to exist before the ground is generated or
 ## the towns end up with invisible streets.
+## Sites the towns and plans the roads: see `TownPlanner`.
+var _planner := TownPlanner.new(self)
+
 func _ready() -> void:
 	_scat_clump.seed = 20260905
 	_scat_clump.noise_type = FastNoiseLite.TYPE_SIMPLEX
@@ -78,7 +124,7 @@ func plan() -> void:
 		Sim.roads.load_road_state(cached_roads)
 	else:
 		var t_s := Time.get_ticks_msec()
-		_site_towns()
+		_planner.site_towns()
 		if Sim.roads.debug_roads:
 			print("[plan] siting towns and dispatching routes: %d ms"
 				% (Time.get_ticks_msec() - t_s))
@@ -100,10 +146,10 @@ func plan_finish() -> void:
 		centres.append(t["c"] as Vector2)
 	var trunks: PackedVector2Array = Sim.roads.nearest_trunk_many(centres)
 	for i in sites.size():
-		_plan_town_streets(sites[i]["c"], float(sites[i]["r"]), trunks[i])
+		_planner.plan_town_streets(sites[i]["c"], float(sites[i]["r"]), trunks[i])
 	var t2 := Time.get_ticks_msec()
 	_streets.append([Vector2(-1500, -6600), Vector2(-2300, -5200)])
-	_plan_junctions()
+	_planner.plan_junctions()
 	var t3 := t2
 	var t4 := t2
 	var t5 := t2
@@ -146,576 +192,6 @@ const REGION_NAMES := [
 	["Kettering", "Draymoor", "Lowry", "Fenwick"],
 	["Aubrey", "Stannard", "Colm", "Harrowgate"],
 ]
-
-## How much of a disc is dry, workable land, 0 to 1.
-static func _land_score(c: Vector2, r: float) -> float:
-	var dry := 0.0
-	var n := 0
-	for i in 7:
-		for j in 7:
-			var q := c + Vector2(float(i - 3), float(j - 3)) * (r / 3.0)
-			if q.distance_to(c) > r:
-				continue
-			n += 1
-			# How high the ground stands over its own sea, which is the same
-			# number in either frame -- the drop cancels. A ceiling written as
-			# a world y instead put the whole band 1300 m out of place at the
-			# far corner of the map, and moved where towns can be sited.
-			var h: float = Sim.height_at(q.x, q.y) - Sim.sea_at(q.x, q.y)
-			if h > 30.0 and h < 1535.0:
-				dry += 1.0
-	return dry / maxf(float(n), 1.0)
-
-## Which regions each run of independent towns joins, and the sites in it:
-## [region a, region b, [site index, ...]]. Region ids here are hub numbers --
-## 0 is home, and hub k is region k.
-var _free_chains: Array = []
-
-static func find_regions() -> Array:
-	var found: Array = []
-	var cand: Array = []
-	var reach := 380000.0
-	var step := 26000.0
-	var x := -reach
-	while x <= reach:
-		var z := -reach
-		while z <= reach:
-			var c := Vector2(x, z)
-			# well clear of home, or it is not a different part of the world
-			if c.length() > 110000.0:
-				var sc := _land_score(c, 13000.0)
-				if sc > 0.82:
-					cand.append([sc - Sim.roads.site_roughness(c, 9000.0) * 2.0, c])
-			z += step
-		x += step
-	cand.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0])
-	for e in cand:
-		var c2: Vector2 = e[1]
-		var ok := true
-		for g in found:
-			if c2.distance_to(g as Vector2) < 130000.0:
-				ok = false
-				break
-		if ok:
-			found.append(c2)
-		if found.size() >= REGIONS:
-			break
-	return found
-
-## Can a town stand here: on dry land, clear of the aerodromes and the depot.
-static func _town_ok(q: Vector2, r: float, sea_margin: float) -> bool:
-	return Sim.height_at(q.x, q.y) >= Sim.sea_at(q.x, q.y) + sea_margin \
-		and Sim.town_clear(q, r)
-
-func _site_towns() -> void:
-	sites.clear()
-	Sim.keep_out = [[Vector2(-1500.0, -6600.0), 350.0]]     # the depot: see `_military`
-	var _t_lm := Time.get_ticks_msec()
-	# Which ground is reachable ground. A town across a strait is a town the
-	# trunk network has to swim to.
-	Sim.build_landmass()
-	if Sim.roads.debug_roads:
-		print("[plan]   build_landmass: %d ms" % (Time.get_ticks_msec() - _t_lm))
-	var _t_named := Time.get_ticks_msec()
-	var pads: Array = []
-	for t in TOWNS:
-		var want := Vector2(float(t[0].x), float(t[0].z))
-		var r: float = float(t[1])
-		var best := want
-		var best_rough: float = Sim.roads.site_roughness(want, r)
-		# Every *candidate* was tested for dry land, but the position the town
-		# was asked for never was -- so a settlement wanted somewhere that
-		# turned out to be under water stayed there unless something else beat
-		# it on roughness, and open sea is very smooth.
-		if not _town_ok(want, r, 25.0) or not Sim.on_home_land(want.x, want.y):
-			best_rough = 1e9
-		var step: float = r * 0.45
-		# The ring it was always looked for in, and further out only if
-		# nothing in it is clear: a town is not put down on top of a runway
-		# for want of somewhere better.
-		for reach in [3, 6]:
-			for i in range(-reach, reach + 1):
-				for j in range(-reach, reach + 1):
-					if (i == 0 and j == 0) or maxi(absi(i), absi(j)) <= reach - 3 and reach > 3:
-						continue
-					var q := want + Vector2(float(i), float(j)) * step
-					# still near the airfield's valley, still on dry land, and
-					# all of it clear of the aerodrome rather than its middle
-					if not _town_ok(q, r, 25.0):
-						continue
-					# and on the same land as everything else, or the road to it
-					# has to cross water
-					if not Sim.on_home_land(q.x, q.y):
-						continue
-					var rough := Sim.roads.site_roughness(q, r)
-					if rough < best_rough:
-						best_rough = rough
-						best = q
-			if best_rough < 1e8:
-				break
-		if best_rough > 1e8:
-			push_warning("no clear ground for %s: not built" % String(t[4]))
-			continue
-		sites.append({"c": best, "r": r, "density": float(t[2]),
-			"tallest": float(t[3]), "name": String(t[4]), "region": 0,
-			"was": want, "rough": best_rough})
-		pads.append({"c": best, "r": r})
-	if Sim.roads.debug_roads:
-		print("[plan]   the named towns: %d ms" % (Time.get_ticks_msec() - _t_named))
-	# and the clusters elsewhere on the map, each with its own towns
-	var t_fr := Time.get_ticks_msec()
-	var regions := find_regions()
-	if Sim.roads.debug_roads:
-		print("[plan]   find_regions: %d ms" % (Time.get_ticks_msec() - t_fr))
-	for ri in regions.size():
-		var rc: Vector2 = regions[ri]
-		for ti in REGION_TOWNS:
-			var ang: float = TAU * (float(ti) + 0.35) / float(REGION_TOWNS)
-			var want2: Vector2 = rc + Vector2(cos(ang), sin(ang)) * 7200.0
-			var rad: float = [1100.0, 720.0, 560.0, 480.0][ti % 4]
-			var best2 := want2
-			var rough2: float = 1e9
-			for i2 in range(-3, 4):
-				for j2 in range(-3, 4):
-					var q2: Vector2 = want2 + Vector2(float(i2), float(j2)) * (rad * 0.7)
-					if not _town_ok(q2, rad, 30.0):
-						continue
-					var rg: float = Sim.roads.site_roughness(q2, rad)
-					if rg < rough2:
-						rough2 = rg
-						best2 = q2
-			if rough2 > 1e8:
-				continue                      # nowhere dry enough here
-			sites.append({"c": best2, "r": rad,
-				"density": [0.66, 0.58, 0.54, 0.50][ti % 4],
-				"tallest": [46.0, 24.0, 17.0, 13.0][ti % 4],
-				"name": String(REGION_NAMES[ri % REGION_NAMES.size()][ti % 4]),
-				"region": ri + 1, "was": want2, "rough": rough2})
-			pads.append({"c": best2, "r": rad})
-	# Independent towns, in the country between the factions.
-	#
-	# Each sits on the line between two regional centres, so it is nobody's and
-	# anyone moving between two factions comes through it. It also gives the
-	# trunk network somewhere to stop: neighbouring regions are a hundred and
-	# thirty kilometres apart by construction, and a single leg that long is
-	# both a bad road and a search the router cannot finish.
-	var hubs: Array = [Vector2.ZERO]
-	for rc3 in regions:
-		hubs.append(rc3 as Vector2)
-	_free_chains = []
-	var tied: Array = [0]
-	var loose: Array = []
-	for hi in range(1, hubs.size()):
-		loose.append(hi)
-	var named := 0
-	while not loose.is_empty():
-		var bd := 1e18
-		var ba := 0
-		var bo := 0
-		for a2 in tied:
-			for oi in loose.size():
-				var d3: float = (hubs[int(a2)] as Vector2).distance_squared_to(
-					hubs[int(loose[oi])] as Vector2)
-				if d3 < bd:
-					bd = d3
-					ba = int(a2)
-					bo = oi
-		var hb: int = int(loose[bo])
-		tied.append(hb)
-		loose.remove_at(bo)
-		var pa: Vector2 = hubs[ba]
-		var pb: Vector2 = hubs[hb]
-		var chain: Array = []
-		for f in [0.34, 0.66]:
-			var want3: Vector2 = pa.lerp(pb, float(f))
-			var rad3 := 620.0
-			var best3 := want3
-			var rough3 := 1e9
-			for i3 in range(-3, 4):
-				for j3 in range(-3, 4):
-					var q3: Vector2 = want3 + Vector2(float(i3), float(j3)) * 1100.0
-					if not _town_ok(q3, rad3, 30.0):
-						continue
-					var rg3: float = Sim.roads.site_roughness(q3, rad3)
-					if rg3 < rough3:
-						rough3 = rg3
-						best3 = q3
-			if rough3 > 1e8:
-				continue                      # open water the whole way across
-			sites.append({"c": best3, "r": rad3, "density": 0.52,
-				"tallest": 21.0,
-				"name": String(FREE_NAMES[named % FREE_NAMES.size()]),
-				"region": -1, "faction": "free", "was": want3, "rough": rough3})
-			pads.append({"c": best3, "r": rad3})
-			chain.append(sites.size() - 1)
-			named += 1
-		if not chain.is_empty():
-			_free_chains.append([ba, hb, chain])
-	var t_rp := Time.get_ticks_msec()
-	# Sites whose ground is under water get no platform, so they get no town:
-	# a settlement is not a reason to raise an island out of the sea. `sites`
-	# and `pads` are built in step, so the survivors index the same way.
-	var kept_pads: Array = Sim.roads.register_town_pads(pads)
-	if kept_pads.size() < pads.size():
-		var keep: Dictionary = {}
-		for k in kept_pads:
-			keep[(k as Dictionary)["c"]] = true
-		var dry_sites: Array = []
-		for si in sites.size():
-			var sc = (sites[si] as Dictionary).get("c")
-			if keep.has(sc):
-				dry_sites.append(sites[si])
-		if Sim.roads.debug_roads:
-			print("[plan]   %d of %d sites were under water and are not built" % [
-				pads.size() - kept_pads.size(), pads.size()])
-		sites = dry_sites
-	if Sim.roads.debug_roads:
-		print("[plan]   register_town_pads (%d): %d ms" % [pads.size(),
-			Time.get_ticks_msec() - t_rp])
-	# The trunk network, laid to where the towns actually ended up.
-	#
-	# It hangs off a bypass running down the east side of the field rather than
-	# off a single gate. A leg that starts beside an airfield and heads
-	# south-west is inside the keep-out within a few hundred metres whatever the
-	# router does about the middle of it, because the relaxation can only move
-	# the waypoints, not the ends — measured, 362 of 4784 sample points inside
-	# the keep-out and four of them on the runway itself. Starting from a road
-	# that is already clear of the field removes the problem rather than
-	# penalising it.
-	var nodes: Array = [
-		Vector2(980.0, 3100.0),        # 0: north gate
-		Vector2(980.0, -3100.0),       # 1: south gate
-	]
-	var links: Array = [[0, 1]]        # the bypass itself
-	for t in sites:
-		nodes.append(t["c"] as Vector2)
-	nodes.append(Vector2(-1500.0, -6600.0))       # the depot
-	nodes.append(Vector2(4200.0, 11000.0))        # and two legs out of the valley
-	nodes.append(Vector2(-5200.0, -13000.0))
-	var first_town := 2
-	var n_towns: int = sites.size()
-	links.append_array(_plan_network(nodes, first_town, n_towns))
-	# Thread the independents in: the nearest town of one region, along the
-	# chain, and into the nearest town of the other. This is the road between
-	# two factions, and it is built in forty kilometre legs the router can
-	# actually survey rather than one long jump.
-	for ch in _free_chains:
-		var ra: int = int(ch[0])
-		var rb: int = int(ch[1])
-		var run: Array = ch[2]
-		if run.is_empty():
-			continue
-		var head: int = first_town + int(run[0])
-		var tail: int = first_town + int(run[run.size() - 1])
-		var ta: int = _closest_in_region(nodes, first_town, n_towns, ra,
-			nodes[head] as Vector2)
-		var tb: int = _closest_in_region(nodes, first_town, n_towns, rb,
-			nodes[tail] as Vector2)
-		if ta >= 0:
-			links.append([ta, head])
-		if tb >= 0:
-			links.append([tb, tail])
-		for k in range(run.size() - 1):
-			links.append([first_town + int(run[k]), first_town + int(run[k + 1])])
-	Sim.roads.begin_roads(nodes, _valid_links(links, nodes.size()))
-
-## The town of a given region nearest a point, as a node index. Region 0 is the
-## home cluster, which is also where the airfield gates are.
-func _closest_in_region(nodes: Array, first_town: int, n_towns: int,
-		region: int, near: Vector2) -> int:
-	var best := -1
-	var bd := 1e18
-	for i in n_towns:
-		if int((sites[i] as Dictionary).get("region", 0)) != region:
-			continue
-		var d: float = (nodes[first_town + i] as Vector2).distance_squared_to(near)
-		if d < bd:
-			bd = d
-			best = first_town + i
-	# the home cluster hangs off the bypass if it has no town of its own
-	if best < 0 and region == 0:
-		return 0
-	return best
-
-## Only the links that name two different places that exist.
-func _valid_links(links: Array, n: int) -> Array:
-	var out: Array = []
-	var seen: Dictionary = {}
-	for pair in links:
-		var a: int = int(pair[0])
-		var b: int = int(pair[1])
-		if a >= n or b >= n or a == b:
-			continue
-		var key: int = mini(a, b) * 100000 + maxi(a, b)
-		if seen.has(key):
-			continue
-		seen[key] = true
-		out.append([a, b])
-	return out
-
-## The trunk network: the shortest set of links that joins every place to every
-## other, plus a couple of extra hops so it reads as a network and not a tree.
-##
-## This was a full ring round the towns *and* a spoke from each of them to the
-## bypass, plus depot legs -- thirty-six routes for sixteen towns, most of them
-## running parallel to another one a kilometre away. Every one of those is
-## routed, surveyed, cut into the ground and drawn, so the redundancy cost real
-## time and real triangles as well as looking like a mess.
-func _plan_network(nodes: Array, first_town: int, n_towns: int) -> Array:
-	var out: Array = []
-	var by_region: Dictionary = {}
-	for i in n_towns:
-		var rg: int = int((sites[i] as Dictionary).get("region", 0))
-		if rg < 0:
-			continue                      # independents are chained separately
-		if not by_region.has(rg):
-			by_region[rg] = []
-		(by_region[rg] as Array).append(first_town + i)
-	for rg2 in by_region:
-		var group: Array = (by_region[rg2] as Array).duplicate()
-		if int(rg2) == 0:
-			# the home cluster hangs off the airfield bypass and its depot
-			group.append(0)
-			group.append(1)
-			for extra_node in range(first_town + n_towns, nodes.size()):
-				group.append(extra_node)
-			out.append([0, 1])
-		out.append_array(_spanning(nodes, group, 2 if group.size() > 5 else 1))
-	# Join the regions to one another. Each got a spanning tree of its own and
-	# nothing more: only region zero was ever tied to the airfield bypass and
-	# the depot, so every other region was an island -- its towns joined to each
-	# other, no road out of it, and its trunk legs simply stopping in open
-	# country. Linked here on the shortest hop between any two places in them,
-	# which is where a road between two regions would actually be built.
-	var regions: Array = by_region.keys()
-	if regions.size() > 1:
-		var joined: Array = [regions[0]]
-		var left: Array = regions.slice(1)
-		while not left.is_empty():
-			var best := 1e18
-			var best_from: Variant = null
-			var best_at := 0
-			for ra in joined:
-				for li in left.size():
-					for na in (by_region[ra] as Array):
-						for nb in (by_region[left[li]] as Array):
-							var d: float = (nodes[int(na)] as Vector2) \
-								.distance_squared_to(nodes[int(nb)] as Vector2)
-							if d < best:
-								best = d
-								best_from = ra
-								best_at = li
-			if best_from == null:
-				break
-			# Unless the independent towns between them already make the road.
-			# They are sited on the line between the two regions, so the
-			# direct link ran down the same corridor a couple of kilometres off
-			# the chain for a hundred kilometres: two roads between every pair
-			# of regions, side by side, all the way.
-			if _chained(int(best_from), int(left[best_at])):
-				joined.append(left[best_at])
-				left.remove_at(best_at)
-				continue
-			# Two roads between them, not one. A single link makes the whole of
-			# one faction's country hang off one bridge: cut it and half the map
-			# is unreachable, and it reads as a chain of places rather than as
-			# two road systems that meet.
-			# One direct link. The independent towns between the two already
-			# carry a road of their own, so this is the second way round
-			# rather than the only one -- and a second hundred-and-thirty
-			# kilometre leg costs as much to survey as the first.
-			out.append_array(_bridge_regions(nodes, by_region[best_from] as Array,
-				by_region[left[best_at]] as Array, 1))
-			joined.append(left[best_at])
-			left.remove_at(best_at)
-	return out
-
-## Whether a chain of independent towns, with at least one town in it, runs
-## between two regions. Hub indices and region numbers are the same thing: hub
-## zero is home, which is region zero.
-func _chained(ra: int, rb: int) -> bool:
-	for ch in _free_chains:
-		var a: int = int(ch[0])
-		var b: int = int(ch[1])
-		if ((a == ra and b == rb) or (a == rb and b == ra)) and not (ch[2] as Array).is_empty():
-			return true
-	return false
-
-## The `k` shortest hops between two groups of places, each using a different
-## town at either end -- so the second road is a separate route through
-## different country, not a twin running alongside the first.
-func _bridge_regions(nodes: Array, ga: Array, gb: Array, k: int) -> Array:
-	var pairs: Array = []
-	for na in ga:
-		for nb in gb:
-			pairs.append([(nodes[int(na)] as Vector2).distance_squared_to(
-				nodes[int(nb)] as Vector2), int(na), int(nb)])
-	pairs.sort_custom(func(x: Array, y: Array) -> bool:
-		return float(x[0]) < float(y[0]))
-	var out: Array = []
-	var used_a: Dictionary = {}
-	var used_b: Dictionary = {}
-	for pr in pairs:
-		if out.size() >= k:
-			break
-		if used_a.has(pr[1]) or used_b.has(pr[2]):
-			continue
-		used_a[pr[1]] = true
-		used_b[pr[2]] = true
-		out.append([int(pr[1]), int(pr[2])])
-	return out
-
-## Prim's algorithm over the given places, then the shortest few links that were
-## not needed to join them up, so there is more than one way round.
-func _spanning(nodes: Array, group: Array, loops: int) -> Array:
-	var out: Array = []
-	if group.size() < 2:
-		return out
-	var inside: Array = [group[0]]
-	var outside: Array = group.slice(1)
-	while not outside.is_empty():
-		var best_d := 1e18
-		var best_i := 0
-		var best_o := 0
-		for a in inside:
-			for oi in outside.size():
-				var d: float = (nodes[a] as Vector2).distance_squared_to(
-					nodes[outside[oi]] as Vector2)
-				if d < best_d:
-					best_d = d
-					best_i = a
-					best_o = oi
-		out.append([best_i, outside[best_o]])
-		inside.append(outside[best_o])
-		outside.remove_at(best_o)
-	# and a few short links that close a loop
-	var spare: Array = []
-	for i in group.size():
-		for j in range(i + 1, group.size()):
-			var pair := [group[i], group[j]]
-			var already := false
-			for e in out:
-				if (e[0] == pair[0] and e[1] == pair[1]) \
-						or (e[0] == pair[1] and e[1] == pair[0]):
-					already = true
-					break
-			if not already:
-				spare.append([(nodes[pair[0]] as Vector2).distance_squared_to(
-					nodes[pair[1]] as Vector2), pair])
-	spare.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
-	for k in mini(loops, spare.size()):
-		out.append(spare[k][1])
-	return out
-
-
-## Where a street meets a road of the network, it meets it the way a street
-## does. A road at the town's own level is a crossroads: the street stops at
-## its edge and neither lays its kerb across the other (`ribbon` in
-## raster.rs). A road a little up on a bank -- the foot of a ramp to a bridge,
-## a road carried over a dip -- the street climbs to meet: its last few tens of
-## metres are graded into the ground as an approach, like the road's own bank,
-## and it is laid on that. One higher than that, it does not climb: it ends at
-## the foot of the bank.
-##
-## They used to be cut back a fixed twenty metres and more from any ramp, which
-## was neither: the street stopped on open ground short of the bank, with the
-## made ground between, and the town's grid did not join the road through it.
-const JOIN_FILL := 3.0
-## Below this the road is at the street's level, near enough.
-const JOIN_MIN := 0.3
-## How steep a street's approach climbs: one in sixteen. (One in twelve and a
-## half was drawn at one in five in places, the fifteen metre mesh folding the
-## climb into the road's bank beside it.)
-const STREET_GRADE := 0.06
-const STREET_HALF := 5.0
-## How far past the top of a street's climb its own bank still reaches: the
-## shoulder a raised leg rounds off over, and the margin a street keeps.
-const APPROACH_TAIL := 16.0
-## For each street that climbs to meet a road, where along it (0 to 1) it does:
-## street index -> [[t0, t1], ...].
-var _approach_spans: Dictionary = {}
-## Every place a street meets a road, for the harness: {p, dir (the street's),
-## fill, kind: "level", "join" or "stop"}.
-var junctions: Array = []
-var _junctions_laid: Array = []
-## The road network as it was handed to the painter, in the chart it was laid
-## out in: carried into whatever chart there is and handed over again when the
-## chart moves (`rechart`).
-var _road_legs_laid := PackedFloat32Array()
-
-func _plan_junctions() -> void:
-	_approach_spans = {}
-	junctions = []
-	var flat := PackedFloat32Array()
-	for seg in _streets:
-		var a: Vector2 = seg[0]
-		var b: Vector2 = seg[1]
-		flat.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y]))
-	var got: PackedFloat32Array = Sim.native.street_crossings(flat)
-	var legs: Array = []
-	var joins := 0
-	var stops := 0
-	for i in range(0, got.size() - 7, 8):
-		var si: int = int(got[i])
-		var t: float = got[i + 1]
-		var p := Vector2(got[i + 2], got[i + 3])
-		var road_y: float = got[i + 4]
-		var town_y: float = got[i + 5]
-		var along := Vector2(got[i + 6], got[i + 7])
-		var fill: float = road_y - town_y
-		var a2: Vector2 = _streets[si][0]
-		var b2: Vector2 = _streets[si][1]
-		var run: float = a2.distance_to(b2)
-		if run < 1.0:
-			continue
-		var dir: Vector2 = (b2 - a2) / run
-		var kind := "level" if absf(fill) < JOIN_MIN else ("stop" if absf(fill) > JOIN_FILL else "join")
-		junctions.append({"p": p, "dir": dir, "along": along, "fill": fill, "kind": kind,
-			"t": t, "street": si})
-		if kind == "level":
-			continue
-		if kind == "stop":
-			stops += 1
-			continue
-		# out of the road's carriageway and kerbs, measured along the street,
-		# which may cross it at an angle
-		var start: float = Sim.roads.ROAD_HALF * 1.55 / maxf(absf(dir.cross(along)), 0.4)
-		var reach: float = clampf(absf(fill) / STREET_GRADE, 8.0, 50.0)
-		for side in [-1.0, 1.0]:
-			# only on the side of the road the street goes on to
-			var room: float = t * run if side < 0.0 else (1.0 - t) * run
-			if room < start + 2.0:
-				continue
-			var l: float = minf(reach, room - start)
-			var q0: Vector2 = p + dir * side * start
-			var q1: Vector2 = p + dir * side * (start + l)
-			legs.append([q0, q1, road_y, town_y, town_y, town_y,
-				Sim.roads.LEG_APPROACH, STREET_HALF])
-			# out past the end of the climb by as far as its bank rounds off,
-			# so the street's own approach is never taken for a bank it has to
-			# keep clear of (`_streets_clear_of_bridges`)
-			var t1: float = clampf(t + side * (start + l + APPROACH_TAIL) / run, 0.0, 1.0)
-			if not _approach_spans.has(si):
-				_approach_spans[si] = []
-			(_approach_spans[si] as Array).append([minf(t, t1), maxf(t, t1)])
-			joins += 1
-	Sim.roads.set_street_approaches(legs)
-	_stats["street_joins"] = joins
-	_stats["street_stops"] = stops
-
-func _plan_town_streets(centre: Vector2, radius: float, trunk: Vector2) -> void:
-	var block := 128.0
-	var lines := int(radius / block)
-	for i in range(-lines, lines + 1):
-		var off := float(i) * block
-		var half := sqrt(maxf(radius * radius - off * off, 0.0))
-		if half < 40.0:
-			continue
-		_streets.append([Vector2(centre.x + off, centre.y - half),
-			Vector2(centre.x + off, centre.y + half)])
-		_streets.append([Vector2(centre.x - half, centre.y + off),
-			Vector2(centre.x + half, centre.y + off)])
-	_streets.append([centre, trunk])
 
 func build() -> void:
 	_rng.seed = 20260821
@@ -833,6 +309,12 @@ func rechart() -> void:
 	# rather than carried, with the box it stands for.
 	for r in get_tree().get_nodes_in_group("rubble"):
 		(r as Node).call("clear_now")
+	# and those not built yet, the same
+	for h in _heaps_due:
+		var rid: int = Obstacles.rubble_of(int(h[2])) if int(h[2]) >= 0 else -1
+		if rid >= 0:
+			Obstacles.remove(rid)
+	_heaps_due.clear()
 	for entry in _laid:
 		var n3: Node3D = entry[0]
 		if not is_instance_valid(n3):
@@ -1038,15 +520,15 @@ func _town_detail() -> void:
 			elif i2 % 11 == 5:
 				kiosk.append(xf)
 		var tone: Color = Sim.faction_colour(faction)
-		made += _detail_batch(_lamp_mesh(tone), lamp, "Lamps_%s" % String(t["name"]))
+		made += _detail_batch(SceneryMeshes.lamp_mesh(tone), lamp, "Lamps_%s" % String(t["name"]))
 		# Benches, kiosks and planters stop a round -- something to get behind
 		# in a street fight -- but not a tank, which knocks them over. Lamp
 		# posts do not: their box is the reach of the arm, and a round would
 		# stop on the air under it.
-		made += _detail_batch(_seat_mesh(tone, biome), seat, "Seats_%s" % String(t["name"]), true)
-		made += _detail_batch(_kiosk_mesh(tone, faction), kiosk,
+		made += _detail_batch(SceneryMeshes.seat_mesh(tone, biome), seat, "Seats_%s" % String(t["name"]), true)
+		made += _detail_batch(SceneryMeshes.kiosk_mesh(tone, faction), kiosk,
 			"Kiosks_%s" % String(t["name"]), true)
-		made += _detail_batch(_planter_mesh(tone, biome), planter,
+		made += _detail_batch(SceneryMeshes.planter_mesh(tone, biome), planter,
 			"Planters_%s" % String(t["name"]), true)
 		_stats["town_faction_" + faction] = int(_stats.get("town_faction_" + faction, 0)) + 1
 	_stats["street_props"] = made
@@ -1133,74 +615,6 @@ func _detail_batch(mesh: Mesh, xforms: Array, nm: String, stops_rounds := false)
 	add_child(mmi)
 	return xforms.size()
 
-func _lamp_mesh(tone: Color) -> ArrayMesh:
-	var st := MeshKit.begin()
-	# A box, stood up. It was a cone, and `MeshKit.cone` runs along z: the
-	# column was lying flat along the pavement, under the surface more often
-	# than not, with the arm and the lantern hanging in the air where the top
-	# of it should have been.
-	MeshKit.box(st, Vector3(0.15, 5.4, 0.15), Vector3(0, 2.7, 0))
-	MeshKit.box(st, Vector3(0.30, 0.35, 0.30), Vector3(0, 0.17, 0))
-	MeshKit.box(st, Vector3(0.14, 0.10, 1.1), Vector3(0, 5.4, -0.45))
-	MeshKit.box(st, Vector3(0.34, 0.16, 0.62), Vector3(0, 5.28, -0.95))
-	return MeshKit.finish(st, MeshKit.mat(tone.darkened(0.45), 0.6, 0.35))
-
-func _seat_mesh(tone: Color, biome: String) -> ArrayMesh:
-	var st := MeshKit.begin()
-	# stone in the dry country, timber where there are trees to cut
-	var stone: bool = biome == "desert" or biome == "rock"
-	MeshKit.box(st, Vector3(1.9, 0.14, 0.52), Vector3(0, 0.46, 0))
-	if stone:
-		MeshKit.box(st, Vector3(1.9, 0.42, 0.44), Vector3(0, 0.21, 0))
-	else:
-		for sx in [-0.75, 0.75]:
-			MeshKit.box(st, Vector3(0.10, 0.44, 0.44), Vector3(sx, 0.22, 0))
-		MeshKit.box(st, Vector3(1.9, 0.44, 0.10), Vector3(0, 0.72, 0.21))
-	var col: Color = Color(0.62, 0.60, 0.56) if stone else Color(0.40, 0.28, 0.17)
-	return MeshKit.finish(st, MeshKit.mat(col.lerp(tone, 0.25), 0.8, 0.0))
-
-func _kiosk_mesh(tone: Color, faction: String) -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.box(st, Vector3(2.2, 2.6, 1.9), Vector3(0, 1.3, 0))
-	match faction:
-		"russia", "china":
-			# a flat canopy on posts, which is what a street kiosk looks like there
-			MeshKit.box(st, Vector3(3.0, 0.14, 2.6), Vector3(0, 2.72, 0))
-		"uk", "usa":
-			# a pitched roof and a hanging sign
-			MeshKit.box(st, Vector3(2.7, 0.30, 2.4), Vector3(0, 2.75, 0))
-			MeshKit.box(st, Vector3(1.7, 0.30, 1.5), Vector3(0, 3.05, 0))
-			MeshKit.box(st, Vector3(1.3, 0.5, 0.08), Vector3(0, 2.1, -1.0))
-		_:
-			# an awning, angled out over the front
-			MeshKit.box(st, Vector3(2.6, 0.10, 1.5), Vector3(0, 2.5, -1.2))
-	return MeshKit.finish(st, MeshKit.mat(tone.lightened(0.12), 0.7, 0.05))
-
-func _planter_mesh(tone: Color, biome: String) -> ArrayMesh:
-	var st := MeshKit.begin()
-	# Boxes, every part: a cone here runs along z, so the tub, the stem and
-	# the crown were all lying on their sides.
-	MeshKit.box(st, Vector3(1.4, 0.75, 1.4), Vector3(0, 0.37, 0))
-	match biome:
-		"desert":
-			# a palm: a bare stem and a crown
-			MeshKit.box(st, Vector3(0.22, 3.7, 0.22), Vector3(0, 2.6, 0))
-			for k in 6:
-				var a := TAU * float(k) / 6.0
-				MeshKit.box(st, Vector3(2.0, 0.07, 0.34),
-					Vector3(cos(a) * 0.9, 4.3, sin(a) * 0.9))
-		"snow", "rock":
-			MeshKit.box(st, Vector3(0.20, 1.0, 0.20), Vector3(0, 1.2, 0))
-			for lvl in 4:
-				var w: float = 1.7 - lvl * 0.4
-				MeshKit.box(st, Vector3(w, 0.62, w), Vector3(0, 1.7 + lvl * 0.6, 0))
-		_:
-			MeshKit.box(st, Vector3(0.26, 2.0, 0.26), Vector3(0, 1.7, 0))
-			MeshKit.box(st, Vector3(2.2, 1.5, 2.2), Vector3(0, 3.3, 0))
-			MeshKit.box(st, Vector3(1.4, 0.8, 1.4), Vector3(0, 4.3, 0))
-	return MeshKit.finish(st, MeshKit.mat(tone.lerp(Color(0.22, 0.36, 0.18), 0.6),
-		0.85, 0.0))
-
 # ---------------------------------------------------------------- landmarks
 ## Something to fly at. The map runs to six hundred kilometres and almost all of
 ## it is empty ground; these give it places, and each one tells you whose
@@ -1259,7 +673,7 @@ func _landmarks() -> void:
 				push_warning("landmark %s found no dry ground near %s"
 					% [String(lm["name"]), str(at.round())])
 				continue
-		var node := _landmark_mesh(String(lm["id"]), float(lm["h"]),
+		var node := SceneryMeshes.landmark_mesh(String(lm["id"]), float(lm["h"]),
 			Sim.faction_colour(String(lm["faction"])))
 		if node == null:
 			continue
@@ -1271,147 +685,7 @@ func _landmarks() -> void:
 		built += 1
 	_stats["landmarks"] = built
 
-## Each one is a handful of primitives, not a model: enough silhouette that you
-## know what you are looking at from a mile up, which is the only range anybody
-## will see them from.
-func _landmark_mesh(id: String, h: float, tone: Color) -> Node3D:
-	var st := MeshKit.begin()
-	var pale := MeshKit.mat(tone, 0.7, 0.05)
-	match id:
-		"eiffel":
-			# four splayed legs, two decks and a spire
-			for sx in [-1.0, 1.0]:
-				for sz in [-1.0, 1.0]:
-					var foot := Vector3(sx * h * 0.16, 0.0, sz * h * 0.16)
-					MeshKit.cone(st, h * 0.020, h * 0.008, 0.0, h * 0.62,
-						foot, 6, true)
-			MeshKit.box(st, Vector3(h * 0.30, h * 0.012, h * 0.30),
-				Vector3(0, h * 0.185, 0))
-			MeshKit.box(st, Vector3(h * 0.16, h * 0.012, h * 0.16),
-				Vector3(0, h * 0.40, 0))
-			MeshKit.cone(st, h * 0.045, h * 0.006, h * 0.40, h * 0.94,
-				Vector3.ZERO, 8, true)
-			MeshKit.cone(st, h * 0.008, h * 0.001, h * 0.94, h, Vector3.ZERO, 6, true)
-		"clock":
-			MeshKit.box(st, Vector3(h * 0.20, h * 0.72, h * 0.20),
-				Vector3(0, h * 0.36, 0))
-			# the faces, one to each side
-			for a in 4:
-				var ang := TAU * float(a) / 4.0
-				MeshKit.box(st, Vector3(h * 0.13, h * 0.13, h * 0.02),
-					Vector3(sin(ang) * h * 0.105, h * 0.66, cos(ang) * h * 0.105))
-			MeshKit.cone(st, h * 0.13, h * 0.005, h * 0.76, h, Vector3.ZERO, 8, true)
-		"liberty":
-			# plinth, star fort, figure, arm and torch
-			MeshKit.box(st, Vector3(h * 0.52, h * 0.10, h * 0.52),
-				Vector3(0, h * 0.05, 0))
-			MeshKit.box(st, Vector3(h * 0.30, h * 0.32, h * 0.30),
-				Vector3(0, h * 0.26, 0))
-			MeshKit.cone(st, h * 0.10, h * 0.07, h * 0.42, h * 0.86,
-				Vector3.ZERO, 10, true)
-			MeshKit.cone(st, h * 0.030, h * 0.026, h * 0.72, h * 0.99,
-				Vector3(h * 0.09, 0, 0), 6, true)
-			MeshKit.cone(st, h * 0.045, h * 0.012, h * 0.99, h * 1.06,
-				Vector3(h * 0.09, 0, 0), 8, true)
-		"onion":
-			MeshKit.box(st, Vector3(h * 0.62, h * 0.34, h * 0.62),
-				Vector3(0, h * 0.17, 0))
-			var spots := [Vector3(0, 0, 0), Vector3(h * 0.26, 0, h * 0.26),
-				Vector3(-h * 0.26, 0, h * 0.26), Vector3(h * 0.26, 0, -h * 0.26),
-				Vector3(-h * 0.26, 0, -h * 0.26)]
-			for i in spots.size():
-				var big: float = 1.0 if i == 0 else 0.62
-				var base := (spots[i] as Vector3) + Vector3(0, h * 0.34, 0)
-				MeshKit.cone(st, h * 0.075 * big, h * 0.085 * big, 0.0,
-					h * 0.26 * big, base, 10, true)
-				var top := base + Vector3(0, h * 0.26 * big, 0)
-				# the dome: fat in the middle, drawn to a point
-				MeshKit.cone(st, h * 0.085 * big, h * 0.10 * big, 0.0,
-					h * 0.07 * big, top, 12, true)
-				MeshKit.cone(st, h * 0.10 * big, h * 0.005 * big, h * 0.07 * big,
-					h * 0.24 * big, top, 12, true)
-		"pagoda":
-			var tiers := 7
-			for i in tiers:
-				var f := 1.0 - float(i) / float(tiers) * 0.62
-				var y := h * 0.06 + float(i) * h * 0.115
-				MeshKit.box(st, Vector3(h * 0.26 * f, h * 0.085, h * 0.26 * f),
-					Vector3(0, y, 0))
-				# the eaves, wider than the storey they sit on
-				MeshKit.cone(st, h * 0.21 * f, h * 0.05 * f, y + h * 0.045,
-					y + h * 0.085, Vector3.ZERO, 4, true)
-			MeshKit.cone(st, h * 0.02, h * 0.004, h * 0.86, h, Vector3.ZERO, 6, true)
-		"wall":
-			# a long rampart with towers along it, running over the ground
-			var seg := 26
-			for i in seg:
-				var x := (float(i) - float(seg) * 0.5) * 260.0
-				var z := sin(float(i) * 0.7) * 190.0
-				var gy: float = Terrain.surface_height(x, z)
-				MeshKit.box(st, Vector3(250.0, h, 22.0), Vector3(x, gy + h * 0.5, z))
-				if i % 4 == 0:
-					MeshKit.box(st, Vector3(34.0, h * 2.0, 34.0),
-						Vector3(x, gy + h, z))
-		"pyramid":
-			# stepped, so it reads as masonry rather than a cone
-			var steps := 14
-			for i in steps:
-				var f := 1.0 - float(i) / float(steps)
-				MeshKit.box(st, Vector3(h * 1.05 * f, h / float(steps), h * 1.05 * f),
-					Vector3(0, h * (float(i) + 0.5) / float(steps), 0))
-		"minaret":
-			MeshKit.box(st, Vector3(h * 0.70, h * 0.30, h * 0.70),
-				Vector3(0, h * 0.15, 0))
-			MeshKit.cone(st, h * 0.32, h * 0.30, h * 0.30, h * 0.38,
-				Vector3.ZERO, 14, true)
-			MeshKit.cone(st, h * 0.30, h * 0.02, h * 0.38, h * 0.66,
-				Vector3.ZERO, 14, true)
-			for sx in [-1.0, 1.0]:
-				for sz in [-1.0, 1.0]:
-					var b := Vector3(sx * h * 0.40, 0.0, sz * h * 0.40)
-					MeshKit.cone(st, h * 0.035, h * 0.030, 0.0, h * 0.82, b, 8, true)
-					MeshKit.cone(st, h * 0.045, h * 0.004, h * 0.82, h, b, 8, true)
-		"opera":
-			# a row of leaning shells on a podium
-			MeshKit.box(st, Vector3(h * 1.5, h * 0.14, h * 0.9),
-				Vector3(0, h * 0.07, 0))
-			for i in 4:
-				var f2 := 1.0 - float(i) * 0.17
-				var x2 := (float(i) - 1.5) * h * 0.34
-				MeshKit.cone(st, h * 0.30 * f2, h * 0.02, h * 0.14, h * f2,
-					Vector3(x2, 0, sin(float(i)) * h * 0.10), 10, false)
-		"colossus":
-			MeshKit.box(st, Vector3(h * 0.44, h * 0.12, h * 0.44),
-				Vector3(0, h * 0.06, 0))
-			for sx2 in [-1.0, 1.0]:
-				MeshKit.cone(st, h * 0.055, h * 0.045, h * 0.12, h * 0.52,
-					Vector3(sx2 * h * 0.10, 0, 0), 8, true)
-			MeshKit.box(st, Vector3(h * 0.28, h * 0.30, h * 0.18),
-				Vector3(0, h * 0.67, 0))
-			MeshKit.cone(st, h * 0.085, h * 0.075, h * 0.82, h * 0.95,
-				Vector3.ZERO, 10, true)
-			# a raised arm
-			MeshKit.cone(st, h * 0.040, h * 0.032, h * 0.62, h * 1.0,
-				Vector3(h * 0.20, 0, 0), 8, true)
-		_:
-			return null
-	var mi := MeshKit.mi(MeshKit.finish(st, pale), "Mesh")
-	var root := Node3D.new()
-	root.add_child(mi)
-	return root
-
 # ---------------------------------------------------------------- buildings
-func _block_mesh(w: float, h: float, d: float, roof: Color, wall: Color) -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.box(st, Vector3(w, h, d), Vector3(0, h * 0.5, 0))
-	var m := MeshKit.panelled(wall, 0.92, 0.0, 3.2)
-	var mesh := MeshKit.finish(st, m)
-	var st2 := MeshKit.begin()
-	MeshKit.box(st2, Vector3(w * 1.04, 0.5, d * 1.04), Vector3(0, h + 0.2, 0))
-	var arr: ArrayMesh = MeshKit.finish(st2, MeshKit.mat(roof, 0.95, 0.0))
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr.surface_get_arrays(0))
-	mesh.surface_set_material(1, MeshKit.mat(roof, 0.95, 0.0))
-	return mesh
 
 func _scatter(mesh: Mesh, xforms: Array, nm: String, breakable := false,
 		foot := AABB()) -> void:
@@ -1473,6 +747,28 @@ func damage_area(pos_in: Vector3, radius: float) -> int:
 	Obstacles.kill_near(pos_in, radius)
 	return _fell(pos_in, radius, false)
 
+## Buildings coming down, soonest first: [drawn transform, size, obstacle id,
+## multimesh, instance, its hidden transform, when (msec)].
+var _heaps_due: Array = []
+## How long a frame may spend on them, and how fast the front goes out.
+const HEAP_BUDGET_USEC := 3000
+const SHOCK_SPEED := 500.0
+
+func _process(_delta: float) -> void:
+	if _heaps_due.is_empty():
+		return
+	var t0: int = Time.get_ticks_usec()
+	var now: int = Time.get_ticks_msec()
+	while not _heaps_due.is_empty() and int(_heaps_due[0][6]) <= now \
+			and Time.get_ticks_usec() - t0 < HEAP_BUDGET_USEC:
+		var h: Array = _heaps_due.pop_front()
+		var mmi: MultiMeshInstance3D = h[3]
+		if is_instance_valid(mmi):
+			_redraw(mmi, int(h[4]), h[5])
+		var heap := Rubble.new()
+		heap.setup(h[0], h[1], int(h[2]))
+		add_child(heap)
+
 ## A blast too light to flatten anything by itself -- a mortar bomb -- wearing
 ## down whatever it lands on or beside: see `Obstacles.batter`. What has had
 ## enough comes down as a bigger blast's would. Returns how many did.
@@ -1491,6 +787,7 @@ func batter(pos_in: Vector3, radius: float, blow: float) -> int:
 ## by distance alone.
 func _fell(pos_in: Vector3, radius: float, boxed_only: bool) -> int:
 	var hits := 0
+	var now: int = Time.get_ticks_msec()
 	var pos: Vector3 = Sim.world_to_boot(pos_in)
 	for b in _breakable:
 		var c: Vector3 = b["centre"]
@@ -1522,11 +819,17 @@ func _fell(pos_in: Vector3, radius: float, boxed_only: bool) -> int:
 			var mmi: MultiMeshInstance3D = b["mmi"]
 			var drawn: Transform3D = mmi.global_transform * mmi.multimesh.get_instance_transform(i)
 			var size: Vector3 = mmi.multimesh.mesh.get_aabb().size * drawn.basis.get_scale()
-			_redraw(mmi, i, Transform3D(t.basis.scaled(Vector3.ONE * 0.001), t.origin - Vector3(0, 60.0, 0)))
-			var heap := Rubble.new()
-			heap.setup(drawn, size, oids[i] if i < oids.size() else -1)
-			add_child(heap)
+			# Brought down when the shock front gets there, nearest first, and a
+			# few a frame (`_process`): a strategic strike levelled the whole
+			# town in one frame, and building every heap's mesh there and then
+			# was more than half a second. Its solid box is already in the field.
+			var far: float = Vector2(t.origin.x - pos.x, t.origin.z - pos.z).length()
+			_heaps_due.append([drawn, size, oids[i] if i < oids.size() else -1, mmi, i,
+				Transform3D(t.basis.scaled(Vector3.ONE * 0.001), t.origin - Vector3(0, 60.0, 0)),
+				now + int(far / SHOCK_SPEED * 1000.0)])
 		b["dead"] = dead
+	if hits > 0:
+		_heaps_due.sort_custom(func(a: Array, c2: Array) -> bool: return int(a[6]) < int(c2[6]))
 	return hits
 
 ## Where every building in one town goes.
@@ -1599,9 +902,9 @@ func _plan_all_towns() -> Array:
 ## Turn one town's plan into meshes. Main thread: it hangs things in the tree.
 func _town_build(buckets: Array) -> void:
 	var kinds := [
-		_block_mesh(1.0, 1.0, 1.0, Color(0.26, 0.25, 0.23), Color(0.70, 0.67, 0.61)),
-		_block_mesh(1.0, 1.0, 1.0, Color(0.22, 0.23, 0.25), Color(0.58, 0.59, 0.60)),
-		_block_mesh(1.0, 1.0, 1.0, Color(0.29, 0.24, 0.21), Color(0.64, 0.58, 0.51)),
+		SceneryMeshes.block_mesh(1.0, 1.0, 1.0, Color(0.26, 0.25, 0.23), Color(0.70, 0.67, 0.61)),
+		SceneryMeshes.block_mesh(1.0, 1.0, 1.0, Color(0.22, 0.23, 0.25), Color(0.58, 0.59, 0.60)),
+		SceneryMeshes.block_mesh(1.0, 1.0, 1.0, Color(0.29, 0.24, 0.21), Color(0.64, 0.58, 0.51)),
 	]
 	for i in 3:
 		var lot: Array = buckets[i]
@@ -1722,8 +1025,8 @@ func _inside_town(p: Vector2) -> bool:
 
 # ---------------------------------------------------------------- military
 func _military(centre: Vector3) -> void:
-	var hangar := _hangar_mesh()
-	var revet := _revetment_mesh()
+	var hangar := SceneryMeshes.hangar_mesh()
+	var revet := SceneryMeshes.revetment_mesh()
 	var hx := []
 	var rx := []
 	for i in 6:
@@ -1749,26 +1052,6 @@ func _military(centre: Vector3) -> void:
 		st.set_normal(Vector3.UP)
 		st.add_vertex(v)
 	add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(Color(0.17, 0.17, 0.18), 0.95, 0.0)), "Apron"))
-
-func _hangar_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	var rings := []
-	for z in [-18.0, 18.0]:
-		var r := PackedVector3Array()
-		for i in 13:
-			var a := PI * float(i) / 12.0
-			r.append(Vector3(cos(a) * 16.0, sin(a) * 12.0, z))
-		r.append(Vector3(-16.0, 0.0, z))
-		rings.append(r)
-	MeshKit.loft(st, rings, Vector3(0, 5, 0))
-	return MeshKit.finish(st, MeshKit.mat(Color(0.33, 0.35, 0.32), 0.9, 0.05))
-
-func _revetment_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.box(st, Vector3(30, 4.5, 3.0), Vector3(0, 2.2, -14.0))
-	MeshKit.box(st, Vector3(3.0, 4.5, 26.0), Vector3(-13.5, 2.2, 0))
-	MeshKit.box(st, Vector3(3.0, 4.5, 26.0), Vector3(13.5, 2.2, 0))
-	return MeshKit.finish(st, MeshKit.mat(Color(0.42, 0.40, 0.34), 0.95, 0.0))
 
 # ---------------------------------------------------------------- landscape
 func _farms() -> void:
@@ -1868,8 +1151,8 @@ const SCAT_PER_TASK := 6250
 var _scat_out: Array = []
 
 func _scatter_nature() -> void:
-	var meshes := {"tree": _tree_mesh(), "pine": _pine_mesh(), "rock": _rock_mesh(),
-		"bush": _bush_mesh()}
+	var meshes := {"tree": SceneryMeshes.tree_mesh(), "pine": SceneryMeshes.pine_mesh(), "rock": SceneryMeshes.rock_mesh(),
+		"bush": SceneryMeshes.bush_mesh()}
 	var cells := {}
 	var cached: Variant = WorldBake.get_baked("scatter")
 	if cached is Dictionary and not (cached as Dictionary).is_empty():
@@ -2001,111 +1284,6 @@ func _scat_slice(t: int) -> void:
 			int(floor(z / SCAT_CELL))], xf])
 	_scat_out[t] = out
 
-func _bush_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	var rings := [
-		MeshKit.ring(0.9, 0.5, 0.25, -0.7, 2.2, 6),
-		MeshKit.ring(1.5, 1.0, 0.85, 0.2, 2.0, 6),
-		MeshKit.ring(0.7, 0.5, 1.35, 0.9, 2.2, 6),
-	]
-	MeshKit.loft(st, rings, Vector3(0, 0.8, 0))
-	return MeshKit.finish(st, MeshKit.mat(Color(0.17, 0.25, 0.13), 0.97, 0.0))
-
-## A tree stood up: trunk, then a crown of `rings` -- each [radius, height up
-## the crown] as shares of `canopy_r` and `canopy_h` -- the crown starting at
-## `crown_from` of the trunk's height.
-##
-## These were built the way `MeshKit` lofts, along z, and the scatter only
-## turns each one about the vertical: every tree in the country lay on its side
-## with its trunk along the ground, and the crown -- two rings at the same z,
-## one high and one low -- was a flat sheet standing on edge, the shape of a
-## tree from one side and a line from the other.
-func _leafy(trunk_r: float, trunk_h: float, canopy_r: float, canopy_h: float,
-		trunk_c: Color, leaf_c: Color, seg: int, crown: Array, crown_from := 0.55) -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.cone(st, trunk_r, trunk_r * 0.7, 0.0, trunk_h, Vector3.ZERO, 5)
-	var m := MeshKit.finish(st, MeshKit.mat(trunk_c, 0.96, 0.0))
-	var st2 := MeshKit.begin()
-	var base: float = trunk_h * crown_from
-	# A crown is one or more lofts (a pine's tiers); each starts a new list.
-	for tier in crown:
-		var rings: Array = []
-		var lo := INF
-		var hi := -INF
-		for i in (tier as Array).size():
-			var rr: Vector2 = tier[i]
-			var z: float = base + rr.y * canopy_h
-			# a little out of round, and turned from ring to ring, so it is not
-			# a lathe turning
-			var wob: float = 1.0 + 0.08 * sin(float(i) * 2.3)
-			rings.append(_turned(MeshKit.ring(canopy_r * rr.x * wob, canopy_r * rr.x / wob,
-				0.0, z, 2.0, seg), float(i) * 0.45))
-			lo = minf(lo, z)
-			hi = maxf(hi, z)
-		MeshKit.loft(st2, rings, Vector3(0, 0, (lo + hi) * 0.5))
-	var leaves: ArrayMesh = MeshKit.finish(st2, MeshKit.mat(leaf_c, 0.96, 0.0))
-	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, leaves.surface_get_arrays(0))
-	m.surface_set_material(1, MeshKit.mat(leaf_c, 0.96, 0.0))
-	return Scenery.upright(m)
-
-static func _turned(ring: PackedVector3Array, a: float) -> PackedVector3Array:
-	var out := PackedVector3Array()
-	var c := cos(a)
-	var sn := sin(a)
-	for p in ring:
-		out.append(Vector3(p.x * c - p.y * sn, p.x * sn + p.y * c, p.z))
-	return out
-
-## A mesh lofted along z, stood up so that z is the vertical.
-static func upright(m: ArrayMesh) -> ArrayMesh:
-	var b := Basis(Vector3.RIGHT, -PI * 0.5)
-	var out := ArrayMesh.new()
-	for s in m.get_surface_count():
-		var arr: Array = m.surface_get_arrays(s)
-		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
-		for i in v.size():
-			v[i] = b * v[i]
-		arr[Mesh.ARRAY_VERTEX] = v
-		if arr[Mesh.ARRAY_NORMAL] != null:
-			var nn: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
-			for i in nn.size():
-				nn[i] = b * nn[i]
-			arr[Mesh.ARRAY_NORMAL] = nn
-		if arr[Mesh.ARRAY_TANGENT] != null:
-			var tg: PackedFloat32Array = arr[Mesh.ARRAY_TANGENT]
-			for i in range(0, tg.size(), 4):
-				var t3: Vector3 = b * Vector3(tg[i], tg[i + 1], tg[i + 2])
-				tg[i] = t3.x
-				tg[i + 1] = t3.y
-				tg[i + 2] = t3.z
-			arr[Mesh.ARRAY_TANGENT] = tg
-		out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-		out.surface_set_material(s, m.surface_get_material(s))
-	return out
-
-## A broad leafy crown, fullest a third of the way up.
-func _tree_mesh() -> ArrayMesh:
-	return _leafy(0.42, 4.2, 3.6, 6.0, Color(0.21, 0.15, 0.11), Color(0.15, 0.27, 0.12), 7,
-		[[Vector2(0.45, 0.0), Vector2(0.92, 0.18), Vector2(1.0, 0.42), Vector2(0.82, 0.70),
-			Vector2(0.42, 0.92), Vector2(0.08, 1.0)]])
-
-## Three tiers of boughs, each a skirt narrowing to the next.
-func _pine_mesh() -> ArrayMesh:
-	return _leafy(0.34, 5.0, 2.7, 10.0, Color(0.19, 0.14, 0.10), Color(0.10, 0.21, 0.13), 7,
-		[[Vector2(0.25, 0.0), Vector2(1.0, 0.08), Vector2(0.35, 0.42)],
-		[Vector2(0.25, 0.30), Vector2(0.78, 0.38), Vector2(0.25, 0.72)],
-		[Vector2(0.2, 0.60), Vector2(0.55, 0.66), Vector2(0.03, 1.0)]], 0.4)
-
-func _rock_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	var rings := [
-		MeshKit.ring(1.4, 0.9, 0.0, -2.0, 2.4, 6),
-		MeshKit.ring(2.6, 1.9, 0.6, 0.0, 2.0, 6),
-		MeshKit.ring(1.2, 0.8, 0.2, 2.2, 2.4, 6),
-	]
-	MeshKit.loft(st, rings, Vector3(0, 0.8, 0))
-	return MeshKit.finish(st, MeshKit.mat(Color(0.33, 0.31, 0.29), 0.98, 0.0))
-
 # ------------------------------------------------------- home base clutter
 func _home_base() -> void:
 	# parked jets on the apron
@@ -2124,8 +1302,8 @@ func _home_base() -> void:
 			h.visible = false
 		add_child(node)
 	# vehicles, blast walls and fuel bowsers
-	var truck := _truck_mesh()
-	var wall := _wall_mesh()
+	var truck := SceneryMeshes.truck_mesh()
+	var wall := SceneryMeshes.wall_mesh()
 	var tx := []
 	var wx := []
 	# Three rows of three, north of the tower. They were 22 m apart from
@@ -2140,20 +1318,6 @@ func _home_base() -> void:
 		wx.append(Transform3D(Basis(Vector3.UP, 0.0), Vector3(60.0 + i * 16.0, 0, -690.0)))
 	_scatter(truck, tx, "Vehicles")
 	_scatter(wall, wx, "BlastWalls")
-
-func _truck_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.box(st, Vector3(2.4, 1.6, 6.2), Vector3(0, 1.5, 0))
-	MeshKit.box(st, Vector3(2.2, 1.4, 2.0), Vector3(0, 2.6, -2.0))
-	for sx in [-1.0, 1.0]:
-		for zz in [-2.0, 1.2, 2.4]:
-			MeshKit.cone(st, 0.5, 0.5, -0.2, 0.2, Vector3(sx * 1.25, 0.5, zz), 6)
-	return MeshKit.finish(st, MeshKit.mat(Color(0.24, 0.28, 0.20), 0.9, 0.1))
-
-func _wall_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	MeshKit.box(st, Vector3(14.0, 3.2, 1.2), Vector3(0, 1.6, 0))
-	return MeshKit.finish(st, MeshKit.mat(Color(0.46, 0.45, 0.40), 0.96, 0.0))
 
 # ---------------------------------------------------------------- roads
 ## Trunk roads and town streets as a single hugging surface. Sampled tightly so
@@ -2790,23 +1954,8 @@ func _pylon_break(runs: Array, pts: Array) -> void:
 	if pts.size() >= 2:
 		runs.append(pts.duplicate())
 
-func _pylon_mesh() -> ArrayMesh:
-	var st := MeshKit.begin()
-	var h := 34.0
-	for sx in [-1.0, 1.0]:
-		for sz in [-1.0, 1.0]:
-			# splayed legs: two boxes each, meeting at the waist
-			MeshKit.box(st, Vector3(0.5, h * 0.55, 0.5),
-				Vector3(sx * 2.6, h * 0.28, sz * 2.6))
-			MeshKit.box(st, Vector3(0.4, h * 0.5, 0.4),
-				Vector3(sx * 1.1, h * 0.75, sz * 1.1))
-	MeshKit.box(st, Vector3(15.0, 0.7, 0.7), Vector3(0, h * 0.70, 0))
-	MeshKit.box(st, Vector3(11.0, 0.6, 0.6), Vector3(0, h * 0.88, 0))
-	MeshKit.box(st, Vector3(0.6, 2.4, 0.6), Vector3(0, h + 1.0, 0))
-	return MeshKit.finish(st, MeshKit.mat(Color(0.42, 0.43, 0.45), 0.85, 0.35))
-
 func _powerlines() -> void:
-	var mesh := _pylon_mesh()
+	var mesh := SceneryMeshes.pylon_mesh()
 	var xf := []
 	var wire := MeshKit.begin()
 	for route in PYLON_ROUTES:
@@ -2879,7 +2028,7 @@ func _powerlines() -> void:
 				pylon_spots.append(Vector3(qq.x, y, qq.y))
 				var top := Vector3(qq.x, y + 23.8, qq.y)
 				if prev != Vector3.INF:
-					_catenary(wire, prev, top)
+					SceneryMeshes.catenary(wire, prev, top)
 					# The longest thing a conductor is asked to cross. A span
 					# that runs away is the run-breaking having failed, and it
 					# is invisible in a count of towers.
@@ -2889,28 +2038,6 @@ func _powerlines() -> void:
 	_scatter(mesh, xf, "Pylons")
 	add_child(MeshKit.mi(MeshKit.finish(wire, MeshKit.mat(Color(0.07, 0.07, 0.08), 0.9, 0.1)), "Wires"))
 	_stats["pylons"] = xf.size()
-
-## Three sagging conductors between two pylon tops.
-func _catenary(st: SurfaceTool, a: Vector3, b: Vector3) -> void:
-	var sag: float = a.distance_to(b) * 0.045
-	var side := (b - a).cross(Vector3.UP).normalized()
-	for lane in [-5.6, 0.0, 5.6]:
-		var off: Vector3 = side * float(lane) + Vector3(0, 3.2 if lane == 0.0 else 0.0, 0)
-		var prev_a := Vector3.ZERO
-		var prev_b := Vector3.ZERO
-		var seg := 8
-		for i in seg + 1:
-			var t := float(i) / float(seg)
-			var p: Vector3 = a.lerp(b, t) + off
-			p.y -= sag * (1.0 - 4.0 * pow(t - 0.5, 2.0))
-			var l := p + Vector3(0, 0.09, 0)
-			var r := p - Vector3(0, 0.09, 0)
-			if i > 0:
-				for v in [prev_a, prev_b, r, prev_a, r, l]:
-					st.set_normal(Vector3.UP)
-					st.add_vertex(v)
-			prev_a = l
-			prev_b = r
 
 func _comms_masts() -> void:
 	var st := MeshKit.begin()
@@ -2961,7 +2088,7 @@ func _fences() -> void:
 				Vector3(q.x, y, q.y)))
 			var q2: Vector2 = a.lerp(b, float(k + 1) / float(n))
 			var y2 := Sim.height_at(q2.x, q2.y)
-			_fence_panel(mesh_st, Vector3(q.x, y, q.y), Vector3(q2.x, y2, q2.y))
+			SceneryMeshes.fence_panel(mesh_st, Vector3(q.x, y, q.y), Vector3(q2.x, y2, q2.y))
 	_scatter(post_mesh, xf, "FencePosts")
 	# and into the obstacle field on its own terms. The general rule throws out
 	# anything under two and a half metres, and a fence post is 2.4 -- so the
@@ -2971,14 +2098,6 @@ func _fences() -> void:
 	add_child(MeshKit.mi(MeshKit.finish(mesh_st,
 		MeshKit.mat(Color(0.36, 0.37, 0.36), 0.95, 0.1)), "FenceMesh"))
 	_stats["fence_posts"] = xf.size()
-
-func _fence_panel(st: SurfaceTool, a: Vector3, b: Vector3) -> void:
-	var lo := 0.25
-	var hi := 2.25
-	for v in [a + Vector3(0, hi, 0), b + Vector3(0, hi, 0), b + Vector3(0, lo, 0),
-			a + Vector3(0, hi, 0), b + Vector3(0, lo, 0), a + Vector3(0, lo, 0)]:
-		st.set_normal(Vector3.UP)
-		st.add_vertex(v)
 
 func _windfarm() -> void:
 	var ridge := Vector2(-6200, -2200)
@@ -3058,30 +2177,44 @@ class Turbine extends Node3D:
 ## footprint and a little past it, higher in the middle, lumps of every size
 ## tumbled at every angle. It settles into the ground after a while and the
 ## heap in the obstacle field goes with it.
+## What a block leaves when it comes down: a heap on the ground, drawn the
+## height and the size of the solid box `Obstacles` leaves in the field for it,
+## so what you see is what stops a round, a man and a soldier's eye.
+##
+## It was laid at the drawn block's own origin -- which for a block opened up
+## at street level is a storey up, the ground floor being walls of its own --
+## so the heap hung in the air; its lumps spilled out past the solid footprint
+## onto ground that stopped nothing; and after two and a half minutes the box
+## was taken out of the field and the heap sank away. It stays now.
 class Rubble extends Node3D:
-	const LIFE := 150.0
-	const SINK := 4.0
-	var _t := 0.0
 	var _oid := -1
-	var _sink_by := 0.0
 
 	func setup(at: Transform3D, size: Vector3, oid: int) -> void:
 		_oid = oid
 		add_to_group("rubble")
 		var yaw := Basis(Vector3.UP, at.basis.get_euler().y)
-		transform = Transform3D(yaw, at.origin)
 		var hx: float = size.x * 0.5
 		var hz: float = size.z * 0.5
+		# on the lowest ground under the footprint, so no corner of it is in the air
+		var ground := INF
+		for sx in [-1.0, 0.0, 1.0]:
+			for sz in [-1.0, 0.0, 1.0]:
+				var q: Vector3 = at.origin + yaw * Vector3(sx * hx, 0.0, sz * hz)
+				ground = minf(ground, Sim.height_at(q.x, q.z))
+		transform = Transform3D(yaw, Vector3(at.origin.x, ground, at.origin.z))
+		# as tall as the solid heap, where there is one
 		var peak: float = clampf(size.y * BLOCK_HEAP * 1.3, 1.0, 5.0)
-		_sink_by = peak + 1.0
+		var rid: int = Obstacles.rubble_of(oid) if oid >= 0 else -1
+		if rid >= 0:
+			peak = maxf(Obstacles.top_of(rid) - ground, 0.6)
 		var rng := RandomNumberGenerator.new()
 		rng.seed = hash(at.origin)
 		var st := MeshKit.begin()
 		# the body of the heap: broad flat slabs lying over most of the
 		# footprint, so the lumps sit on a mound and not on the grass
 		for k in 7:
-			var su: float = rng.randf_range(-0.6, 0.6)
-			var sv: float = rng.randf_range(-0.6, 0.6)
+			var su: float = rng.randf_range(-0.4, 0.4)
+			var sv: float = rng.randf_range(-0.4, 0.4)
 			var slab := Vector3(hx * rng.randf_range(0.7, 1.1), peak * rng.randf_range(0.35, 0.6),
 				hz * rng.randf_range(0.7, 1.1))
 			var sb := Basis(Vector3.UP, rng.randf() * TAU) \
@@ -3092,13 +2225,16 @@ class Rubble extends Node3D:
 		for k in n:
 			# anywhere over the footprint and a little past it, the big
 			# lumps towards the middle and the small ones spilled out
-			var u: float = rng.randf_range(-1.15, 1.15)
-			var v: float = rng.randf_range(-1.15, 1.15)
+			# inside the solid footprint (`Obstacles._leave_rubble` makes it
+			# 1.04 of the block's): a lump outside it is a lump rounds pass through
+			var u: float = rng.randf_range(-0.95, 0.95)
+			var v: float = rng.randf_range(-0.95, 0.95)
 			var r: float = clampf(sqrt(u * u * 0.5 + v * v * 0.5), 0.0, 1.0)
 			var s: float = lerpf(2.4, 0.5, r) * rng.randf_range(0.6, 1.2)
 			var lump := Vector3(s * rng.randf_range(0.8, 1.6), s * rng.randf_range(0.4, 0.9),
 				s * rng.randf_range(0.8, 1.6))
-			var y: float = peak * (1.0 - r * r) - lump.y * 0.45
+			# the tallest lumps reach the top of the solid heap and no higher
+			var y: float = minf(peak * (1.0 - r * r) - lump.y * 0.45, peak - lump.y * 0.5)
 			var b := Basis(Vector3.UP, rng.randf() * TAU) \
 				* Basis(Vector3(rng.randf_range(-1, 1), 0, rng.randf_range(-1, 1)).normalized(),
 					rng.randf_range(0.1, 0.6))
@@ -3130,17 +2266,3 @@ class Rubble extends Node3D:
 				Obstacles.remove(rid)
 			_oid = -1
 		queue_free()
-
-	func _process(delta: float) -> void:
-		_t += delta
-		if _t < LIFE:
-			return
-		# into the ground, and the heap out of the field as it goes
-		if _oid >= 0:
-			var rid: int = Obstacles.rubble_of(_oid)
-			if rid >= 0:
-				Obstacles.remove(rid)
-			_oid = -1
-		position.y -= _sink_by * delta / SINK
-		if _t > LIFE + SINK:
-			queue_free()

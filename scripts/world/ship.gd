@@ -768,6 +768,9 @@ func _captain(delta: float) -> void:
 		var shoot: Node3D = _pick_threat()
 		if shoot == null:
 			shoot = _pick_air()
+			# the fire control radar on it, launch or not
+			if shoot is Aircraft:
+				(shoot as Aircraft).spike(self)
 		if shoot != null and has_vls() and _ai_vls_cd <= 0.0 and vls_cd <= 0.0:
 			_ai_vls_cd = randf_range(3.5, 7.0)
 			fire_vls(shoot)
@@ -1013,6 +1016,11 @@ func _pick_air() -> Node3D:
 ## actually be taken.
 func _round_reaches(tgt: Node3D, round_id := "sm2") -> bool:
 	var from: Vector3 = global_transform * (_vls_muzzle + Vector3(0, 2.5, 0))
+	# a stealthy target is not held by the ship's radar until it is close
+	if String(WeaponSpec.get_spec(round_id).get("kind", "")) == "radar" \
+			and from.distance_to(tgt.global_position) \
+			> Sim.radar_reach(float(WeaponSpec.get_spec(round_id).get("range", 74000.0)), tgt):
+		return false
 	var rel: Vector3 = tgt.global_position - from
 	var brg := atan2(rel.x, -rel.z)
 	var el := deg_to_rad(62.0)
@@ -1131,7 +1139,7 @@ func fire_gun() -> bool:
 		+ Vector3(sin(aim_yaw), 0, -cos(aim_yaw)) * 4.0
 	var v := Vector3(sin(aim_yaw) * cos(aim_pitch), sin(aim_pitch),
 		-cos(aim_yaw) * cos(aim_pitch)) * 820.0
-	var shell := Aircraft.Shell.new()
+	var shell := GunShell.new()
 	shell.drag = SHELL_DRAG
 	shell.vel = v
 	shell.damage = 240.0
@@ -1167,7 +1175,7 @@ func show_shot(yaw: float, pitch: float) -> void:
 		+ Vector3(sin(yaw), 0, -cos(yaw)) * 4.0
 	Effects.muzzle_flash(get_tree().current_scene, muzzle,
 		Vector3(sin(yaw), 0, -cos(yaw)), 3.2)
-	var shell := Aircraft.Shell.new()
+	var shell := GunShell.new()
 	shell.drag = SHELL_DRAG
 	shell.vel = Vector3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch)) * 820.0
 	shell.damage = 0.0             # the host decides what it hits

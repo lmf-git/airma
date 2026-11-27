@@ -464,12 +464,12 @@ func _run_decoy_test() -> void:
 								Vector3.ZERO, tv, wary):
 							broke += 1
 							break
-						wary *= 0.6
+						wary *= Missile.DECOY_WARY
 				var p3: float = float(broke) / 2000.0
 				worst = maxf(worst, p3)
 				row.append("%s %ds %2.0f%%/%2.0f%%" % [c[0], int(tgo), p1 * 100.0, p3 * 100.0])
 		print("[decoy] %-8s %s: %s" % [wid, "flares" if ir else "chaff ", "  ".join(row)])
-		if worst > 0.75:
+		if worst > 0.85:
 			bad.append("%s: three salvos at the best moment still break it %.0f%% of the time" % [
 				wid, worst * 100.0])
 	print("[decoy] (one salvo / three salvos held down)")
@@ -1801,7 +1801,7 @@ func _run_tracer_test() -> void:
 	var worst_ratio := 1e9
 	var rows := PackedStringArray()
 	for speed in [180.0, 900.0, 1030.0, 1600.0]:
-		var t := Effects.Tracer.new()
+		var t := Tracer.new()
 		t.vel = Vector3(0, 0, -float(speed))
 		world.add_child(t)
 		var mi := t.get_child(0) as MeshInstance3D

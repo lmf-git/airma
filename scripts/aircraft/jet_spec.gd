@@ -56,8 +56,126 @@ static var _table: Dictionary = {}
 static func get_spec(id: String) -> Dictionary:
 	if _table.is_empty():
 		_table = _db()
+		_table["ac130"] = _ac130(_table["c130"])
 		_table["ah64g"] = _door_gunship(_table["ah64"])
 	return _table.get(id, _table["f22"])
+
+## The four attack helicopters are one airframe as far as the flight model and
+## the drawing go: the same fuselage sections, stub wings, gear and pylons,
+## with the control power, damping and inertia all in proportion to the mass
+## (an Apache's pitch authority is seven newton-metres a kilogram, and so is a
+## Tiger's). They were four copies of the same sixty-seven lines with a dozen
+## numbers changed. `o` is what makes each one itself.
+static func _attack_heli(o: Dictionary) -> Dictionary:
+	var m: float = o["mass"]
+	return {
+	"faction": o["faction"],
+	"name": o["name"],
+	"role": "Attack helicopter",
+	"blurb": o["blurb"],
+	"rotary": true,
+	"mass": m,
+	"inertia": Vector3(m * 32.0 / 10.0, m * 36.0 / 10.0, m * 15.0 / 10.0),
+	"wing_area": 22.0, "span": o["span"], "aspect": 3.0,
+	"rotor_radius": o["rotor_radius"],
+	"cl_alpha": 3.0, "cl_max_aoa": deg_to_rad(20.0), "cd0": 0.075, "oswald": 0.7,
+	"thrust_mil": 1.0, "thrust_ab": 1.0, "spool": 2.2,
+	"pitch_torque": 7.0 * m, "roll_torque": 6.0 * m, "yaw_torque": m * 42.0 / 10.0,
+	"pitch_damp": m * 65.0 / 10.0, "roll_damp": m * 32.0 / 10.0, "yaw_damp": 5.0 * m,
+	"pitch_stab": m * 22.0 / 10.0, "yaw_stab": m * 34.0 / 10.0,
+	"max_pitch_rate": 0.85, "max_roll_rate": 1.9,
+	"tvc": 0.0,
+	"fuel": 1400.0, "sfc_mil": 0.9, "sfc_ab": 0.9,
+	"vne": 95.0, "g_limit": 3.5,
+	"stealth": 1.6,
+	"gun": {"rounds": 1200, "rpm": 625, "muzzle": 800.0, "damage": 34.0, "he": 1.5,
+			"pos": o["gun_pos"]},
+	"gear": [
+		{"pos": Vector3(0.0, -1.55, -3.4), "r": 0.26, "steer": true, "brake": false, "len": 0.75},
+		{"pos": Vector3(-1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
+		{"pos": Vector3(1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
+	],
+	"bays": [
+		{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
+		 "stations": [
+			{"pos": Vector3(-2.60, -0.35, 0.4), "weapon": "agm114"},
+			{"pos": Vector3(2.60, -0.35, 0.4), "weapon": "agm114"},
+			{"pos": Vector3(-1.95, -0.42, 0.6), "weapon": "hydra"},
+			{"pos": Vector3(1.95, -0.42, 0.6), "weapon": "hydra"},
+		]},
+	],
+	"shape": {
+		"paint": o["paint"], "dark": o["dark"],
+		"glass": o["glass"],
+		"sections": [
+			[-5.4, 0.35, 0.45, 0.10, 2.2],
+			[-4.2, 0.72, 0.80, 0.05, 2.4],
+			[-2.6, 0.95, 1.05, 0.0, 2.6],
+			[-0.4, 1.00, 1.10, 0.0, 2.8],
+			[1.8, 0.90, 1.00, 0.05, 2.6],
+			[3.4, 0.55, 0.62, 0.20, 2.4],
+			[5.6, 0.30, 0.38, 0.35, 2.2],
+			[7.8, 0.22, 0.30, 0.45, 2.2],
+		],
+		"wing": {"poly": [Vector2(0.95, -0.6), Vector2(3.10, -0.3), Vector2(3.10, 0.9), Vector2(0.95, 1.2)],
+				 "y": -0.10, "t_root": 0.24, "t_tip": 0.12},
+		"stab": {"poly": [Vector2(0.35, 6.3), Vector2(2.20, 6.5), Vector2(2.20, 7.3), Vector2(0.35, 7.5)],
+				 "y": 0.30, "t_root": 0.14, "t_tip": 0.07},
+		"fins": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(6.4, 0.45), Vector2(7.5, 2.6), Vector2(8.3, 2.6), Vector2(8.5, 0.5)],
+				  "t": 0.16}],
+		"canopy": {"z0": -4.6, "z1": -1.6, "w": 0.62, "h": 0.70, "y": 0.72},
+		"intakes": [{"pos": Vector3(0.78, 0.95, 0.6), "size": Vector3(0.55, 0.55, 2.2), "yaw": 0.0}],
+		"nozzles": [],
+		"nozzle_kind": "round",
+		"rotors": [
+			{"pos": Vector3(0, 1.85, -0.2), "radius": o["rotor_radius"], "blades": 4, "axis": "y",
+			 "tilt": 4.0, "rate": 26.0, "chord": 0.34},
+			{"pos": o["tail_rotor"][0], "radius": o["tail_rotor"][1], "blades": 4,
+			 "axis": "x", "rate": 90.0, "chord": 0.16},
+		],
+	},
+	}
+
+## The gunship is the freighter with a battery down the left side: the same
+## airframe with the guns and their ports, a smaller walkable hold, darker
+## paint and its own thrust figure. It was a whole second copy of the C-130
+## with these changed.
+static func _ac130(base: Dictionary) -> Dictionary:
+	var s: Dictionary = base.duplicate(true)
+	s["name"] = "AC-130J Ghostrider"
+	s["role"] = "Gunship"
+	s["blurb"] = "Four turboprops, no missiles and a battery pointing out of the left side.\nFly a left hand orbit, put the pod on something and let the gunners\nwork. Crew can walk the hold while it is airborne."
+	s["thrust_mil"] = 190000.0
+	s["thrust_ab"] = 190000.0
+	s["gunship"] = true
+	s["guns"] = [
+		{"id": "g105", "name": "105 mm M102", "rpm": 10.0, "damage": 620.0, "blast": 22.0, "frag": 45.0,
+		 "muzzle": 494.0, "spread": 0.004},
+		# One and a half milliradians, not eight: a Bofors on a fixed mount
+		# is a precise gun, and at eight a burst at two and a half kilometres
+		# spread forty metres along the ground round the mark.
+		{"id": "g40", "name": "40 mm Bofors", "rpm": 100.0, "damage": 150.0, "blast": 9.0, "frag": 16.0,
+		 "muzzle": 881.0, "spread": 0.0015},
+		# Five milliradians, not sixteen: about twelve metres either way at
+		# two and a half kilometres. At sixteen the burst covered a football
+		# pitch and hit what it was aimed at by chance.
+		{"id": "g25", "name": "25 mm GAU-12", "rpm": 1800.0, "damage": 34.0, "blast": 3.5, "frag": 7.0,
+		 "muzzle": 1040.0, "spread": 0.005},
+	]
+	var shape: Dictionary = s["shape"]
+	shape["paint"] = Color(0.23, 0.24, 0.23)
+	shape["side_guns"] = [
+		{"pos": Vector3(-2.30, -0.95, 2.60), "length": 3.6, "radius": 0.135,
+		 "depress": 12.0},
+		{"pos": Vector3(-2.30, -0.55, 0.40), "length": 2.9, "radius": 0.085,
+		 "depress": 11.0},
+		{"pos": Vector3(-2.30, -0.40, -1.60), "length": 2.3, "radius": 0.060,
+		 "depress": 10.0},
+	]
+	shape["gun_ports"] = [Vector3(-5.82, -1.70, 2.60), Vector3(-5.15, -1.10, 0.40),
+		Vector3(-4.56, -0.80, -1.60)]
+	(shape["hold"] as Dictionary)["half"] = Vector3(1.85, 2.25, 6.4)
+	return s
 
 ## The CHOPPER GUNNER's aircraft: an Apache in a gunship's orbit, the gunner on
 ## its own weapons -- the 30 mm chin gun and the Hydra pods -- laid from the
@@ -999,97 +1117,6 @@ static func _db() -> Dictionary:
 			"canard": {"poly": [Vector2(1.0, -4.6), Vector2(2.7, -3.9), Vector2(2.7, -3.2), Vector2(1.0, -2.9)], "y": 0.22, "t_root": 0.13, "t_tip": 0.06},
 		},
 	},
-	"ac130": {
-		"faction": "usa",
-		"name": "AC-130J Ghostrider",
-		"role": "Gunship",
-		"blurb": "Four turboprops, no missiles and a battery pointing out of the left side.\nFly a left hand orbit, put the pod on something and let the gunners\nwork. Crew can walk the hold while it is airborne.",
-		"mass": 62000.0,
-		"inertia": Vector3(1400000.0, 1650000.0, 780000.0),
-		"wing_area": 162.1, "span": 40.4, "aspect": 10.1,
-		"cl_alpha": 5.2, "cl_max_aoa": deg_to_rad(17.0), "cd0": 0.0216, "oswald": 0.82, "flap_cl": 1.10,
-		"thrust_mil": 190000.0, "thrust_ab": 190000.0, "spool": 2.4,
-		"pitch_torque": 9200000.0, "roll_torque": 1250000.0, "yaw_torque": 1500000.0,
-		"pitch_damp": 4600000.0, "roll_damp": 1050000.0, "yaw_damp": 3200000.0,
-		"pitch_stab": 2600000.0, "yaw_stab": 3400000.0,
-		"max_pitch_rate": 0.22, "max_roll_rate": 0.95,
-		"tvc": 0.0,
-		"fuel": 20800.0, "sfc_mil": 0.34, "sfc_ab": 0.34,
-		"vne": 240.0, "g_limit": 3.0,
-		"stealth": 2.4,
-		"gunship": true,
-		"guns": [
-			{"id": "g105", "name": "105 mm M102", "rpm": 10.0, "damage": 620.0, "blast": 22.0, "frag": 45.0,
-			 "muzzle": 494.0, "spread": 0.004},
-			# One and a half milliradians, not eight: a Bofors on a fixed mount
-			# is a precise gun, and at eight a burst at two and a half kilometres
-			# spread forty metres along the ground round the mark.
-			{"id": "g40", "name": "40 mm Bofors", "rpm": 100.0, "damage": 150.0, "blast": 9.0, "frag": 16.0,
-			 "muzzle": 881.0, "spread": 0.0015},
-			# Five milliradians, not sixteen: about twelve metres either way at
-			# two and a half kilometres. At sixteen the burst covered a football
-			# pitch and hit what it was aimed at by chance.
-			{"id": "g25", "name": "25 mm GAU-12", "rpm": 1800.0, "damage": 34.0, "blast": 3.5, "frag": 7.0,
-			 "muzzle": 1040.0, "spread": 0.005},
-		],
-		"gun": {"rounds": 0, "rpm": 600, "muzzle": 1000.0, "damage": 10.0,
-				"pos": Vector3(-2.0, -0.6, -2.0)},
-		"gear": [
-			{"pos": Vector3(0.0, -3.05, -12.6), "r": 0.62, "steer": true, "brake": false, "len": 1.30},
-			{"pos": Vector3(-2.60, -3.00, 0.70), "r": 0.72, "steer": false, "brake": true, "len": 1.20},
-			{"pos": Vector3(2.60, -3.00, 0.70), "r": 0.72, "steer": false, "brake": true, "len": 1.20},
-		],
-		"bays": [
-			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
-			 "stations": [],},
-		],
-		"canopy_opens": false,
-		"shape": {
-			"paint": Color(0.23, 0.24, 0.23), "dark": Color(0.12, 0.13, 0.12),
-			"glass": Color(0.45, 0.48, 0.52),
-			"sections": [
-				[-17.0, 0.55, 0.75, 0.30, 2.2],
-				[-15.0, 1.35, 1.55, 0.10, 2.3],
-				[-12.5, 2.05, 2.10, 0.0, 2.5],
-				[-8.0, 2.35, 2.35, 0.0, 2.8],
-				[-2.0, 2.40, 2.40, 0.0, 3.0],
-				[4.0, 2.40, 2.40, 0.0, 3.0],
-				[8.5, 2.25, 2.30, 0.10, 2.9],
-				[12.5, 1.60, 1.90, 0.55, 2.6],
-				[16.0, 0.75, 1.20, 1.10, 2.4],
-			],
-			"wing": {"poly": [Vector2(2.2, -5.6), Vector2(20.2, -3.2), Vector2(20.2, -0.6), Vector2(2.2, 0.9)],
-					 "y": 2.05, "t_root": 0.95, "t_tip": 0.30},
-			"stab": {"elevator": true, "poly": [Vector2(1.5, 12.4), Vector2(8.6, 13.6), Vector2(8.6, 15.4), Vector2(1.5, 16.0)],
-					 "y": 1.35, "t_root": 0.42, "t_tip": 0.16},
-			"fins": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(9.6, 2.0), Vector2(13.4, 9.6), Vector2(15.6, 9.6), Vector2(16.4, 2.2)],
-					  "t": 0.45}],
-			"canopy": {"z0": -15.4, "z1": -12.6, "w": 1.15, "h": 0.80, "y": 1.65},
-			"intakes": [],
-			"nozzles": [],
-			"nozzle_kind": "round",
-			"props": [
-				{"pos": Vector3(6.2, 2.25, -5.4), "r": 2.35},
-				{"pos": Vector3(11.4, 2.25, -4.6), "r": 2.35},
-			],
-			"side_guns": [
-				{"pos": Vector3(-2.30, -0.95, 2.60), "length": 3.6, "radius": 0.135,
-				 "depress": 12.0},
-				{"pos": Vector3(-2.30, -0.55, 0.40), "length": 2.9, "radius": 0.085,
-				 "depress": 11.0},
-				{"pos": Vector3(-2.30, -0.40, -1.60), "length": 2.3, "radius": 0.060,
-				 "depress": 10.0},
-			],
-			"gun_ports": [Vector3(-5.82, -1.70, 2.60), Vector3(-5.15, -1.10, 0.40),
-				Vector3(-4.56, -0.80, -1.60)],
-			"hold": {"pos": Vector3(0, -1.55, 1.5), "half": Vector3(1.85, 2.25, 6.4),
-				"crates": [
-					[Vector3(1.15, 0.55, -3.4), Vector3(1.1, 1.1, 1.6)],
-					[Vector3(1.15, 0.55, -1.6), Vector3(1.1, 1.1, 1.6)],
-					[Vector3(-1.25, 0.35, 4.2), Vector3(0.9, 0.7, 1.4)],
-				]},
-		},
-	},
 	"c130": {
 		"faction": "usa",
 		"name": "C-130J Super Hercules",
@@ -1112,9 +1139,9 @@ static func _db() -> Dictionary:
 		"gun": {"rounds": 0, "rpm": 600, "muzzle": 1000.0, "damage": 10.0,
 				"pos": Vector3(-2.0, -0.6, -2.0)},
 		"gear": [
-			{"pos": Vector3(0.0, -3.05, -12.6), "r": 0.62, "steer": true, "brake": false, "len": 1.30},
-			{"pos": Vector3(-2.60, -3.00, 0.70), "r": 0.72, "steer": false, "brake": true, "len": 1.20},
-			{"pos": Vector3(2.60, -3.00, 0.70), "r": 0.72, "steer": false, "brake": true, "len": 1.20},
+			{"pos": Vector3(0.0, -3.10, -12.6), "r": 0.62, "steer": true, "brake": false, "len": 1.30},
+			{"pos": Vector3(-2.60, -3.00, 1.40), "r": 0.72, "steer": false, "brake": true, "len": 1.20},
+			{"pos": Vector3(2.60, -3.00, 1.40), "r": 0.72, "steer": false, "brake": true, "len": 1.20},
 		],
 		"bays": [
 			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
@@ -1157,274 +1184,30 @@ static func _db() -> Dictionary:
 				]},
 		},
 	},
-	"ah64": {
-		"faction": "usa",
-		"name": "AH-64E Apache Guardian",
-		"role": "Attack helicopter",
+	"ah64": _attack_heli({
+		"faction": "usa", "name": "AH-64E Apache Guardian",
 		"blurb": "Tandem cockpit, chin gun and a mast full of trouble. Heavy for a helicopter\nbut it hauls a full rack and holds a hover in the weeds.",
-		"rotary": true,
-		"mass": 8000.0,
-		"inertia": Vector3(25600.0, 28800.0, 12000.0),
-		"wing_area": 22.0, "span": 5.2, "aspect": 3.0,
-		"rotor_radius": 7.32,
-		"cl_alpha": 3.0, "cl_max_aoa": deg_to_rad(20.0), "cd0": 0.075, "oswald": 0.7,
-		"thrust_mil": 1.0, "thrust_ab": 1.0, "spool": 2.2,
-		"pitch_torque": 56000.0, "roll_torque": 48000.0, "yaw_torque": 33600.0,
-		"pitch_damp": 52000.0, "roll_damp": 25600.0, "yaw_damp": 40000.0,
-		"pitch_stab": 17600.0, "yaw_stab": 27200.0,
-		"max_pitch_rate": 0.85, "max_roll_rate": 1.9,
-		"tvc": 0.0,
-		"fuel": 1400.0, "sfc_mil": 0.9, "sfc_ab": 0.9,
-		"vne": 95.0, "g_limit": 3.5,
-		"stealth": 1.6,
-		"gun": {"rounds": 1200, "rpm": 625, "muzzle": 800.0, "damage": 34.0, "he": 1.5,
-				"pos": Vector3(0.0, -1.05, -3.6)},
-		"gear": [
-			{"pos": Vector3(0.0, -1.55, -3.4), "r": 0.26, "steer": true, "brake": false, "len": 0.75},
-			{"pos": Vector3(-1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-			{"pos": Vector3(1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-		],
-		"bays": [
-			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
-			 "stations": [
-				{"pos": Vector3(-2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(-1.95, -0.42, 0.6), "weapon": "hydra"},
-				{"pos": Vector3(1.95, -0.42, 0.6), "weapon": "hydra"},
-			]},
-		],
-		"shape": {
-			"paint": Color(0.24, 0.26, 0.24), "dark": Color(0.11, 0.12, 0.11),
-			"glass": Color(0.30, 0.35, 0.34),
-			"sections": [
-				[-5.4, 0.35, 0.45, 0.10, 2.2],
-				[-4.2, 0.72, 0.80, 0.05, 2.4],
-				[-2.6, 0.95, 1.05, 0.0, 2.6],
-				[-0.4, 1.00, 1.10, 0.0, 2.8],
-				[1.8, 0.90, 1.00, 0.05, 2.6],
-				[3.4, 0.55, 0.62, 0.20, 2.4],
-				[5.6, 0.30, 0.38, 0.35, 2.2],
-				[7.8, 0.22, 0.30, 0.45, 2.2],
-			],
-			"wing": {"poly": [Vector2(0.95, -0.6), Vector2(3.10, -0.3), Vector2(3.10, 0.9), Vector2(0.95, 1.2)],
-					 "y": -0.10, "t_root": 0.24, "t_tip": 0.12},
-			"stab": {"poly": [Vector2(0.35, 6.3), Vector2(2.20, 6.5), Vector2(2.20, 7.3), Vector2(0.35, 7.5)],
-					 "y": 0.30, "t_root": 0.14, "t_tip": 0.07},
-			"fins": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(6.4, 0.45), Vector2(7.5, 2.6), Vector2(8.3, 2.6), Vector2(8.5, 0.5)],
-					  "t": 0.16}],
-			"canopy": {"z0": -4.6, "z1": -1.6, "w": 0.62, "h": 0.70, "y": 0.72},
-			"intakes": [{"pos": Vector3(0.78, 0.95, 0.6), "size": Vector3(0.55, 0.55, 2.2), "yaw": 0.0}],
-			"nozzles": [],
-			"nozzle_kind": "round",
-			"rotors": [
-				{"pos": Vector3(0, 1.85, -0.2), "radius": 7.32, "blades": 4, "axis": "y",
-				 "tilt": 4.0, "rate": 26.0, "chord": 0.34},
-				{"pos": Vector3(-0.9, 2.05, 7.9), "radius": 1.46, "blades": 4,
-				 "axis": "x", "rate": 90.0, "chord": 0.16},
-			],
-		},
-	},
-	"mi28": {
-		"faction": "russia",
-		"name": "Mi-28N Havoc",
-		"role": "Attack helicopter",
+		"mass": 8000.0, "span": 5.2, "rotor_radius": 7.32, "tail_rotor": [Vector3(-0.9, 2.05, 7.9), 1.46],
+		"gun_pos": Vector3(0.0, -1.05, -3.6),
+		"paint": Color(0.24, 0.26, 0.24), "dark": Color(0.11, 0.12, 0.11), "glass": Color(0.30, 0.35, 0.34)}),
+	"mi28": _attack_heli({
+		"faction": "russia", "name": "Mi-28N Havoc",
 		"blurb": "Armoured, blunt and quick to accelerate. The Russian answer to the Apache,\nwith a heavier nose gun and less patience.",
-		"rotary": true,
-		"mass": 8600.0,
-		"inertia": Vector3(27520.0, 30960.0, 12900.0),
-		"wing_area": 22.0, "span": 5.4, "aspect": 3.0,
-		"rotor_radius": 8.65,
-		"cl_alpha": 3.0, "cl_max_aoa": deg_to_rad(20.0), "cd0": 0.075, "oswald": 0.7,
-		"thrust_mil": 1.0, "thrust_ab": 1.0, "spool": 2.2,
-		"pitch_torque": 60200.0, "roll_torque": 51600.0, "yaw_torque": 36120.0,
-		"pitch_damp": 55900.0, "roll_damp": 27520.0, "yaw_damp": 43000.0,
-		"pitch_stab": 18920.0, "yaw_stab": 29240.0,
-		"max_pitch_rate": 0.85, "max_roll_rate": 1.9,
-		"tvc": 0.0,
-		"fuel": 1400.0, "sfc_mil": 0.9, "sfc_ab": 0.9,
-		"vne": 95.0, "g_limit": 3.5,
-		"stealth": 1.6,
-		"gun": {"rounds": 1200, "rpm": 625, "muzzle": 800.0, "damage": 34.0, "he": 1.5,
-				"pos": Vector3(0.0, -1.10, -3.8)},
-		"gear": [
-			{"pos": Vector3(0.0, -1.55, -3.4), "r": 0.26, "steer": true, "brake": false, "len": 0.75},
-			{"pos": Vector3(-1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-			{"pos": Vector3(1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-		],
-		"bays": [
-			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
-			 "stations": [
-				{"pos": Vector3(-2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(-1.95, -0.42, 0.6), "weapon": "hydra"},
-				{"pos": Vector3(1.95, -0.42, 0.6), "weapon": "hydra"},
-			]},
-		],
-		"shape": {
-			"paint": Color(0.27, 0.30, 0.25), "dark": Color(0.12, 0.13, 0.11),
-			"glass": Color(0.28, 0.33, 0.31),
-			"sections": [
-				[-5.4, 0.35, 0.45, 0.10, 2.2],
-				[-4.2, 0.72, 0.80, 0.05, 2.4],
-				[-2.6, 0.95, 1.05, 0.0, 2.6],
-				[-0.4, 1.00, 1.10, 0.0, 2.8],
-				[1.8, 0.90, 1.00, 0.05, 2.6],
-				[3.4, 0.55, 0.62, 0.20, 2.4],
-				[5.6, 0.30, 0.38, 0.35, 2.2],
-				[7.8, 0.22, 0.30, 0.45, 2.2],
-			],
-			"wing": {"poly": [Vector2(0.95, -0.6), Vector2(3.10, -0.3), Vector2(3.10, 0.9), Vector2(0.95, 1.2)],
-					 "y": -0.10, "t_root": 0.24, "t_tip": 0.12},
-			"stab": {"poly": [Vector2(0.35, 6.3), Vector2(2.20, 6.5), Vector2(2.20, 7.3), Vector2(0.35, 7.5)],
-					 "y": 0.30, "t_root": 0.14, "t_tip": 0.07},
-			"fins": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(6.4, 0.45), Vector2(7.5, 2.6), Vector2(8.3, 2.6), Vector2(8.5, 0.5)],
-					  "t": 0.16}],
-			"canopy": {"z0": -4.6, "z1": -1.6, "w": 0.62, "h": 0.70, "y": 0.72},
-			"intakes": [{"pos": Vector3(0.78, 0.95, 0.6), "size": Vector3(0.55, 0.55, 2.2), "yaw": 0.0}],
-			"nozzles": [],
-			"nozzle_kind": "round",
-			"rotors": [
-				{"pos": Vector3(0, 1.85, -0.2), "radius": 8.65, "blades": 4, "axis": "y",
-				 "tilt": 4.0, "rate": 26.0, "chord": 0.34},
-				{"pos": Vector3(0.9, 2.05, 7.9), "radius": 1.73, "blades": 4,
-				 "axis": "x", "rate": 90.0, "chord": 0.16},
-			],
-		},
-	},
-	"z10": {
-		"faction": "china",
-		"name": "Z-10 Thunderbolt",
-		"role": "Attack helicopter",
+		"mass": 8600.0, "span": 5.4, "rotor_radius": 8.65, "tail_rotor": [Vector3(0.9, 2.05, 7.9), 1.73],
+		"gun_pos": Vector3(0.0, -1.10, -3.8),
+		"paint": Color(0.27, 0.30, 0.25), "dark": Color(0.12, 0.13, 0.11), "glass": Color(0.28, 0.33, 0.31)}),
+	"z10": _attack_heli({
+		"faction": "china", "name": "Z-10 Thunderbolt",
 		"blurb": "Narrow, light and agile. Less armour than the others but it points fast and\nsits behind a ridge line very happily.",
-		"rotary": true,
-		"mass": 5540.0,
-		"inertia": Vector3(17728.0, 19944.0, 8310.0),
-		"wing_area": 22.0, "span": 4.8, "aspect": 3.0,
-		"rotor_radius": 6.3,
-		"cl_alpha": 3.0, "cl_max_aoa": deg_to_rad(20.0), "cd0": 0.075, "oswald": 0.7,
-		"thrust_mil": 1.0, "thrust_ab": 1.0, "spool": 2.2,
-		"pitch_torque": 38780.0, "roll_torque": 33240.0, "yaw_torque": 23268.0,
-		"pitch_damp": 36010.0, "roll_damp": 17728.0, "yaw_damp": 27700.0,
-		"pitch_stab": 12188.0, "yaw_stab": 18836.0,
-		"max_pitch_rate": 0.85, "max_roll_rate": 1.9,
-		"tvc": 0.0,
-		"fuel": 1400.0, "sfc_mil": 0.9, "sfc_ab": 0.9,
-		"vne": 95.0, "g_limit": 3.5,
-		"stealth": 1.6,
-		"gun": {"rounds": 1200, "rpm": 625, "muzzle": 800.0, "damage": 34.0, "he": 1.5,
-				"pos": Vector3(0.0, -1.00, -3.4)},
-		"gear": [
-			{"pos": Vector3(0.0, -1.55, -3.4), "r": 0.26, "steer": true, "brake": false, "len": 0.75},
-			{"pos": Vector3(-1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-			{"pos": Vector3(1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-		],
-		"bays": [
-			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
-			 "stations": [
-				{"pos": Vector3(-2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(-1.95, -0.42, 0.6), "weapon": "hydra"},
-				{"pos": Vector3(1.95, -0.42, 0.6), "weapon": "hydra"},
-			]},
-		],
-		"shape": {
-			"paint": Color(0.22, 0.24, 0.23), "dark": Color(0.10, 0.11, 0.10),
-			"glass": Color(0.26, 0.31, 0.30),
-			"sections": [
-				[-5.4, 0.35, 0.45, 0.10, 2.2],
-				[-4.2, 0.72, 0.80, 0.05, 2.4],
-				[-2.6, 0.95, 1.05, 0.0, 2.6],
-				[-0.4, 1.00, 1.10, 0.0, 2.8],
-				[1.8, 0.90, 1.00, 0.05, 2.6],
-				[3.4, 0.55, 0.62, 0.20, 2.4],
-				[5.6, 0.30, 0.38, 0.35, 2.2],
-				[7.8, 0.22, 0.30, 0.45, 2.2],
-			],
-			"wing": {"poly": [Vector2(0.95, -0.6), Vector2(3.10, -0.3), Vector2(3.10, 0.9), Vector2(0.95, 1.2)],
-					 "y": -0.10, "t_root": 0.24, "t_tip": 0.12},
-			"stab": {"poly": [Vector2(0.35, 6.3), Vector2(2.20, 6.5), Vector2(2.20, 7.3), Vector2(0.35, 7.5)],
-					 "y": 0.30, "t_root": 0.14, "t_tip": 0.07},
-			"fins": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(6.4, 0.45), Vector2(7.5, 2.6), Vector2(8.3, 2.6), Vector2(8.5, 0.5)],
-					  "t": 0.16}],
-			"canopy": {"z0": -4.6, "z1": -1.6, "w": 0.62, "h": 0.70, "y": 0.72},
-			"intakes": [{"pos": Vector3(0.78, 0.95, 0.6), "size": Vector3(0.55, 0.55, 2.2), "yaw": 0.0}],
-			"nozzles": [],
-			"nozzle_kind": "round",
-			"rotors": [
-				{"pos": Vector3(0, 1.85, -0.2), "radius": 6.3, "blades": 4, "axis": "y",
-				 "tilt": 4.0, "rate": 26.0, "chord": 0.34},
-				{"pos": Vector3(-0.9, 2.05, 7.9), "radius": 1.26, "blades": 4,
-				 "axis": "x", "rate": 90.0, "chord": 0.16},
-			],
-		},
-	},
-	"tiger": {
-		"faction": "france",
-		"name": "Eurocopter Tiger HAD",
-		"role": "Attack helicopter",
+		"mass": 5540.0, "span": 4.8, "rotor_radius": 6.3, "tail_rotor": [Vector3(-0.9, 2.05, 7.9), 1.26],
+		"gun_pos": Vector3(0.0, -1.00, -3.4),
+		"paint": Color(0.22, 0.24, 0.23), "dark": Color(0.10, 0.11, 0.10), "glass": Color(0.26, 0.31, 0.30)}),
+	"tiger": _attack_heli({
+		"faction": "france", "name": "Eurocopter Tiger HAD",
 		"blurb": "The lightest gunship in the set. Composite, twin engined and quick on the\ncontrols; flown by France and, in this theatre, by NATO partners.",
-		"rotary": true,
-		"mass": 6100.0,
-		"inertia": Vector3(19520.0, 21960.0, 9150.0),
-		"wing_area": 22.0, "span": 4.6, "aspect": 3.0,
-		"rotor_radius": 6.51,
-		"cl_alpha": 3.0, "cl_max_aoa": deg_to_rad(20.0), "cd0": 0.075, "oswald": 0.7,
-		"thrust_mil": 1.0, "thrust_ab": 1.0, "spool": 2.2,
-		"pitch_torque": 42700.0, "roll_torque": 36600.0, "yaw_torque": 25620.0,
-		"pitch_damp": 39650.0, "roll_damp": 19520.0, "yaw_damp": 30500.0,
-		"pitch_stab": 13420.0, "yaw_stab": 20740.0,
-		"max_pitch_rate": 0.85, "max_roll_rate": 1.9,
-		"tvc": 0.0,
-		"fuel": 1400.0, "sfc_mil": 0.9, "sfc_ab": 0.9,
-		"vne": 95.0, "g_limit": 3.5,
-		"stealth": 1.6,
-		"gun": {"rounds": 1200, "rpm": 625, "muzzle": 800.0, "damage": 34.0, "he": 1.5,
-				"pos": Vector3(0.0, -0.95, -3.2)},
-		"gear": [
-			{"pos": Vector3(0.0, -1.55, -3.4), "r": 0.26, "steer": true, "brake": false, "len": 0.75},
-			{"pos": Vector3(-1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-			{"pos": Vector3(1.55, -1.62, 1.10), "r": 0.34, "steer": false, "brake": true, "len": 0.80},
-		],
-		"bays": [
-			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
-			 "stations": [
-				{"pos": Vector3(-2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(2.60, -0.35, 0.4), "weapon": "agm114"},
-				{"pos": Vector3(-1.95, -0.42, 0.6), "weapon": "hydra"},
-				{"pos": Vector3(1.95, -0.42, 0.6), "weapon": "hydra"},
-			]},
-		],
-		"shape": {
-			"paint": Color(0.25, 0.27, 0.29), "dark": Color(0.11, 0.12, 0.13),
-			"glass": Color(0.29, 0.34, 0.35),
-			"sections": [
-				[-5.4, 0.35, 0.45, 0.10, 2.2],
-				[-4.2, 0.72, 0.80, 0.05, 2.4],
-				[-2.6, 0.95, 1.05, 0.0, 2.6],
-				[-0.4, 1.00, 1.10, 0.0, 2.8],
-				[1.8, 0.90, 1.00, 0.05, 2.6],
-				[3.4, 0.55, 0.62, 0.20, 2.4],
-				[5.6, 0.30, 0.38, 0.35, 2.2],
-				[7.8, 0.22, 0.30, 0.45, 2.2],
-			],
-			"wing": {"poly": [Vector2(0.95, -0.6), Vector2(3.10, -0.3), Vector2(3.10, 0.9), Vector2(0.95, 1.2)],
-					 "y": -0.10, "t_root": 0.24, "t_tip": 0.12},
-			"stab": {"poly": [Vector2(0.35, 6.3), Vector2(2.20, 6.5), Vector2(2.20, 7.3), Vector2(0.35, 7.5)],
-					 "y": 0.30, "t_root": 0.14, "t_tip": 0.07},
-			"fins": [{"x": 0.0, "cant": 0.0, "poly": [Vector2(6.4, 0.45), Vector2(7.5, 2.6), Vector2(8.3, 2.6), Vector2(8.5, 0.5)],
-					  "t": 0.16}],
-			"canopy": {"z0": -4.6, "z1": -1.6, "w": 0.62, "h": 0.70, "y": 0.72},
-			"intakes": [{"pos": Vector3(0.78, 0.95, 0.6), "size": Vector3(0.55, 0.55, 2.2), "yaw": 0.0}],
-			"nozzles": [],
-			"nozzle_kind": "round",
-			"rotors": [
-				{"pos": Vector3(0, 1.85, -0.2), "radius": 6.51, "blades": 4, "axis": "y",
-				 "tilt": 4.0, "rate": 26.0, "chord": 0.34},
-				{"pos": Vector3(0.9, 2.05, 7.9), "radius": 1.30, "blades": 4,
-				 "axis": "x", "rate": 90.0, "chord": 0.16},
-			],
-		},
-	},
+		"mass": 6100.0, "span": 4.6, "rotor_radius": 6.51, "tail_rotor": [Vector3(0.9, 2.05, 7.9), 1.30],
+		"gun_pos": Vector3(0.0, -0.95, -3.2),
+		"paint": Color(0.25, 0.27, 0.29), "dark": Color(0.11, 0.12, 0.13), "glass": Color(0.29, 0.34, 0.35)}),
 	"a320": {
 		"faction": "civil",
 		"name": "Aerline A320 Series",
@@ -1447,9 +1230,9 @@ static func _db() -> Dictionary:
 		"gun": {"rounds": 0, "rpm": 600, "muzzle": 900.0, "damage": 1.0,
 				"pos": Vector3(0, 0, 0)},
 		"gear": [
-			{"pos": Vector3(0.0, -3.3, -14.0), "r": 0.52, "steer": true, "brake": false, "len": 1.3},
-			{"pos": Vector3(-3.5, -3.35, 0.55), "r": 0.62, "steer": false, "brake": true, "len": 1.25},
-			{"pos": Vector3(3.5, -3.35, 0.55), "r": 0.62, "steer": false, "brake": true, "len": 1.25},
+			{"pos": Vector3(0.0, -3.45, -14.0), "r": 0.52, "steer": true, "brake": false, "len": 1.3},
+			{"pos": Vector3(-3.5, -3.35, 1.60), "r": 0.62, "steer": false, "brake": true, "len": 1.25},
+			{"pos": Vector3(3.5, -3.35, 1.60), "r": 0.62, "steer": false, "brake": true, "len": 1.25},
 		],
 		"bays": [
 			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,
@@ -1503,9 +1286,9 @@ static func _db() -> Dictionary:
 		"gun": {"rounds": 0, "rpm": 600, "muzzle": 900.0, "damage": 1.0,
 				"pos": Vector3(0, 0, 0)},
 		"gear": [
-			{"pos": Vector3(0.0, -2.35, -8.4), "r": 0.38, "steer": true, "brake": false, "len": 1.05},
-			{"pos": Vector3(-2.0, -2.4, 0.42), "r": 0.48, "steer": false, "brake": true, "len": 1.0},
-			{"pos": Vector3(2.0, -2.4, 0.42), "r": 0.48, "steer": false, "brake": true, "len": 1.0},
+			{"pos": Vector3(0.0, -2.50, -8.4), "r": 0.38, "steer": true, "brake": false, "len": 1.05},
+			{"pos": Vector3(-2.0, -2.4, 0.95), "r": 0.48, "steer": false, "brake": true, "len": 1.0},
+			{"pos": Vector3(2.0, -2.4, 0.95), "r": 0.48, "steer": false, "brake": true, "len": 1.0},
 		],
 		"bays": [
 			{"id": "pylons", "kind": "external", "drag": 0.0, "open_time": 0.0,

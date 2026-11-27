@@ -377,7 +377,7 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 	# to show, so the hand-over from the ground is onto the fine picture and
 	# not onto the whole-planet one with the fine one arriving half way.
 	_collect_patch()
-	if alt > FADE_LO - 10000.0:
+	if alt > FADE_LO - 10000.0 and not (cam is SatView and not (cam as SatView).settled()):
 		_want_patch(_patch_window(cam))
 	# Only once there is something out there to see. Left at 2600 km from the
 	# ground the far plane would be paying for the whole cap on every frame of
@@ -506,6 +506,7 @@ func _collect_patch() -> void:
 	if _patch_asked.size() != 4 or Sim.native == null \
 			or not Sim.native.body_patch_ready():
 		return
+	var _pt := Sim.prof_at()
 	var buf: PackedByteArray = Sim.native.body_patch_take()
 	var img := Image.create_from_data(PATCH_RES, PATCH_RES, true,
 		Image.FORMAT_RGBA8, buf) if buf.size() == _patch_bytes() else null
@@ -521,6 +522,7 @@ func _collect_patch() -> void:
 		_mat.set_shader_parameter("patch_win", Vector4(_patch_win[0], _patch_win[1],
 			_patch_win[2], _patch_win[3]))
 		_mat.set_shader_parameter("patch_on", 1.0)
+	Sim.prof_end(&"planet.patch", _pt)
 	_patch_asked = PackedFloat32Array()
 	if _patch_next.size() == 4:
 		var again := _patch_next

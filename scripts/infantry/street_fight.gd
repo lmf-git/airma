@@ -22,6 +22,9 @@ var _cqb_tel_fired := false
 var _cqb_fall := -1.0
 var _cqb_test := false
 var _cqb_view := ""
+## A harness run that wants the man in the street at once, windowed: no side
+## or deploy screen, which nobody is there to press.
+var skip_deploy := false
 var _bounds_ground := 0.0
 var _bounds_air := 0.0
 var _oob_t := 0.0
@@ -587,7 +590,8 @@ func tick_town_sets(delta: float) -> void:
 func cqb_deploy(first: bool) -> void:
 	# A harness run has nobody to press the button, and a command line that
 	# names a loadout has already chosen.
-	if _cqb_test or _cqb_view != "" or CqbMatch.plain or DisplayServer.get_name() == "headless":
+	if _cqb_test or _cqb_view != "" or skip_deploy or CqbMatch.plain \
+			or DisplayServer.get_name() == "headless":
 		return
 	if not is_instance_valid(world.walker) or not is_instance_valid(world.cqb):
 		return

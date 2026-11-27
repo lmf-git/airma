@@ -1298,16 +1298,16 @@ func _run_globe_test() -> void:
 	m.globe_zoom = 1.0
 	var org := Vector2(960.0, 540.0)
 	var rad := 450.0
-	var b: Basis = m.call("_globe_basis")
+	var b: Basis = m.globe_view.call("_globe_basis")
 	# The middle of the chart, which is the country this sortie is flown from
 	# and what the map should open looking at.
-	var home: Vector3 = m.call("_globe_at", Vector2.ZERO, org, rad, b, 1.0)
+	var home: Vector3 = m.globe_view.call("_globe_at", Vector2.ZERO, org, rad, b, 1.0)
 	var home_off: float = Vector2(home.x, home.y).distance_to(org)
 	print("[globe] the airfield lands %.2f px from the middle, facing %.3f" % [
 		home_off, home.z])
 	# A corner of the mapped square, which is 848 km out: it should be a little
 	# way off the middle and still on the near side.
-	var corner: Vector3 = m.call("_globe_at",
+	var corner: Vector3 = m.globe_view.call("_globe_at",
 		Vector2(Sim.WORLD_HALF, Sim.WORLD_HALF), org, rad, b, 1.0)
 	var corner_off: float = Vector2(corner.x, corner.y).distance_to(org)
 	# Where it ought to be: the ball is `rad` px for a radius of PLANET_R, and
@@ -1323,8 +1323,8 @@ func _run_globe_test() -> void:
 	print("[globe] the antipode faces %.3f (negative is away from the eye)" % back.z)
 	# Turn it half over and the theatre should go round the back.
 	m.globe_tilt = PI * 0.49
-	var b2: Basis = m.call("_globe_basis")
-	var turned: Vector3 = m.call("_globe_at", Vector2.ZERO, org, rad, b2, 1.0)
+	var b2: Basis = m.globe_view.call("_globe_basis")
+	var turned: Vector3 = m.globe_view.call("_globe_at", Vector2.ZERO, org, rad, b2, 1.0)
 	print("[globe] tilted %.0f deg, the airfield faces %.3f" % [
 		rad_to_deg(m.globe_tilt), turned.z])
 	# The airfield has to be on the equator, not at a pole: the climate has run
@@ -1371,7 +1371,7 @@ func _run_globe_test() -> void:
 		for j in 16:
 			var a := TAU * float(i) / 64.0
 			var r: float = Sim.PLANET_R * 0.999 * float(j) / 15.0
-			var p: Vector3 = m.call("_globe_at",
+			var p: Vector3 = m.globe_view.call("_globe_at",
 				Vector2(cos(a) * r, sin(a) * r), org, rad, b, 1.0)
 			worst = maxf(worst, Vector2(p.x, p.y).distance_to(org))
 	print("[globe] the furthest any ground point lands is %.1f px, on a %.0f px disc" % [
@@ -1418,8 +1418,8 @@ func _run_patch_test() -> void:
 	for z in [1.0, 4.0, 20.0, 80.0, 260.0]:
 		m.globe_zoom = float(z)
 		var rad: float = half * 0.84 * float(z)
-		var b: Basis = m.call("_globe_basis")
-		var w: PackedFloat32Array = m.call("_globe_window", rad, b)
+		var b: Basis = m.globe_view.call("_globe_basis")
+		var w: PackedFloat32Array = m.globe_view.call("_globe_window", rad, b)
 		if w.size() != 4:
 			spans.append("x%.0f:whole" % float(z))
 			continue
@@ -1432,9 +1432,9 @@ func _run_patch_test() -> void:
 		", ".join(PackedStringArray(spans))])
 	# What one texel of each is worth on the ground, at the closest zoom.
 	m.globe_zoom = 260.0
-	var b2: Basis = m.call("_globe_basis")
+	var b2: Basis = m.globe_view.call("_globe_basis")
 	var rad2: float = half * 0.84 * 260.0
-	var win: PackedFloat32Array = m.call("_globe_window", rad2, b2)
+	var win: PackedFloat32Array = m.globe_view.call("_globe_window", rad2, b2)
 	var ok_win: bool = win.size() == 4
 	var base_m := 0.0
 	var patch_m := 0.0
@@ -1446,13 +1446,13 @@ func _run_patch_test() -> void:
 		# the same number: the map baked in line and the frame that zoomed
 		# stopped for it.
 		var t0 := Time.get_ticks_usec()
-		m.call("_want_patch", win)
+		m.globe_view.call("_want_patch", win)
 		asked_ms = float(Time.get_ticks_usec() - t0) * 0.001
 		var spun := 0
 		while not Sim.native.patch_ready() and spun < 4000:
 			spun += 1
 			await world.get_tree().process_frame
-		m.call("_collect_patch")
+		m.globe_view.call("_collect_patch")
 		ms = float(m.get("_patch_ms"))
 		# Metres to a texel: the base sheet spans the planet, the patch spans
 		# the window.
@@ -1466,7 +1466,7 @@ func _run_patch_test() -> void:
 		var east: Vector3 = pole.cross(home).normalized()
 		var cu: float = (win[0] + win[1]) * 0.5
 		var cv: float = (win[2] + win[3]) * 0.5
-		var d: Vector3 = m.call("_uv_dir", cu, cv, pole, home, east)
+		var d: Vector3 = m.globe_view.call("_uv_dir", cu, cv, pole, home, east)
 		var q: Vector2 = Sim.dir_to_chart(d)
 		agree = absf(Sim.native.planet_height(d)
 			- (Sim.height_at(q.x, q.y) - Sim.sea_at(q.x, q.y)))
@@ -1521,8 +1521,8 @@ func _run_patch_test() -> void:
 		ink_delta, str(on_road.round())])
 	# The mesh, which is rebuilt every frame the map is open.
 	m.globe_zoom = 1.0
-	var b3: Basis = m.call("_globe_basis")
-	var lit3: Vector3 = m.call("_globe_light", b3)
+	var b3: Basis = m.globe_view.call("_globe_basis")
+	var lit3: Vector3 = m.globe_view.call("_globe_light", b3)
 	var org3 := Vector2(960.0, 540.0)
 	var rad3 := 450.0
 	var t1 := Time.get_ticks_usec()
@@ -1543,7 +1543,7 @@ func _run_patch_test() -> void:
 	# sub-observer point is the middle of the disc in both.
 	var centre_dir: Vector3 = (b3.inverse() * Vector3(0.0, 0.0, 1.0)).normalized()
 	var q3: Vector2 = Sim.dir_to_chart(centre_dir)
-	var mark: Vector3 = m.call("_globe_at", q3, org3, rad3, b3, 1.0)
+	var mark: Vector3 = m.globe_view.call("_globe_at", q3, org3, rad3, b3, 1.0)
 	var mark_off: float = Vector2(mark.x, mark.y).distance_to(org3)
 	print("[patch] the globe mesh is %d triangles in %.2f ms; %d points off the disc; the marks project to %.2f px of its middle" % [
 		int(idx3.size() / 3.0), mesh_ms, off_disc, mark_off])
@@ -2104,7 +2104,7 @@ func _run_map_shot() -> void:
 	# the same direction written two ways, and comparing the two literals is
 	# what let a 42 degree error pass as "0.0 deg apart". The world's is put
 	# into the planet's frame first, the same way the map does it.
-	var lit_map: Vector3 = world.map.call("_globe_light", Basis())
+	var lit_map: Vector3 = world.map.globe_view.call("_globe_light", Basis())
 	var w0: Vector3 = world._sun.global_transform.basis.z \
 		if is_instance_valid(world._sun) else Vector3.UP
 	var lit_world: Vector3 = (Sim.chart_origin * w0.y + Sim.chart_east * w0.x
@@ -2218,8 +2218,8 @@ func _run_map_shot() -> void:
 		print("[mapshot] viewport %s, captured %dx%d, scale %.2f" % [
 			str(vpr), img.get_width(), img.get_height(), scale_px])
 		var rad2: float = minf(vpr.x, vpr.y) * 0.42 * float(zoom_at) * scale_px
-		var bas: Basis = world.map.call("_globe_basis")
-		var sunv: Vector3 = world.map.call("_globe_light", bas)
+		var bas: Basis = world.map.globe_view.call("_globe_basis")
+		var sunv: Vector3 = world.map.globe_view.call("_globe_light", bas)
 		var day_sum := 0.0
 		var day_n := 0
 		var night_sum := 0.0

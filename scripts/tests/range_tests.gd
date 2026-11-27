@@ -62,7 +62,7 @@ func _run_range_test() -> void:
 		var aim_at: Vector3 = rt.global_position + Vector3(0, rt.cy, 0)
 		for k in 10:
 			# held up for the drop, the way the walker lays a shot
-			var d: Vector3 = world.walker._lay(eye, aim_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
+			var d: Vector3 = world.walker.arms._lay(eye, aim_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
 			Firearm.fire(world, world.walker, 0, g, eye, d, 0.0)
 			for f in 3:
 				await world.get_tree().physics_frame
@@ -202,7 +202,7 @@ func _run_range_cam(arg: String) -> void:
 	world.walker._take_up(Firearm.index_of(kit), false)
 	var eye: Vector3 = world.walker.cam.global_position
 	var aim_at: Vector3 = rt.global_position + Vector3(0, rt.cy, 0)
-	var d: Vector3 = world.walker._lay(eye, aim_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
+	var d: Vector3 = world.walker.arms._lay(eye, aim_at, float(g["muzzle"]), 9.81, false, Firearm.drag_of(g))
 	var t0 := Time.get_ticks_msec()
 	Firearm.fire(world, world.walker, 0, g, eye + d * 1.2, d, 0.0)
 	var shot_mid := false
@@ -217,9 +217,9 @@ func _run_range_cam(arg: String) -> void:
 			if ridden != null and is_instance_valid(ridden):
 				var rn: Node3D = ridden
 				print("[rangecam] riding %s: cal %s, ride scale %.4f, camera %.3f m off it, near %.3f, round model %s" % [
-					kit, str((rn as Effects.Tracer).cal.get("name", "none")), float(rn.call("ride_scale")),
+					kit, str((rn as Tracer).cal.get("name", "none")), float(rn.call("ride_scale")),
 					world.cam.global_position.distance_to(rn.get_global_transform_interpolated().origin), world.cam.near,
-					str((rn as Effects.Tracer)._round != null and (rn as Effects.Tracer)._round.visible)])
+					str((rn as Tracer)._round != null and (rn as Tracer)._round.visible)])
 			print("[rangecam] mid-flight: time scale %.3f, physics %d a second, riding %s, near %.3f far %.0f" % [
 				Engine.time_scale, Engine.physics_ticks_per_second, str(world.cam.riding()),
 				world.get_viewport().get_camera_3d().near, world.get_viewport().get_camera_3d().far])

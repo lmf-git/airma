@@ -802,14 +802,16 @@ func call_in(id: String) -> bool:
 			var at3: Vector3 = pick_at
 			add_nuke(12.0, Vector3(at3.x, fight._ground(at3.x, at3.z), at3.z), TAC_LETHAL, false)
 			Sim.report("TACTICAL NUKE inbound — twelve seconds, get eighty metres clear of the mark", Sim.Ev.BAD)
-			Effects.nuke_warm(fight.world)
+			# No warm-up copy of the cloud. One was put four metres in front of
+			# the camera here to have its shaders built early, and the raymarch
+			# filling the screen was itself a 2.7 second frame; the engine
+			# builds them without stopping now (`--stalltest=tacnuke`).
 			Sfx.play_at(fight.world, "roar", at3 + Vector3(0, 900, 0), 9.0, 0.7, 9000.0)
 			return true
 		"stratnuke_at":
 			var at4: Vector3 = pick_at
 			add_nuke(20.0, Vector3(at4.x, fight._ground(at4.x, at4.z), at4.z), STRAT_LETHAL, true)
 			Sim.report("STRATEGIC NUKE inbound — twenty seconds. It has been an honour.", Sim.Ev.BAD)
-			Effects.nuke_warm(fight.world)
 			Sfx.play_at(fight.world, "roar", at4 + Vector3(0, 2000, 0), 10.0, 0.55, 12000.0)
 			return true
 		"strike":
@@ -1057,18 +1059,25 @@ func _warhead_body(strategic: bool) -> Node3D:
 func _nuke(at: Vector3, lethal: float, strategic: bool, picture := false) -> void:
 	var scn: Variant = fight.world.get("scenery")
 	var flat := lethal * 1.2
+	var _p0 := Sim.prof_at()
 	if scn != null and is_instance_valid(scn) and scn.has_method("damage_area"):
 		scn.damage_area(at, flat)
 	else:
 		Obstacles.kill_near(at, flat)
+	Sim.prof_end(&"nuke.flatten", _p0)
+	var _p1 := Sim.prof_at()
 	for t in TownSet.live:
 		if is_instance_valid(t):
 			(t as TownSet).flatten(at, flat)
+	Sim.prof_end(&"nuke.town", _p1)
+	var _p2 := Sim.prof_at()
 	Effects.mute_blast = true
 	Effects.nuke(fight.world, at, lethal)
 	Effects.mute_blast = false
+	Sim.prof_end(&"nuke.fx", _p2)
 	if picture:
 		return
+	var _p3 := Sim.prof_at()
 	var seen := {}
 	var hurt: Array = fight.soldiers.duplicate()
 	hurt.append_array(fight.get_tree().get_nodes_in_group("hittable"))
@@ -1088,8 +1097,11 @@ func _nuke(at: Vector3, lethal: float, strategic: bool, picture := false) -> voi
 			# outside it, the blast: hurt, not killed
 			n.take_hit(70.0 * (1.0 - (d - lethal) / (lethal * 0.6)), credit)
 	KillFeed.cause = ""
+	Sim.prof_end(&"nuke.hurt", _p3)
 	if strategic and is_instance_valid(fight.mode) and fight.mode.running:
+		var _p4 := Sim.prof_at()
 		fight.mode._finish(true, "STRATEGIC STRIKE")
+		Sim.prof_end(&"nuke.finish", _p4)
 
 ## `many` is one burst of a carpet: there are a hundred of them inside a few
 ## seconds, and each drawn as a bomb is -- three fireballs, two of them lamps

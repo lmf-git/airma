@@ -346,16 +346,13 @@ func cycle_target() -> void:
 		if air_only and not Aircraft.is_airborne(n):
 			continue
 		cand.append(n)
-	var fwd := -global_transform.basis.z
-	# Rank on angle *and* range. Sorting on boresight angle alone locks the
-	# radar onto whatever happens to be dead ahead, so a contact ninety
-	# kilometres away and opening beat one two kilometres off the nose.
+	# Ranked by where you are looking and then by range: see `target_cost`.
+	var look := view_dir()
 	var reach: float = float(Sim.RADAR_RANGES[Sim.radar_range_idx])
 	var cost := func(n: Node3D) -> float:
-		var rel: Vector3 = n.global_position - global_position
-		return fwd.angle_to(rel) + rel.length() / reach * 1.2
+		return target_cost(n, look, reach)
 	cand = cand.filter(func(n): return \
-		global_position.distance_to(n.global_position) < reach)
+		global_position.distance_to(n.global_position) < Sim.radar_reach(reach, n))
 	# and our own laser spot, which the hostile test above passes over
 	for sp in ([] if air_only else _own_spots(reach)):
 		if not cand.has(sp):

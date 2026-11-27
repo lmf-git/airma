@@ -54,7 +54,7 @@ func _pilot(delta: float) -> void:
 			# Coming in at its working height it was in the open sky for the
 			# whole run, and the first one up shot it down every time.
 			if missile_warn > 0.0:
-				drop_flare()
+				counter_incoming()
 			# and over whatever is ahead, which the working orbit looks out for
 			# and this did not: at seventy with the nose down it flew into
 			# the rising ground short of the town
@@ -83,16 +83,19 @@ func _pilot(delta: float) -> void:
 	_phase += delta * 0.12
 	var foe := _find_enemy()
 	target = foe
+	if is_instance_valid(foe) and foe is Aircraft and global_position.distance_to(
+			foe.global_position) < Sim.radar_reach(8000.0, foe):
+		(foe as Aircraft).spike(self)
 
 	if missile_warn > 0.0 and arena != null:
 		# Called in over a fight it stays on the fight: flares out and the
 		# nose kept on the target. Breaking away and down, which a bandit
 		# does, had it turning its back on the town every time a man on the
 		# other side shouldered a missile, and diving to thirty metres.
-		# Flares only: what a man shoulders is a heat seeker, and chaff
-		# dumped over the town drew off radar-guided rockets fired into it,
-		# ours included.
-		drop_flare()
+		# Flares, and chaff only when a radar round is really inbound: what a
+		# man shoulders is a heat seeker, and chaff dumped over the town drew
+		# off radar-guided rockets fired into it, ours included.
+		counter_incoming()
 		if state == STATION and foe:
 			state = ENGAGE
 	elif missile_warn > 0.0:
@@ -183,7 +186,7 @@ func _maws(delta: float) -> void:
 		var closing: float = maxf((m.get("vel") as Vector3 - linear_velocity).dot(
 			(global_position - mn.global_position).normalized()), 50.0)
 		if d / closing < 2.4:
-			drop_flare()
+			counter_incoming()
 			return
 
 func _find_enemy() -> Node3D:
@@ -309,7 +312,7 @@ func _shoot(foe: Node3D, delta: float) -> void:
 	if _fire_wait > 0.0 or ang > 16.0:
 		return
 	var want := ""
-	if d < 5200.0 and count_remaining("aim120") > 0:
+	if d < Sim.radar_reach(5200.0, foe) and count_remaining("aim120") > 0:
 		want = "aim120"
 	elif d < 3200.0 and count_remaining("aim9") > 0:
 		want = "aim9"

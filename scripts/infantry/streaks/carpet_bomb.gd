@@ -66,11 +66,13 @@ func _ready() -> void:
 		add_child(mi)
 	else:
 		# a drogue canister of smoke or phosphorus: body, and the fins that
-		# slow it
+		# slow it. A metre and a half by fifteen centimetres -- it was over two
+		# metres long and forty across with fins the width of a door, bigger
+		# than the thousand-pound bombs off the same aeroplane.
 		var st := MeshKit.begin()
-		MeshKit.cone(st, 0.2, 0.2, -1.2, 1.1, Vector3.ZERO, 8)
-		MeshKit.box(st, Vector3(0.7, 0.03, 0.5), Vector3(0, 0, 1.0))
-		MeshKit.box(st, Vector3(0.03, 0.7, 0.5), Vector3(0, 0, 1.0))
+		MeshKit.cone(st, 0.075, 0.075, -0.8, 0.7, Vector3.ZERO, 8)
+		MeshKit.box(st, Vector3(0.34, 0.02, 0.28), Vector3(0, 0, 0.62))
+		MeshKit.box(st, Vector3(0.02, 0.34, 0.28), Vector3(0, 0, 0.62))
 		add_child(MeshKit.mi(MeshKit.finish(st, MeshKit.mat(
 			Color(0.42, 0.40, 0.22), 0.6, 0.3)), "Bomb"))
 	if not bomblet:

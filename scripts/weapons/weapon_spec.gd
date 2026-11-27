@@ -492,7 +492,10 @@ static func _db() -> Dictionary:
 		# at, so a sixteenth of the turn -- under two g -- and it went past a
 		# drone circling at walking pace by fifty metres, eight hundred out.
 		"boost": 340.0, "burn": 2.0, "max_g": 22.0, "drag": 0.000048, "ref_speed": 600.0,
-		"life": 22.0, "range": 6000.0, "seeker_fov": 40.0, "lock_time": 0.7,
+		# Under five kilometres, as a Stinger or an Igla is. Six let a
+		# shoulder round -- and the air defence vehicles carrying them, which
+		# were told nine -- reach out further than any of them can.
+		"life": 22.0, "range": 5000.0, "seeker_fov": 40.0, "lock_time": 0.7,
 		"arm_time": 0.4, "fuse": 5.0, "damage": 150.0, "lethal": 8.0,
 		"colour": Color(0.26, 0.27, 0.25), "band": Color(0.72, 0.66, 0.22),
 		"eject": 0.0, "trail": Color(0.86, 0.84, 0.82),

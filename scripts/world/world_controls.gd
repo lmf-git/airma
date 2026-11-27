@@ -192,10 +192,7 @@ func resume() -> void:
 	# Whatever had the mouse before the pause gets it back. Only the walker and
 	# the mouse stick did: a tank, a ship or the sensor page came back with the
 	# pointer free, and the gun would not lay until something captured it again.
-	var grab: bool = (world.on_foot and is_instance_valid(world.walker) and not world.walker.dead) \
-		or crewed or world.gunning or (is_instance_valid(world.pod) and world.pod.active) \
-		or (is_instance_valid(world.player) and not world.on_foot and "mouse_fly" in world.player and world.player.mouse_fly)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if grab else Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _wants_grab() else Input.MOUSE_MODE_VISIBLE
 	deploy_yield(false)
 
 func pause() -> void:
@@ -570,10 +567,12 @@ func _wants_grab() -> bool:
 	if is_instance_valid(world.tank) or is_instance_valid(world.ship) or world.crew.at_conn() \
 			or world.gunning or (is_instance_valid(world.pod) and world.pod.active):
 		return true
-	if is_instance_valid(world.cam) and bool(world.cam.get("_free")):
-		return true
-	return is_instance_valid(world.player) and "mouse_fly" in world.player \
-		and bool(world.player.mouse_fly)
+	# In a cockpit the pointer is captured too. It was left free unless the
+	# mouse stick was on, so a jet spawned straight into the air had the
+	# cursor sitting over the view, and resuming from the menu put it back
+	# there: nothing in a cockpit is worked by pointing -- the map, the menus
+	# and the sensor page are screens of their own above.
+	return is_instance_valid(world.player) and world.player.alive
 
 ## Back in the window after another had it. The system lets go of a captured
 ## pointer when the window loses focus, but the mode still reads as captured,
@@ -584,4 +583,38 @@ func regrab() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	sync_mouse()
+
+# --------------------------------------------------------------- the presence
+## Tell `Sim` what is really being played and sat in, for the Discord line.
+func sync_presence() -> void:
+	if not world.running:
+		Sim.presence_mode = ""
+		Sim.presence_seat = ""
+		return
+	var mode := String(Sim.mission)
+	if is_instance_valid(world.cqb):
+		mode = "range" if world.cqb.range_mode else ("arms" if world.cqb.air \
+			else ("ground" if world.cqb.armour else "cqb"))
+	Sim.presence_mode = mode
+	var seat := ""
+	if is_instance_valid(world.sat_view) and world.sat_view.active():
+		seat = "@Watching from orbit"
+	elif world.missions.in_rocket():
+		seat = "@Riding a rocket"
+	elif world.on_foot:
+		seat = "@On foot"
+	elif is_instance_valid(world.tank):
+		seat = "@Driving " + String(world.tank.display_name())
+	elif world.crew.at_conn() and is_instance_valid(world.carrier):
+		seat = "@At the conn, " + String(world.carrier.display_name())
+	elif is_instance_valid(world.ship):
+		seat = "@In command, " + String(world.ship.display_name())
+	elif world.gunning and is_instance_valid(world.player):
+		seat = "@On the guns, " + String(world.player.display_name())
+	elif is_instance_valid(world.player):
+		seat = "@Flying " + String(world.player.display_name())
+	# the deploy screen, a respawn: in the match, not in anything yet
+	if seat == "" or (is_instance_valid(world.deploy_ui) and world.deploy_ui.visible):
+		seat = "@Choosing what to go in as"
+	Sim.presence_seat = seat
 

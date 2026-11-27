@@ -28,6 +28,7 @@
 
 mod chunk;
 mod cloud;
+mod discord;
 mod field;
 mod index;
 mod raster;

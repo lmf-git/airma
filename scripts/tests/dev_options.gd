@@ -15,6 +15,13 @@ func parse_arg(a: String) -> bool:
 		world._dump = int(a.substr(7))
 	elif a.begins_with("--view="):
 		world._view = a.substr(7)
+	elif a == "--spikeshot":
+		# the minimap up and the two nearest hostiles tracking you, for --shot
+		_spike_shot = true
+	elif a.begins_with("--sideview="):
+		# a camera off the player's left side at wheel height, DIST metres
+		# out: for photographing how an aeroplane sits on its gear
+		_side_dist = float(a.substr(11))
 	elif a == "--nocockpit":
 		world._nocockpit = true
 	elif a == "--openbay":
@@ -43,6 +50,9 @@ func parse_arg(a: String) -> bool:
 		_sat_tilt = deg_to_rad(float(sv[1])) if sv.size() > 1 else 0.0
 		_sat_pan = float(sv[2]) * 1000.0 if sv.size() > 2 else 0.0
 		SatView.clear_air = sv.size() > 3 and sv[3] == "clear"
+	elif a.begins_with("--satpan="):
+		# with --satview: pan north this many km a second, to measure a pan
+		_sat_pan_rate = float(a.substr(9)) * 1000.0
 	elif a.begins_with("--at="):
 		var av := a.substr(5).split(",")
 		if av.size() == 3:
@@ -240,11 +250,51 @@ var _look_from := Vector3.INF
 var _look_at := Vector3.INF
 var _look_cam: Camera3D = null
 
+var _spike_shot := false
+
+func tick_spike_shot() -> void:
+	if not _spike_shot or not world.running or not is_instance_valid(world.player):
+		return
+	Sim.panel_left = 3
+	var me: Aircraft = world.player
+	var near: Array = []
+	for n in world.get_tree().get_nodes_in_group("hittable"):
+		if n is Node3D and "team" in n and int(n.team) != me.team and n != me:
+			near.append(n)
+	near.sort_custom(func(a, b): return (a as Node3D).global_position.distance_to(me.global_position) \
+		< (b as Node3D).global_position.distance_to(me.global_position))
+	for n2 in near.slice(0, 2):
+		me.spike(n2)
+
+var _side_dist := 0.0
+var _side_cam: Camera3D = null
+
+func tick_side_view() -> void:
+	if _side_dist <= 0.0 or not world.running or not is_instance_valid(world.player):
+		return
+	if _side_cam == null:
+		_side_cam = Camera3D.new()
+		_side_cam.fov = 40.0
+		world.add_child(_side_cam)
+		if is_instance_valid(world.hud):
+			world.hud.visible = false
+	var p: Node3D = world.player
+	var b: Basis = p.global_transform.basis
+	var ground: float = Sim.height_at(p.global_position.x, p.global_position.z)
+	var eye: Vector3 = p.global_position - b.x * _side_dist
+	eye.y = ground + 1.0
+	_side_cam.global_position = eye
+	_side_cam.look_at(Vector3(p.global_position.x, ground + 1.5, p.global_position.z), Vector3.UP)
+	_side_cam.current = true
+
 var _sat_alt := -1.0
 var _sat_tilt := 0.0
 var _sat_pan := 0.0
+var _sat_pan_rate := 0.0
 
 func tick_sat_view() -> void:
+	if _sat_pan_rate != 0.0 and is_instance_valid(world.sat_view) and world.sat_view.active():
+		world.sat_view.call("_pan", 0.0, _sat_pan_rate * world.get_process_delta_time())
 	if _sat_alt <= 0.0 or not world.running:
 		return
 	if not is_instance_valid(world.sat_view) or not world.sat_view.active():
@@ -311,7 +361,7 @@ func tick_cqb_view() -> void:
 			world.walker._take_up(want_kit, false)
 		if cv == "reload" and world.walker.reloading <= 0.0:
 			world.walker.ammo = 3
-			world.walker._begin_reload(world.walker.gun_spec())
+			world.walker.arms._begin_reload(world.walker.gun_spec())
 		if cv == "reload" and world.walker.reloading < world.walker._reload_span * 0.55:
 			world.walker.reloading = world.walker._reload_span * 0.55
 		if cv == "look" or cv == "adsdown":
@@ -457,7 +507,7 @@ func _set_off_nuke_shot() -> void:
 	Effects.nuke(world, at, _nuke_shot[2])
 	await world.get_tree().process_frame
 	for n in world.get_children():
-		if n.get_class() == "Node3D" and "lethal" in n and "_t" in n:
+		if (n.get_class() == "Node3D" and "lethal" in n and "_t" in n) or n is Shockwave:
 			n.set("_t", _nuke_shot[3])
 	print("[nukeshot] %.0f m lethal radius at %s, aged %.0f s" % [
 		_nuke_shot[2], str(at.round()), _nuke_shot[3]])

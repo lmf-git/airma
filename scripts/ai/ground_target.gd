@@ -142,6 +142,17 @@ func _physics_process(delta: float) -> void:
 	if kind != "sam":
 		return
 	_cool -= delta
+	# The battery's radar is on whatever it could engage whether or not a round
+	# is ready: tracking is what warns a pilot, before anything is fired.
+	_spike_t -= delta
+	if _spike_t <= 0.0:
+		_spike_t = 1.0
+		for n2 in get_tree().get_nodes_in_group("hittable"):
+			if n2 is Aircraft and is_instance_valid(n2) and n2.team != team and n2.is_alive() \
+					and n2.agl > 90.0 and global_position.distance_to(n2.global_position) \
+					< Sim.radar_reach(9000.0, n2) and Sim.line_of_sight(
+						global_position + Vector3(0, 6.0, 0), (n2 as Node3D).global_position):
+				(n2 as Aircraft).spike(self)
 	if _cool > 0.0:
 		return
 	for n in get_tree().get_nodes_in_group("hittable"):
@@ -153,7 +164,7 @@ func _physics_process(delta: float) -> void:
 		# A battery will not waste a round on something down in the clutter it
 		# cannot hold a lock on. Ninety metres was a floor to stop it shooting
 		# at parked aircraft; it takes real terrain-following to be safe now.
-		if d < 9000.0 and n.agl > 90.0 and _worth_shooting(n as Node3D, d):
+		if d < Sim.radar_reach(9000.0, n) and n.agl > 90.0 and _worth_shooting(n as Node3D, d):
 			# A battery cannot shoot at what its radar cannot see. Flying the
 			# valley floor to stay behind the ridge line is the whole point of
 			# going in low, and without this the site engaged straight through
@@ -178,7 +189,10 @@ func _physics_process(delta: float) -> void:
 ## what is waiting for you when you get there. Short reach, no radar to warn
 ## you, and an infrared seeker that a flare will pull off — but you have to have
 ## seen it coming to throw one.
-const MANPADS_REACH := 5200.0
+## Seconds to the battery's next look round with its radar: see `spike`.
+var _spike_t := 0.0
+
+const MANPADS_REACH := 4500.0
 const MANPADS_CEILING := 1800.0
 
 func _manpads(delta: float) -> void:

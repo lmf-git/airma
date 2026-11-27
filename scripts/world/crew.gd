@@ -212,7 +212,7 @@ func gunner_input(_delta: float) -> void:
 			and not Sim.ui_modal:
 		var aim: Vector3 = world.pod.aim_point()
 		if aim != Vector3.INF:
-			world.player.fire_gunship(world, aim)
+			world.player.battery.fire(world, aim)
 
 ## 1 to 8 pick a store, at the gun station and on the sensor page alike.
 func _weapon_keys() -> void:
@@ -252,7 +252,7 @@ func sensor_input() -> void:
 			if is_instance_valid(station_walker):
 				Sim.report("the gunner has the battery", Sim.Ev.INFO)
 			elif aim != Vector3.INF:
-				world.player.fire_gunship(world, aim)
+				world.player.battery.fire(world, aim)
 		elif w == "gun":
 			# On the fire button as well as the gun key, and for as long as it
 			# is down: see below. Reaching this branch on the press alone gave

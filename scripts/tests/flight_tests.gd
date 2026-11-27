@@ -259,16 +259,16 @@ func tick_gunner(delta: float) -> void:
 			# ...and whether the barrels can actually get there. The battery is
 			# on trunnions with a real arc, so a sight that is holding a mark
 			# the mount cannot train onto is a shot that will not be taken.
-			var laid: bool = aim != Vector3.INF and world.player.lay_battery(aim)
+			var laid: bool = aim != Vector3.INF and world.player.battery.lay(aim)
 			print("[gunner] t=%4.1f alt=%6.1f bank=%+5.1f spd=%5.1f  pod=%s  battery=%s  gun=%s" % [
 				_gt, world.player.global_position.y, rad_to_deg(atan2(-b.x.y, b.y.y)),
 				world.player.linear_velocity.length(),
 				"locked" if aim != Vector3.INF else "no point",
 				("on the mark" if laid else "cannot train (needs az %+.0f el %+.0f)" % [
-					world.player.battery_need(aim).x, world.player.battery_need(aim).y]) if aim != Vector3.INF else "-",
+					world.player.battery.need(aim).x, world.player.battery.need(aim).y]) if aim != Vector3.INF else "-",
 				world.player.weapon_label(world.player.current_weapon())])
 			if aim != Vector3.INF:
-				world.player.fire_gunship(world, aim)
+				world.player.battery.fire(world, aim)
 #endregion
 
 
@@ -347,16 +347,16 @@ func _run_rof_test() -> void:
 			continue
 		world.player.set_weapon(wi)
 		world.player.gun_cd = 0.0
-		world.player.battery_cd.clear()
+		world.player.battery.cd.clear()
 		var before: int = world.get_tree().get_nodes_in_group("shells").size()
 		var shots := 0
 		var t := 0.0
 		while t < 6.0:
-			if world.player.fire_gunship(world, aim):
+			if world.player.battery.fire(world, aim):
 				shots += 1
 			await world.get_tree().physics_frame
 			t += 1.0 / float(Engine.physics_ticks_per_second)
-		var g: Dictionary = world.player.gunship_gun()
+		var g: Dictionary = world.player.battery.gun()
 		print("[rof] %s held 6 s: %d shots fired (table %d rpm = %.1f in 6 s), %d shells in the air" % [
 			gid, shots, int(g.get("rpm", 0)), float(g.get("rpm", 0)) / 10.0,
 			world.get_tree().get_nodes_in_group("shells").size() - before])
@@ -1207,7 +1207,7 @@ func _check_hud_keys() -> void:
 	}
 	var bad := 0
 	var seen := 0
-	for group in world.hud._air_keys():
+	for group in world.hud.keys._air_keys():
 		for row in (group[1] as Array):
 			var desc := String(row[1])
 			if not want.has(desc):

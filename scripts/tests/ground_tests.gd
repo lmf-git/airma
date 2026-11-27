@@ -190,8 +190,8 @@ func _run_mirv_lock_test() -> void:
 		var p: Vector3 = f.global_position
 		if i > 0:
 			p += Vector3(900.0, 0.0, -500.0)
-		var q: Vector3 = world.map._globe_at(Vector2(p.x, p.z), vp * 0.5,
-			minf(vp.x, vp.y) * 0.42 * world.map.globe_zoom, world.map._globe_basis())
+		var q: Vector3 = world.map.globe_view._globe_at(Vector2(p.x, p.z), vp * 0.5,
+			minf(vp.x, vp.y) * 0.42 * world.map.globe_zoom, world.map.globe_view._globe_basis())
 		var click := InputEventMouseButton.new()
 		click.button_index = MOUSE_BUTTON_RIGHT
 		click.pressed = true
@@ -323,8 +323,8 @@ func _run_map_lock_test() -> void:
 	world.map.globe_zoom = 60.0
 	await world.get_tree().process_frame
 	var vp: Vector2 = world.map.get_viewport_rect().size
-	var q: Vector3 = world.map._globe_at(Vector2(foe.global_position.x, foe.global_position.z),
-		vp * 0.5, minf(vp.x, vp.y) * 0.42 * world.map.globe_zoom, world.map._globe_basis())
+	var q: Vector3 = world.map.globe_view._globe_at(Vector2(foe.global_position.x, foe.global_position.z),
+		vp * 0.5, minf(vp.x, vp.y) * 0.42 * world.map.globe_zoom, world.map.globe_view._globe_basis())
 	var click := InputEventMouseButton.new()
 	click.button_index = MOUSE_BUTTON_RIGHT
 	click.pressed = true
@@ -339,8 +339,8 @@ func _run_map_lock_test() -> void:
 	# and zoomed right out, where the satellites crowd the same few pixels
 	world.map.globe_zoom = 1.0
 	await world.get_tree().process_frame
-	q = world.map._globe_at(Vector2(foe.global_position.x, foe.global_position.z),
-		vp * 0.5, minf(vp.x, vp.y) * 0.42 * world.map.globe_zoom, world.map._globe_basis())
+	q = world.map.globe_view._globe_at(Vector2(foe.global_position.x, foe.global_position.z),
+		vp * 0.5, minf(vp.x, vp.y) * 0.42 * world.map.globe_zoom, world.map.globe_view._globe_basis())
 	click.position = Vector2(q.x, q.y)
 	world.tank.map_lock = null
 	world.map._gui_input(click)

@@ -148,7 +148,7 @@ func _pilot(delta: float) -> void:
 		if Sim.held(&"gun") or Sim.held(&"fire"):
 			var aim := gunship_aim()
 			if aim != Vector3.INF:
-				fire_gunship(get_tree().current_scene, aim)
+				battery.fire(get_tree().current_scene, aim)
 			else:
 				say("no aim point — ALT+right click for the pod, CTRL+T to designate")
 	elif (Sim.held(&"gun") or Sim.held(&"fire")) and current_weapon() == "gun" \
@@ -246,16 +246,13 @@ func cycle_target() -> void:
 		return
 	if Sim.debug_weapons:
 		print("[lock] %d hostile(s) in the world" % cand.size())
-	var fwd := -global_transform.basis.z
-	# Rank on angle *and* range. Sorting on boresight angle alone locks the
-	# radar onto whatever happens to be dead ahead, so a contact ninety
-	# kilometres away and opening beat one two kilometres off the nose.
+	# Ranked by where you are looking and then by range: see `target_cost`.
+	var look := view_dir()
 	var reach: float = float(Sim.RADAR_RANGES[Sim.radar_range_idx])
 	var cost := func(n: Node3D) -> float:
-		var rel: Vector3 = n.global_position - global_position
-		return fwd.angle_to(rel) + rel.length() / reach * 1.2
+		return target_cost(n, look, reach)
 	cand = cand.filter(func(n): return \
-		global_position.distance_to(n.global_position) < reach)
+		global_position.distance_to(n.global_position) < Sim.radar_reach(reach, n))
 	# Terrain masking. A radar cannot see through a mountain: a contact in the
 	# next valley is not a lock, and something sitting behind a ridge is hidden
 	# until one of you comes up. Anything within a couple of kilometres stays

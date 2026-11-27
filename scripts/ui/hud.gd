@@ -4,6 +4,12 @@ extends Control
 ## target boxes are unprojected through the live camera, so they stay glued to
 ## the world in every view.
 
+## See `HudKeys`.
+var keys := HudKeys.new(self)
+
+var _card: KeyCard = null
+
+
 const GREEN := Color(0.24, 1.0, 0.42)
 const DIM := Color(0.30, 1.0, 0.48, 0.70)
 const AMBER := Color(1.0, 0.78, 0.22)
@@ -155,7 +161,10 @@ func _refresh_masking() -> void:
 
 func _process(delta: float) -> void:
 	var _pp := Sim.prof_at()
-	_refresh_seen(delta)
+	# Hidden -- the satellite view, a screenshot -- nothing reads the contact
+	# picture, and working it out was four milliseconds a frame for nobody.
+	if is_visible_in_tree():
+		_refresh_seen(delta)
 	_tick(delta)
 	Sim.prof_end(&"hud.process", _pp)
 
@@ -165,7 +174,7 @@ func _tick(delta: float) -> void:
 		l["age"] += delta
 	for kl in kill_lines:
 		kl["age"] += delta
-	_refresh_help()
+	keys._refresh_help()
 	queue_redraw()
 
 ## Caching the shaped text was tried and buys nothing.
@@ -1404,6 +1413,26 @@ func _draw_minimap_at(c: Vector2, r: float) -> void:
 			continue
 		var hostile: bool = ("team" in n) and n.team != aircraft.team
 		draw_circle(p, 2.5, RED if hostile else Color(0.4, 0.85, 1.0))
+	# What has a radar on you: a yellow ring round it if it is on the map, and
+	# a lock cone in from its bearing either way, so a battery off the edge of
+	# the panel still says which way it is.
+	var lock_col := Color(1.0, 0.86, 0.15)
+	for sp in aircraft.spiking_nodes():
+		var sn: Node3D = sp
+		var spt: Vector2 = to_screen.call(Vector2(sn.global_position.x, sn.global_position.z))
+		if box.grow(-6.0).has_point(spt):
+			draw_arc(spt, 6.0, 0.0, TAU, 16, lock_col, 1.6)
+		var dirv: Vector2 = spt - c
+		if dirv.length() < 1.0:
+			continue
+		dirv = dirv.normalized()
+		# from the edge of the panel toward the middle, narrowing on you
+		var reach_px: float = r / maxf(absf(dirv.x), absf(dirv.y))
+		var outer: Vector2 = c + dirv * minf(reach_px, (spt - c).length())
+		var side := Vector2(-dirv.y, dirv.x) * minf((outer - c).length() * 0.28, 16.0)
+		draw_colored_polygon(PackedVector2Array([c + dirv * 9.0, outer + side, outer - side]),
+			Color(lock_col.r, lock_col.g, lock_col.b, 0.22))
+		draw_line(c + dirv * 9.0, outer, Color(lock_col.r, lock_col.g, lock_col.b, 0.8), 1.2)
 	draw_colored_polygon(PackedVector2Array([c + Vector2(0, -7), c + Vector2(-5, 5),
 		c + Vector2(5, 5)]), GREEN)
 	_txt(c + Vector2(-r + 4, r - 6), "MAP %d km" % int(rng * 0.001), 12, DIM)
@@ -1725,6 +1754,45 @@ func _draw_landing(vp: Vector2) -> void:
 			RED if rem < 400.0 else GREEN)
 
 # ---------------------------------------------------------------- warnings
+## What is coming and what to throw at it: a heat seeker is pulled off by
+## flares and not chaff, a radar round by chaff and not flares. It said "break
+## and flare" whatever it was, and flares do nothing to an AMRAAM.
+var _lock_tone := 0.0
+
+func _threat_call() -> String:
+	var ir := false
+	var radar := false
+	var friendly := false
+	var rounds: Array = []
+	for m in get_tree().get_nodes_in_group("missiles"):
+		if m is Missile and is_instance_valid((m as Missile).target) \
+				and (m as Missile).target == aircraft and not (m as Missile).dead:
+			rounds.append(m)
+	# and the one that raised the warning, if it has since broken off: the
+	# warning stays up a moment after, and said "MISSILE -- BREAK" with no
+	# word of what it was
+	if rounds.is_empty() and is_instance_valid(aircraft.warned_by):
+		rounds.append(aircraft.warned_by)
+	for r in rounds:
+		var mm: Missile = r
+		match mm.seeker():
+			"ir":
+				ir = true
+			"radar":
+				radar = true
+		if int(mm.team) == int(aircraft.team):
+			friendly = true
+	var fl: String = Sim.keys.label(&"flare", "C")
+	var ch: String = Sim.keys.label(&"chaff", "V")
+	var who: String = "FRIENDLY FIRE: " if friendly else ""
+	if ir and radar:
+		return who + "MISSILES  —  FLARES (%s) AND CHAFF (%s)" % [fl, ch]
+	if radar:
+		return who + "RADAR MISSILE  —  BEAM IT AND CHAFF (%s)" % ch
+	if ir:
+		return who + "IR MISSILE  —  BREAK AND FLARE (%s)" % fl
+	return who + "MISSILE  —  BREAK"
+
 func _draw_warnings(vp: Vector2, c: Vector2) -> void:
 	var blink := fmod(_t, 0.6) < 0.35
 	var y := c.y - 150.0
@@ -1733,8 +1801,20 @@ func _draw_warnings(vp: Vector2, c: Vector2) -> void:
 		_txt(Vector2(0, c.y + 6), "ESC for the menu", 18, WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		return
 	if (aircraft.missile_warn > 0.0 or aircraft.missile_tti < INF) and blink:
-		_txt(Vector2(0, y), "MISSILE  —  BREAK AND FLARE", 26, RED, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+		_txt(Vector2(0, y), _threat_call(), 26, RED, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		y += 34.0
+	else:
+		# tracked, nothing in the air yet: who has a radar on you
+		var spikes: PackedStringArray = aircraft.spiked_by()
+		if not spikes.is_empty():
+			if blink:
+				_txt(Vector2(0, y), "RADAR LOCK  —  %s" % " · ".join(spikes), 22, AMBER,
+					HORIZONTAL_ALIGNMENT_CENTER, vp.x)
+			y += 30.0
+			_lock_tone -= get_process_delta_time()
+			if _lock_tone <= 0.0:
+				_lock_tone = 1.1
+				Sfx.play_ui(get_tree().current_scene, "beep", -16.0, 0.8)
 	if aircraft.stalling and blink:
 		_txt(Vector2(0, y), "STALL", 24, AMBER, HORIZONTAL_ALIGNMENT_CENTER, vp.x)
 		y += 30.0
@@ -1956,314 +2036,3 @@ func _draw_mode(vp: Vector2) -> void:
 		_txt(Vector2(0, vp.y * 0.34), str(st["result"]), 30,
 			GREEN if str(st["result"]).begins_with("VICTORY") else RED,
 			HORIZONTAL_ALIGNMENT_CENTER, vp.x)
-
-func _ship_keys() -> Array:
-	var conn := [
-		["A / D", "wheel: port / starboard"],
-		["W / S", "telegraph: ahead / astern"],
-		["P", "view: conning tower / close / chase / wide"],
-		["RMB (hold)", "zoom the view"],
-		["N", "night vision"],
-		["M", "tactical map"],
-		["U", "hand over the conn"],
-	]
-	if ship.can_dive():
-		conn.append(["F / R", "dive / surface"])
-	var arms := [
-		["1 - 2", "select weapon by number"],
-		["\\", "cycle weapon"],
-		["T", "cycle target"],
-		["SPACE", "fire the selected weapon"],
-		["O", "sensor page"],
-		["I", "sensor channel"],
-		["L", "laser"],
-		["CTRL + T", "track what the sight is on"],
-	]
-	if ship.can_launch():
-		arms.append(["RMB on the map", "lay the strategic aiming point"])
-	if not ship.armed():
-		# A merchant hull, or a boat with her tubes shot dry: the sensor is
-		# still hers, the weapon keys are not.
-		return [["THE CONN", conn], ["SENSOR", [
-			["O", "sensor page"],
-			["I", "sensor channel"],
-			["CTRL + T", "track what the sight is on"],
-		]], ["GENERAL", _general_keys()]]
-	return [["THE CONN", conn], ["WEAPONS", arms], ["GENERAL", _general_keys()]]
-
-## The carrier's bridge. She has nothing to fire, so the card says so by
-## leaving it off: the aeroplane's card stood here before, offering a gun, a
-## weapon select and a gunner station on a ship that carries none of them.
-func _conn_keys() -> Array:
-	return [["THE CONN", [
-		["A / D", "wheel: port / starboard"],
-		["W / S", "telegraph: ahead / astern"],
-		["mouse", "look out from the island"],
-		["RMB (hold)", "zoom the view"],
-		["O / ALT+RMB", "sensor page"],
-		["TAB", "sensor, all stop, amidships, hand over"],
-		["M", "tactical map"],
-		["U", "hand over the conn"],
-	]], ["GENERAL", _general_keys()]]
-
-func _rocket_keys() -> Array:
-	return [["THE ROCKET", [
-		["SHIFT / CTRL", "throttle up / down"],
-		["X", "engine cut"],
-		["W / S", "pitch"],
-		["Q / E", "yaw"],
-		["A / D", "roll"],
-		["T", "attitude: free, hold, prograde, retrograde"],
-		["H", "autopilot: to orbit; in the moon rocket, on to the moon"],
-		["SPACE", "drop the spent stage, light the next"],
-		[", / .", "time warp, coasting above the air"],
-		["mouse / wheel", "look round / closer and further"],
-		["U", "climb out, once it is down"],
-	]], ["TO ORBIT", [
-		["1", "full throttle, straight up"],
-		["2", "from a kilometre up, lean east a little at a time"],
-		["3", "past 40 km, T to PROGRADE and let it follow"],
-		["4", "cut when LOW POINT passes 150 km"],
-	]], ["GENERAL", _general_keys()]]
-
-func _tank_keys() -> Array:
-	var t: Tank = tank as Tank
-	var drive: Array = [
-		["W / S", "throttle ahead / astern"],
-		["A / D", "steer"],
-		["X", "brake"],
-		["P", "view"],
-		["N", "night vision"],
-		["M", "tactical map"],
-		["U", "dismount"],
-	]
-	var gun: Array = [["mouse", "lay the turret"]]
-	var ws: PackedStringArray = t.weapons() if t != null else PackedStringArray()
-	if ws.size() > 1:
-		gun.append(["1 - %d  or  \\" % ws.size(), "select / cycle weapon"])
-	if t != null and t.is_indirect():
-		gun.append(["RMB on the map", "lay a fire mission by grid"])
-		gun.append(["SPACE / LMB", "fire on the mission" + ("  ( a ripple )" if t.is_ripple() else "")])
-		gun.append(["TAB", "cancel the fire mission"])
-	elif t != null and t.is_air_defence():
-		gun.append(["SPACE / LMB", "fire: the gun leads, the missile wants a lock"])
-	else:
-		gun.append(["SPACE / LMB", "fire"])
-		if t != null and t.has_coax():
-			gun.append(["K", "coaxial machine gun"])
-	gun.append(["O", "the sight"])
-	return [
-		["DRIVING", drive],
-		["THE GUN" if t == null or not t.is_indirect() else "FIRE MISSION", gun],
-		["GENERAL", _general_keys()],
-	]
-
-func _foot_keys() -> Array:
-	var w: Walker = walker as Walker
-	var in_hold: bool = w != null and is_instance_valid(w.frame)
-	var gunship: bool = in_hold and is_instance_valid(w.frame_owner) \
-		and "spec" in w.frame_owner and bool(w.frame_owner.spec.get("gunship", false))
-	var move: Array = [
-		["WASD", "walk"],
-		["SHIFT", "sprint  ( weapon down, spends wind )"],
-		["C / CTRL", "crouch on and off  ( from a sprint: slide )"],
-		["Z", "prone on and off"],
-		["SPACE", "jump  /  vault  /  climb  —  at a tall wall: take hold of it"],
-		["on a wall", "W S A D climb, SHIFT faster, SPACE kick off, C let go"],
-		["Q / E", "lean left / right"],
-		["F", "pick up a dropped weapon"],
-		["U", "board what you are standing at"],
-	]
-	if w != null and w.chute:
-		move = [["under canopy", "A D turn, W run on and sink, S brake and hold up"]]
-	elif in_hold:
-		move = [
-			["WASD", "walk about the hold"],
-			["ramp", "walk off the end of the open ramp to jump"],
-		]
-		if gunship:
-			move.append(["G", "take a gun station"])
-	var groups: Array = [
-		["ON FOOT" if not in_hold else "IN THE HOLD", move],
-		["WEAPONS", [
-			["LMB", "fire"],
-			["RMB", "sights"],
-			["WHEEL", "on the sights: a variable scope's power"],
-			["↑ ↓ ← →", "on the sights: dial elevation and windage"],
-			["V", "fire mode"],
-			["1 - 3", "the two long guns and the sidearm"],
-			["R", "reload"],
-			["G", "grenade"],
-			["X", "flashbang"],
-		]],
-	]
-	if _carries_mortar() and not in_hold:
-		groups.append(["MORTAR", [
-			["LMB", "set it up where you stand  ( stand still )"],
-			["RMB", "plot a fire mission on the map, 80 – 820 m"],
-			["LMB", "once laid: a round onto the mission"],
-			["move", "packs it up again"],
-		]])
-	var view: Array = [
-		["P", "first person / over the shoulder"],
-		["B", "binoculars"],
-		["N", "night vision"],
-		["M", "map — wheel zooms right in to the streets"],
-		["TAB", "orders"],
-	]
-	if is_instance_valid(w) and is_instance_valid(w.arena):
-		view.append(["4 - 7", "kill streaks, cheapest first — chosen on the deploy screen"])
-		view.append(["", "airstrike and fire mission open the map: click the spot"])
-	groups.append(["VIEW", view])
-	groups.append(["GENERAL", _general_keys()])
-	return groups
-
-func _carries_mortar() -> bool:
-	if walker == null or not is_instance_valid(walker):
-		return false
-	var w: Walker = walker as Walker
-	for i in w.slots:
-		if String(w.spec_of(int(i)).get("launcher", "")) == "mortar":
-			return true
-	return false
-
-func _general_keys() -> Array:
-	return [
-		["F2", "this card"],
-		["F3", "admin"],
-		["F4", "satellite view: the planet from orbit"],
-		["/", "chat"],
-		["ESC", "back out: map, satellite view, then menu"],
-	]
-
-func _air_keys() -> Array:
-	var ac: Aircraft = aircraft
-	var sp: Dictionary = ac.spec if is_instance_valid(ac) else {}
-	var heli: bool = ac is Helicopter or bool(sp.get("rotary", false))
-	var fly: Array
-	if heli:
-		fly = [
-			["W / S", "cyclic forward / back"],
-			["A / D", "cyclic left / right"],
-			["Q / E", "pedals: yaw left / right"],
-			["SHIFT / CTRL", "collective up / down  ( let go: it holds the height )"],
-			[";", "mouse as cyclic  ( ALT + mouse: look around )"],
-		]
-	else:
-		fly = [
-			["W / S", "pitch down / up"],
-			["A / D", "roll left / right"],
-			["Q / E", "rudder"],
-			["SHIFT / CTRL", "throttle + afterburner"],
-			[";", "mouse as stick  ( ALT + mouse: look around )"],
-		]
-		if bool(sp.get("stovl", false)):
-			fly.append(["H", "jetborne / wingborne  ( STOVL )"])
-	var ground: Array = [["G", "landing gear up / down"],
-		["X", "wheel brakes" + ("" if heli else " / airbrake")]]
-	if not heli:
-		ground.append(["F", "flaps"])
-	if bool(sp.get("gunship", false)):
-		ground.append(["J", "gunner station"])
-	var arms: Array = [
-		["1 - 8", "select weapon by number"],
-		["\\", "cycle weapon"],
-		["T", "cycle target"],
-		["LMB / SPACE", "fire selected weapon"],
-		["K", "gun burst"],
-		["C", "flares"],
-		["V", "chaff"],
-	]
-	# doors to open, not pylons, which are listed with the bays and are always ready
-	if (sp.get("bays", []) as Array).any(func(b): return String(b.get("kind", "")) == "internal"):
-		arms.insert(2, ["B", "open + close weapon bay"])
-	return [
-		["HELICOPTER" if heli else "FLYING", fly],
-		["ON THE GROUND", ground],
-		["WEAPONS", arms],
-		["SENSORS", [
-			["RMB (hold)", "zoom the view"],
-			["O / ALT+RMB", "raise / stow the sensor page"],
-			["CTRL+T", "designate  ( point track )"],
-			["L", "laser  ( lamp with the page stowed )"],
-			["N", "sensor channel / night vision"],
-			["[  ]", "left / right side panels"],
-			["=  -", "radar range"],
-		]],
-		["VIEW", [
-			["P", "cockpit / chase / orbit"],
-			["ALT + mouse", "look around"],
-			["Y", "weapon camera"],
-			["M", "map"],
-			["TAB", "aircraft actions"],
-			["F3", "air traffic: call aircraft in to land"],
-		]],
-		["GENERAL", _general_keys()],
-	]
-
-
-var _card: KeyCard = null
-## What the card is currently showing, as one integer: which seat, and the two
-## things a ship's list depends on. Compared every frame, which costs nothing;
-## the list is only rebuilt and redrawn when it differs.
-var _card_sig := ""
-
-## Which keys apply where you are sitting, and whether that has changed.
-func _refresh_help() -> void:
-	if _card == null:
-		return
-	var sig: String = _seat_sig() if show_help else "off"
-	if sig == _card_sig:
-		return
-	_card_sig = sig
-	_card.visible = show_help
-	if not show_help:
-		return
-	match sig.get_slice(":", 0):
-		"rocket":
-			_card.show_keys(_rocket_keys())
-		"conn":
-			_card.show_keys(_conn_keys())
-		"ship":
-			_card.show_keys(_ship_keys())
-		"tank":
-			_card.show_keys(_tank_keys())
-		"foot":
-			var keys: Array = _foot_keys()
-			# on the range, its own keys first: the slow-motion bullet camera is
-			# the reason to be there and nothing on the card said how to get it
-			if mode != null and is_instance_valid(mode) and String(mode.get("mode")) == "range":
-				keys = [["FIRING RANGE", [
-					["Y", "slow-motion bullet camera: rides your next round to the board"],
-					["PgUp / PgDn", "slow-motion speed"],
-					["T", "trace lines: each round's flight, and its drop off the bore line"],
-					["BACKSPACE", "clear the boards and the traces"],
-					["F", "take a weapon off the rack behind the line"],
-				]]] + keys
-			_card.show_keys(keys)
-		_:
-			_card.show_keys(_air_keys())
-
-## Where you are, as far as the key card cares: the seat, and whatever about it
-## changes which keys do something -- the airframe, a ship's tubes, a man in a
-## hold or under a canopy, a mortar in his kit. Compared every frame, which
-## costs nothing; the card is only rebuilt when it differs. It was the seat
-## alone, so a helicopter got the jet's flaps and bay, and a man in a hold or
-## hanging under a canopy got the whole of the street.
-func _seat_sig() -> String:
-	if rocket != null and is_instance_valid(rocket):
-		return "rocket"
-	if carrier != null and is_instance_valid(carrier):
-		return "conn"
-	if ship != null and is_instance_valid(ship):
-		return "ship:%s%s%s" % [ship.can_dive(), ship.can_launch(), ship.armed()]
-	if tank != null and is_instance_valid(tank):
-		return "tank:%s" % String(tank.get("kind")) if "kind" in tank else "tank"
-	if walker != null and is_instance_valid(walker):
-		var w: Walker = walker as Walker
-		return "foot:%s%s%s%s" % [w.chute, is_instance_valid(w.frame), _carries_mortar(),
-			is_instance_valid(w.arena)]
-	if is_instance_valid(aircraft):
-		# the airframe itself: a spec carries no name of its own
-		return "air:%d" % aircraft.get_instance_id()
-	return "air:"

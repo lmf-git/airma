@@ -116,9 +116,9 @@ func _run_carrier_conn_test() -> void:
 	if not world.actions.visible or ids != PackedStringArray(["sensor", "allstop", "amidships", "dismount"]):
 		bad.append("TAB opened %s" % str(ids))
 	world.actions.close()
-	world.hud._refresh_help()
-	if world.hud._card_sig != "conn" and world.hud.show_help:
-		bad.append("the key card is not the conn's (sig %s)" % world.hud._card_sig)
+	world.hud.keys._refresh_help()
+	if world.hud.keys._card_sig != "conn" and world.hud.show_help:
+		bad.append("the key card is not the conn's (sig %s)" % world.hud.keys._card_sig)
 	# and the menu still works from here: all stop, then hand over
 	world.carrier.telegraph = 0.6
 	world.controls.do_action("allstop")

@@ -217,7 +217,7 @@ static func setup_for(c: Dictionary, id: String, make := false) -> Dictionary:
 	return s
 
 ## What a salvo of small arms fire can go through, as metres of wall: see
-## `Effects.Tracer.pen`. A pistol round stops in a plank; a rifle round goes
+## `Tracer.pen`. A pistol round stops in a plank; a rifle round goes
 ## through a partition or one man; the long rifles through a house wall; and
 ## the .50 through most of what a street is made of.
 const PEN := {"pistol": 0.10, "glock": 0.10, "smg": 0.14, "vector": 0.12, "shotgun": 0.05,
@@ -515,7 +515,9 @@ class Frag extends Node3D:
 		if fuse <= 0.0:
 			_burst()
 			return
-		vel.y -= 14.0 * delta
+		# what anything falls at; it was fourteen, which with the throw below
+		# put a grenade sixteen metres out at best
+		vel.y -= 9.81 * delta
 		var was := global_position
 		var to := was + vel * delta
 		# A wall turns it back off whichever face it met.

@@ -27,6 +27,8 @@ var flaps := 0.0
 var assist := true
 
 # ---- state ---------------------------------------------------------------
+## The side guns, if this is a gunship: see `GunshipBattery`.
+var battery := GunshipBattery.new(self)
 var power := 0.0                 # spooled engine setting 0..1
 var fuel := 0.0
 var ammo := 0
@@ -314,17 +316,38 @@ func _held(kind: String, scan: Callable) -> Node3D:
 ## makes it rank first again, and the next press hands back the same neighbour.
 ## T walked between two contacts for ever and never reached the third -- which
 ## is exactly what "it works sometimes" looks like from the cockpit.
+## Step the lock along `cand` in order of `cost`: the best first, and each
+## press after that the next best. It stepped through them in the order they
+## happened to have been made after the first pick, so the second press went
+## to anything at all -- often something behind you.
 func _next_target(cand: Array, cost: Callable) -> void:
 	var order := cand.duplicate()
-	order.sort_custom(func(a, b): return a.get_instance_id() < b.get_instance_id())
+	var c := {}
+	for n in order:
+		c[n] = float(cost.call(n))
+	order.sort_custom(func(a, b): return float(c[a]) < float(c[b]))
 	var i := order.find(target)
-	if i < 0:
-		# nothing held, or what was held is gone: take the best one there is
-		cand.sort_custom(func(a, b): return cost.call(a) < cost.call(b))
-		target = cand[0]
-	else:
-		target = order[(i + 1) % order.size()]
+	target = order[0] if i < 0 else order[(i + 1) % order.size()]
 	lock_time = 0.0
+
+## Which way the pilot is looking: the camera, when it is ours and he has
+## turned his head or swung the view round; the nose otherwise.
+func view_dir() -> Vector3:
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
+	if cam != null and cam.get_parent() != null and not (cam is SatView):
+		return -cam.global_transform.basis.z
+	return -global_transform.basis.z
+
+## How good a lock something would be: what is inside the cone the pilot is
+## looking down comes first, nearest the middle of it first; what is outside
+## it only after, however close. Range counts, but less than where he is
+## looking -- the radar used to take whatever was nearest the nose.
+const LOCK_CONE := deg_to_rad(25.0)
+func target_cost(n: Node3D, look: Vector3, reach: float) -> float:
+	var rel: Vector3 = n.global_position - global_position
+	var ang: float = look.angle_to(rel)
+	var off_cone: float = 0.0 if ang <= LOCK_CONE else 2.0 + (ang - LOCK_CONE) * 2.0
+	return ang + off_cone + rel.length() / maxf(reach, 1.0) * 0.6
 
 ## Distance from a world point to this machine's hull, not to its origin. A
 ## transport measured from the centre reads as fifteen metres away while you are
@@ -429,8 +452,7 @@ func _tick_physics(delta: float) -> void:
 	_chaff_t = maxf(_chaff_t - delta, 0.0)
 	_chaff_cd = maxf(_chaff_cd - delta, 0.0)
 	gun_cd = maxf(gun_cd - delta, 0.0)
-	for gid in battery_cd:
-		battery_cd[gid] = maxf(float(battery_cd[gid]) - delta, 0.0)
+	battery.tick(delta)
 	_gun_snd = maxf(_gun_snd - delta, 0.0)
 	# trigger off: stop the buzzsaw rather than leaving it running
 	if _gun_snd <= 0.0 and is_instance_valid(_gun_audio) and _gun_audio.playing:
@@ -515,9 +537,11 @@ func _animate(delta: float) -> void:
 	var target_gear := 1.0 if gear_down else 0.0
 	gear_anim = move_toward(gear_anim, target_gear, delta / 2.4)
 	flap_anim = move_toward(flap_anim, flaps, delta / 1.6)
-	for g in _gear_nodes:
+	for gi in _gear_nodes.size():
+		var g: Node3D = _gear_nodes[gi]
 		g.rotation.x = deg_to_rad(88.0) * (1.0 - gear_anim)
 		g.visible = gear_anim > 0.01
+		_draw_oleo(g, gi, delta)
 	for id in bays:
 		var b: Dictionary = bays[id]
 		if b["kind"] == "external":
@@ -1519,13 +1543,42 @@ func _forces(state: PhysicsDirectBodyState3D) -> void:
 	state.apply_central_force(force)
 	state.apply_torque(torque)
 
+## How far each leg is pushed up into its oleo, from the last physics tick:
+## what `_draw_oleo` shows. The legs were drawn rigid, so on the runway the
+## wheels went into the tarmac by however much the spring was compressed and
+## a landing showed nothing taking the weight.
+var gear_comp := PackedFloat32Array()
+var _oleo_s := PackedFloat32Array()
+
+## One leg drawn at the compression it is under: the wheel up the leg, the leg
+## shorter by the same, eased so the picture does not flicker tick to tick.
+func _draw_oleo(pivot: Node3D, gi: int, delta: float) -> void:
+	if pivot.get_child_count() < 2 or gi >= (spec["gear"] as Array).size():
+		return
+	if _oleo_s.size() != _gear_nodes.size():
+		_oleo_s.resize(_gear_nodes.size())
+	var glen: float = float(spec["gear"][gi]["len"])
+	var want: float = gear_comp[gi] if gi < gear_comp.size() else 0.0
+	_oleo_s[gi] = lerpf(_oleo_s[gi], minf(want, glen * 0.5), clampf(delta * 18.0, 0.0, 1.0))
+	var sh: float = _oleo_s[gi]
+	var strut := pivot.get_child(0) as Node3D
+	var wheel := pivot.get_child(1) as Node3D
+	wheel.position.y = -glen + sh
+	strut.scale.y = maxf((glen - sh) / glen, 0.05)
+	strut.position.y = -(glen - sh) * 0.5
+
 func _gear_forces(state: PhysicsDirectBodyState3D, _force: Vector3, _torque: Vector3, _g: float) -> int:
 	var xf := state.transform
 	var com := xf.origin + xf.basis * center_of_mass
 	var hits := 0
 	_dbg_gear = Vector3.ZERO
 	_dbg_gear_fwd = 0.0
+	if gear_comp.size() != (spec["gear"] as Array).size():
+		gear_comp.resize((spec["gear"] as Array).size())
+	gear_comp.fill(0.0)
+	var gi := -1
 	for g in spec["gear"]:
+		gi += 1
 		var lp: Vector3 = g["pos"]
 		var wp: Vector3 = xf * lp
 		var gh := Sim.height_at(wp.x, wp.z)
@@ -1540,12 +1593,16 @@ func _gear_forces(state: PhysicsDirectBodyState3D, _force: Vector3, _torque: Vec
 		if comp <= 0.0:
 			continue
 		comp = minf(comp, 0.55)
+		gear_comp[gi] = comp
 		hits += 1
 		var n := Vector3.UP if on_deck else Sim.normal_at(wp.x, wp.z)
 		var arm := wp - com
 		var pv := state.linear_velocity + state.angular_velocity.cross(arm)
 		var vn := pv.dot(n)
-		var k: float = mass * 9.81 * 3.4 / 0.20
+		# About five centimetres a leg at rest, and the rest of its travel for
+		# a landing. It was two: a leg you could not see work, on the ground
+		# or in a touchdown.
+		var k: float = mass * 9.81 * 3.4 / 0.50
 		var c: float = 1.1 * sqrt(k * mass / 3.0)
 		var fn: float = maxf(k * comp - c * vn, 0.0)
 		fn = minf(fn, mass * 9.81 * 9.0)
@@ -1763,261 +1820,6 @@ func fire() -> String:
 	if unguided:
 		_note("away — no lock, unguided")
 	return ""
-
-## Each gun of a gunship's battery has its own crew and its own loader: the
-## time until it can fire again, by gun id. It was the one `gun_cd` for all
-## three, so a 105 round put the forty and the twenty-five out of action for
-## six seconds as well, and switching guns to keep shooting did nothing.
-var battery_cd := {}
-
-## AC-130 style battery: side firing shells lobbed at a designated point.
-func gunship_gun() -> Dictionary:
-	if not spec.get("gunship", false):
-		return {}
-	for g in spec["guns"]:
-		if String(g["id"]) == current_weapon():
-			return g
-	return spec["guns"][0]
-
-## How far a sponson mount will train: a generous arc off the port beam, which
-## is where a gunship's whole business is conducted, and well down.
-const BATTERY_AZ := 0.79         # +/- 45 degrees fore and aft of the beam
-const BATTERY_EL_LO := -0.09     # a shade above the horizontal
-const BATTERY_EL_HI := 1.40      # to eighty degrees below it
-
-## Lay the side battery on a point, and say whether it can actually get there.
-##
-## The barrels used to be part of the airframe mesh, so they pointed wherever
-## they had been modelled and the rounds went wherever the sensor was looking:
-## the two had nothing to do with one another. They are on trunnions now, and
-## the fire comes out along the barrel -- so if the mount cannot train onto the
-## mark, the shot cannot be taken either, which is what banking a gunship into
-## its orbit is for.
-func aim_battery(at: Vector3) -> bool:
-	var mounts := _battery()
-	if mounts == null:
-		return true
-	var ok := true
-	for m in mounts.get_children():
-		var node := m as Node3D
-		if node == null:
-			continue
-		# in the frame the mount actually hangs in, whatever the model root
-		# does to it
-		var frame := node.get_parent() as Node3D
-		var local: Vector3 = (frame.global_transform.affine_inverse() * at
-			if frame != null else global_transform.affine_inverse() * at) - node.position
-		if local.length() < 1.0:
-			continue
-		local = local.normalized()
-		var az: float = atan2(local.z, -local.x)
-		var el: float = asin(clampf(-local.y, -1.0, 1.0))
-		if absf(az) > BATTERY_AZ or el < BATTERY_EL_LO or el > BATTERY_EL_HI:
-			ok = false
-		node.rotation = Vector3(0.0, clampf(az, -BATTERY_AZ, BATTERY_AZ),
-			clampf(el, BATTERY_EL_LO, BATTERY_EL_HI))
-	return ok
-
-## Lay the battery so the round arrives on the mark, rather than at it.
-##
-## `aim_battery` points the barrels straight down the sight line, and a gunship
-## round does not fly down the sight line. The 105 leaves at 494 m/s, so from
-## the orbit it is five seconds in the air: it falls a hundred and twenty metres
-## on the way, and it carries the aeroplane's own hundred-odd metres a second
-## sideways the whole time -- five hundred metres of it. Laid on the mark, the
-## whole battery landed short and well astern of whatever the sensor was
-## holding, and an area track was a place the rounds never went.
-##
-## Solved against the shell as it is actually flown: muzzle speed along the
-## bore plus the aeroplane's velocity, and gravity applied the way `Shell`
-## applies it, a physics step at a time. A point track is led by its own
-## velocity as well. A handful of iterations converges, because the round is
-## several times faster than anything else in the sum.
-func battery_lead(aim: Vector3, from: Vector3) -> Vector3:
-	var g := gunship_gun()
-	var v0: float = float(g.get("muzzle", 0.0))
-	if v0 <= 1.0:
-		return aim
-	var vt := _mark_velocity(aim)
-	var dt: float = 1.0 / float(maxi(Engine.physics_ticks_per_second, 1))
-	var t: float = from.distance_to(aim) / v0
-	var d := aim - from
-	for i in 10:
-		d = aim + vt * t - from - linear_velocity * t \
-			+ Vector3.UP * 4.905 * (t * t + t * dt)
-		t = d.length() / v0
-	# a long way out along the solution, so the mounts -- which lay from
-	# their own trunnions, a couple of metres from the muzzle -- read the
-	# direction and not the point
-	return from + d.normalized() * 100000.0
-
-## The training and elevation the first mount needs for a point, in degrees,
-## against its limits. For the harness: "cannot train" says nothing about which
-## way it cannot.
-func battery_need(aim: Vector3) -> Vector2:
-	var mounts := _battery()
-	if mounts == null or mounts.get_child_count() == 0:
-		return Vector2.ZERO
-	var node := mounts.get_child(0) as Node3D
-	var at := battery_lead(aim, _port_centre())
-	var local: Vector3 = (mounts.global_transform.affine_inverse() * at - node.position).normalized()
-	return Vector2(rad_to_deg(atan2(local.z, -local.x)),
-		rad_to_deg(asin(clampf(-local.y, -1.0, 1.0))))
-
-## Lay every mount on the solution for the selected gun. What the sight-follows
-## loop and the trigger both call, so the barrels you watch are the ones the
-## rounds leave.
-func lay_battery(aim: Vector3) -> bool:
-	return aim_battery(battery_lead(aim, _port_centre()))
-
-## Where a gun fires from: its own ports if it names them (a helicopter's
-## chin gun and its rocket pods are not in the same place), else the
-## aircraft's.
-func _ports_of(g: Dictionary) -> Array:
-	if g.has("ports"):
-		return g["ports"]
-	return spec["shape"].get("gun_ports", [Vector3(-2.4, -0.6, 0.0)])
-
-func _port_centre() -> Vector3:
-	var ports: Array = _ports_of(gunship_gun())
-	var c := Vector3.ZERO
-	for q in ports:
-		c += q as Vector3
-	return global_transform * (c / float(maxi(ports.size(), 1)))
-
-## How fast the mark is moving: a point track's own velocity, nothing for a spot
-## on the ground.
-func _mark_velocity(aim: Vector3) -> Vector3:
-	var pd: Variant = get("pod")
-	if pd == null or not is_instance_valid(pd) or int(pd.get("mode")) != SensorPod.POINT:
-		return Vector3.ZERO
-	var t: Variant = pd.get("tracked")
-	if t == null or not is_instance_valid(t) or not (t is Node3D) \
-			or (t as Node3D).global_position.distance_to(aim) > 1.0:
-		return Vector3.ZERO
-	if "linear_velocity" in t:
-		return t.get("linear_velocity")
-	if (t as Node).has_method("get_velocity"):
-		return t.call("get_velocity")
-	if "vel" in t:
-		return t.get("vel")
-	return Vector3.ZERO
-
-## The side battery's mounts. Built inside the model, not on the aeroplane: it
-## was looked up as a child of the aeroplane itself, where it is not, so it was
-## never found -- the barrels never trained, and every round went down the
-## sight line instead of along a barrel.
-var _battery_node: Node3D = null
-
-func _battery() -> Node3D:
-	if _battery_node != null and is_instance_valid(_battery_node):
-		return _battery_node
-	var root: Variant = _model.get("root") if _model is Dictionary else null
-	if root is Node:
-		_battery_node = (root as Node).find_child("SideGuns", true, false) as Node3D
-	return _battery_node
-
-## Where a given barrel is pointing, in world space. The mount was built along
-## its own -X, so that axis rotated into the world is the bore.
-func _bore(node: Node3D) -> Vector3:
-	return (node.global_transform.basis * Vector3(-1.0, 0.0, 0.0)).normalized()
-
-## The mark a gunship's rockets home on: one, moved to wherever the gunner fires.
-var _gun_spot: Node3D = null
-
-func fire_gunship(world: Node, aim: Vector3) -> bool:
-	var g := gunship_gun()
-	var gid := String(g.get("id", ""))
-	if g.is_empty() or float(battery_cd.get(gid, 0.0)) > 0.0 or not alive:
-		return false
-	var ports: Array = _ports_of(g)
-	var pick: int = randi() % ports.size()
-	var muzzle: Vector3 = global_transform * (ports[pick] as Vector3)
-	# laid on where the round will meet the mark, from the barrel that fires it
-	var lead_pt := battery_lead(aim, muzzle)
-	# A rocket steers itself onto the spot: it leaves pointed at it. Laid like a
-	# shell -- held up for a fall at its full speed, which it does not reach
-	# for a second -- every Hydra off a gunner's pod went out high, overflew
-	# the mark and was trying to pull fifty g at the bottom of it with ten to
-	# pull with: measured, closest pass eighty-five metres, every round.
-	if g.has("missile"):
-		lead_pt = muzzle + (aim - muzzle).normalized() * 100000.0
-	if not aim_battery(lead_pt):
-		return false
-	# One round, then the loader. This line went missing once and the 105 fired
-	# every physics step -- a hundred and twenty howitzer rounds a second.
-	battery_cd[gid] = 60.0 / float(g["rpm"])
-	# Along the barrel that is actually firing, not along the sight line. The
-	# two agree whenever the mount is on the mark, which is the point. With no
-	# mount to read it is the solution itself -- it was the sight line, which
-	# is exactly where a round does not go.
-	var dir := lead_pt - muzzle
-	var mounts := _battery()
-	if mounts != null and pick < mounts.get_child_count():
-		var node := mounts.get_child(pick) as Node3D
-		if node != null:
-			dir = _bore(node)
-	# Was `dir.length() < 1.0`, written for the hundred-kilometre solution
-	# vector. The bore is a unit vector, and a unit vector is 0.99999994 long
-	# about as often as it is 1.0: every such shot was refused *after* the
-	# loader had been started, so the 105 sat through six seconds for a round
-	# that never left, on the mark the whole time.
-	if dir.length_squared() < 1e-6:
-		battery_cd[gid] = 0.0
-		return false
-	dir = dir.normalized()
-	# A cone round the bore, `spread` radians at its edge. It was a random
-	# box of that size on all three axes -- the corners half as wide again,
-	# and the part along the bore wasted -- and a gunship looks down at a
-	# shallow slant, so the up-and-down half of the error was stretched three
-	# times over along the ground.
-	var sp: float = g["spread"]
-	var a := randf() * TAU
-	var r: float = sqrt(randf()) * sp
-	var bb := Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT)
-	dir = (bb * Vector3(cos(a) * r, sin(a) * r, -1.0)).normalized()
-	# A rocket from the pods is a rocket: the same round the aircraft fires off
-	# its rails, motor, smoke and all, homing on the gunner's mark the way an
-	# Apache's are laid by its sight. It was a shell with a rocket's damage --
-	# a tracer -- which neither looked nor flew like one.
-	if g.has("missile"):
-		if not is_instance_valid(_gun_spot):
-			_gun_spot = DesignatedSpot.new()
-			_gun_spot.team = team
-			world.add_child(_gun_spot)
-		_gun_spot.global_position = aim
-		_gun_spot.set("_life", 140.0)
-		var m := Missile.new()
-		m.laser_guided = true
-		var xf_m := Transform3D(Basis.looking_at(dir, Vector3.UP if absf(dir.y) < 0.98 else Vector3.RIGHT), muzzle)
-		m.launch(String(g["missile"]), xf_m, linear_velocity, self, _gun_spot)
-		world.add_child(m)
-		store_released.emit(m)
-		Sfx.play_at(world, "launch", muzzle, -3.0, randf_range(0.92, 1.06))
-		return true
-	var shell := Shell.new()
-	shell.vel = dir * float(g["muzzle"]) + linear_velocity
-	# laid by `battery_lead`, which allows for gravity and not for the air:
-	# kept to that, so what it lays on is where it lands
-	shell.drag = 0.0
-	shell.damage = float(g["damage"])
-	shell.blast = float(g["blast"])
-	shell.frag = float(g.get("frag", 0.0))
-	shell.shooter = self
-	shell.team = team
-	# what it was sent at, so --debugweapons can say how far off it landed
-	shell.set_meta("aim", aim)
-	shell.set_meta("origin", muzzle)
-	world.add_child(shell)
-	shell.global_position = muzzle
-	# a gunship's shells on every screen: see `NetLaunches.share`
-	if Sim.net != null and Sim.net.active:
-		Sim.net.launches.share(self, shell)
-	Effects.muzzle_flash(world, muzzle, dir, 2.6 if float(g["rpm"]) < 40.0 else 1.3)
-	Effects.dust(world, muzzle, 1.6)
-	Sfx.play_at(world, "boom" if float(g["rpm"]) < 40.0 else "rifle", muzzle,
-		-2.0 if float(g["rpm"]) < 40.0 else -6.0, 0.55 if float(g["rpm"]) < 40.0 else 0.8, 3000.0)
-	return true
 
 ## Where the gun's rounds and flash come out, in the aeroplane's own frame.
 ##
@@ -2376,7 +2178,7 @@ func drop_flare() -> void:
 	flares -= n
 	var b := global_transform.basis
 	for i in n:
-		var f := Flare.new()
+		var f := Decoys.Flare.new()
 		var side: float = -1.0 if i % 2 == 0 else 1.0
 		var spread := float(i) * 0.35
 		f.vel = linear_velocity * 0.80 + b.x * side * randf_range(6.0, 16.0) \
@@ -2401,7 +2203,7 @@ func drop_chaff() -> void:
 	chaff -= n
 	var b := global_transform.basis
 	for i in n:
-		var c := Chaff.new()
+		var c := Decoys.Chaff.new()
 		var side: float = -1.0 if i % 2 == 0 else 1.0
 		c.vel = linear_velocity * 0.35 + b.x * side * randf_range(3.0, 9.0) \
 			+ b.y * -randf_range(2.0, 6.0)
@@ -2414,6 +2216,61 @@ func drop_chaff() -> void:
 func dispense_all() -> void:
 	drop_flare()
 	drop_chaff()
+
+## Flares, and chaff as well when a radar round is actually coming: what is
+## shouldered at a low helicopter is a heat seeker, and chaff dumped over a
+## town draws off the radar rockets fired into it -- your own side's included.
+func counter_incoming() -> void:
+	drop_flare()
+	for m in get_tree().get_nodes_in_group("missiles"):
+		if m is Missile and (m as Missile).target == self and not (m as Missile).dead \
+				and (m as Missile).seeker() == "radar":
+			drop_chaff()
+			return
+
+## The last round a warning was raised for, so the warning can say what it
+## is after the round has broken off or been decoyed.
+var warned_by: Missile = null
+
+## Radars tracking this aircraft: who, what kind of thing it is, and until
+## when the mark holds -- each shooter renews it while it keeps tracking. Before
+## a launch there was nothing to tell you that you were being tracked; the
+## first warning was the missile.
+var _spikes := {}
+const SPIKE_HOLD_MS := 1800
+
+## A radar on `by` is tracking this aircraft.
+func spike(by: Node) -> void:
+	if by == null or not is_instance_valid(by):
+		return
+	var what := "SAM"
+	if by is Aircraft:
+		what = "FIGHTER" if not bool((by as Aircraft).spec.get("rotary", false)) else "HELICOPTER"
+	elif by is Ship:
+		what = "SHIP"
+	_spikes[by.get_instance_id()] = [what, Time.get_ticks_msec() + SPIKE_HOLD_MS]
+
+## The things tracking this aircraft now, for the map to mark.
+func spiking_nodes() -> Array:
+	var out: Array = []
+	var now: int = Time.get_ticks_msec()
+	for k in _spikes.keys():
+		var n: Object = instance_from_id(int(k))
+		if int((_spikes[k] as Array)[1]) >= now and is_instance_valid(n) and n is Node3D:
+			out.append(n)
+	return out
+
+## The kinds of radar tracking this aircraft now, nothing if none.
+func spiked_by() -> PackedStringArray:
+	var out := PackedStringArray()
+	var now: int = Time.get_ticks_msec()
+	for k in _spikes.keys():
+		var e: Array = _spikes[k]
+		if int(e[1]) < now or not is_instance_valid(instance_from_id(int(k))):
+			_spikes.erase(k)
+		elif not out.has(String(e[0])):
+			out.append(String(e[0]))
+	return out
 
 func warn_missile() -> void:
 	missile_warn = 2.0
@@ -2441,29 +2298,6 @@ func take_hit(amount: float, _from: Node = null) -> void:
 	if amount > 55.0 or randf() < chance:
 		break_part(_pick_part())
 	_damage(amount)
-
-## A laser spot standing in for a target the seeker can hold. It is not a thing
-## that can be shot, it is a place on the ground.
-class DesignatedSpot extends Node3D:
-	var team := -1
-	func _ready() -> void:
-		# in "hittable" so the fuse sweep finds it: a bomb that flies through
-		# its own designation and carries on is no use to anybody
-		add_to_group("hittable")
-		# ...but it is a place, not a contact. Without this the radar cycled
-		# onto the player's own laser spot.
-		add_to_group("no_lock")
-	var _life := 140.0
-	func is_alive() -> bool:
-		return true
-	func hit_radius() -> float:
-		return 2.0
-	func take_hit(_a: float, _f: Node = null) -> void:
-		pass
-	func _process(delta: float) -> void:
-		_life -= delta
-		if _life <= 0.0:
-			queue_free()
 
 ## Parts still attached, most fragile first.
 func _pick_part() -> String:
@@ -2506,7 +2340,7 @@ func break_part(id: String) -> void:
 	var xf := node.global_transform
 	var arm := xf.origin - global_position
 	node.get_parent().remove_child(node)
-	var d := Debris.new()
+	var d := AirframeDebris.new()
 	d.visual = node
 	d.vel = linear_velocity + angular_velocity.cross(arm) \
 		+ arm.normalized() * randf_range(3.0, 9.0) + Vector3(0, randf_range(0.0, 3.0), 0)
@@ -2572,7 +2406,7 @@ func _shed(node: Node3D) -> void:
 		return
 	var xf := node.global_transform
 	node.get_parent().remove_child(node)
-	var d := Debris.new()
+	var d := AirframeDebris.new()
 	d.visual = node
 	d.vel = linear_velocity + Vector3(randf_range(-6, 6), randf_range(-2, 4), randf_range(-6, 6))
 	d.spin = Vector3(randf_range(-9, 9), randf_range(-9, 9), randf_range(-9, 9))
@@ -2861,329 +2695,3 @@ func explode(with_pilot := true) -> void:
 	get_tree().current_scene.add_child(rd)
 	died.emit(self)
 
-
-## Decoy flare: a hot billboard that flickers and tumbles away trailing embers
-## and smoke, rather than the plain white ball it used to be.
-## A bundle of dipoles that blooms into a cloud. It is not bright — the whole
-## point is that it is invisible and enormous on a radar scope — so it is drawn
-## as a dull expanding puff rather than the firework a flare is.
-class Chaff extends Node3D:
-	var vel := Vector3.ZERO
-	var life := 7.0
-	var _age := 0.0
-	var _puff: GPUParticles3D
-
-	func _ready() -> void:
-		top_level = true
-		add_to_group("chaff")
-		_puff = Effects.trail_particles(Color(0.72, 0.74, 0.78), 2.2, 26)
-		_puff.lifetime = 3.0
-		_puff.emitting = true
-		add_child(_puff)
-		reset_physics_interpolation()
-
-	func _physics_process(delta: float) -> void:
-		_age += delta
-		life -= delta
-		if life <= 0.0:
-			queue_free()
-			return
-		# it sheds its launch speed almost immediately and then just hangs
-		vel = vel.lerp(Vector3.DOWN * 3.0, clampf(delta * 2.2, 0.0, 1.0))
-		global_position += vel * delta
-		if _age > 3.4 and is_instance_valid(_puff):
-			_puff.emitting = false
-
-class Flare extends Node3D:
-	var vel := Vector3.ZERO
-	var life := 5.0
-	var _burn := 0.0
-	var _core: MeshInstance3D
-	var _mat: StandardMaterial3D
-	var _spin := Vector3.ZERO
-
-	func _ready() -> void:
-		top_level = true
-		_core = MeshInstance3D.new()
-		var qm := QuadMesh.new()
-		qm.size = Vector2(1.5, 1.5)
-		_mat = StandardMaterial3D.new()
-		_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-		_mat.albedo_texture = Effects.glow_texture()
-		_mat.albedo_color = Color(1.0, 0.86, 0.55, 0.95)
-		_mat.render_priority = 6
-		qm.material = _mat
-		_core.mesh = qm
-		_core.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(_core)
-		var embers := Effects.ember_particles(Color(1.0, 0.7, 0.25), 0.55, 20)
-		embers.emitting = true
-		add_child(embers)
-		var smoke := Effects.trail_particles(Color(0.9, 0.9, 0.92), 1.1, 22)
-		smoke.lifetime = 1.8
-		smoke.emitting = true
-		add_child(smoke)
-		_spin = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
-		reset_physics_interpolation()
-
-	func _physics_process(delta: float) -> void:
-		life -= delta
-		_burn += delta
-		vel = vel.lerp(Vector3(0, -16.0, 0), delta * 0.55)
-		global_position += vel * delta
-		rotation += _spin * delta
-		var fade: float = clampf(life / 2.2, 0.0, 1.0)
-		var flick := 0.72 + 0.28 * sin(_burn * 47.0) * randf_range(0.6, 1.0)
-		_core.scale = Vector3.ONE * (0.7 + 0.7 * fade) * flick
-		_mat.albedo_color = Color(1.0, 0.86, 0.55, 0.95 * fade)
-		if life <= 0.0:
-			queue_free()
-
-
-## A piece of airframe on its way to the ground.
-class Debris extends Node3D:
-	var _has_smoke := false
-
-	func _exit_tree() -> void:
-		if _has_smoke:
-			Effects.release_smoke_slot()
-			_has_smoke = false
-	var visual: Node3D
-	var vel := Vector3.ZERO
-	var spin := Vector3.ZERO
-	var smoking := false
-	var life := 18.0
-
-	func _ready() -> void:
-		top_level = true
-		if visual:
-			add_child(visual)
-			visual.transform = Transform3D.IDENTITY
-		# only if the world can afford another plume
-		if smoking and Effects.smoke_slot():
-			_has_smoke = true
-			var t := Effects.trail_particles(Color(0.32, 0.31, 0.30), 2.4, 24)
-			t.lifetime = 2.4
-			t.emitting = true
-			add_child(t)
-		reset_physics_interpolation()
-
-	func _physics_process(delta: float) -> void:
-		life -= delta
-		vel += Vector3.DOWN * 9.81 * delta
-		vel -= vel * vel.length() * 0.0016 * delta
-		global_position += vel * delta
-		rotation += spin * delta
-		spin = spin.lerp(Vector3.ZERO, delta * 0.12)
-		var g := Sim.height_at(global_position.x, global_position.z)
-		if global_position.y <= g + 0.3:
-			Effects.dust(get_tree().current_scene, Vector3(global_position.x, g, global_position.z), 2.6)
-			queue_free()
-		elif life <= 0.0:
-			queue_free()
-
-
-## Gunship shell: ballistic, explodes on impact.
-class Shell extends Node3D:
-	var _has_smoke := false
-	## Only the look of it: see `Effects.Tracer.harmless`.
-	var harmless := false
-
-	func _exit_tree() -> void:
-		if _has_smoke:
-			Effects.release_smoke_slot()
-			_has_smoke = false
-	var vel := Vector3.ZERO
-	var damage := 120.0
-	var blast := 8.0
-	## How far its fragments reach men in the open, where that is further than
-	## the fireball: nothing, unless whoever fires it says so.
-	var frag := 0.0
-	var shooter: Node = null
-	var team := 0
-	var life := 140.0          # artillery arcs can be a minute in the air
-	var arm_dist := 12.0       # fuse arming distance: see _physics_process
-	var rocket := false        # launcher round: drawn as one, and pointed
-	var _flown := 0.0
-	var _ground_in := 0.0      # seconds before the ground is worth asking about
-	## What the air takes off it per metre: see `Ballistics`. A shell keeps its
-	## speed far better than a bullet does, but over twenty kilometres of
-	## artillery arc even this is the difference between hitting and not.
-	var drag := 0.00002
-
-	func _ready() -> void:
-		top_level = true
-		add_to_group("shells")
-		var mi := MeshInstance3D.new()
-		if rocket:
-			# a launcher round is a metre and a half of motor, and it is meant to
-			# be watched off the rails: body, nose and a burning throat
-			var body := CapsuleMesh.new()
-			body.radius = 0.16
-			body.height = 2.6
-			body.radial_segments = 8
-			body.rings = 2
-			var bm := StandardMaterial3D.new()
-			bm.albedo_color = Color(0.30, 0.31, 0.33)
-			bm.metallic = 0.5
-			bm.roughness = 0.55
-			body.material = bm
-			mi.mesh = body
-			mi.rotation.x = deg_to_rad(90.0)     # capsule is built along Y
-			var flame := MeshInstance3D.new()
-			var fm := SphereMesh.new()
-			fm.radius = 0.30
-			fm.height = 1.5
-			fm.radial_segments = 8
-			fm.rings = 3
-			var em := StandardMaterial3D.new()
-			em.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			em.albedo_color = Color(1.0, 0.72, 0.30)
-			fm.material = em
-			flame.mesh = fm
-			flame.position = Vector3(0, 0, 1.5)
-			flame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			add_child(flame)
-			if Effects.smoke_slot():
-				_has_smoke = true
-				var trail := Effects.trail_particles(Color(0.78, 0.78, 0.80), 1.6, 40)
-				trail.lifetime = 2.6
-				trail.emitting = true
-				add_child(trail)
-		else:
-			var sm := SphereMesh.new()
-			sm.radius = 0.35
-			sm.height = 0.7
-			sm.radial_segments = 6
-			sm.rings = 3
-			var m := StandardMaterial3D.new()
-			m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			m.albedo_color = Color(1.0, 0.75, 0.35)
-			sm.material = m
-			mi.mesh = sm
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(mi)
-		# The arc it flies, drawn: grey behind a rocket, a hot thread behind a
-		# shell, which until now was a dot you could not follow across the sky.
-		var rb: GeometryInstance3D = Effects.ribbon(Color(0.8, 0.8, 0.82, 0.4), 0.7, 4.0, 8.0) \
-			if rocket else Effects.ribbon(Color(1.0, 0.66, 0.3, 0.45), 0.3, 0.7, 6.0, true)
-		if rb != null:
-			add_child(rb)
-			_ribbon = rb
-		reset_physics_interpolation()
-
-	## The ribbon starts where the round does. Whoever makes one puts it in the
-	## tree first and at the muzzle second, and a strip begun in between runs
-	## from the middle of the world.
-	var _ribbon: GeometryInstance3D = null
-	var _ribbon_new := true
-
-	func _physics_process(delta: float) -> void:
-		if _ribbon_new:
-			_ribbon_new = false
-			if _ribbon != null:
-				_ribbon.call(&"clear")
-		var _ps := Sim.prof_at()
-		_fly(delta)
-		Sim.prof_end(&"fx.shell", _ps)
-
-	func _fly(delta: float) -> void:
-		life -= delta
-		var from := global_position
-		vel = Ballistics.step(from, vel, drag, delta, _flown)
-		var to := from + vel * delta
-		global_position = to
-		if rocket and vel.length_squared() > 4.0:
-			# nose follows the trajectory, so it arcs over rather than sliding
-			# sideways down the sky
-			var up_ref := Vector3.UP if absf(vel.normalized().y) < 0.98 else Vector3.FORWARD
-			look_at(to + vel, up_ref)
-		_flown += from.distance_to(to)
-		# A fuse does not arm at the muzzle. Without this a howitzer parked in a
-		# line of vehicles detonated its own round nine metres out, on the tank
-		# standing beside it, every single time it fired.
-		if _flown < arm_dist:
-			return
-		# Against the shared picture of what can be hit, and only what the step
-		# could reach is asked anything: see `Sim.hit_scan`.
-		Sim.hit_scan()
-		var pos: PackedVector3Array = Sim.hit_pos
-		var rad: PackedFloat32Array = Sim.hit_rad
-		var mid: Vector3 = (from + to) * 0.5
-		var fuse: float = blast * 0.4
-		var span: float = from.distance_to(to) * 0.5 + fuse
-		for i in pos.size():
-			var reach: float = rad[i] + span
-			if pos[i].distance_squared_to(mid) > reach * reach:
-				continue
-			var n: Variant = Sim.hit_nodes[i]
-			if not is_instance_valid(n) or n == shooter:
-				continue
-			if n.has_method("is_alive") and not n.is_alive():
-				continue
-			var np: Vector3 = n.global_position
-			if Geometry3D.get_closest_point_to_segment(np, from, to).distance_to(np) < rad[i] + fuse:
-				_burst(to)
-				return
-		# The ground is not asked about while the round is nowhere near it. An
-		# artillery arc spends most of a minute kilometres up, and that was two
-		# crossings into the extension a tick to be told so. Clearance cannot
-		# close faster than the round flies plus the ground rising under it at
-		# forty-five degrees, so a round with height in hand is left alone for
-		# the time that would take, less a margin.
-		_ground_in -= delta
-		if _ground_in > 0.0:
-			if life <= 0.0:
-				queue_free()
-			return
-		var bed := Sim.height_at(to.x, to.z)
-		var sea_b: float = Sim.sea_at(to.x, to.z)
-		var clear_by: float = to.y - maxf(bed, sea_b)
-		if clear_by > 400.0:
-			_ground_in = (clear_by - 250.0) / maxf(vel.length() * 2.0, 50.0)
-		if to.y <= sea_b and bed < sea_b:
-			# a shell striking the sea goes off at the surface
-			Effects.splash(get_tree().current_scene,
-				Vector3(to.x, sea_b, to.z), maxf(blast * 0.8, 5.0))
-			_burst(Vector3(to.x, sea_b, to.z))
-		elif to.y <= bed:
-			_burst(Vector3(to.x, bed, to.z))
-		elif life <= 0.0:
-			queue_free()
-
-	func _burst(at: Vector3) -> void:
-		if Sim.debug_weapons and has_meta("aim"):
-			var aim: Vector3 = get_meta("aim")
-			var org: Vector3 = get_meta("origin", at)
-			print("[shell] impact %.0f m from aim (range %.1f km); flew %.0f m, at=%s aim=%s life=%.1f" % [
-				Vector2(at.x - aim.x, at.z - aim.z).length(),
-				Vector2(aim.x - org.x, aim.z - org.z).length() * 0.001,
-				Vector2(at.x - org.x, at.z - org.z).length(),
-				str(at.round()), str(aim.round()), 140.0 - life])
-		if harmless:
-			var was_m: bool = Effects.mute_blast
-			Effects.mute_blast = true
-			Effects.explosion(get_tree().current_scene, at, blast)
-			Effects.mute_blast = was_m
-			queue_free()
-			return
-		Effects.explosion(get_tree().current_scene, at, blast)
-		# The fireball is not what a shell kills men with. A soldier is not in
-		# the list below -- he is not a radar contact -- so all he ever took was
-		# the explosion's own share, which reaches four fifths of the blast and
-		# falls away from the middle: a 105 killed inside ten metres and a
-		# forty inside four, and a gunship put round after round among men who
-		# walked out of it.
-		if frag > 0.0:
-			Effects._blast_infantry(get_tree().current_scene, at, frag)
-		for n in get_tree().get_nodes_in_group("hittable"):
-			if not is_instance_valid(n) or n == shooter:
-				continue
-			var d: float = n.global_position.distance_to(at)
-			if d < blast * 2.2 and n.has_method("take_hit"):
-				n.take_hit(damage * clampf(1.0 - d / (blast * 2.2), 0.15, 1.0),
-					shooter if is_instance_valid(shooter) else null)
-		queue_free()

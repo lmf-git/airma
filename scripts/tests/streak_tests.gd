@@ -512,7 +512,7 @@ func _run_drop_test() -> void:
 			if not is_instance_valid(mark_man) or not mark_man.alive:
 				break
 			mark_man.global_position = spot
-			if ch.fire_gunship(world, Soldier.chest_of(mark_man)):
+			if ch.battery.fire(world, Soldier.chest_of(mark_man)):
 				shots += 1
 			for fm in flying:
 				if is_instance_valid(fm):
@@ -529,7 +529,7 @@ func _run_drop_test() -> void:
 			", ".join(PackedStringArray(falls.map(func(f: float) -> String: return "%.0f" % f)))])
 		var dead: bool = not is_instance_valid(mark_man) or not mark_man.alive
 		print("[drop] chopper gunner: %d %s at a man in the street, he is %s" % [
-			shots, String(ch.gunship_gun().get("name", "rounds")), "dead" if dead else "still up"])
+			shots, String(ch.battery.gun().get("name", "rounds")), "dead" if dead else "still up"])
 		if not dead:
 			bad.append("the chopper gunner could not kill a man in the open")
 	_drop_seen.erase("_on")

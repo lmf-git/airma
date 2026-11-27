@@ -32,6 +32,9 @@ func parse_arg(a: String) -> bool:
 		_wreck_test = true
 	elif a == "--mortartest":
 		_mortar_test = true
+	elif a.begins_with("--stalltest="):
+		_stall_id = a.substr(12)
+		world.street_fight.skip_deploy = true
 	elif a == "--balltest":
 		_ball_test = true
 	elif a == "--boundstest":
@@ -489,7 +492,7 @@ func _run_prone_test() -> void:
 				# read as it leaves: it says where it stopped on the tick it frees itself
 				var ends: Array = []
 				if is_instance_valid(shot):
-					var rnd := shot as Effects.Tracer
+					var rnd := shot as Tracer
 					rnd.tree_exiting.connect(func() -> void: ends.append(rnd.ended_at))
 				for f in 300:
 					if not is_instance_valid(shot) or not ends.is_empty():
@@ -551,7 +554,7 @@ func _run_prone_test() -> void:
 	if spawned.is_empty():
 		bad.append("over the sill: no round came out")
 	else:
-		var r2 := spawned[0][0] as Effects.Tracer
+		var r2 := spawned[0][0] as Tracer
 		var from2: Vector3 = spawned[0][1]
 		if is_instance_valid(r2):
 			r2.tree_exiting.connect(func() -> void: ends2.append(r2.ended_at))
@@ -983,7 +986,7 @@ func tick_holdfire() -> void:
 func _tracers() -> Array:
 	var out: Array = []
 	for n in world.get_children():
-		if n is Effects.Tracer:
+		if n is Tracer:
 			out.append(n)
 	return out
 
@@ -1003,7 +1006,7 @@ func _hf_round(p: Aircraft, w: Walker, from: Vector3, dir: Vector3, carried: boo
 	var inside: bool = carried and absf(lf.z) <= hh.z and absf(lf.x) <= hh.x
 	Firearm.fire(world, w if inside else null, 1, g, from, dir, 0.0, 1.0, false,
 		p.linear_velocity if carried else Vector3.ZERO)
-	var mine: Effects.Tracer = null
+	var mine: Tracer = null
 	for t in _tracers():
 		if not before.has(t):
 			mine = t
@@ -1367,6 +1370,68 @@ func _run_mortar_test() -> void:
 		bad.append("one 60 mm round flattened a whole block")
 	tube.queue_free()
 	print("[mortar] RESULT: %s" % ("ok" if bad.is_empty() else "FAILED -- " + ", ".join(bad)))
+	world.get_tree().quit()
+#endregion
+
+
+#region --stalltest=
+## Call a strike onto a spot down the street and time every frame after it:
+## the worst frames, and what the profiler saw in them. Windowed, because a
+## stall from lights or shaders is the renderer's. --preset=cqb:foot
+## --stalltest=wp|tacnuke|stratnuke|carpet|strike
+var _stall_id := ""
+var _stall_t := -1.0
+var _stall_last := 0
+var _stall_frames: Array = []        # [usec, time since the call]
+var _stall_tags: Array = []
+
+func tick_stall_test() -> void:
+	if _stall_id == "" or not is_instance_valid(world.cqb) or not is_instance_valid(world.walker):
+		return
+	var now: int = Time.get_ticks_usec()
+	if _stall_t < 0.0:
+		_stall_t = 0.0
+		var w: Walker = world.walker
+		var fwd := Vector3(-sin(w.yaw), 0.0, -cos(w.yaw))
+		var far: float = 450.0 if _stall_id.ends_with("nuke") else 120.0
+		var spot: Vector3 = w.global_position + fwd * far
+		var ks = world.cqb.streaks
+		ks.bank[_stall_id] = 1
+		if _stall_id == "wp":
+			# a full-length strip, as the streak lays it at its longest
+			ks.wp_from = spot - fwd.cross(Vector3.UP) * 50.0
+			ks.picked("wp", spot + fwd.cross(Vector3.UP) * 50.0)
+		else:
+			ks.picked(_stall_id, spot)
+		Sim.profiling = true
+		Sim.prof_reset()
+		_stall_last = now
+		print("[stall] %s called %d m out" % [_stall_id, int(far)])
+		return
+	var dt: int = now - _stall_last
+	_stall_last = now
+	_stall_t += float(dt) / 1e6
+	_stall_frames.append([dt, _stall_t])
+	_stall_tags.append(Sim.prof_report().slice(0, 3))
+	Sim.prof_reset()
+	var span: float = 45.0 if _stall_id.ends_with("nuke") else 30.0
+	if _stall_t < span:
+		return
+	var idx: Array = range(_stall_frames.size())
+	idx.sort_custom(func(a, b): return int(_stall_frames[a][0]) > int(_stall_frames[b][0]))
+	var times: Array = []
+	for f in _stall_frames:
+		times.append(int(f[0]))
+	times.sort()
+	print("[stall] %d frames, median %.1f ms, 99th %.1f ms" % [times.size(),
+		times[times.size() >> 1] / 1000.0, times[int(times.size() * 0.99)] / 1000.0])
+	for k in idx.slice(0, 6):
+		var parts := PackedStringArray()
+		for r in _stall_tags[k]:
+			parts.append("%s %.1f" % [String(r[0]), float(r[1]) * 0.001])
+		print("[stall]   %.0f ms at %.1f s: %s" % [int(_stall_frames[k][0]) / 1000.0,
+			float(_stall_frames[k][1]), ", ".join(parts)])
+	_stall_id = ""
 	world.get_tree().quit()
 #endregion
 
@@ -1762,12 +1827,12 @@ func _tick_cqb_test(delta: float) -> void:
 				found = true
 				world.walker.global_position = stand
 				world.walker.on_floor = true
-				var began: bool = world.walker._begin_traverse(-across, false)
+				var began: bool = world.walker.climb._begin_traverse(-across, false)
 				var kind: String = world.walker._trav
-				var span: float = world.walker._trav_span
+				var span: float = world.walker.climb._trav_span
 				var steps := 0
 				while world.walker._trav != "" and steps < 600:
-					world.walker._traverse(1.0 / 120.0)
+					world.walker.climb._traverse(1.0 / 120.0)
 					steps += 1
 				print("[cqb] %-9s (top %.2f m): %s%s, %.2f s, ends %.2f m above where he started and %.2f m on" % [
 					String(want[0]), Obstacles.top_at(at.x, at.z) - stand.y,
@@ -1785,14 +1850,14 @@ func _tick_cqb_test(delta: float) -> void:
 			from_side.y = Sim.height_at(from_side.x, from_side.z)
 			world.walker.global_position = from_side
 			world.walker.on_floor = true
-			var took: bool = world.walker._begin_traverse(Vector3(0, 0, -1), false)
+			var took: bool = world.walker.climb._begin_traverse(Vector3(0, 0, -1), false)
 			var ticks := 0
 			world.walker.test_climb = 1.0
 			while (world.walker._wall >= 0 or world.walker._trav != "") and ticks < 6000:
 				if world.walker._wall >= 0:
-					world.walker._on_wall(1.0 / 120.0)
+					world.walker.climb._on_wall(1.0 / 120.0)
 				else:
-					world.walker._traverse(1.0 / 120.0)
+					world.walker.climb._traverse(1.0 / 120.0)
 				ticks += 1
 			world.walker.test_climb = 0.0
 			var up_y: float = world.walker.global_position.y
@@ -1826,21 +1891,21 @@ func _tick_cqb_test(delta: float) -> void:
 			var seen_l: Array = TownSet.ladder_at(world.walker.global_position)
 			var y0: float = world.walker.global_position.y
 			if not seen_l.is_empty():
-				world.walker._take_ladder(seen_l)
-			var on_it: bool = world.walker._ladder
+				world.walker.climb._take_ladder(seen_l)
+			var on_it: bool = world.walker.climb._ladder
 			world.walker.test_climb = 1.0
 			var worst_h := 0.0
 			var worst_f := 0.0
 			var lt := 0
 			while (world.walker._wall >= 0 or world.walker._trav != "") and lt < 6000:
 				if world.walker._wall >= 0:
-					world.walker._on_wall(1.0 / 120.0)
+					world.walker.climb._on_wall(1.0 / 120.0)
 					if lt > 60 and world.walker._wall >= 0:
 						var le: Dictionary = world.walker.body.rig_error()
 						worst_h = maxf(worst_h, maxf(float(le["hand_l"]), float(le["hand_r"])))
 						worst_f = maxf(worst_f, maxf(float(le["foot_l"]), float(le["foot_r"])))
 				else:
-					world.walker._traverse(1.0 / 120.0)
+					world.walker.climb._traverse(1.0 / 120.0)
 				lt += 1
 			world.walker.test_climb = 0.0
 			print("[cqb] ladder: found=%s, on it=%s, %.1f s, ends %.1f m up of %.1f; worst hand %.0f mm and worst foot %.0f mm off the face" % [
@@ -1950,7 +2015,7 @@ func _tick_cqb_test(delta: float) -> void:
 				["dmr", 0.40, true], ["sniper", 1.0, false], ["fifty", 1.0, true], ["fifty", 3.0, false]]:
 			var slab: int = Obstacles.add_box(sky + Vector3(0, -2.0, -20.0), 3.0, 4.0, float(pcase[1]) * 0.5)
 			var pg: Dictionary = Firearm.spec(String(pcase[0]))
-			var rd: Effects.Tracer = Effects.bullet(world, sky, Vector3(0, 0, -float(pg["muzzle"])), null,
+			var rd: Tracer = Effects.bullet(world, sky, Vector3(0, 0, -float(pg["muzzle"])), null,
 				float(pg["dmg"]), 0, 1.0, 1.4, Firearm.drag_of(pg), Firearm.pen_of(pg))
 			var went := false
 			for tick in 40:
@@ -1983,7 +2048,7 @@ func _tick_cqb_test(delta: float) -> void:
 					line_up[mi2].health = 100.0
 				Sim._hit_tick = -1
 				var mg: Dictionary = Firearm.spec(String(mcase[0]))
-				var mr: Effects.Tracer = Effects.bullet(world, sky, Vector3(0, 0, -300.0), null, 1.0, 0,
+				var mr: Tracer = Effects.bullet(world, sky, Vector3(0, 0, -300.0), null, 1.0, 0,
 					1.0, 1.4, 0.0, Firearm.pen_of(mg))
 				for tick2 in 30:
 					if mr.is_queued_for_deletion():
@@ -2016,7 +2081,7 @@ func _tick_cqb_test(delta: float) -> void:
 					world.walker.global_position = sky + Vector3(1.0, -0.9, -12.0)
 				Sim._hit_tick = -1
 				for shot in 6:
-					var sr: Effects.Tracer = Effects.bullet(world, sky, Vector3(0, 0, -600.0), null, 26.0,
+					var sr: Tracer = Effects.bullet(world, sky, Vector3(0, 0, -600.0), null, 26.0,
 						side_n, 1.0, 1.4, 0.0, 0.3)
 					for tick3 in 12:
 						if sr.is_queued_for_deletion():
@@ -2284,7 +2349,7 @@ func _run_cqb_fix(dir: String) -> void:
 	var keep: Vector3 = w.global_position
 	w.global_position = wall0 + Vector3(2.8, 0.0, 0.2 + 0.42 + 0.15)
 	w.global_position.y = Sim.height_at(w.global_position.x, w.global_position.z)
-	var vaulted: bool = w._begin_traverse(Vector3(0, 0, -1), false)
+	var vaulted: bool = w.climb._begin_traverse(Vector3(0, 0, -1), false)
 	print("[cqbfix] at the window: %s" % (w._trav if vaulted else "nothing"))
 	if not vaulted or w._trav != "vault":
 		bad.append("could not vault through the window (%s)" % (w._trav if vaulted else "nothing"))

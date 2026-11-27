@@ -152,8 +152,8 @@ func share(by: Node, r: Node) -> void:
 	if is_instance_valid(by):
 		tm = int(by.get("team")) if "team" in by else (int(by.get("side")) if "side" in by else 1)
 	var d := {"by": _who_of(by), "team": link.lt(tm)}
-	if r is Aircraft.Shell:
-		var sh := r as Aircraft.Shell
+	if r is GunShell:
+		var sh := r as GunShell
 		d["k"] = "shell"
 		d["o"] = sh.global_position
 		d["v"] = sh.vel
@@ -271,7 +271,7 @@ func net_launch(d: Dictionary) -> void:
 	drawn += 1
 	match String(d.get("k", "")):
 		"shell":
-			var sh := Aircraft.Shell.new()
+			var sh := GunShell.new()
 			sh.harmless = true
 			sh.vel = d.get("v", Vector3.ZERO)
 			sh.blast = float(d.get("b", 8.0))

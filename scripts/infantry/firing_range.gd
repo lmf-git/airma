@@ -331,9 +331,9 @@ func _exit_tree() -> void:
 ## marked with what they are and followed.
 func _on_round(shot: Node3D, shooter: Node) -> void:
 	var w: Variant = world.get("walker") if world != null else null
-	if w == null or shooter != w or not (shot is Effects.Tracer):
+	if w == null or shooter != w or not (shot is Tracer):
 		return
-	var t := shot as Effects.Tracer
+	var t := shot as Tracer
 	if not t.small:
 		return
 	var wk: Walker = w
@@ -381,7 +381,7 @@ func _physics_process(delta: float) -> void:
 			r["live"] = false
 			_dirty = true
 			continue
-		var t := n as Effects.Tracer
+		var t := n as Tracer
 		var p: Vector3 = t.global_position
 		if t.ended_at != Vector3.INF:
 			p = t.ended_at
@@ -552,7 +552,7 @@ func _process(delta: float) -> void:
 	if not ridden.is_empty():
 		var rn: Variant = ridden["node"]
 		if is_instance_valid(rn):
-			(rn as Effects.Tracer).show_round(true)
+			(rn as Tracer).show_round(true)
 	var cam: Variant = world.get("cam") if world != null else null
 	var riding: bool = cam != null and is_instance_valid(cam) and (cam as Node).call("riding") \
 		and (not ridden.is_empty() or _slowed)

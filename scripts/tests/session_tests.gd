@@ -1101,10 +1101,10 @@ func tick_mptest(delta: float) -> void:
 		var w: Walker = world.walker
 		if _mp_act == 0 and _mp_cqb_t > 2.0:
 			_mp_act = 1
-			w._throw_flash = false
-			w._throw()
-			w._throw_flash = true
-			w._throw()
+			w.arms._throw_flash = false
+			w.arms._throw()
+			w.arms._throw_flash = true
+			w.arms._throw()
 			Firearm.rocket(world, w, w.side, Firearm.spec("law"), w.global_position + Vector3(0, 1.6, 0),
 				Vector3(0, 0.05, -1).normalized())
 			print("[mp] join: threw a grenade and a flashbang, fired a rocket")
