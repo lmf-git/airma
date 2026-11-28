@@ -448,6 +448,8 @@ func _ready() -> void:
 	# the slot depends on the roster, which arrives after the mission starts
 	net.roster_changed.connect(session.offset_for_peer)
 	menu.mission_changed.connect(session.on_lobby_mission)
+	menu.mission_changed.connect(func(_m: String) -> void: controls.menu_refocus())
+	menu.town_changed.connect(func(_i: int) -> void: controls.menu_refocus())
 	menu.join_requested.connect(session.join_game)
 	menu.side_changed.connect(func(sd: int) -> void:
 		if net != null:
@@ -492,12 +494,58 @@ func _ready() -> void:
 		await _paint("Laying the ground", 0.97,
 			"%d chunks left" % terrain.pending_count())
 		settle += 1
+	# The place the hangar opens over, got ready while the loading screen is
+	# still up: its fine picture from orbit (off the disk after the first time)
+	# and the ground there, so the first look at it is not a smear that
+	# sharpens. Only for a plain start; a command line has its own business.
+	if Sim.globe and is_instance_valid(planet) and DisplayServer.get_name() != "headless" \
+			and (OS.get_cmdline_user_args().is_empty() or "--intro" in OS.get_cmdline_user_args()):
+		var tgt: Vector3 = controls.mission_target(String(menu.mission_id))
+		var fd: Vector3 = Sim.chart_to_dir(tgt.x, tgt.z)
+		terrain.recentre(Vector3(tgt.x, maxf(Sim.height_at(tgt.x, tgt.z), Sim.sea_at(tgt.x, tgt.z)) + 2.0, tgt.z))
+		var t_ready := Time.get_ticks_msec()
+		while Time.get_ticks_msec() - t_ready < 20000 \
+				and (not planet.focus_ready(fd) or terrain.pending_count() > 0):
+			planet.prepare_focus(fd)
+			terrain.flush_pending(48)
+			await _paint("Looking down from orbit", 0.985,
+				"%d chunks left" % terrain.pending_count() if terrain.pending_count() > 0 else "")
+		print("[boot] orbit view ready in %d ms" % (Time.get_ticks_msec() - t_ready))
+		# ...and everything the hangar can send you to, kept on disk, so
+		# picking it there is a read and not a bake: the painted ground of
+		# every region, and each town's (and the field's) picture from orbit.
+		# The first start pays for it here, with the screen still up; the
+		# rest find it all made.
+		var t_warm := Time.get_ticks_msec()
+		var spots: Array = _mask_spots.duplicate()
+		for i in spots.size():
+			if not terrain.mask_on_disk(spots[i]):
+				await _paint("Painting the country", 0.988, "region %d of %d" % [i + 1, spots.size()])
+				terrain.prepare_mask(spots[i])
+		var dirs: Array = [Sim.chart_to_dir(0.0, 0.0), Sim.chart_to_dir(-600.0, 7000.0)]
+		for st in scenery.sites:
+			var sc: Vector2 = st["c"]
+			dirs.append(Sim.chart_to_dir(sc.x, sc.y))
+		for i in dirs.size():
+			if planet.on_disk(dirs[i]):
+				continue
+			planet.warm(dirs[i])
+			while planet.warming():
+				await _paint("Mapping from orbit", 0.992, "%d of %d" % [i + 1, dirs.size()])
+		print("[boot] cache warmed in %d ms" % (Time.get_ticks_msec() - t_warm))
+		# the guns' sounds, made once: the street fight asked for them on the
+		# frame it started, three quarters of a tenth of a second of it
+		await _paint("Loading the armoury", 0.995)
+		Sfx.warm(Firearm.SOUNDS)
 	await _paint("Ready", 1.0)
 	booting = false
 	# The world first, behind the screen that is still up. No turntable and no
 	# vehicle on it: the hangar opens on the country, and a model only appears
 	# once somebody has asked to look at one.
-	cine_cam.current = true
+	# The hangar stands over the planet seen from orbit, or (off the round
+	# planet) over the flypast.
+	if not controls.menu_backdrop():
+		cine_cam.current = true
 	preview.visible = false
 	get_viewport().disable_3d = false
 	if _loading != null:
@@ -672,7 +720,12 @@ func _environment() -> void:
 func _set_preview(id: String) -> void:
 	# Asking to see a vehicle is what ends the flypast. Until then the hangar
 	# stands over the country with nothing on the turntable.
-	if not booting and cine_cam != null and cine_cam.current:
+	if not booting and is_instance_valid(sat_view) and sat_view.in_menu():
+		sat_view.end_menu(false)
+		_stand_rig()
+		menu_cam.current = true
+		preview.visible = true
+	elif not booting and cine_cam != null and cine_cam.current:
 		# The chart may have moved since the rig was stood up.
 		_stand_rig()
 		menu_cam.current = true
@@ -756,6 +809,8 @@ func _process(delta: float) -> void:
 			eye = _me_or_player()
 		if eye != null:
 			weather.thin_air(_env, Sim.altitude(eye.global_position), _psm)
+			if _psm != null:
+				_psm.set_shader_parameter("sky_up", Sim.up_at(eye.global_position))
 		# the satellite view with the air cleared away: the ground as a map
 		# would show it, no haze over it
 		if SatView.clear_air and is_instance_valid(sat_view) and sat_view.active():
@@ -872,7 +927,15 @@ func _tick_world(delta: float) -> void:
 				lead *= 1600.0 / far_enough
 			# Nothing to rebuild while the body has it: the chunks are hidden,
 			# and the whole point of the sphere is not to be paying for them.
-			if not is_instance_valid(planet) or not planet.dormant:
+			var focus: Vector3 = _sat_focus()
+			if focus != Vector3.INF:
+				# The satellite view is holding over somewhere, or coming
+				# down onto it: the ground is built there now, hidden under
+				# the planet body, so it is standing when the view arrives.
+				var _pf2 := Sim.prof_at()
+				terrain.recentre(focus)
+				Sim.prof_end(&"terrain.recentre", _pf2)
+			elif not is_instance_valid(planet) or not planet.dormant:
 				var _pr := Sim.prof_at()
 				terrain.recentre(eye3.global_position + lead)
 				Sim.prof_end(&"terrain.recentre", _pr)
@@ -882,11 +945,14 @@ func _tick_world(delta: float) -> void:
 		# up until their replacements are in, so falling behind costs memory
 		# rather than holes in the ground.
 		terrain.flush_pending(24)
+		var g_eye: Vector3 = _sat_focus()
+		if g_eye == Vector3.INF and eye3 != null:
+			g_eye = eye3.global_position
 		if is_instance_valid(obstacles) and eye3 != null:
-			obstacles.follow(eye3.global_position)
+			obstacles.follow(g_eye)
 		# and the roads painted sharp round wherever you are
 		if eye3 != null:
-			terrain.follow_roads(eye3.global_position)
+			terrain.follow_roads(g_eye)
 		# and the painted ground follows you to whichever part of the world you
 		# are in, so a town three hundred kilometres from home has streets and
 		# made ground under it like any other
@@ -895,12 +961,13 @@ func _tick_world(delta: float) -> void:
 			var bd := 1e18
 			for spot in _mask_spots:
 				var sp: Vector2 = spot
-				var dd: float = Vector2(eye3.global_position.x - sp.x,
-					eye3.global_position.z - sp.y).length_squared()
+				var dd: float = Vector2(g_eye.x - sp.x, g_eye.z - sp.y).length_squared()
 				if dd < bd:
 					bd = dd
 					best = sp
 			terrain.set_mask_centre(best)
+		if is_instance_valid(terrain):
+			terrain.pump_mask()
 	vision_fx.update_underwater(delta)
 	vision_fx.update_flash(delta)
 	if _nvg != null and _nvg.visible:
@@ -983,7 +1050,7 @@ func _tick_world(delta: float) -> void:
 	if is_instance_valid(hud) and is_instance_valid(cam) and running:
 		hud.flight_page = (cam.mode == ChaseCamera.Mode.COCKPIT) \
 			and not is_instance_valid(cam.weapon_cam)
-	if boarding:
+	if boarding and not (is_instance_valid(sat_view) and sat_view.in_intro()):
 		crew.tick_boarding(delta)
 	if running and is_instance_valid(player) and not boarding and not on_foot:
 		_watch_landing(delta)
@@ -1015,6 +1082,9 @@ func set_weather(id: String) -> void:
 		weather.apply(id, _env, _sun, _fill, _psm)
 
 func _start(id: String, mission: String) -> void:
+	# Off the hangar's backdrop; the way down from it is `WorldControls.match_intro`.
+	if is_instance_valid(sat_view) and sat_view.in_menu():
+		sat_view.end_menu(true)
 	# a "veh:" selection means the player starts in the driver's seat instead
 	var drive_kind := ""
 	var ship_kind := ""
@@ -1178,6 +1248,8 @@ func _start(id: String, mission: String) -> void:
 		if boarding:
 			crew.end_boarding()
 		session.foot_at_field()
+	# down out of orbit onto it, once the cameras are where they are going
+	controls.match_intro.call_deferred()
 
 
 ## The player's aircraft, built and wired to every page that reads it. Also
@@ -1263,6 +1335,16 @@ func _reset_interp(n: Node3D) -> void:
 	if is_instance_valid(n):
 		n.reset_physics_interpolation()
 
+
+## Where the ground should be built for, while the satellite view is high over
+## a place it is holding on or coming down to: a few metres over the ground
+## there. INF otherwise, and the ground follows the eye as usual.
+func _sat_focus() -> Vector3:
+	if not is_instance_valid(sat_view) or not sat_view.current \
+			or sat_view.focus_dir == Vector3.ZERO or sat_view.view_height() < SatView.FOCUS_BELOW:
+		return Vector3.INF
+	var q: Vector2 = Sim.dir_to_chart(sat_view.focus_dir)
+	return Vector3(q.x, maxf(Sim.height_at(q.x, q.y), Sim.sea_at(q.x, q.y)) + 2.0, q.y)
 
 func _on_mode_finished(_win: bool, _text: String) -> void:
 	pass

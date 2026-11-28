@@ -55,6 +55,13 @@ func pip_texture() -> Texture2D:
 	return _vp.get_texture() if _vp != null else null
 
 func _ready() -> void:
+	# Last in the frame. A gunship called in from the street came up and put
+	# the gunner on the guns from the match's own `_process`, which runs after
+	# this one: the page went up and its picture was drawn that frame from a
+	# camera nobody had placed yet -- at the world's origin, under the ground,
+	# looking whichever way it was made. Placed last, it is where it is
+	# looking before anything is drawn from it.
+	process_priority = 1000
 	_font = ThemeDB.fallback_font
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	custom_minimum_size = SIZE
@@ -224,7 +231,39 @@ func set_fullscreen(on: bool) -> void:
 ## The second camera renders the whole world, sky and cloud and all. It was
 ## left rendering every frame whether the page was up or not -- a second view
 ## of the world drawn into nothing for the whole of every sortie.
+## The picture is held dark from the moment the page goes up until the camera
+## has been placed once since: see `_ready`.
+var _placed := false
+
+## Put the camera on the head and pointing where the head points, now. Called
+## every frame, and straight away by whatever has just put the page up or laid
+## the head somewhere, so the first frame drawn is from the right place even
+## when that happened after this frame's `_process`.
+func place_now() -> void:
+	if platform == null or not is_instance_valid(platform) or _cam == null:
+		return
+	if platform is Aircraft and plane() == null:
+		return
+	var origin := _head_origin()
+	var dir := _aim_dir()
+	if dir.length() < 0.5:
+		return
+	_cam.global_position = origin
+	var up := Vector3.UP if absf(dir.y) < 0.985 \
+		else _mount_xf(platform).basis.y
+	_cam.look_at(origin + dir * 1000.0, up)
+	if not _placed:
+		_placed = true
+		if _tex != null:
+			_tex.self_modulate = Color.WHITE
+
 func _render_when_up() -> void:
+	if not (active or _pip):
+		_placed = false
+	if (active or _pip) and not _placed:
+		place_now()
+	if _tex != null:
+		_tex.self_modulate = Color.WHITE if _placed else Color.BLACK
 	if _vp != null:
 		_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if (active or _pip) \
 			else SubViewport.UPDATE_DISABLED
@@ -740,14 +779,9 @@ func _process(delta: float) -> void:
 		_stow()
 		return
 	_t += delta
-	var origin := _head_origin()
-	var dir := _aim_dir()
 	_cam.fov = lerpf(_cam.fov, ZOOMS[zoom_step], clampf(delta * 8.0, 0.0, 1.0))
-	_cam.global_position = origin
-	var holder: Node3D = platform
-	var up := Vector3.UP if absf(dir.y) < 0.985 or holder == null \
-		else _mount_xf(holder).basis.y
-	_cam.look_at(origin + dir * 1000.0, up)
+	place_now()
+	var origin := _head_origin()
 	if not active:
 		# only the corner panel is watching: the picture, and nothing the
 		# page does with it

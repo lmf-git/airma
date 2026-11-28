@@ -11,6 +11,8 @@ signal join_requested(id: String, address: String)
 signal resume_requested()
 signal settings_requested()
 signal side_changed(side: int)
+## A town picked for a street fight: the hangar's satellite view goes to it.
+signal town_changed(i: int)
 
 const MISSIONS := [
 	["takeoff", "RUNWAY START", "No threats. Cold on runway 36 — firewall it, rotate around 150 kt, gear up with G."],
@@ -206,7 +208,9 @@ func _ready() -> void:
 	_cqb_row.visible = false
 	_mode_box.add_child(_cqb_row)
 	_cqb_town = _cqb_pick("TOWN", [])
-	_cqb_town.item_selected.connect(func(i: int): CqbMatch.town = _cqb_town.get_item_id(i))
+	_cqb_town.item_selected.connect(func(i: int):
+		CqbMatch.town = _cqb_town.get_item_id(i)
+		town_changed.emit(CqbMatch.town))
 	# how many a side: ours, the player among them, and theirs
 	var sizes: Array = []
 	for n in CqbMatch.SIZES:

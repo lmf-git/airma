@@ -13,6 +13,7 @@ func _init(w: World) -> void:
 # -------------------------------------------------------------- command line
 func parse() -> void:
 	var preset := ""
+	var intro := false
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--preset="):
 			preset = a.substr(9)
@@ -58,6 +59,8 @@ func parse() -> void:
 			if not OS.has_feature("headless"):
 				DisplayServer.window_set_vsync_mode(
 					DisplayServer.VSYNC_DISABLED)
+		elif a == "--intro":
+			intro = true
 		elif a == "--debugweapons":
 			Sim.debug_weapons = true
 		elif a.begins_with("--orbit="):
@@ -69,6 +72,9 @@ func parse() -> void:
 			if world.harness == null:
 				world.harness = TestHarness.new(world)
 			world.harness.parse_arg(a)
+	# a harness run, a screenshot or a preset goes straight in
+	if (world.harness != null or preset != "" or world._shot != "") and not intro:
+		SatView.intro_on = false
 	if world.net_host:
 		world.session.host_game(world.menu.jet_id, "")
 		# from the command line there is nobody to press LAUNCH

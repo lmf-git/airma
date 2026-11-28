@@ -162,7 +162,9 @@ uniform vec3 tarmac : source_color = vec3(0.135, 0.133, 0.140);
 // red the asphalt, green the kerb, blue the markings, each as a distance to its
 // edge with the edge at 0.5 (`road_paint` in raster.rs). Two squares, the near one
 // fine enough for the lines and the far one only for the asphalt and kerbs;
-// past both, the coarse mask above. Off while `_on` is 0.
+// past both, the coarse mask above. `_on` is how much of each to take (0 is
+// off): `Terrain.follow_roads` fades it in when a square is first painted and
+// out as the eye climbs past the height it is good for, so nothing snaps.
 uniform sampler2D road_near : filter_linear_mipmap, repeat_disable;
 uniform vec2 road_near_centre = vec2(0.0);
 uniform float road_near_half = 256.0;
@@ -171,6 +173,12 @@ uniform sampler2D road_mid : filter_linear_mipmap, repeat_disable;
 uniform vec2 road_mid_centre = vec2(0.0);
 uniform float road_mid_half = 1024.0;
 uniform float road_mid_on = 0.0;
+// The widest, at four metres a texel: only the asphalt, but sharp streets out
+// to a few kilometres instead of the coarse mask's smear.
+uniform sampler2D road_far : filter_linear_mipmap, repeat_disable;
+uniform vec2 road_far_centre = vec2(0.0);
+uniform float road_far_half = 4096.0;
+uniform float road_far_on = 0.0;
 uniform vec3 kerb_col : source_color = vec3(0.46, 0.45, 0.43);
 uniform vec3 paint_col : source_color = vec3(0.86, 0.85, 0.80);
 // Concrete and hardstanding, not wet earth. At 0.335 this was darker than the
@@ -377,6 +385,24 @@ void vertex() {
 	wnrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
 }
 
+// How much of a painted square to take at `ruv`: all of it in the middle,
+// thinning out to nothing at its edge. The edge is a rounded square, not the
+// square itself, so where the sharp roads give way to the coarser ones is a
+// soft band and not a straight line with corners.
+float road_w(vec2 ruv, float inner, float on) {
+	vec2 q = abs(ruv - vec2(0.5)) * 2.0;
+	q *= q;
+	float edge = sqrt(sqrt(q.x * q.x + q.y * q.y));
+	return on * (1.0 - smoothstep(inner, 1.0, edge));
+}
+
+// Each channel is a distance to its edge, which is at 0.5: cut it there, as
+// soft as a pixel on the screen and no softer.
+vec4 road_cut(vec4 r) {
+	vec4 fw = max(fwidth(r), vec4(0.004)) * 0.75;
+	return smoothstep(vec4(0.5) - fw, vec4(0.5) + fw, r);
+}
+
 void fragment() {
 	if (ground_fade < 0.999) {
 		float ign = fract(52.9829189 * fract(dot(FRAGCOORD.xy,
@@ -436,28 +462,29 @@ void fragment() {
 	float kerb_amt = 0.0;
 	float paint_amt = 0.0;
 	float cam_d = length(VERTEX);
-	if (road_mid_on > 0.5) {
-		vec2 ruv = (wpos.xz - road_mid_centre) / (road_mid_half * 2.0) + vec2(0.5);
-		float edge = max(abs(ruv.x - 0.5), abs(ruv.y - 0.5)) * 2.0;
-		if (edge < 1.0) {
-			float w = 1.0 - smoothstep(0.85, 1.0, edge);
-			// each channel a distance to its edge, which is at 0.5: cut it
-			// there, as soft as a pixel on the screen and no softer
-			vec4 r = texture(road_mid, ruv);
-			vec4 fw = max(fwidth(r), vec4(0.004)) * 0.75;
-			vec4 cv = smoothstep(vec4(0.5) - fw, vec4(0.5) + fw, r);
+	if (road_far_on > 0.001) {
+		vec2 ruv = (wpos.xz - road_far_centre) / (road_far_half * 2.0) + vec2(0.5);
+		float w = road_w(ruv, 0.55, road_far_on);
+		if (w > 0.0) {
+			vec4 cv = road_cut(texture(road_far, ruv));
 			road_amt = mix(road_amt, cv.r, w);
 			kerb_amt = mix(kerb_amt, cv.g, w);
 		}
 	}
-	if (road_near_on > 0.5) {
+	if (road_mid_on > 0.001) {
+		vec2 ruv = (wpos.xz - road_mid_centre) / (road_mid_half * 2.0) + vec2(0.5);
+		float w = road_w(ruv, 0.65, road_mid_on);
+		if (w > 0.0) {
+			vec4 cv = road_cut(texture(road_mid, ruv));
+			road_amt = mix(road_amt, cv.r, w);
+			kerb_amt = mix(kerb_amt, cv.g, w);
+		}
+	}
+	if (road_near_on > 0.001) {
 		vec2 ruv = (wpos.xz - road_near_centre) / (road_near_half * 2.0) + vec2(0.5);
-		float edge = max(abs(ruv.x - 0.5), abs(ruv.y - 0.5)) * 2.0;
-		if (edge < 1.0) {
-			float w = 1.0 - smoothstep(0.8, 1.0, edge);
-			vec4 r = texture(road_near, ruv);
-			vec4 fw = max(fwidth(r), vec4(0.004)) * 0.75;
-			vec4 cv = smoothstep(vec4(0.5) - fw, vec4(0.5) + fw, r);
+		float w = road_w(ruv, 0.7, road_near_on);
+		if (w > 0.0) {
+			vec4 cv = road_cut(texture(road_near, ruv));
 			road_amt = mix(road_amt, cv.r, w);
 			kerb_amt = mix(kerb_amt, cv.g, w);
 			// the lines only as near as they can be made out
@@ -623,21 +650,20 @@ const MASK_HALF := 18000.0            # and how far that box reaches
 var mask_centre := Vector2.ZERO
 
 func _bake_ground_mask() -> ImageTexture:
-	var n := MASK_N
 	var t0 := Time.get_ticks_msec()
-	var key := "ground_mask_%d_%d" % [int(mask_centre.x), int(mask_centre.y)]
-	var cached: Variant = WorldBake.get_baked(key)
-	if cached is PackedByteArray and (cached as PackedByteArray).size() == n * n * 2:
-		return _mask_texture(cached, n, t0)
-	# The shapes, then one call. Sixteen million texels against nine thousand
-	# capsules is the kind of arithmetic there is no point doing anywhere else:
-	# the extension buckets the shapes by row and fills the rows across every
-	# core, where this was a pair of nested loops per capsule in script.
+	var shapes: Array = _mask_shapes(mask_centre)
+	var img: Image = _mask_image(mask_centre, shapes)
+	return _mask_texture(img, t0)
+
+## The towns and roads that reach into the box round `c`, for the rasteriser.
+## Read on the main thread (they are the road network's), cheap next to the
+## sixteen million texels they become.
+func _mask_shapes(c: Vector2) -> Array:
 	var discs := PackedFloat32Array()      # x, z, solid, fade, channel
 	for pad in Sim.roads.town_pads:
 		var pc: Vector2 = pad["c"]
 		var pr: float = pad["r"]
-		if not _in_box(pc, pr * 1.4):
+		if not _in_box_of(c, pc, pr * 1.4):
 			continue
 		discs.append_array(PackedFloat32Array([pc.x, pc.y, pr * 1.02, pr * 1.32, 1.0]))
 	var caps := PackedFloat32Array()       # ax, az, bx, bz, solid, fade, channel
@@ -649,45 +675,111 @@ func _bake_ground_mask() -> ImageTexture:
 		for r in (src[0] as Array):
 			var a: Vector2 = r[0]
 			var b: Vector2 = r[1]
-			if not _in_box(a, reach) and not _in_box(b, reach):
+			if not _in_box_of(c, a, reach) and not _in_box_of(c, b, reach):
 				continue
 			caps.append_array(PackedFloat32Array([a.x, a.y, b.x, b.y,
 				solid, fade, 0.0]))
-	var made: Array = Sim.native.ground_mask(discs, caps, n, MASK_HALF,
-		mask_centre)
-	var buf: PackedByteArray = made[0]
-	var cover: Vector2 = made[1]
-	stats["mask_road_px"] = int(cover.x)
-	stats["mask_town_px"] = int(cover.y)
-	stats["mask_m_per_texel"] = snappedf(MASK_HALF * 2.0 / float(n), 0.01)
-	WorldBake.put(key, buf)
-	return _mask_texture(buf, n, t0)
+	return [discs, caps]
 
-func _mask_texture(buf: PackedByteArray, n: int, t0: int) -> ImageTexture:
-	stats["mask_ms"] = Time.get_ticks_msec() - t0
+## The mask round `c`, mipmapped, off the disk if it has been made before and
+## rasterised (and kept) if not. Safe on a worker. Kept as a file of its own
+## per centre rather than in the world bake, which is read whole into memory:
+## every region's thirty-odd megabytes were being carried for the session.
+const MASK_CACHE := "user://mask_cache"
+static var _mask_sig := ""
+
+static func mask_path(c: Vector2) -> String:
+	if _mask_sig == "":
+		_mask_sig = WorldBake.signature().substr(0, 16)
+	return "%s/%s_%d_%d_%d.bin" % [MASK_CACHE, _mask_sig, MASK_N, int(c.x), int(c.y)]
+
+func _mask_image(c: Vector2, shapes: Array) -> Image:
+	var n := MASK_N
+	var path := mask_path(c)
+	var buf := PackedByteArray()
+	if FileAccess.file_exists(path):
+		var f := FileAccess.open_compressed(path, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+		if f != null:
+			var sz: int = f.get_32()
+			buf = f.get_buffer(sz)
+			f.close()
+	if buf.size() != n * n * 2:
+		var made: Array = Sim.native.ground_mask(shapes[0], shapes[1], n, MASK_HALF, c)
+		buf = made[0]
+		var cover: Vector2 = made[1]
+		stats["mask_road_px"] = int(cover.x)
+		stats["mask_town_px"] = int(cover.y)
+		DirAccess.make_dir_recursive_absolute(MASK_CACHE)
+		var w := FileAccess.open_compressed(path + ".part", FileAccess.WRITE, FileAccess.COMPRESSION_ZSTD)
+		if w != null:
+			w.store_32(buf.size())
+			w.store_buffer(buf)
+			w.close()
+			DirAccess.rename_absolute(path + ".part", path)
+	stats["mask_m_per_texel"] = snappedf(MASK_HALF * 2.0 / float(n), 0.01)
 	var img := Image.create_from_data(n, n, false, Image.FORMAT_RG8, buf)
+	return img
+
+## Made (or read back) ahead of time, for the loading screen: the box round
+## `c` is on disk afterwards, so moving the painted ground there is a read.
+func mask_on_disk(c: Vector2) -> bool:
+	return FileAccess.file_exists(mask_path(c))
+
+func prepare_mask(c: Vector2) -> void:
+	if not mask_on_disk(c):
+		_mask_image(c, _mask_shapes(c))
+
+func _mask_texture(img: Image, t0: int) -> ImageTexture:
 	# A second 33 MB copy is only worth carrying when something is going to
 	# measure it; in a normal session the GPU has the only copy it needs.
 	if OS.has_feature("headless") or OS.is_debug_build():
 		mask_img = img.duplicate()      # un-mipmapped, for the harness
-	img.generate_mipmaps()
+	if not img.has_mipmaps():
+		img.generate_mipmaps()
+	stats["mask_ms"] = Time.get_ticks_msec() - t0
 	return ImageTexture.create_from_image(img)
 
-## Move the painted box to another part of the world. Cheap when it is already
-## there; a re-bake and a texture swap when it is not, and the result is kept on
-## disk per centre so each region is only ever rasterised once.
+## Move the painted box to another part of the world. Read (or rasterised) and
+## mipmapped on a worker, and swapped in -- picture and centre together -- once
+## it is ready: done in line it was a second and more of frozen screen, four
+## the first time, every time the view went to another region.
+var _mask_task := -1
+var _mask_want := Vector2.INF
+var _mask_ready: Image = null
+var _mask_t0 := 0
+
 func set_mask_centre(c: Vector2) -> void:
-	if mask_centre.distance_to(c) < 1.0 or _mat == null:
+	if _mat == null:
 		return
-	# Timed for the same reason the chart move is: it happens while you are
-	# flying, it is sixteen million texels, and nothing was watching it.
-	var t0 := Time.get_ticks_msec()
-	mask_centre = c
+	if mask_centre.distance_to(c) < 1.0 and _mask_task < 0:
+		return
+	if _mask_task >= 0:
+		return            # one at a time; asked again next frame if still wanted
+	if _mask_want.distance_to(c) < 1.0 and _mask_ready != null:
+		return
+	_mask_want = c
+	_mask_t0 = Time.get_ticks_msec()
+	var shapes: Array = _mask_shapes(c)
+	_mask_task = WorkerThreadPool.add_task(func() -> void:
+		var img: Image = _mask_image(c, shapes)
+		img.generate_mipmaps()
+		_mask_ready = img, true, "ground mask")
+
+## Swap a finished mask in. Called every frame.
+func pump_mask() -> void:
+	if _mask_task < 0 or not WorkerThreadPool.is_task_completed(_mask_task):
+		return
+	WorkerThreadPool.wait_for_task_completion(_mask_task)
+	_mask_task = -1
+	var img: Image = _mask_ready
+	_mask_ready = null
+	if img == null or _mat == null:
+		return
+	mask_centre = _mask_want
 	_mat.set_shader_parameter("mask_centre", mask_centre)
-	_mat.set_shader_parameter("ground_mask", _bake_ground_mask())
-	print("[mask] the painted ground moved to %s: %d ms (%d of it rasterising)" % [
-		str(c.round()), Time.get_ticks_msec() - t0,
-		int(stats.get("mask_ms", 0))])
+	_mat.set_shader_parameter("ground_mask", _mask_texture(img, _mask_t0))
+	print("[mask] the painted ground moved to %s: %d ms, off the main thread" % [
+		str(mask_centre.round()), Time.get_ticks_msec() - _mask_t0])
 
 ## What the ground actually shows at a world point: red tarmac, green made
 ## ground, straight out of the baked mask.
@@ -704,8 +796,11 @@ func mask_at(x: float, z: float) -> Vector2:
 ## Clamping put every distant town and road on the edge texels of the box, as a
 ## smear down one side of the map.
 func _in_box(c: Vector2, r: float) -> bool:
-	return absf(c.x - mask_centre.x) < MASK_HALF + r \
-		and absf(c.y - mask_centre.y) < MASK_HALF + r
+	return _in_box_of(mask_centre, c, r)
+
+func _in_box_of(box: Vector2, c: Vector2, r: float) -> bool:
+	return absf(c.x - box.x) < MASK_HALF + r \
+		and absf(c.y - box.y) < MASK_HALF + r
 
 ## Live leaves, keyed by depth and grid index plus the depths of the four
 ## neighbours -- because those decide how the edges are conformed, and a node
@@ -839,11 +934,22 @@ static func foot_ground(x: float, z: float, y: float, eye: Vector3) -> float:
 ## way to its edge, and swapped in when it is ready -- the old one stays up
 ## meanwhile, so falling behind costs sharpness and never a hole. Too high off
 ## the ground to see one, it is not painted at all.
+##
+## None of them is switched on or off in a frame. A square fades in when it is
+## first painted (or painted somewhere the last one did not reach), and fades
+## out over the top of its height band rather than at a line. A third, coarse
+## square was added so the streets stay streets out to a few kilometres
+## instead of turning into the mask's smear at one.
 const ROAD_LEVELS := [
 	# texels, half width, markings, how high the eye may be, its uniform prefix
-	[2048, 256.0, true, 900.0, "road_near"],
-	[2048, 1024.0, false, 4000.0, "road_mid"],
+	[2048, 256.0, true, 1400.0, "road_near"],
+	[2048, 1024.0, false, 7000.0, "road_mid"],
+	[2048, 4096.0, false, 16000.0, "road_far"],
 ]
+## Seconds a freshly painted square takes to fade in.
+const ROAD_FADE_IN := 0.7
+## The fraction of a level's height limit at which it starts fading out.
+const ROAD_FADE_FROM := 0.65
 var _road_lv: Array = []
 ## Painted at least once since the roads were last handed over -- for the
 ## harness, and to know the near square is worth sampling.
@@ -854,6 +960,10 @@ var road_near_img: Image = null
 func roads_changed() -> void:
 	for lv in _road_lv:
 		lv["centre"] = Vector2.INF
+		# what is up is of roads that are not there now, or numbered in a
+		# chart that has moved: out at once, and the repaint fades in
+		lv["ramp"] = 0.0
+		_set_road_on(lv)
 
 func follow_roads(eye: Vector3) -> void:
 	if _mat == null:
@@ -862,10 +972,20 @@ func follow_roads(eye: Vector3) -> void:
 		for spec in ROAD_LEVELS:
 			_road_lv.append({"n": spec[0], "half": spec[1], "lines": spec[2],
 				"ceiling": spec[3], "u": spec[4], "centre": Vector2.INF,
-				"task": -1, "want": Vector2.INF, "img": null, "tex": null})
+				"task": -1, "want": Vector2.INF, "img": null, "tex": null,
+				"ramp": 0.0, "on": -1.0, "agl_w": 1.0})
 	var agl: float = eye.y - Sim.height_at(eye.x, eye.z)
+	var now: int = Time.get_ticks_msec()
+	var dt: float = clampf(float(now - _road_ms) * 0.001, 0.0, 0.1) if _road_ms > 0 else 0.0
+	_road_ms = now
 	for lv in _road_lv:
 		_collect_paint(lv)
+		# in once painted, and out over the top of its height band
+		var ceil_m: float = lv["ceiling"]
+		lv["agl_w"] = 1.0 - smoothstep(ceil_m * ROAD_FADE_FROM, ceil_m, agl)
+		if lv["tex"] != null and float(lv["ramp"]) < 1.0:
+			lv["ramp"] = minf(float(lv["ramp"]) + dt / ROAD_FADE_IN, 1.0)
+		_set_road_on(lv)
 		if agl > float(lv["ceiling"]) or int(lv["task"]) >= 0:
 			continue
 		var half: float = lv["half"]
@@ -877,6 +997,21 @@ func follow_roads(eye: Vector3) -> void:
 		if at.x != INF and at.distance_to(c) < half * 0.25:
 			continue
 		_paint_roads(lv, c)
+
+var _road_ms := 0
+
+## How much of a square the ground takes, handed to the shader when it changes.
+func _set_road_on(lv: Dictionary) -> void:
+	if _mat == null:
+		return
+	var r: float = clampf(float(lv.get("ramp", 0.0)), 0.0, 1.0)
+	var on: float = r * r * (3.0 - 2.0 * r) * float(lv.get("agl_w", 1.0))
+	if lv["tex"] == null:
+		on = 0.0
+	if absf(on - float(lv.get("on", -1.0))) < 0.002:
+		return
+	lv["on"] = on
+	_mat.set_shader_parameter(String(lv["u"]) + "_on", on)
 
 ## Paint one square on a worker.
 func _paint_roads(lv: Dictionary, c: Vector2) -> void:
@@ -906,20 +1041,28 @@ func _finish_paint(lv: Dictionary) -> void:
 	var img: Image = lv["img"]
 	if img == null:
 		return
+	var _pp := Sim.prof_at()
 	lv["img"] = null
 	if lv["tex"] == null:
 		lv["tex"] = ImageTexture.create_from_image(img)
 	else:
 		(lv["tex"] as ImageTexture).update(img)
+	# Somewhere the last square did not reach (or the first one): it fades in.
+	# Following the eye, the new square paints the same roads over what the
+	# old one had, so it simply replaces it.
+	var was: Vector2 = lv["centre"]
+	if was.x == INF or was.distance_to(lv["want"]) > float(lv["half"]):
+		lv["ramp"] = 0.0
 	lv["centre"] = lv["want"]
 	var u: String = lv["u"]
 	_mat.set_shader_parameter(u, lv["tex"])
 	_mat.set_shader_parameter(u + "_centre", lv["centre"])
 	_mat.set_shader_parameter(u + "_half", lv["half"])
-	_mat.set_shader_parameter(u + "_on", 1.0)
+	_set_road_on(lv)
 	if lv["lines"]:
 		road_near_img = lv.get("raw")
 		roads_painted += 1
+	Sim.prof_end(&"roads.upload", _pp)
 
 ## Paint every square now, for `eye`, and wait for it: for the harness.
 func paint_roads_now(eye: Vector3) -> void:

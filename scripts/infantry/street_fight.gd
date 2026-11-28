@@ -133,6 +133,7 @@ func _board_gunship(j: Aircraft, centre: Vector3, kind: String) -> void:
 	# laid on the middle of the fight to begin with; the mouse takes it from there
 	world.pod.mode = SensorPod.AREA
 	world.pod.area_point = centre
+	world.pod.place_now()
 	# His ears go with him. The camera that draws the screen is still the one
 	# in the street, so everything was heard from there: the guns he was
 	# firing were a distant thump and the shells landing were on top of him.
@@ -569,6 +570,11 @@ func tick_town_sets(delta: float) -> void:
 	if eye == null:
 		return
 	var at := eye.global_position
+	# the satellite view holding over a place: measured from the place, so a
+	# town built ahead of a match is not taken down again
+	var fp: Vector3 = world._sat_focus()
+	if fp != Vector3.INF:
+		at = fp
 	var built := false
 	for i in world.scenery.sites.size():
 		var c: Vector2 = world.scenery.sites[i]["c"]

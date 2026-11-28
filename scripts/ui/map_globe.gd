@@ -203,6 +203,9 @@ func _globe_window(rad: float, b: Basis) -> PackedFloat32Array:
 	# The cap that reaches the corners of the screen, with a margin so a small
 	# drag does not run off the edge of what has been baked.
 	var ang: float = asin(clampf(half * 1.45 * sqrt(2.0) / rad, 0.0, 1.0))
+	# Snapped, as the satellite view's is (`Planet._window_at`), so a view
+	# come back to asks for a window already on disk.
+	ang = 0.01 * pow(1.5, ceilf(log(maxf(ang, 0.01) / 0.01) / log(1.5) - 1e-4))
 	var pole: Vector3 = Sim.PLANET_NORTH
 	var home := Vector3.UP
 	var east: Vector3 = pole.cross(home).normalized()
@@ -211,6 +214,7 @@ func _globe_window(rad: float, b: Basis) -> PackedFloat32Array:
 	var c: Vector3 = (b.inverse() * Vector3(0.0, 0.0, 1.0)).normalized()
 	var uvc: Vector2 = mv._globe_uv(c, pole, home, east)
 	var dv: float = ang / PI
+	uvc.y = snappedf(uvc.y, dv * 0.25)
 	var v0: float = uvc.y - dv
 	var v1: float = uvc.y + dv
 	# Meridians converge, so a cap of a given angle spans more longitude the
@@ -219,6 +223,8 @@ func _globe_window(rad: float, b: Basis) -> PackedFloat32Array:
 	var span: float = cos(absf(lat)) 
 	var du: float = 0.5 if v0 <= 0.0 or v1 >= 1.0 or span < 0.02 \
 		else minf(ang / TAU / span, 0.5)
+	if du < 0.5:
+		uvc.x = snappedf(uvc.x, du * 0.25)
 	return PackedFloat32Array([uvc.x - du, uvc.x + du,
 		clampf(v0, 0.0, 1.0), clampf(v1, 0.0, 1.0)])
 
@@ -251,24 +257,60 @@ func _want_patch(win: PackedFloat32Array) -> void:
 		_patch_next = win.duplicate()
 		return
 	_patch_t0 = Time.get_ticks_usec()
+	# Kept on disk: a small picture, read back in line.
+	var path := _cache_path(win)
+	if FileAccess.file_exists(path):
+		var f := FileAccess.open_compressed(path, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+		if f != null:
+			var n: int = f.get_32()
+			var got := f.get_buffer(n)
+			f.close()
+			if _apply_patch(got, win):
+				mv.queue_redraw()
+				return
 	if Sim.native.patch_request(MapView.PATCH_RES, MapView.PATCH_RES, Sim.PLANET_NORTH,
 			win[0], win[1], win[2], win[3]):
 		_patch_asked = win.duplicate()
 		_patch_next = PackedFloat32Array()
+
+const CACHE := "user://map_patch_cache"
+
+func _cache_path(win: PackedFloat32Array) -> String:
+	if Planet._code_sig == "":
+		Planet._code_sig = WorldBake.signature()
+	var key := "map|%s|%d|%.5f,%.5f,%.5f,%.5f|%d" % [Planet._code_sig, MapView.PATCH_RES,
+		win[0], win[1], win[2], win[3], int(round(Sim.season * 10.0))]
+	return "%s/%s.bin" % [CACHE, key.sha256_text().substr(0, 24)]
+
+func _apply_patch(buf: PackedByteArray, win: PackedFloat32Array) -> bool:
+	if buf.size() < MapView.PATCH_RES * MapView.PATCH_RES * 3:
+		return false
+	var img := Image.create_from_data(MapView.PATCH_RES, MapView.PATCH_RES, false,
+		Image.FORMAT_RGB8, buf.slice(0, MapView.PATCH_RES * MapView.PATCH_RES * 3))
+	_patch_tex = ImageTexture.create_from_image(img)
+	_patch_win = win.duplicate()
+	return true
 
 ## Take delivery of a finished bake.
 func _collect_patch() -> void:
 	if _patch_asked.size() != 4 or not Sim.native.patch_ready():
 		return
 	var buf: PackedByteArray = Sim.native.patch_take()
-	if buf.size() >= MapView.PATCH_RES * MapView.PATCH_RES * 3:
-		var img := Image.create_from_data(MapView.PATCH_RES, MapView.PATCH_RES, false,
-			Image.FORMAT_RGB8, buf)
-		_patch_tex = ImageTexture.create_from_image(img)
-		# The window this picture is *of*, which is the one that went out with
-		# the request and not whatever the view has moved on to since.
-		_patch_win = _patch_asked.duplicate()
+	# The window this picture is *of*, which is the one that went out with
+	# the request and not whatever the view has moved on to since.
+	if _apply_patch(buf, _patch_asked):
 		_patch_ms = float(Time.get_ticks_usec() - _patch_t0) * 0.001
+		var path := _cache_path(_patch_asked)
+		var keep := buf.slice(0, MapView.PATCH_RES * MapView.PATCH_RES * 3)
+		WorkerThreadPool.add_task(func() -> void:
+			DirAccess.make_dir_recursive_absolute(CACHE)
+			var w := FileAccess.open_compressed(path + ".part", FileAccess.WRITE,
+				FileAccess.COMPRESSION_ZSTD)
+			if w != null:
+				w.store_32(keep.size())
+				w.store_buffer(keep)
+				w.close()
+				DirAccess.rename_absolute(path + ".part", path), false, "map patch save")
 	_patch_asked = PackedFloat32Array()
 	# Whatever was wanted while that one was running goes out now.
 	if _patch_next.size() == 4:

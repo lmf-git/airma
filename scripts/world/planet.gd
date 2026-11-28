@@ -231,6 +231,10 @@ const PATCH_MAX := 0.5
 ## How far the eye may move, or the cap grow or shrink, before the window is
 ## baked again, as a fraction of its own span.
 const PATCH_SLACK := 0.2
+## The window baked round a satellite view's focus: about 570 km either side.
+const FOCUS_PATCH_ANG := 0.09
+## The step between the sizes a window may be: see `_window_at`.
+const PATCH_LADDER := 1.5
 ## Mirrors `sphere::BODY_RELIEF_TOP`: the height a full alpha stands for.
 const RELIEF_TOP := 8000.0
 
@@ -246,6 +250,22 @@ var _patch_tex: ImageTexture = null
 var _patch_win := PackedFloat32Array()
 var _patch_asked := PackedFloat32Array()
 var _patch_next := PackedFloat32Array()
+var _patch_next_cache := false
+## The fine picture of a place the satellite view holds on is the same every
+## time it is asked for (in the same season, by the same code), so it is kept
+## on disk: read back on a worker the next time instead of baked again.
+const PATCH_CACHE := "user://patch_cache"
+## How much disk the kept pictures may take; the oldest go first past it.
+const PATCH_CACHE_BYTES := 10_000_000_000
+## Where the bake in flight is to be saved, if it is one worth keeping.
+var _patch_save := ""
+## A cached picture being read back.
+var _disk_task := -1
+var _disk_buf := PackedByteArray()
+var _disk_path := ""
+static var _code_sig := ""
+## A picture being baked for the disk and not for the screen: see `warm`.
+var _patch_warm := false
 ## How much of the body is being drawn, and so how much of the ground is not.
 var fade := 0.0
 ## True once the ground is completely hidden and there is no reason to keep
@@ -378,7 +398,13 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 	# not onto the whole-planet one with the fine one arriving half way.
 	_collect_patch()
 	if alt > FADE_LO - 10000.0 and not (cam is SatView and not (cam as SatView).settled()):
-		_want_patch(_patch_window(cam))
+		_want_patch(_patch_window(cam), true)
+	elif cam is SatView and (cam as SatView).focus_dir != Vector3.ZERO:
+		# Coming down onto somewhere, or the menu holding over it: the moving
+		# view never settles, so the ground there is baked ahead of it --
+		# once, for the span the way down passes through -- and the descent
+		# lands on the fine picture rather than on twenty-kilometre texels.
+		_want_patch(_window_at((cam as SatView).focus_dir, FOCUS_PATCH_ANG), true)
 	# Only once there is something out there to see. Left at 2600 km from the
 	# ground the far plane would be paying for the whole cap on every frame of
 	# a landing circuit.
@@ -414,6 +440,12 @@ func follow(cam: Camera3D, terrain: Node, scenery: Node) -> void:
 		# the whole shrunken body, and the moon beyond it if it is that close
 		cam.far = maxf(cam.far, (r + alt) * 1.3)
 	cam.near = clampf(cam.far / NEAR_RATIO, NEAR_LO, NEAR_MAX)
+	# The satellite view has nothing under its lens, and from far out the 1.2 m
+	# cap put far over near past what the shadow culler can take (above): from
+	# about 9800 km up the sun went, and the planet and its cloud went black.
+	# Its near plane goes out with the far one.
+	if cam is SatView:
+		cam.near = clampf(cam.far / NEAR_RATIO, NEAR_LO, maxf(alt * 0.05, NEAR_LO))
 	# A camera that carries something right under the lens -- the rifle on a
 	# man's cheek -- says how close it needs to see. Left at a quarter metre
 	# the plane sliced the stock and receiver open in first person, and worse
@@ -456,7 +488,16 @@ func _patch_window(cam: Camera3D) -> PackedFloat32Array:
 		var foot: float = (cam as SatView).view_height() * tan(deg_to_rad(cam.fov) * 0.5) \
 			* sqrt(1.0 + aspect * aspect) * 1.3
 		ang = clampf(foot / Sim.PLANET_R, PATCH_MIN, ang)
-	var d: Vector3 = Sim.world_to_planet_dir(rel / dist).normalized()
+	return _window_at(Sim.world_to_planet_dir(rel / dist).normalized(), ang)
+
+## The window `ang` radians either side of `d`, a direction in the planet's
+## frame.
+##
+## Snapped: the span up to the next of a ladder of sizes and the middle to an
+## eighth of it, so the same place at the same height asks for the same window
+## every time -- which is what lets the picture be kept on disk and found again.
+func _window_at(d: Vector3, ang: float) -> PackedFloat32Array:
+	ang = PATCH_MIN * pow(PATCH_LADDER, ceilf(log(maxf(ang, PATCH_MIN) / PATCH_MIN) / log(PATCH_LADDER) - 1e-4))
 	var north: Vector3 = Sim.PLANET_NORTH
 	var home := Vector3.UP
 	var east: Vector3 = north.cross(home).normalized()
@@ -465,17 +506,20 @@ func _patch_window(cam: Camera3D) -> PackedFloat32Array:
 	var uc: float = lon / TAU + 0.5
 	var vc: float = 0.5 - lat / PI
 	var dv: float = ang / PI
+	vc = snappedf(vc, dv * 0.25)
+	lat = (0.5 - vc) * PI
 	# Meridians close up toward the poles, so the same cap spans more of them
 	# the further it is from the equator; one with a pole in it spans them all.
 	var du := 0.5
 	if sin(ang) < cos(lat) * 0.995:
 		du = minf(asin(sin(ang) / cos(lat)) / TAU, 0.5)
+		uc = snappedf(uc, du * 0.25)
 	return PackedFloat32Array([uc - du, uc + du,
 		clampf(vc - dv, 0.0, 1.0), clampf(vc + dv, 0.0, 1.0)])
 
 ## Bake the window if what is held no longer covers it. One bake in flight at a
 ## time, and what goes out after it is the newest window wanted meanwhile.
-func _want_patch(win: PackedFloat32Array) -> void:
+func _want_patch(win: PackedFloat32Array, cache := false) -> void:
 	if Sim.native == null or not Sim.native.has_method("body_patch_request"):
 		return
 	if _patch_win.size() == 4 and not _patch_stale(_patch_win, win):
@@ -484,11 +528,110 @@ func _want_patch(win: PackedFloat32Array) -> void:
 		if not _patch_stale(_patch_asked, win):
 			return
 		_patch_next = win
+		_patch_next_cache = cache
+		return
+	var path := _patch_path(win) if cache else ""
+	if path != "" and FileAccess.file_exists(path):
+		_patch_asked = win
+		_patch_next = PackedFloat32Array()
+		_disk_path = path
+		_disk_task = WorkerThreadPool.add_task(_read_patch.bind(path), true, "patch read")
 		return
 	if Sim.native.body_patch_request(PATCH_RES, Sim.PLANET_NORTH,
 			win[0], win[1], win[2], win[3]):
 		_patch_asked = win
+		_patch_save = path
 		_patch_next = PackedFloat32Array()
+
+## The file a window's picture is kept in: by the window, the season it was
+## painted in (to a twentieth of the year's swing) and the code that painted it.
+func _patch_path(win: PackedFloat32Array) -> String:
+	if _code_sig == "":
+		_code_sig = WorldBake.signature()
+	var key := "%s|%d|%.5f,%.5f,%.5f,%.5f|%d" % [_code_sig, PATCH_RES, win[0], win[1], win[2],
+		win[3], int(round(Sim.season * 10.0))]
+	return "%s/%s.bin" % [PATCH_CACHE, key.sha256_text().substr(0, 24)]
+
+## On a worker: the cached picture, or nothing if it will not read.
+func _read_patch(path: String) -> void:
+	var f := FileAccess.open_compressed(path, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+	if f == null:
+		_disk_buf = PackedByteArray()
+		return
+	var n: int = f.get_32()
+	_disk_buf = f.get_buffer(n)
+	f.close()
+
+## On a worker: keep a fresh bake, and no more of them than the budget.
+static func _write_patch(path: String, buf: PackedByteArray) -> void:
+	DirAccess.make_dir_recursive_absolute(PATCH_CACHE)
+	var tmp := path + ".part"
+	var f := FileAccess.open_compressed(tmp, FileAccess.WRITE, FileAccess.COMPRESSION_ZSTD)
+	if f == null:
+		return
+	f.store_32(buf.size())
+	f.store_buffer(buf)
+	f.close()
+	DirAccess.rename_absolute(tmp, path)
+	var d := DirAccess.open(PATCH_CACHE)
+	if d == null:
+		return
+	var files: Array = []
+	var total := 0
+	for fn in d.get_files():
+		if fn.ends_with(".bin"):
+			var full := "%s/%s" % [PATCH_CACHE, fn]
+			var sz := 0
+			var rf := FileAccess.open(full, FileAccess.READ)
+			if rf != null:
+				sz = rf.get_length()
+				rf.close()
+			total += sz
+			files.append([FileAccess.get_modified_time(full), full, sz])
+	if total <= PATCH_CACHE_BYTES:
+		return
+	files.sort_custom(func(a, b): return int(a[0]) < int(b[0]))
+	for e in files:
+		if total <= PATCH_CACHE_BYTES:
+			break
+		DirAccess.remove_absolute(String(e[1]))
+		total -= int(e[2])
+
+## Whether the picture of a satellite view holding on `d` is on disk.
+func on_disk(d: Vector3) -> bool:
+	if Sim.native == null or not Sim.native.has_method("body_patch_request"):
+		return true
+	return FileAccess.file_exists(_patch_path(_window_at(d, FOCUS_PATCH_ANG)))
+
+## Bake the picture of `d` for the disk, on the loading screen: poll
+## `warming` (which also takes delivery) until it says no.
+func warm(d: Vector3) -> void:
+	if _patch_asked.size() == 4 or on_disk(d):
+		return
+	var win := _window_at(d, FOCUS_PATCH_ANG)
+	if Sim.native.body_patch_request(PATCH_RES, Sim.PLANET_NORTH,
+			win[0], win[1], win[2], win[3]):
+		_patch_asked = win
+		_patch_save = _patch_path(win)
+		_patch_warm = true
+
+func warming() -> bool:
+	_collect_patch()
+	return _patch_asked.size() == 4
+
+## Whether the fine picture is up for a satellite view holding on `d` (a
+## direction in the planet's frame), or there is nothing that could make one.
+func focus_ready(d: Vector3) -> bool:
+	if Sim.native == null or not Sim.native.has_method("body_patch_request"):
+		return true
+	var win := _window_at(d, FOCUS_PATCH_ANG)
+	return _patch_win.size() == 4 and not _patch_stale(_patch_win, win)
+
+## Ask for the fine picture of `d` ahead of time -- on the loading screen,
+## before anything is looking at it -- and take delivery as it comes.
+func prepare_focus(d: Vector3) -> void:
+	_collect_patch()
+	_want_patch(_window_at(d, FOCUS_PATCH_ANG), true)
 
 ## Whether `held` is far enough from `want` to be worth baking again.
 func _patch_stale(held: PackedFloat32Array, want: PackedFloat32Array) -> bool:
@@ -503,11 +646,40 @@ func _patch_stale(held: PackedFloat32Array, want: PackedFloat32Array) -> bool:
 
 ## Take delivery of a finished bake and hang it on the window it is of.
 func _collect_patch() -> void:
-	if _patch_asked.size() != 4 or Sim.native == null \
-			or not Sim.native.body_patch_ready():
+	if _patch_asked.size() != 4 or Sim.native == null:
 		return
+	var buf: PackedByteArray
+	if _disk_task >= 0:
+		if not WorkerThreadPool.is_task_completed(_disk_task):
+			return
+		WorkerThreadPool.wait_for_task_completion(_disk_task)
+		_disk_task = -1
+		buf = _disk_buf
+		_disk_buf = PackedByteArray()
+		if buf.size() != _patch_bytes():
+			# unreadable: thrown away, and baked again
+			DirAccess.remove_absolute(_disk_path)
+			var again_w := _patch_asked
+			_patch_asked = PackedFloat32Array()
+			_want_patch(again_w, true)
+			return
+	else:
+		if not Sim.native.body_patch_ready():
+			return
+		buf = Sim.native.body_patch_take()
+		if _patch_save != "" and buf.size() == _patch_bytes():
+			WorkerThreadPool.add_task(_write_patch.bind(_patch_save, buf), false, "patch save")
+		_patch_save = ""
+		if _patch_warm:
+			# for the disk, not for the screen
+			_patch_warm = false
+			_patch_asked = PackedFloat32Array()
+			if _patch_next.size() == 4:
+				var nw := _patch_next
+				_patch_next = PackedFloat32Array()
+				_want_patch(nw, _patch_next_cache)
+			return
 	var _pt := Sim.prof_at()
-	var buf: PackedByteArray = Sim.native.body_patch_take()
 	var img := Image.create_from_data(PATCH_RES, PATCH_RES, true,
 		Image.FORMAT_RGBA8, buf) if buf.size() == _patch_bytes() else null
 	if img != null:
@@ -527,7 +699,7 @@ func _collect_patch() -> void:
 	if _patch_next.size() == 4:
 		var again := _patch_next
 		_patch_next = PackedFloat32Array()
-		_want_patch(again)
+		_want_patch(again, _patch_next_cache)
 
 ## What a baked window comes to with its mips, which is what the extension
 ## hands back.

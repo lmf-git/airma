@@ -98,6 +98,9 @@ const SPREAD_K := 0.30
 ## volume now and a step fetches twice, so thirty-two steps cost less than
 ## twenty did and the banding a coarse march leaves goes with them.
 const STEPS := 32
+## ...and from orbit, where a ray only crosses the slab: see `follow`.
+const STEPS_HIGH := 12
+var _steps_now := -1
 ## Texels across the noise volume. Big enough that the finest octave baked into
 ## it still has two texels to itself, which is what stops the volume being its
 ## own aliasing source.
@@ -180,6 +183,8 @@ uniform vec3 sun_dir = vec3(0.0, 1.0, 0.0);
 uniform vec3 tint : source_color = vec3(0.92, 0.94, 0.97);
 uniform vec3 shade : source_color = vec3(0.48, 0.52, 0.60);
 uniform int steps = 20;
+// The angle one pixel covers, so a sample knows how much sky it stands for.
+uniform float px_ang = 0.001;
 
 varying vec3 wpos;
 
@@ -214,7 +219,7 @@ uniform sampler3D vol : filter_linear, repeat_enable;
 // part of the profile. The field is a function of direction alone and the
 // profile only shapes it in height, so that one number is the whole of the
 // cloud standing over a sample, and the march lights with it.
-float density(vec3 p, out float column) {
+float density(vec3 p, out float column, float foot) {
 	column = 0.0;
 	vec3 up = normalize(p - centre);
 	float r = length(p - centre);
@@ -244,7 +249,13 @@ float density(vec3 p, out float column) {
 	// than by where in the sky it was, and came out smeared along it.
 	vec3 qd = pu * detail_scale + vec3(shape * detail_warp)
 		+ wind_uv * wind_time * 3.0;
-	float detail = texture(vol, qd).g;
+	// Only as fine as the pixel can show. From orbit a pixel is kilometres of
+	// sky and the detail is clouds a few kilometres across: read anyway it
+	// came out as speckle that crawled as the view moved, and every read
+	// landed somewhere new in the volume, which is what the GPU paid for.
+	// Past it, the detail's average.
+	float dw = 1.0 - smoothstep(1500.0, 6000.0, foot);
+	float detail = dw > 0.0 ? mix(0.5, texture(vol, qd).g, dw) : 0.5;
 	float cut = (1.0 - detail) * erode;
 	// `shape` is the same field with the profile taken off it again.
 	column = max(shape + (1.0 - profile) * (shape + 1.0 - coverage)
@@ -367,7 +378,7 @@ void fragment() {
 		t += dt;
 		dt *= g;
 		float column;
-		float d = density(p, column);
+		float d = density(p, column, (t - dt / g) * px_ang);
 		if (d <= 0.0) {
 			continue;
 		}
@@ -478,6 +489,16 @@ func follow(cam: Camera3D) -> void:
 	_mat.set_shader_parameter("r_base", (Sim.PLANET_R + BASE) * k)
 	_mat.set_shader_parameter("r_top", (Sim.PLANET_R + TOP) * k)
 	_mat.set_shader_parameter("r_ground", Sim.PLANET_R * k)
+	# From well above the layer a ray only crosses it -- a few kilometres of
+	# slab, not fifty along it -- and a dozen samples see what thirty-two did.
+	var alt: float = cam.global_position.distance_to(Sim.planet_centre) / maxf(k, 1e-6) - Sim.PLANET_R
+	var n: int = int(round(lerpf(float(STEPS), float(STEPS_HIGH),
+		smoothstep(30000.0, 400000.0, alt))))
+	if n != _steps_now:
+		_steps_now = n
+		_mat.set_shader_parameter("steps", n)
+	var vh: float = maxf(cam.get_viewport().get_visible_rect().size.y, 1.0)
+	_mat.set_shader_parameter("px_ang", deg_to_rad(cam.fov) / vh)
 
 func _shell() -> ArrayMesh:
 	return MeshKit.globe(MeshKit.even_rings(RINGS), SEGS, 1.0, false).commit()

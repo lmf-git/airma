@@ -96,6 +96,7 @@ func _start_watchdog() -> void:
 ## sensor pod and the armour sight are settled.
 func tick_before_sensors(delta: float) -> void:
 	flight_tests.tick_gunner(delta)
+	dev_options.tick_menu_flow(delta)
 
 
 ## Called from `World._tick_world`.
@@ -355,6 +356,7 @@ func tick_after_street(delta: float) -> void:
 	infantry_tests.tick_wreck_test()
 	infantry_tests.tick_mortar_test()
 	infantry_tests.tick_stall_test()
+	infantry_tests.tick_gun_shots()
 	streak_tests.tick_drop()
 	infantry_tests.tick_zero()
 	infantry_tests.tick_holdfire()

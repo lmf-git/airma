@@ -35,6 +35,11 @@ func parse_arg(a: String) -> bool:
 	elif a.begins_with("--stalltest="):
 		_stall_id = a.substr(12)
 		world.street_fight.skip_deploy = true
+	elif a.begins_with("--gunshots="):
+		# windowed, --preset=cqb:foot: call the AC-130 and photograph the
+		# gunner's screen at set times after it, into DIR
+		_gunshot_dir = a.substr(11)
+		world.street_fight.skip_deploy = true
 	elif a == "--balltest":
 		_ball_test = true
 	elif a == "--boundstest":
@@ -1433,6 +1438,74 @@ func tick_stall_test() -> void:
 			float(_stall_frames[k][1]), ", ".join(parts)])
 	_stall_id = ""
 	world.get_tree().quit()
+#endregion
+
+
+#region --gunshots=
+## Photographs of the gunner's screen the moment the AC-130 is called and on:
+## --preset=cqb:foot --gunshots=DIR (windowed).
+var _gunshot_dir := ""
+## counts up to the call from six seconds out, so the fight is settled first
+var _gunshot_t := -7.0
+var _gunshot_i := 0
+var _gunshot_us := 0
+const GUNSHOT_AT := [0.0, 0.05, 0.15, 0.3, 0.6, 1.0, 2.0, 4.0, 8.0]
+
+func tick_gun_shots() -> void:
+	if _gunshot_dir == "" or not is_instance_valid(world.cqb) or not is_instance_valid(world.walker):
+		return
+	if _gunshot_t < -1.0:
+		_gunshot_t += world.get_process_delta_time()
+		return
+	if _gunshot_t < 0.0:
+		_gunshot_t = 0.0
+		DirAccess.make_dir_recursive_absolute(_gunshot_dir)
+		world.cqb.streaks.bank["gunship"] = 1
+		# at the end of the frame, after every _process -- the worst of the
+		# orders a key press can land in
+		world.cqb.streaks.call_in.call_deferred("gunship")
+		Sim.profiling = true
+		Sim.prof_reset()
+		_gunshot_us = Time.get_ticks_usec()
+		# what each of the first frames actually drew from
+		var nframes := [0]
+		var cb := func() -> void:
+			nframes[0] += 1
+			if nframes[0] > 6:
+				return
+			var pc: Camera3D = world.pod._cam
+			var p: Vector3 = pc.global_position
+			print("[gunshots] drawn frame %d: pod cam %s, %.0f m over the ground, its up %.2f, looking %s; ship drawn at %s" % [
+				nframes[0], str(p.round()), p.y - Sim.height_at(p.x, p.z), pc.global_basis.y.y,
+				str((-pc.global_basis.z).snapped(Vector3.ONE * 0.01)),
+				str(world.called_gunship.get_global_transform_interpolated().origin.round()) if is_instance_valid(world.called_gunship) else "-"])
+		RenderingServer.frame_post_draw.connect(cb)
+		print("[gunshots] called (deferred)")
+		return
+	_gunshot_t += world.get_process_delta_time()
+	var now: int = Time.get_ticks_usec()
+	var parts := PackedStringArray()
+	for r in Sim.prof_report().slice(0, 3):
+		parts.append("%s %.1f" % [String(r[0]), float(r[1]) * 0.001])
+	Sim.prof_reset()
+	if now - _gunshot_us > 30000:
+		print("[gunshots]   %.0f ms frame at %.2f s: %s" % [(now - _gunshot_us) / 1000.0, _gunshot_t, ", ".join(parts)])
+	_gunshot_us = now
+	if _gunshot_i >= GUNSHOT_AT.size():
+		_gunshot_dir = ""
+		world.get_tree().quit()
+		return
+	if _gunshot_t < float(GUNSHOT_AT[_gunshot_i]):
+		return
+	var img: Image = world.get_viewport().get_texture().get_image()
+	var path := "%s/gun_%02d_%.2fs.png" % [_gunshot_dir, _gunshot_i, _gunshot_t]
+	img.save_png(path)
+	var pod: SensorPod = world.pod
+	print("[gunshots] %.2f s: pod active=%s full=%s mode=%d zoom=%d cam at %s looking at %s, ship at %s" % [
+		_gunshot_t, str(pod.active), str(pod.fullscreen), pod.mode, pod.zoom_step,
+		str(pod._cam.global_position.round()), str(pod.aim_point().round()),
+		str(world.called_gunship.global_position.round()) if is_instance_valid(world.called_gunship) else "none"])
+	_gunshot_i += 1
 #endregion
 
 

@@ -50,6 +50,34 @@ func parse_arg(a: String) -> bool:
 		_sat_tilt = deg_to_rad(float(sv[1])) if sv.size() > 1 else 0.0
 		_sat_pan = float(sv[2]) * 1000.0 if sv.size() > 2 else 0.0
 		SatView.clear_air = sv.size() > 3 and sv[3] == "clear"
+	elif a.begins_with("--menuflow="):
+		# --menuflow=MISSION[,TOWN] (windowed, no preset, with --intro
+		# --introshots=DIR): the hangar's satellite view, the mission picked,
+		# photographed once it has gone there, and launched
+		var mf := a.substr(11).split(",")
+		_mf_mission = mf[0]
+		_mf_town = int(mf[1]) if mf.size() > 1 else -1
+	elif a.begins_with("--handoff="):
+		# --handoff=SECS[,click]: the same, skipping the way down part way with
+		# a key (W) or a click, as a player taking over would
+		var hv := a.substr(10).split(",")
+		_ho_skip = float(hv[0])
+		_ho_click = hv.size() > 1 and hv[1] == "click"
+		_handoff = true
+		_intro_prof = true
+	elif a == "--handoff":
+		# with --intro: each drawn frame either side of the end of the way
+		# down -- which camera, in what mode, how far from the aircraft
+		_handoff = true
+		_intro_prof = true
+	elif a == "--introprof":
+		# with --intro: every slow frame of the way down, and what it was
+		_intro_prof = true
+		Sim.profiling = true
+	elif a.begins_with("--introshots="):
+		# with --intro, windowed: a picture every half second of the way down
+		# out of orbit into the match, into DIR
+		_intro_dir = a.substr(13)
 	elif a.begins_with("--satpan="):
 		# with --satview: pan north this many km a second, to measure a pan
 		_sat_pan_rate = float(a.substr(9)) * 1000.0
@@ -292,7 +320,221 @@ var _sat_tilt := 0.0
 var _sat_pan := 0.0
 var _sat_pan_rate := 0.0
 
+var _intro_dir := ""
+var _mf_mission := ""
+var _mf_town := -1
+var _mf_t := 0.0
+var _mf_step := 0
+var _mf_worst := 0.0
+var _mf_frames := 0
+
+func tick_menu_flow(delta: float) -> void:
+	if _mf_mission == "" or world.booting or world.running:
+		return
+	_mf_t += delta
+	if _mf_t > 0.5:
+		_mf_worst = maxf(_mf_worst, delta)
+		_mf_frames += 1
+	var shots: String = _intro_dir if _intro_dir != "" else "user://menuflow"
+	if _mf_step == 0 and _mf_t > 2.5:
+		_mf_step = 1
+		DirAccess.make_dir_recursive_absolute(shots)
+		world.get_viewport().get_texture().get_image().save_png("%s/menu_0_boot.png" % shots)
+		if _mf_town >= 0:
+			CqbMatch.town = _mf_town
+		world.menu._select_mission(_mf_mission)
+		world.controls.menu_refocus()
+		print("[menuflow] picked %s, town %d; sat in menu %s" % [_mf_mission, CqbMatch.town,
+			str(world.sat_view.in_menu())])
+	elif _mf_step == 1 and _mf_t > 9.0:
+		_mf_step = 2
+		world.get_viewport().get_texture().get_image().save_png("%s/menu_1_focus.png" % shots)
+		print("[menuflow] held over it at %.0f km; ground chunks pending %d; menu frames %d, worst %.0f ms" % [
+			world.sat_view.view_height() * 0.001, world.terrain.pending_count(), _mf_frames, _mf_worst * 1000.0])
+		var la: Array = world.menu.launch_args()
+		var t_l := Time.get_ticks_msec()
+		if _handoff and not _ip_hooked:
+			_ip_hooked = true
+			RenderingServer.frame_post_draw.connect(_ip_after_draw)
+		world.session.on_launch(String(la[0]), String(la[1]))
+		print("[menuflow] launched %s: %d ms in the call" % [str(la), Time.get_ticks_msec() - t_l])
+var _intro_t := 0.0
+var _intro_n := 0
+var _intro_after := -1.0
+
+var _intro_prof := false
+var _ip_us := 0
+var _ip_slow: Array = []
+var _ip_n := 0
+var _ip_jerk := 0.0
+var _ip_meas := false
+var _ip_jerk_at := ""
+var _ip_dt0 := 0.016
+var _ip_dorm := false
+var _ip_win := PackedFloat32Array()
+var _ip_rel0 := Vector3.INF
+var _ip_rel1 := Vector3.INF
+
+func _tick_intro_prof() -> void:
+	if not _intro_prof:
+		return
+	var sv: SatView = world.sat_view
+	var now: int = Time.get_ticks_usec()
+	var inn: bool = is_instance_valid(sv) and sv.in_intro()
+	if (inn or (_handoff and world.running)) and not _ip_hooked:
+		_ip_hooked = true
+		RenderingServer.frame_post_draw.connect(_ip_after_draw)
+	if inn and _ip_us > 0:
+		var dt: float = (now - _ip_us) / 1000.0
+		_ip_n += 1
+		var vrid: RID = world.get_viewport().get_viewport_rid()
+		if not _ip_meas:
+			_ip_meas = true
+			RenderingServer.viewport_set_measure_render_time(vrid, true)
+		var events := PackedStringArray()
+		var dorm: bool = world.planet.dormant
+		if dorm != _ip_dorm:
+			events.append("ground %s" % ("hidden" if dorm else "shown"))
+			_ip_dorm = dorm
+		var pw: PackedFloat32Array = world.planet._patch_win
+		if pw != _ip_win:
+			events.append("new orbit picture")
+			_ip_win = pw.duplicate()
+		var tv: bool = world.terrain.visible
+		if dt > 25.0 or not events.is_empty():
+			events.append("gpu %.1f cpu %.1f" % [RenderingServer.viewport_get_measured_render_time_gpu(vrid),
+				RenderingServer.viewport_get_measured_render_time_cpu(vrid)])
+			if dt <= 25.0:
+				_ip_slow.append("(%.0f ms at %.0f m: %s, terrain visible %s)" % [dt, sv.view_height(), ", ".join(events), str(tv)])
+		if dt > 25.0:
+			var parts := PackedStringArray(events)
+			for r in Sim.prof_report().slice(0, 12):
+				if float(r[1]) > 300.0 and String(r[0]) != "world.total":
+					parts.append("%s %.1f" % [String(r[0]), float(r[1]) * 0.001])
+			_ip_slow.append("%.0f ms at %.0f m: %s" % [dt, sv.view_height(), ", ".join(parts)])
+	Sim.prof_reset()
+	_ip_us = now if inn else 0
+	if not inn and _ip_n > 0:
+		print("[introprof] %d frames, %d over 25 ms; worst jerk against the aircraft below 400 m: %.2f m (%s)" % [
+			_ip_n, _ip_slow.size(), _ip_jerk, _ip_jerk_at])
+		for l in _ip_slow:
+			print("[introprof]   " + String(l))
+		_ip_n = 0
+		_ip_slow.clear()
+		if not _handoff:
+			world.get_tree().quit()
+
+var _ip_hooked := false
+var _handoff := false
+var _ho_after := -1
+var _ho_log: Array = []
+
+var _ho_pre := 0
+var _ho_skip := -1.0
+var _ho_min := INF
+var _ho_min_at := ""
+var _ho_click := false
+
+func _ho_frame() -> void:
+	var sv: SatView = world.sat_view
+	var inn: bool = is_instance_valid(sv) and sv.in_intro()
+	if _ho_after < 0 and _ho_pre < 4 and not inn:
+		_ho_pre += 1
+		var c: Camera3D = world.get_viewport().get_camera_3d()
+		print("[handoff] launch frame %d: %s%s intro %s" % [_ho_pre, c.name,
+			" mode %d" % int((c as ChaseCamera).mode) if c is ChaseCamera else "", str(inn)])
+	if inn:
+		_ho_after = 0
+	elif _ho_after >= 0:
+		_ho_after += 1
+	if _ho_after < 0 or _ho_after > 8:
+		return
+	if inn and _ho_skip > 0.0 and sv._intro_t >= _ho_skip:
+		_ho_skip = -1.0
+		if _ho_click:
+			var mb := InputEventMouseButton.new()
+			mb.button_index = MOUSE_BUTTON_LEFT
+			mb.pressed = true
+			Input.parse_input_event(mb)
+		else:
+			var k := InputEventKey.new()
+			k.physical_keycode = KEY_W
+			k.keycode = KEY_W
+			k.pressed = true
+			Input.parse_input_event(k)
+	var cam: Camera3D = world.get_viewport().get_camera_3d()
+	var m := ""
+	if cam is ChaseCamera:
+		m = " mode %d" % int((cam as ChaseCamera).mode)
+	var d := -1.0
+	if is_instance_valid(world.player) and world.player.is_inside_tree():
+		d = cam.global_position.distance_to(world.player.get_global_transform_interpolated().origin)
+	if inn and d >= 0.0 and d < _ho_min:
+		_ho_min = d
+		_ho_min_at = "%.2f s in, %.0f m up" % [sv._intro_t, sv.view_height()]
+	if _ho_after == 1:
+		print("[handoff] closest to the aircraft on the way down: %.1f m at %s" % [_ho_min, _ho_min_at])
+	var l := "%s %s%s far %.0f, %.1f m from the aircraft, fov %.0f%s" % [
+		"in" if inn else "after %d" % _ho_after, cam.name, m, cam.far, d, cam.fov,
+		", %.2f s in, %.0f m up" % [sv._intro_t, sv.view_height()] if inn else ""]
+	_ho_log.append(l)
+	if _intro_dir != "" and (not inn or sv._intro_t > sv._intro_len - 0.06):
+		DirAccess.make_dir_recursive_absolute(_intro_dir)
+		world.get_viewport().get_texture().get_image().save_png("%s/ho_%s.png" % [_intro_dir,
+			"a%d" % _ho_after if not inn else "i%.2f" % sv._intro_t])
+	if inn:
+		_ho_log = _ho_log.slice(-3)
+	if _ho_after == 8:
+		for x in _ho_log:
+			print("[handoff] " + String(x))
+		world.get_tree().quit()
+
+## Measured once the frame is drawn, so the view and the aeroplane are both as
+## they were drawn: before the view's own update it is a frame behind, and an
+## aeroplane at 230 m/s against uneven frames reads as a shake that is not there.
+func _ip_after_draw() -> void:
+	if _handoff:
+		_ho_frame()
+		return
+	var sv: SatView = world.sat_view
+	if not is_instance_valid(sv) or not sv.in_intro() or not is_instance_valid(world.player) \
+			or not world.player.is_inside_tree() or world.on_foot:
+		return
+	var rel: Vector3 = sv.global_position - world.player.get_global_transform_interpolated().origin
+	var fdt: float = maxf(world.get_process_delta_time(), 0.001)
+	if _ip_rel1 != Vector3.INF and _ip_rel0 != Vector3.INF and sv.view_height() < 400.0:
+		# a change of velocity, as metres a frame at sixty frames a second
+		var jk: float = ((rel - _ip_rel1) / fdt - (_ip_rel1 - _ip_rel0) / _ip_dt0).length() / 60.0
+		if jk > _ip_jerk:
+			_ip_jerk = jk
+			_ip_jerk_at = "%.0f m up, %.2f s in, frame %.1f ms" % [sv.view_height(), sv._intro_t, fdt * 1000.0]
+	_ip_rel0 = _ip_rel1
+	_ip_rel1 = rel
+	_ip_dt0 = fdt
+
+func _tick_intro_shots() -> void:
+	_tick_intro_prof()
+	if _intro_dir == "" or not world.running:
+		return
+	var sv: SatView = world.sat_view
+	var dt: float = world.get_process_delta_time()
+	if is_instance_valid(sv) and sv.in_intro():
+		_intro_t += dt
+		if _intro_t >= _intro_n * 0.5:
+			DirAccess.make_dir_recursive_absolute(_intro_dir)
+			world.get_viewport().get_texture().get_image().save_png("%s/intro_%02d.png" % [_intro_dir, _intro_n])
+			print("[intro] %.1f s: %.0f m up, tilt %.2f" % [_intro_t, sv.view_height(), sv.tilt])
+			_intro_n += 1
+	elif _intro_n > 0:
+		_intro_after = maxf(_intro_after, 0.0) + dt
+		if _intro_after > 2.0:
+			world.get_viewport().get_texture().get_image().save_png("%s/intro_after.png" % _intro_dir)
+			print("[intro] done; camera %s, deploy up %s" % [world.get_viewport().get_camera_3d().name,
+				str(is_instance_valid(world.deploy_ui) and world.deploy_ui.visible)])
+			world.get_tree().quit()
+
 func tick_sat_view() -> void:
+	_tick_intro_shots()
 	if _sat_pan_rate != 0.0 and is_instance_valid(world.sat_view) and world.sat_view.active():
 		world.sat_view.call("_pan", 0.0, _sat_pan_rate * world.get_process_delta_time())
 	if _sat_alt <= 0.0 or not world.running:

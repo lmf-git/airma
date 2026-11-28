@@ -120,7 +120,8 @@ func setup(at: Vector2, game: GameMode, owner_world: Node, town_set: TownSet) ->
 		biome = town_set.biome
 		for k in town_set.stats:
 			stats[k] = town_set.stats[k]
-	_survey()
+	if not _adopt_presurvey(town_set):
+		_survey()
 	_spots = [Vector3(centre.x, 0, centre.y)]
 	for o in [Vector2(-64, -64), Vector2(64, -64), Vector2(-64, 64), Vector2(64, 64),
 			Vector2(0, -70), Vector2(0, 70), Vector2(-100, 0), Vector2(100, 0),
@@ -140,6 +141,50 @@ func setup(at: Vector2, game: GameMode, owner_world: Node, town_set: TownSet) ->
 			if t == 0 and i == 0:
 				continue                    # that one is you
 			_spawn(t, i)
+
+## The route survey of a town, made while the hangar sat over it: a tenth of
+## a second of grid marking that was the biggest part of the frame LAUNCH
+## froze on. Taken by the match if the town is the one it is in and nothing in
+## it has gone up or come down since; surveyed afresh otherwise.
+static var _pre: CqbMatch = null
+static var _pre_key := ""
+
+static func _survey_key(ts: TownSet) -> String:
+	return "%s|%d" % [str(ts.centre), Obstacles.edit_count()]
+
+static func presurvey(ts: TownSet) -> void:
+	if not is_instance_valid(ts) or ts.building:
+		return
+	var key := _survey_key(ts)
+	if key == _pre_key and is_instance_valid(_pre):
+		return
+	if is_instance_valid(_pre):
+		_pre.free()
+	var m := CqbMatch.new()
+	m.dressing = ts
+	m.centre = ts.centre
+	m._n = int(HALF * 2.0 / CELL)
+	m._corner = m.centre - Vector2(HALF, HALF)
+	m._survey()
+	_pre = m
+	_pre_key = key
+
+func _adopt_presurvey(ts: TownSet) -> bool:
+	if not is_instance_valid(_pre) or not is_instance_valid(ts) or _survey_key(ts) != _pre_key:
+		return false
+	_nav = _pre._nav
+	_vnav = _pre._vnav
+	_vn = _pre._vn
+	_comp = _pre._comp
+	_vcomp = _pre._vcomp
+	_edit_seen = _pre._edit_seen
+	map_tex = _pre.map_tex
+	stats["free_cells"] = _pre.stats.get("free_cells", 0)
+	stats["vehicle_cells"] = _pre.stats.get("vehicle_cells", 0)
+	_pre.free()
+	_pre = null
+	_pre_key = ""
+	return true
 
 func _exit_tree() -> void:
 	Effects.credit = null

@@ -257,6 +257,13 @@ uniform float dusk = 0.0;
 // Sine of how far below level the planet's own horizon lies from the eye:
 // zero on the ground, about -0.1 at thirty kilometres, -0.17 at a hundred.
 uniform float horizon_dip = 0.0;
+// Which way is up from the planet at the eye. The world's own up is that only
+// near the middle of the chart; from orbit a long way round from it, the
+// planet's edge measured against the world's up put the "ground" side of the
+// sky across open space.
+uniform vec3 sky_up = vec3(0.0, 1.0, 0.0);
+// 0 in the air, 1 well above it: in space the stars are out by day too.
+uniform float space_k = 0.0;
 
 group_uniforms cloud;
 uniform float coverage = 0.48;      // 0 clear, 1 solid
@@ -533,7 +540,7 @@ void sky() {
 		// and the limb looks past the planet into the sky. Measured from level,
 		// that band was painted the ground colour: a flat grey slab with a dead
 		// straight edge standing above the curve of the planet.
-		float up = clamp((dir.y - horizon_dip) / (1.0 - horizon_dip), -1.0, 1.0);
+		float up = clamp((dot(dir, sky_up) - horizon_dip) / (1.0 - horizon_dip), -1.0, 1.0);
 		vec3 sky_col = mix(horizon_colour, top_colour, pow(clamp(up, 0.0, 1.0), 0.55));
 		if (up < 0.0) {
 			sky_col = mix(horizon_colour, ground_colour, pow(-up, 0.35));
@@ -560,7 +567,7 @@ void sky() {
 		// hides them is scattered sunlight, and the atmosphere shell drawn over
 		// this supplies exactly that: at sea level it is opaque and they cannot
 		// be seen, and as it thins they come out on their own.
-		if (up > -0.05) {
+		if (up > -0.05 || space_k > 0.0) {
 			vec3 sp = floor(dir * 780.0);
 			float star = hash13(sp);
 			star = pow(max(star - 0.9965, 0.0) * 285.0, 2.2);
@@ -568,8 +575,11 @@ void sky() {
 			// there is a sunlit planet filling half the view, and against that
 			// an eye -- or a camera -- stopped down for the daylight does not
 			// see them. Full at night, a few of the brightest by day.
+			// From well above the air -- the satellite view -- there is no
+			// daylight sky round the planet at all, and the stars are out.
 			sky_col += vec3(0.85, 0.88, 1.0) * star
-				* smoothstep(-0.05, 0.15, up) * mix(0.10, 1.0, night);
+				* mix(smoothstep(-0.05, 0.15, up), 1.0, space_k)
+				* mix(mix(0.10, 1.0, night), 0.75, space_k);
 		}
 		// The half resolution pass has nothing to say unless it drew cloud.
 		//
@@ -643,6 +653,7 @@ func thin_air(env: Environment, alt: float, psm: ShaderMaterial = null) -> void:
 		# eye: a great grey disc standing round a planet a tenth its size.
 		var rr: float = Sim.PLANET_R * Sim.view_scale / (Sim.PLANET_R + maxf(alt, 0.0))
 		psm.set_shader_parameter("horizon_dip", -sqrt(maxf(1.0 - rr * rr, 0.0)))
+		psm.set_shader_parameter("space_k", smoothstep(80000.0, 600000.0, alt))
 	if env == null:
 		return
 	# The usual exponential atmosphere: about eight and a half kilometres to an

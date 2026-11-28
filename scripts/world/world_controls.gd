@@ -381,7 +381,8 @@ func shell_input(e: InputEvent) -> void:
 			and (Input.is_action_pressed(&"freelook") or world.gunning):
 		world.pod.slew(Sim.mouse_rel(e as InputEventMouseMotion))
 		return
-	if world.boarding and ((e is InputEventKey and e.pressed and not e.echo) \
+	if world.boarding and not (is_instance_valid(world.sat_view) and world.sat_view.in_intro()) \
+			and ((e is InputEventKey and e.pressed and not e.echo) \
 			or (e is InputEventMouseButton and e.pressed)):
 		world.crew.end_boarding()
 		return
@@ -524,6 +525,117 @@ func toggle_sat_view() -> void:
 		world.sat_view.leave(world.hud)
 	else:
 		world.sat_view.enter(world.get_viewport().get_camera_3d(), world.hud)
+
+## Into a match from orbit: the satellite view starts over the place the
+## match is in -- the town of a street fight, the aircraft or the field
+## otherwise -- and comes down onto the camera you will play from. The deploy
+## screen waits until it is down, and so does the walk out to the aeroplane.
+## Not for the rocket missions, which start on the pad and go the other way,
+## nor off the round planet.
+func match_intro() -> void:
+	if is_instance_valid(world.sat_view) and not SatView.intro_on:
+		world.sat_view.end_menu(false)
+	if not SatView.intro_on or not Sim.globe or not world.running \
+			or DisplayServer.get_name() == "headless" \
+			or String(Sim.mission) in ["launch", "moon"]:
+		return
+	# Walking out to the aeroplane: down onto the walk-out's own camera, put
+	# where its first frame has it; the walk waits for the view to arrive.
+	if world.boarding:
+		world.crew.tick_boarding(0.0)
+	var cam: Camera3D = world.get_viewport().get_camera_3d()
+	if cam == null or cam is SatView:
+		return
+	var target: Vector3 = cam.global_position - cam.global_basis.z * 60.0
+	var follow: Node3D = null
+	if is_instance_valid(world.cqb) and world.on_foot:
+		target = Vector3(world.cqb.centre.x, Sim.height_at(world.cqb.centre.x, world.cqb.centre.y),
+			world.cqb.centre.y)
+	elif is_instance_valid(world.tank) and world.tank.is_inside_tree():
+		target = world.tank.global_position
+		follow = world.tank
+	elif is_instance_valid(world.player):
+		target = world.player.global_position
+		# in the air it goes on flying while the view comes down to it
+		if not world.boarding:
+			follow = world.player
+			# and it comes down to the outside of it, from behind: arriving
+			# in the cockpit, the view went through the airframe to get there
+			if is_instance_valid(world.cam) and cam == world.cam \
+					and world.cam.mode == ChaseCamera.Mode.COCKPIT:
+				world.cam.mode = ChaseCamera.Mode.CHASE
+				world.cam.cycle()
+				world.cam.mode = ChaseCamera.Mode.CHASE
+	if not is_instance_valid(world.sat_view):
+		world.sat_view = SatView.new()
+		world.sat_view.name = "SatView"
+		world.add_child(world.sat_view)
+	var held := is_instance_valid(world.deploy_ui) and world.deploy_ui.visible
+	if held:
+		world.deploy_ui.visible = false
+	world.sat_view.descend(target, cam, world.hud, func() -> void:
+		if held and is_instance_valid(world.deploy_ui) and is_instance_valid(world.cqb) \
+				and not world.deploy_ui.visible:
+			world.deploy_ui.visible = true
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE,
+		SatView.INTRO_FROM, SatView.INTRO_SECS, follow)
+
+## The hangar's backdrop: the planet from orbit, held over whatever the menu
+## has picked. False where there is no round planet to show, or headless.
+func menu_backdrop() -> bool:
+	if not Sim.globe or DisplayServer.get_name() == "headless" or world.running:
+		return false
+	if not is_instance_valid(world.sat_view):
+		world.sat_view = SatView.new()
+		world.sat_view.name = "SatView"
+		world.add_child(world.sat_view)
+	world.sat_view.menu_panel = world.menu
+	world.sat_view.enter_menu()
+	# what the hangar has picked is got ready from the start; the view only
+	# goes to it once something is picked
+	menu_refocus(false)
+	return true
+
+## Where a mission picked in the hangar takes place, on the chart.
+func mission_target(mission: String) -> Vector3:
+	if mission in ["cqb", "ground", "arms", "range"] and is_instance_valid(world.scenery) \
+			and not world.scenery.sites.is_empty():
+		var c: Vector2 = world.scenery.sites[clampi(CqbMatch.town, 0, world.scenery.sites.size() - 1)]["c"]
+		return Vector3(c.x, 0.0, c.y)
+	if mission == "carrier" and is_instance_valid(world.carrier):
+		return world.carrier.global_position
+	if mission in ["takeoff", "ramp", "sandbox", "landing", "launch", "moon"]:
+		return Vector3.ZERO
+	# the air starts, a few kilometres short of the field
+	return Vector3(-600.0, 0.0, 7000.0)
+
+## The mission or the town in the hangar has changed: the backdrop goes to
+## it (back from the turntable if that was up), and what can be got ready
+## there ahead of LAUNCH is started -- the ground, and a town's set.
+func menu_refocus(glide := true) -> void:
+	if world.running or world.booting or not Sim.globe \
+			or DisplayServer.get_name() == "headless":
+		return
+	if not is_instance_valid(world.sat_view):
+		return
+	var mission := String(world.menu.mission_id)
+	var target: Vector3 = mission_target(mission)
+	if not world.sat_view.in_menu():
+		world.preview.visible = false
+		world.sat_view.enter_menu()
+	world.sat_view.menu_focus(target, glide)
+	if mission in ["cqb", "ground", "arms", "range"] and is_instance_valid(world.scenery) \
+			and not world.scenery.sites.is_empty():
+		var ts: TownSet = world.street_fight.town_set(clampi(CqbMatch.town, 0, world.scenery.sites.size() - 1), true)
+		_presurvey_when_built(ts)
+
+## Survey the town's routes for the match once its set is all standing: see
+## `CqbMatch.presurvey`. Only while the hangar is still over it.
+func _presurvey_when_built(ts: TownSet) -> void:
+	while is_instance_valid(ts) and ts.building and not world.running:
+		await world.get_tree().process_frame
+	if is_instance_valid(ts) and not world.running:
+		CqbMatch.presurvey(ts)
 
 # ------------------------------------------------------------------ the mouse
 ## Whether the pointer is captured, worked out afresh every frame from what is
